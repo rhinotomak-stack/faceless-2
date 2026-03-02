@@ -11,6 +11,36 @@ const MG_BACKGROUNDS = {
     elegant:  'radial-gradient(ellipse at center, #0a0020, #050010)',
 };
 
+// Google Fonts map (same as Composition.jsx — load theme fonts during pre-render)
+const GOOGLE_FONTS_MAP = {
+    'Orbitron': 'Orbitron:wght@400;700;900',
+    'Roboto': 'Roboto:wght@400;500;600;700;900',
+    'Merriweather': 'Merriweather:wght@400;700;900',
+    'Open Sans': 'Open+Sans:wght@400;500;600;700',
+    'Oswald': 'Oswald:wght@400;500;600;700',
+    'Lato': 'Lato:wght@400;700;900',
+    'Montserrat': 'Montserrat:wght@400;500;600;700;800;900',
+    'Inter': 'Inter:wght@400;500;600;700',
+    'Playfair Display': 'Playfair+Display:wght@400;700;900',
+    'Cormorant': 'Cormorant:wght@400;500;600;700',
+    'Bebas Neue': 'Bebas+Neue',
+    'Roboto Condensed': 'Roboto+Condensed:wght@400;500;700',
+};
+
+function getGoogleFontsUrl(themeId) {
+    if (!themeId) return null;
+    try {
+        const theme = require('../themes.js').getTheme(themeId);
+        const fonts = new Set();
+        for (const fontStack of [theme.fonts.heading, theme.fonts.body]) {
+            const primary = fontStack.split(',')[0].trim().replace(/["']/g, '');
+            if (GOOGLE_FONTS_MAP[primary]) fonts.add(GOOGLE_FONTS_MAP[primary]);
+        }
+        if (fonts.size === 0) return null;
+        return `https://fonts.googleapis.com/css2?${[...fonts].map(f => `family=${f}`).join('&')}&display=swap`;
+    } catch { return null; }
+}
+
 /**
  * Pre-render a single MG as a transparent or styled clip.
  *
@@ -22,6 +52,7 @@ const MG_BACKGROUNDS = {
  */
 export const MGPreRenderComposition = (props) => {
     const { mg, scriptContext, isFullScreen } = props;
+    const fontsUrl = getGoogleFontsUrl(scriptContext?.themeId);
 
     if (!mg) {
         return <AbsoluteFill style={{ backgroundColor: 'transparent' }} />;
@@ -35,16 +66,20 @@ export const MGPreRenderComposition = (props) => {
         if (mg.type === 'mapChart') {
             return (
                 <AbsoluteFill>
+                    {fontsUrl && <style dangerouslySetInnerHTML={{ __html: `@import url('${fontsUrl}');` }} />}
                     <MotionGraphic mg={mg} scriptContext={scriptContext || {}} />
                 </AbsoluteFill>
             );
         }
 
-        // articleHighlight has 3D transforms — no scale(1.5)
+        // articleHighlight has 3D transforms — moderate scale(1.3) to fill more of the frame
         if (mg.type === 'articleHighlight') {
             return (
                 <AbsoluteFill style={{ background: bgStyle }}>
-                    <MotionGraphic mg={mg} scriptContext={scriptContext || {}} />
+                    {fontsUrl && <style dangerouslySetInnerHTML={{ __html: `@import url('${fontsUrl}');` }} />}
+                    <AbsoluteFill style={{ transform: 'scale(1.3)', transformOrigin: 'center center' }}>
+                        <MotionGraphic mg={mg} scriptContext={scriptContext || {}} />
+                    </AbsoluteFill>
                 </AbsoluteFill>
             );
         }
@@ -52,6 +87,7 @@ export const MGPreRenderComposition = (props) => {
         // Default full-screen MG: background + scale(1.5)
         return (
             <AbsoluteFill style={{ background: bgStyle }}>
+                {fontsUrl && <style dangerouslySetInnerHTML={{ __html: `@import url('${fontsUrl}');` }} />}
                 <AbsoluteFill style={{ transform: 'scale(1.5)', transformOrigin: 'center center' }}>
                     <MotionGraphic mg={mg} scriptContext={scriptContext || {}} />
                 </AbsoluteFill>
@@ -62,6 +98,7 @@ export const MGPreRenderComposition = (props) => {
     // Overlay MG: transparent background — rendered over video in FFmpeg
     return (
         <AbsoluteFill style={{ backgroundColor: 'transparent' }}>
+            {fontsUrl && <style dangerouslySetInnerHTML={{ __html: `@import url('${fontsUrl}');` }} />}
             <MotionGraphic mg={mg} scriptContext={scriptContext || {}} />
         </AbsoluteFill>
     );
@@ -78,6 +115,7 @@ export const MGPreRenderComposition = (props) => {
  */
 export const MGBatchComposition = (props) => {
     const { items, scriptContext } = props;
+    const fontsUrl = getGoogleFontsUrl(scriptContext?.themeId);
 
     if (!items || items.length === 0) {
         return <AbsoluteFill style={{ backgroundColor: 'transparent' }} />;
@@ -85,6 +123,7 @@ export const MGBatchComposition = (props) => {
 
     return (
         <AbsoluteFill style={{ backgroundColor: 'transparent' }}>
+            {fontsUrl && <style dangerouslySetInnerHTML={{ __html: `@import url('${fontsUrl}');` }} />}
             {items.map((item, i) => (
                 <Sequence
                     key={i}
@@ -120,7 +159,9 @@ const RenderSingleMG = ({ mg, scriptContext, isFullScreen }) => {
         if (mg.type === 'articleHighlight') {
             return (
                 <AbsoluteFill style={{ background: bgStyle }}>
-                    <MotionGraphic mg={mg} scriptContext={scriptContext} />
+                    <AbsoluteFill style={{ transform: 'scale(1.3)', transformOrigin: 'center center' }}>
+                        <MotionGraphic mg={mg} scriptContext={scriptContext} />
+                    </AbsoluteFill>
                 </AbsoluteFill>
             );
         }

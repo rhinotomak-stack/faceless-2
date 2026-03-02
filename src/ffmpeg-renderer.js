@@ -5,7 +5,7 @@ const fs = require('fs');
 const { spawn, execFile } = require('child_process');
 
 // Version marker — if you see this in the log, the latest code is loaded
-const RENDERER_VERSION = 'v4-2026-03-01';
+const RENDERER_VERSION = 'v6-order-fix-2026-03-02';
 
 // ---------------------------------------------------------------------------
 // CONFIG
@@ -25,58 +25,6 @@ const FINAL_VIDEO_BITRATE = process.env.FFMPEG_FINAL_BITRATE || '18M';
 const FINAL_VIDEO_MAXRATE = process.env.FFMPEG_FINAL_MAXRATE || '24M';
 const FINAL_VIDEO_BUFSIZE = process.env.FFMPEG_FINAL_BUFSIZE || '48M';
 const CPU_FALLBACK_CRF = process.env.FFMPEG_CPU_CRF || '26';
-
-// ---------------------------------------------------------------------------
-// TRANSITION MAP: App transition types → FFmpeg xfade names
-// ---------------------------------------------------------------------------
-
-const XFADE_MAP = {
-    // Direct mappings
-    'fade': 'fade',
-    'dissolve': 'dissolve',
-    'crossfade': 'dissolve',
-    'wipe': 'wipeleft',
-    'slide': 'slideleft',
-    'slideLeft': 'slideleft',
-    'slideRight': 'slideright',
-    'push': 'slideleft',
-    'swipe': 'slideright',
-    'zoom': 'zoomin',
-    'flash': 'fadewhite',
-    'cameraFlash': 'fadewhite',
-    'pixelate': 'pixelize',
-    'mosaic': 'pixelize',
-    'reveal': 'circlecrop',
-    'ink': 'circlecrop',
-    'vignetteBlink': 'fadeblack',
-    // Fallback mappings
-    'crossBlur': 'dissolve',
-    'blur': 'dissolve',
-    'luma': 'wipeleft',
-    'ripple': 'dissolve',
-    'filmBurn': 'fadewhite',
-    'morph': 'dissolve',
-    'dreamFade': 'dissolve',
-    'whip': 'smoothleft',
-    'bounce': 'zoomin',
-    'shutterSlice': 'wipeup',
-    'zoomBlur': 'dissolve',
-    'splitWipe': 'wipeup',
-    'directionalBlur': 'dissolve',
-    'colorFade': 'fadeblack',
-    'spin': 'dissolve',
-    'flare': 'fadewhite',
-    'lightLeak': 'fadewhite',
-    'filmGrain': 'fade',
-    'shadowWipe': 'wipeleft',
-    'prismShift': 'dissolve',
-    'glitch': 'pixelize',
-    'dataMosh': 'pixelize',
-    'scanline': 'fade',
-    'rgbSplit': 'fade',
-    'static': 'pixelize',
-    'tvStatic': 'pixelize',
-};
 
 // ---------------------------------------------------------------------------
 // UTILITIES
@@ -198,7 +146,7 @@ function cancelRender() {
     _activeProcesses.clear();
 }
 
-function runFFmpeg(args, onProgress, totalDuration, timeoutMs) {
+function runFFmpeg(args, onProgress, totalDuration, timeoutMs, silenceTimeoutMs) {
     return new Promise((resolve, reject) => {
         if (_cancelled) return reject(new Error('Cancelled'));
         const proc = spawn(FFMPEG_PATH, args, { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -239,9 +187,10 @@ function runFFmpeg(args, onProgress, totalDuration, timeoutMs) {
         const watchdog = setInterval(() => {
             const silentMs = Date.now() - lastProgressTime;
             const totalMs = Date.now() - startTime;
-            // Kill if silent for 30s
-            if (silentMs > 30000 && !settled) {
-                log('FFmpeg silent for 30s, killing process...');
+            // Kill if silent for too long (default 30s, compose step gets more)
+            const silenceLimit = silenceTimeoutMs || 30000;
+            if (silentMs > silenceLimit && !settled) {
+                log(`FFmpeg silent for ${Math.round(silentMs / 1000)}s (limit ${Math.round(silenceLimit / 1000)}s), killing process...`);
                 killProc();
             }
             // Hard timeout — kill if scene takes way too long
@@ -273,7 +222,7 @@ async function prepareScene(scene, publicDir, prepDir, fps) {
     const mediaPath = resolveMediaPath(scene.mediaFile, publicDir);
     if (!mediaPath || !fs.existsSync(mediaPath)) {
         log(`Scene ${scene.index}: no media, generating black clip`);
-        return generateBlackClip(outFile, scene.duration, fps);
+        return generateBlackClip(outFile, getSceneDurationSec(scene, fps), fps);
     }
 
     if (scene.mediaType === 'image') {
@@ -476,6 +425,9 @@ async function preRenderMGs(plan, publicDir, prepDir, progressCallback) {
     const canvasMGs = [];
     const remotionOverlayMGs = [];
     const remotionFullscreenMGs = [];
+    // Scene-level keys that must NOT leak into MG data (they come from the spread of scene.mgData
+    // which is a copy of the scene object itself in some plans)
+    const SCENE_ONLY_KEYS = new Set(['isMGScene', 'trackId', 'mediaType', 'keyword', 'sceneIndex', 'index', 'mediaFile', 'originalStartTime', 'originalEndTime']);
 
     for (let i = 0; i < overlayMGs.length; i++) {
         const mg = overlayMGs[i];
@@ -483,35 +435,56 @@ async function preRenderMGs(plan, publicDir, prepDir, progressCallback) {
             type: mg.type, text: mg.text || '', subtext: mg.subtext || '',
             style: mg.style || plan.mgStyle || 'clean',
             position: mg.position || 'bottom-left',
-            duration: mg.duration || 3, startTime: 0,
+            duration: mg.duration || 3,
+            animationSpeed: mg.animationSpeed,
             ...(mg.mgData || {}),
         };
-        if (canvasRenderer && canvasRenderer.canRenderWithCanvas(mg.type)) {
+        // Force startTime=0 for standalone pre-render (mgData spread may inject timeline time)
+        mgData.startTime = 0;
+        for (const key of SCENE_ONLY_KEYS) delete mgData[key];
+        if (mgData.duration > 100) mgData.duration = mg.duration || 3;
+        if (canvasRenderer && canvasRenderer.canRenderWithCanvas(mgData.type)) {
             canvasMGs.push({ mg: mgData, isFullScreen: false, originalIndex: i, category: 'overlay' });
         } else {
             remotionOverlayMGs.push({ mg: mgData, originalIndex: i });
         }
     }
 
+    // ALL fullscreen MGs rendered via Remotion (individual renders, CPU, more reliable)
     for (let i = 0; i < fullscreenMGs.length; i++) {
         const scene = fullscreenMGs[i];
         const mgData = {
             type: scene.type, text: scene.text || '', subtext: scene.subtext || '',
             style: scene.style || plan.mgStyle || 'clean',
-            position: 'center', duration: scene.duration || 3, startTime: 0,
+            duration: scene.duration || 3,
+            animationSpeed: scene.animationSpeed || (scene.mgData && scene.mgData.animationSpeed),
             ...(scene.mgData || {}),
+            // position MUST be after the spread — fullscreen MGs are always centered
+            // (matches Composition.jsx renderScene logic; mgData spread can contain
+            // non-center positions from the AI pipeline which would misplace content)
+            position: 'center',
         };
+        // CRITICAL: override fields that must be fixed for pre-rendering
+        // scene.mgData may contain startTime/endTime from the timeline (e.g., 8.31s) which
+        // would break the standalone Remotion render that starts at frame 0
+        mgData.startTime = 0;
+        // Clean scene-level metadata that leaked through the spread
+        for (const key of SCENE_ONLY_KEYS) delete mgData[key];
+        // Ensure duration is in seconds (scene.mgData.duration should be correct,
+        // but scene.duration can be in frames from the UI)
+        if (mgData.duration > 100) {
+            // Likely frames — use endTime - startTime from the normalized scene
+            mgData.duration = scene.endTime - scene.startTime;
+        }
         if (mgData.type === 'mapChart') {
             mgData.mapStyle = scene.mapStyle || (scene.mgData && scene.mgData.mapStyle) || plan.mapStyle || 'dark';
         }
-        if (canvasRenderer && canvasRenderer.canRenderWithCanvas(scene.type)) {
-            canvasMGs.push({ mg: mgData, isFullScreen: true, originalIndex: i, category: 'fullscreen' });
-        } else {
-            remotionFullscreenMGs.push({ mg: mgData, originalIndex: i, scene });
-        }
+        // DIAGNOSTIC: log every fullscreen MG's key fields
+        log(`FS-MG[${i}] type="${mgData.type}" dur=${mgData.duration}s text="${(mgData.text || '').slice(0, 40)}" subtext="${(mgData.subtext || '').slice(0, 40)}" style="${mgData.style}" pos="${mgData.position}"`);
+        remotionFullscreenMGs.push({ mg: mgData, originalIndex: i, scene });
     }
 
-    log(`MG rendering: ${canvasMGs.length} via Canvas, ${remotionOverlayMGs.length + remotionFullscreenMGs.length} via Remotion`);
+    log(`MG rendering: ${canvasMGs.length} overlays via Canvas, ${remotionOverlayMGs.length} overlays via Remotion, ${remotionFullscreenMGs.length} fullscreen via Remotion`);
 
     // ---- Phase 1: Canvas render (fast) ----
     if (canvasMGs.length > 0) {
@@ -526,18 +499,18 @@ async function preRenderMGs(plan, publicDir, prepDir, progressCallback) {
         canvasTimer();
     }
 
-    // ---- Phase 2: Remotion fallback for complex types ----
-    const remotionTotal = remotionOverlayMGs.length + remotionFullscreenMGs.length;
-    if (remotionTotal > 0) {
-        log(`Remotion-rendering ${remotionTotal} complex MGs (${[...remotionOverlayMGs, ...remotionFullscreenMGs].map(m => m.mg.type).join(', ')})`);
-
-        let bundle, renderMedia, selectComposition;
+    // ---- Phase 2: Remotion rendering ----
+    // Overlay Remotion MGs: batch render (VP8 WebM for alpha transparency)
+    // Fullscreen MGs: individual render (H.264 mp4, more reliable, proper static file serving)
+    const needsRemotion = remotionOverlayMGs.length > 0 || remotionFullscreenMGs.length > 0;
+    if (needsRemotion) {
+        let bundleFn, renderMediaFn, selectCompositionFn;
         try {
             const bundler = require('@remotion/bundler');
             const renderer = require('@remotion/renderer');
-            bundle = bundler.bundle;
-            renderMedia = renderer.renderMedia;
-            selectComposition = renderer.selectComposition;
+            bundleFn = bundler.bundle;
+            renderMediaFn = renderer.renderMedia;
+            selectCompositionFn = renderer.selectComposition;
         } catch (e) {
             logError(`Remotion renderer not available: ${e.message}`);
             return mgClipDir;
@@ -572,76 +545,145 @@ async function preRenderMGs(plan, publicDir, prepDir, progressCallback) {
         let bundleLocation;
         try {
             const bundleTimer = timer('MG Remotion bundle');
-            progressCallback({ percent: 33, message: 'Bundling Remotion for complex MGs...' });
-            bundleLocation = await bundle({ entryPoint: rootFile, publicDir });
+            progressCallback({ percent: 33, message: 'Bundling Remotion for MGs...' });
+            bundleLocation = await bundleFn({ entryPoint: rootFile, publicDir });
             bundleTimer();
         } catch (e) {
             logError(`Remotion bundle failed: ${e.message}`);
             return mgClipDir;
         }
 
-        // Build batch items for Remotion-only MGs
-        const batchItems = [];
-        const mgManifest = [];
-        let offsetFrames = 0;
-
-        for (const entry of remotionOverlayMGs) {
-            const dur = entry.mg.duration || 3;
-            const durFrames = Math.max(1, Math.round(dur * fps));
-            batchItems.push({ mg: entry.mg, isFullScreen: false, offsetFrames, durationFrames: durFrames });
-            mgManifest.push({ type: 'overlay', index: entry.originalIndex, batchStartSec: offsetFrames / fps, durationSec: dur });
-            offsetFrames += durFrames;
-        }
-        for (const entry of remotionFullscreenMGs) {
-            const dur = entry.mg.duration || 3;
-            const durFrames = Math.max(1, Math.round(dur * fps));
-            batchItems.push({ mg: entry.mg, isFullScreen: true, offsetFrames, durationFrames: durFrames });
-            mgManifest.push({ type: 'fullscreen', index: entry.originalIndex, batchStartSec: offsetFrames / fps, durationSec: dur });
-            offsetFrames += durFrames;
-        }
-
-        const totalBatchDuration = offsetFrames / fps;
-        const batchFile = path.join(mgClipDir, 'mg-batch.webm');
-
-        try {
-            const mgRenderTimer = timer('MG Remotion renderMedia');
-            progressCallback({ percent: 34, message: 'Rendering complex MGs via Remotion...' });
-
-            const composition = await selectComposition({
-                serveUrl: bundleLocation, id: 'MGBatch',
-                inputProps: { items: batchItems, scriptContext, totalDuration: totalBatchDuration },
-                ...(binariesDirectory ? { binariesDirectory } : {}),
-            });
-
-            await renderMedia({
-                composition, serveUrl: bundleLocation, codec: 'vp8',
-                outputLocation: batchFile, chromiumOptions: { gl: 'angle' },
-                concurrency: 6,
-                ...(binariesDirectory ? { binariesDirectory } : {}),
-                onProgress: ({ progress }) => {
-                    progressCallback({ percent: 34 + Math.round(progress * 5), message: `Remotion MGs: ${Math.round(progress * 100)}%` });
-                },
-            });
-            mgRenderTimer();
-
-            // Split batch into individual clips
-            for (const item of mgManifest) {
-                const outFile = path.join(mgClipDir, `mg-${item.type}-${item.index}.webm`);
+        // Pre-load world-110m.json for mapChart MGs (belt-and-suspenders: avoids fetch issues)
+        const hasMapChart = [...remotionOverlayMGs, ...remotionFullscreenMGs].some(e => e.mg.type === 'mapChart');
+        if (hasMapChart) {
+            const geoPath = path.join(publicDir, 'world-110m.json');
+            if (fs.existsSync(geoPath)) {
                 try {
-                    await new Promise((resolve, reject) => {
-                        execFile(FFMPEG_PATH, [
-                            '-y', '-i', batchFile,
-                            '-ss', item.batchStartSec.toFixed(3),
-                            '-t', item.durationSec.toFixed(3),
-                            '-c:v', 'copy', '-an', outFile
-                        ], { timeout: 30000 }, (err) => { if (err) reject(err); else resolve(); });
-                    });
+                    const geoJson = JSON.parse(fs.readFileSync(geoPath, 'utf-8'));
+                    for (const entry of [...remotionOverlayMGs, ...remotionFullscreenMGs]) {
+                        if (entry.mg.type === 'mapChart') {
+                            entry.mg._preloadedGeo = geoJson;
+                        }
+                    }
+                    log('Pre-loaded world-110m.json for mapChart MGs');
                 } catch (e) {
-                    logError(`Split Remotion MG ${item.type}-${item.index} failed: ${e.message}`);
+                    logError(`Failed to pre-load world-110m.json: ${e.message}`);
                 }
             }
-        } catch (e) {
-            logError(`Remotion batch render failed: ${e.message}`);
+        }
+
+        const binOpts = binariesDirectory ? { binariesDirectory } : {};
+
+        // ---- Phase 2a: Batch render overlay Remotion MGs (VP8 for alpha) ----
+        if (remotionOverlayMGs.length > 0) {
+            const batchItems = [];
+            const mgManifest = [];
+            let offsetFrames = 0;
+
+            for (const entry of remotionOverlayMGs) {
+                const dur = entry.mg.duration || 3;
+                const durFrames = Math.max(1, Math.round(dur * fps));
+                batchItems.push({ mg: entry.mg, isFullScreen: false, offsetFrames, durationFrames: durFrames });
+                mgManifest.push({ type: 'overlay', index: entry.originalIndex, batchStartSec: offsetFrames / fps, durationSec: dur });
+                offsetFrames += durFrames;
+            }
+
+            const totalBatchDuration = offsetFrames / fps;
+            const batchFile = path.join(mgClipDir, 'mg-batch.webm');
+
+            try {
+                const mgRenderTimer = timer('MG Remotion overlay batch');
+                progressCallback({ percent: 34, message: `Batch-rendering ${remotionOverlayMGs.length} overlay MGs...` });
+
+                const composition = await selectCompositionFn({
+                    serveUrl: bundleLocation, id: 'MGBatch',
+                    inputProps: { items: batchItems, scriptContext, totalDuration: totalBatchDuration },
+                    ...binOpts,
+                });
+
+                await renderMediaFn({
+                    composition, serveUrl: bundleLocation, codec: 'vp8',
+                    outputLocation: batchFile, chromiumOptions: { gl: 'angle' },
+                    concurrency: 6, ...binOpts,
+                    onProgress: ({ progress }) => {
+                        progressCallback({ percent: 34 + Math.round(progress * 3), message: `Remotion overlay MGs: ${Math.round(progress * 100)}%` });
+                    },
+                });
+                mgRenderTimer();
+
+                // Split batch into individual clips
+                for (const item of mgManifest) {
+                    const outFile = path.join(mgClipDir, `mg-${item.type}-${item.index}.webm`);
+                    try {
+                        await new Promise((resolve, reject) => {
+                            execFile(FFMPEG_PATH, [
+                                '-y', '-i', batchFile,
+                                '-ss', item.batchStartSec.toFixed(3),
+                                '-t', item.durationSec.toFixed(3),
+                                '-c:v', 'copy', '-an', outFile
+                            ], { timeout: 30000 }, (err) => { if (err) reject(err); else resolve(); });
+                        });
+                        if (fs.existsSync(outFile)) {
+                            const sizeKB = (fs.statSync(outFile).size / 1024).toFixed(0);
+                            log(`Remotion overlay MG ${item.index} (${remotionOverlayMGs[0]?.mg?.type}): ${sizeKB}KB`);
+                        }
+                    } catch (e) {
+                        logError(`Split Remotion overlay MG ${item.index} failed: ${e.message}`);
+                    }
+                }
+            } catch (e) {
+                logError(`Remotion overlay batch render failed: ${e.message}`);
+            }
+        }
+
+        // ---- Phase 2b: Individual render each fullscreen MG via Remotion ----
+        if (remotionFullscreenMGs.length > 0) {
+            log(`Rendering ${remotionFullscreenMGs.length} fullscreen MGs individually via Remotion (H.264)...`);
+
+            for (let i = 0; i < remotionFullscreenMGs.length; i++) {
+                if (_cancelled) break;
+
+                const entry = remotionFullscreenMGs[i];
+                const outFile = path.join(mgClipDir, `mg-fullscreen-${entry.originalIndex}.mp4`);
+                const dur = entry.mg.duration || 3;
+
+                // DIAGNOSTIC: save exact inputProps to JSON for debugging
+                try {
+                    const debugFile = path.join(mgClipDir, `mg-fullscreen-${entry.originalIndex}-debug.json`);
+                    fs.writeFileSync(debugFile, JSON.stringify({ mg: entry.mg, scriptContext: { themeId: scriptContext.themeId, mgStyle: scriptContext.mgStyle }, duration: dur, isFullScreen: true }, null, 2));
+                    log(`FS-MG[${entry.originalIndex}] debug saved: ${debugFile}`);
+                } catch (_) {}
+
+                try {
+                    progressCallback({
+                        percent: 34 + Math.round(((i + 1) / remotionFullscreenMGs.length) * 5),
+                        message: `Fullscreen MG ${i + 1}/${remotionFullscreenMGs.length} (${entry.mg.type})...`,
+                    });
+
+                    log(`FS-MG[${entry.originalIndex}] Remotion render: type=${entry.mg.type} dur=${dur}s durationInFrames=${Math.ceil(dur * fps)}`);
+
+                    const composition = await selectCompositionFn({
+                        serveUrl: bundleLocation, id: 'MGPreRender',
+                        inputProps: { mg: entry.mg, scriptContext, duration: dur, isFullScreen: true },
+                        ...binOpts,
+                    });
+
+                    await renderMediaFn({
+                        composition, serveUrl: bundleLocation, codec: 'h264',
+                        outputLocation: outFile, chromiumOptions: { gl: 'angle' },
+                        ...binOpts,
+                    });
+
+                    if (fs.existsSync(outFile)) {
+                        const sizeKB = (fs.statSync(outFile).size / 1024).toFixed(0);
+                        log(`Fullscreen MG ${entry.originalIndex} (${entry.mg.type}): ${sizeKB}KB ✓`);
+                    } else {
+                        logError(`Fullscreen MG ${entry.originalIndex} (${entry.mg.type}): output file missing!`);
+                    }
+                } catch (e) {
+                    logError(`Fullscreen MG ${entry.originalIndex} (${entry.mg.type}) render failed: ${e.message}`);
+                }
+            }
         }
     }
 
@@ -650,18 +692,51 @@ async function preRenderMGs(plan, publicDir, prepDir, progressCallback) {
 }
 
 // ---------------------------------------------------------------------------
+// PASS 1.6: PRE-RENDER TRANSITIONS VIA REMOTION
+// Renders each non-cut transition as an opaque H.264 clip using the exact
+// same enter/exit styles + overlay effects as the preview (Composition.jsx).
+// These clips are overlaid in the compose step for pixel-perfect sync.
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
 // PASS 2: FILTER GRAPH BUILDER
 // ---------------------------------------------------------------------------
 
-async function buildFilterGraph(plan, prepDir, overlayPrepDir, publicDir) {
+async function buildFilterGraph(plan, prepDir, overlayPrepDir, publicDir, timeWindow = null) {
     const fps = plan.fps || 30;
-    const track1Scenes = getTrackScenes(plan, 'video-track-1');
-    const track2Scenes = getTrackScenes(plan, 'video-track-2');
-    const track3Scenes = getTrackScenes(plan, 'video-track-3');
+    const tw = timeWindow; // shorthand
 
-    // Map transitions by fromSceneIndex
-    const transMap = {};
-    (plan.transitions || []).forEach(t => { transMap[t.fromSceneIndex] = t; });
+    // Filter scenes to time window
+    const filterScenes = (scenes) => {
+        if (!tw) return scenes;
+        return scenes.filter(s => {
+            const start = s.startTime || 0;
+            const end = s.endTime || (start + getSceneDurationSec(s, fps));
+            return start < tw.endTime && end > tw.startTime;
+        });
+    };
+
+    const track1Scenes = filterScenes(getTrackScenes(plan, 'video-track-1'));
+    const track2Scenes = filterScenes(getTrackScenes(plan, 'video-track-2'));
+    const track3Scenes = filterScenes(getTrackScenes(plan, 'video-track-3'));
+
+    // Log compose order for track-1 (this is the actual playback order)
+    if (track1Scenes.length > 0) {
+        log(`COMPOSE ORDER (track-1, ${track1Scenes.length} scenes):`);
+        track1Scenes.forEach((s, i) => {
+            log(`  [${i}] scene.index=${s.index} startTime=${(s.startTime || 0).toFixed(2)}s endTime=${(s.endTime || 0).toFixed(2)}s file=prep-${s.index}.mp4`);
+        });
+        // Sanity check: warn if scene indices don't match chronological order
+        const indexOrder = track1Scenes.map(s => s.index);
+        const isSorted = indexOrder.every((v, i) => i === 0 || v > indexOrder[i - 1]);
+        if (!isSorted) {
+            log(`⚠ NOTE: Scene indices are NOT sequential (${indexOrder.join(',')}). This is normal when scenes were reordered in the timeline or images are on track-2. Compose uses startTime order, not index order.`);
+        }
+    }
+    if (track2Scenes.length > 0) log(`Track-2 overlays: ${track2Scenes.length} scenes`);
+    if (track3Scenes.length > 0) log(`Track-3 overlays: ${track3Scenes.length} scenes`);
+
+    // Transitions disabled — all hard cuts
 
     const inputs = [];     // -i arguments
     const filters = [];    // filter_complex lines
@@ -669,100 +744,75 @@ async function buildFilterGraph(plan, prepDir, overlayPrepDir, publicDir) {
     const nextLabel = (prefix) => `${prefix}${labelCounter++}`;
 
     // -----------------------------------------------------------------------
-    // Section A: Build full-duration timeline base
-    // Track-1 has gaps where track-2/3 scenes take over. We fill gaps with
-    // black clips so the base video spans the entire duration.
+    // Section A: Build chunk-duration timeline base (scenes only, no gap fillers)
     // -----------------------------------------------------------------------
-    const totalDur = plan.totalDuration || 90;
-    const timelineSegments = []; // ordered list of scenes + gap fillers
+    const chunkStart = tw ? tw.startTime : 0;
+    const chunkEnd = tw ? tw.endTime : (plan.totalDuration || 90);
+    const totalDur = chunkEnd - chunkStart;
 
-    // Detect gaps and insert black fillers
-    let cursor = track1Scenes.length > 0 ? (track1Scenes[0].startTime || 0) : 0;
+    // Build inputs for each scene, inserting black gap fillers where track-1 has gaps
+    // (e.g., where images play on track-2). Without gap fillers, xfade compresses the
+    // timeline and overlay tracks get misaligned.
+    const t1Prepared = [];
+    let prevEnd = chunkStart; // Track where the last scene ended
 
-    // Add initial gap if first scene doesn't start at 0
-    if (cursor > 0.1) {
-        timelineSegments.push({ type: 'gap', duration: cursor });
-        log(`Gap: 0.00-${cursor.toFixed(2)} (${cursor.toFixed(2)}s) — black filler`);
-    }
-
-    for (let i = 0; i < track1Scenes.length; i++) {
-        const scene = track1Scenes[i];
+    for (const scene of track1Scenes) {
         const sceneStart = scene.startTime || 0;
-        const sceneEnd = scene.endTime || (sceneStart + scene.duration);
+        const sceneDurSec = getSceneDurationSec(scene, fps);
 
-        // Gap before this scene?
-        if (sceneStart - cursor > 0.1) {
-            const gapDur = sceneStart - cursor;
-            timelineSegments.push({ type: 'gap', duration: gapDur });
-            log(`Gap: ${cursor.toFixed(2)}-${sceneStart.toFixed(2)} (${gapDur.toFixed(2)}s) — black filler`);
+        // Insert black gap filler if there's a gap before this scene
+        const gapDur = sceneStart - prevEnd;
+        if (gapDur > 0.1) {
+            const gapFile = path.join(prepDir, `gap-before-${scene.index}.mp4`);
+            if (!fs.existsSync(gapFile)) {
+                await generateBlackClip(gapFile, gapDur, fps);
+            }
+            const gapIdx = inputs.length;
+            inputs.push(gapFile);
+            t1Prepared.push({ scene: { index: `gap-${scene.index}`, startTime: prevEnd, endTime: sceneStart }, inputIdx: gapIdx, label: `${gapIdx}:v`, actualDuration: gapDur, isGap: true });
+            log(`Gap filler: ${prevEnd.toFixed(2)}s-${sceneStart.toFixed(2)}s (${gapDur.toFixed(2)}s black)`);
         }
 
-        timelineSegments.push({ type: 'scene', scene });
-        cursor = sceneEnd;
-    }
+        const prepFile = path.join(prepDir, `prep-${scene.index}.mp4`);
+        if (!fs.existsSync(prepFile)) {
+            log(`⚠ Scene ${scene.index}: prep missing, generating black`);
+            await generateBlackClip(prepFile, sceneDurSec, fps);
+        }
 
-    // Trailing gap to reach total duration
-    if (totalDur - cursor > 0.1) {
-        const gapDur = totalDur - cursor;
-        timelineSegments.push({ type: 'gap', duration: gapDur });
-        log(`Gap: ${cursor.toFixed(2)}-${totalDur.toFixed(2)} (${gapDur.toFixed(2)}s) — black filler`);
-    }
+        const inputIdx = inputs.length;
+        inputs.push(prepFile);
 
-    // Build inputs for each segment — generate real .mp4 files for gaps
-    // (lavfi color= sources have different pixel format and break xfade)
-    const t1Prepared = [];
-    let gapCounter = 0;
-    for (const seg of timelineSegments) {
-        if (seg.type === 'scene') {
-            const scene = seg.scene;
-            const prepFile = path.join(prepDir, `prep-${scene.index}.mp4`);
-            if (!fs.existsSync(prepFile)) {
-                log(`⚠ Scene ${scene.index}: prep missing, generating black`);
-                await generateBlackClip(prepFile, scene.duration, fps);
-            }
-
-            const inputIdx = inputs.length;
-            inputs.push(prepFile);
-
-            let actualDuration = scene.duration;
-            try {
-                const info = await probeMedia(prepFile);
-                if (info.duration > 0) {
-                    // Safety: if probed duration is >2x expected, something is wrong — use planned duration
-                    if (info.duration > scene.duration * 2) {
-                        log(`⚠ Scene ${scene.index}: probed ${info.duration.toFixed(2)}s >> expected ${scene.duration.toFixed(2)}s — using planned duration`);
-                    } else {
-                        actualDuration = info.duration;
-                        if (Math.abs(actualDuration - scene.duration) > 0.5) {
-                            log(`Scene ${scene.index}: plan=${scene.duration.toFixed(2)}s actual=${actualDuration.toFixed(2)}s`);
-                        }
+        let actualDuration = sceneDurSec;
+        try {
+            const info = await probeMedia(prepFile);
+            if (info.duration > 0) {
+                if (info.duration > sceneDurSec * 2) {
+                    log(`⚠ Scene ${scene.index}: probed ${info.duration.toFixed(2)}s >> expected ${sceneDurSec.toFixed(2)}s — using planned duration`);
+                } else {
+                    actualDuration = info.duration;
+                    if (Math.abs(actualDuration - sceneDurSec) > 0.5) {
+                        log(`Scene ${scene.index}: plan=${sceneDurSec.toFixed(2)}s actual=${actualDuration.toFixed(2)}s`);
                     }
                 }
-            } catch (e) { /* fallback to scene.duration */ }
+            }
+        } catch (e) { /* fallback to sceneDurSec */ }
 
-            t1Prepared.push({ scene, inputIdx, label: `${inputIdx}:v`, actualDuration });
-        } else {
-            // Black gap filler — generate a real .mp4 file (same format as prep clips)
-            const gapFile = path.join(prepDir, `gap-${gapCounter++}.mp4`);
-            await generateBlackClip(gapFile, seg.duration, fps);
+        t1Prepared.push({ scene, inputIdx, label: `${inputIdx}:v`, actualDuration });
+        prevEnd = scene.endTime || (sceneStart + sceneDurSec);
+    }
 
-            const inputIdx = inputs.length;
-            inputs.push(gapFile);
-
-            let actualDuration = seg.duration;
-            try {
-                const info = await probeMedia(gapFile);
-                if (info.duration > 0) actualDuration = info.duration;
-            } catch (e) { /* use planned duration */ }
-
-            t1Prepared.push({ scene: null, inputIdx, label: `${inputIdx}:v`, actualDuration, isGap: true });
+    // If the last scene ends before the chunk, extend the last clip to cover the full duration
+    // (prevents video freezing before audio finishes)
+    if (t1Prepared.length > 0) {
+        if (chunkEnd - prevEnd > 0.2) {
+            log(`Extending last scene to cover chunk end (scenes end at ${prevEnd.toFixed(2)}s, chunk ends at ${chunkEnd.toFixed(2)}s)`);
+            t1Prepared[t1Prepared.length - 1].actualDuration += (chunkEnd - prevEnd);
         }
     }
 
-    // Chain all segments with xfade
+    // Chain all scenes with hard cuts (xfade with minimal duration)
     let baseLabel = null;
     if (t1Prepared.length === 0) {
-        // Generate a black clip file for the full duration
         const fullBlack = path.join(prepDir, `gap-full.mp4`);
         await generateBlackClip(fullBlack, totalDur, fps);
         const blackInput = inputs.length;
@@ -776,38 +826,24 @@ async function buildFilterGraph(plan, prepDir, overlayPrepDir, publicDir) {
 
         for (let i = 1; i < t1Prepared.length; i++) {
             const curr = t1Prepared[i];
-            const prev = t1Prepared[i - 1];
             const outLabel = nextLabel('x');
 
-            // Only use real transitions between two actual scenes (not gaps)
-            const trans = (prev.scene && !prev.isGap) ? transMap[prev.scene.index] : null;
-
-            if (trans && trans.type !== 'cut' && trans.duration > 0 && !curr.isGap) {
-                const xfadeType = XFADE_MAP[trans.type] || 'fade';
-                const transDur = Math.min(trans.duration / 1000, runningOffset * 0.8);
-                const offset = Math.max(0, runningOffset - transDur);
-                filters.push(
-                    `${prevLabel}[${curr.label}]xfade=transition=${xfadeType}:duration=${transDur.toFixed(3)}:offset=${offset.toFixed(3)}[${outLabel}]`
-                );
-                runningOffset = offset + curr.actualDuration;
-            } else {
-                // Cut / gap boundary — instant fade
-                const cutDur = 0.04;
-                const offset = Math.max(0, runningOffset - cutDur);
-                filters.push(
-                    `${prevLabel}[${curr.label}]xfade=transition=fade:duration=${cutDur}:offset=${offset.toFixed(3)}[${outLabel}]`
-                );
-                runningOffset = offset + curr.actualDuration;
-            }
+            // Hard cut — instant transition between all segments
+            const cutDur = 0.04;
+            const offset = Math.max(0, runningOffset - cutDur);
+            filters.push(
+                `${prevLabel}[${curr.label}]xfade=transition=fade:duration=${cutDur}:offset=${offset.toFixed(3)}[${outLabel}]`
+            );
+            runningOffset = offset + curr.actualDuration;
             prevLabel = `[${outLabel}]`;
         }
         baseLabel = prevLabel;
 
-        log(`Track-1 timeline: ${t1Prepared.length} segments (${track1Scenes.length} scenes + ${t1Prepared.length - track1Scenes.length} gaps), total ${runningOffset.toFixed(2)}s`);
+        log(`Track-1 timeline: ${t1Prepared.length} scenes, total ${runningOffset.toFixed(2)}s`);
     }
 
     // -----------------------------------------------------------------------
-    // Section B: Track-2 and Track-3 overlays
+    // Section B: Track-2 and Track-3 overlays — hard cut (no fades)
     // -----------------------------------------------------------------------
     for (const trackScenes of [track2Scenes, track3Scenes]) {
         for (const scene of trackScenes) {
@@ -817,11 +853,12 @@ async function buildFilterGraph(plan, prepDir, overlayPrepDir, publicDir) {
             const inputIdx = inputs.length;
             inputs.push(prepFile);
 
-            const startT = scene.startTime || 0;
-            const endT = scene.endTime || (startT + scene.duration);
+            const absStart = scene.startTime || 0;
+            const absEnd = scene.endTime || (absStart + scene.duration);
 
-            // Delay the overlay stream to start at the scene's startTime
-            // setpts shifts the overlay's PTS so it appears at the right time
+            const startT = Math.max(0, toChunkRelative(absStart, tw));
+            const endT = Math.min(totalDur, toChunkRelative(absEnd, tw));
+
             const delayedLabel = nextLabel('d');
             filters.push(
                 `[${inputIdx}:v]setpts=PTS+${startT.toFixed(3)}/TB[${delayedLabel}]`
@@ -836,41 +873,33 @@ async function buildFilterGraph(plan, prepDir, overlayPrepDir, publicDir) {
     }
 
     // -----------------------------------------------------------------------
-    // Section C: Overlay videos (grain, dust, lightLeak) — DISABLED until rebuild
-    // (preview doesn't render these, so applying them causes visual mismatch)
-    // -----------------------------------------------------------------------
-
-    // -----------------------------------------------------------------------
-    // Section D: Code-generated VFX — DISABLED until rebuild
-    // (vignette, letterbox, colorTint, chromatic — preview doesn't render
-    //  these, so applying them here causes visual mismatch)
-    // -----------------------------------------------------------------------
-
-    // -----------------------------------------------------------------------
     // Section E: Motion Graphics (canvas-rendered FFV1 MKV clips with alpha)
+    // Times adjusted to chunk-relative. Only MGs overlapping the time window are included.
     // -----------------------------------------------------------------------
-    // Individual MG clips: mg-overlay-N.mkv (canvas FFV1) or mg-overlay-N.webm (Remotion VP8 fallback)
-    // FFV1 yuva444p has guaranteed alpha — overlay filter (format=auto) handles transparency.
     const mgClipDir = overlayPrepDir;
-    const mgs = plan.motionGraphics || [];
-    if (mgClipDir && mgs.length > 0) {
-        log(`Overlaying ${mgs.length} MG clips in filter graph`);
-        let overlayIdx = 0;
-        for (const mg of mgs) {
-            // Try .mkv first (canvas FFV1), fall back to .webm (Remotion VP8)
+    const allMgs = plan.motionGraphics || [];
+    // Filter overlay MGs to time window (use absolute index for clip filename)
+    if (mgClipDir && allMgs.length > 0) {
+        let overlaysInChunk = 0;
+        for (let overlayIdx = 0; overlayIdx < allMgs.length; overlayIdx++) {
+            const mg = allMgs[overlayIdx];
+            const absStart = mg.startTime || 0;
+            const dur = mg.duration || 3;
+            const absEnd = absStart + dur;
+
+            // Skip MGs outside this chunk
+            if (tw && (absStart >= tw.endTime || absEnd <= tw.startTime)) continue;
+
             let clipFile = path.join(mgClipDir, `mg-overlay-${overlayIdx}.mkv`);
             if (!fs.existsSync(clipFile)) clipFile = path.join(mgClipDir, `mg-overlay-${overlayIdx}.webm`);
-            overlayIdx++;
             if (!fs.existsSync(clipFile)) continue;
 
-            const startT = mg.startTime || 0;
-            const dur = mg.duration || 3;
-            const endT = startT + dur;
+            const startT = Math.max(0, toChunkRelative(absStart, tw));
+            const endT = Math.min(totalDur, toChunkRelative(absEnd, tw));
 
             const inputIdx = inputs.length;
             inputs.push(clipFile);
 
-            // Delay the MG clip to its position on the main timeline
             const delayedLabel = nextLabel('mgd');
             filters.push(
                 `[${inputIdx}:v]setpts=PTS+${startT.toFixed(3)}/TB[${delayedLabel}]`
@@ -881,7 +910,9 @@ async function buildFilterGraph(plan, prepDir, overlayPrepDir, publicDir) {
                 `${baseLabel}[${delayedLabel}]overlay=0:0:format=auto:eof_action=pass:enable='between(t,${startT.toFixed(3)},${endT.toFixed(3)})'[${outLabel}]`
             );
             baseLabel = `[${outLabel}]`;
+            overlaysInChunk++;
         }
+        if (overlaysInChunk > 0) log(`Overlaying ${overlaysInChunk} MG clips in filter graph`);
     }
 
     // Full-screen MG scenes
@@ -913,18 +944,25 @@ async function buildFilterGraph(plan, prepDir, overlayPrepDir, publicDir) {
             });
 
         if (mgScenes.length > 0) {
-            log(`Overlaying ${mgScenes.length} fullscreen MG clips in filter graph`);
-            let fsIdx = 0;
-            for (const scene of mgScenes) {
-                // Try .mkv first (canvas FFV1), fall back to .webm (Remotion VP8)
-                let clipFile = path.join(mgClipDir, `mg-fullscreen-${fsIdx}.mkv`);
-                if (!fs.existsSync(clipFile)) clipFile = path.join(mgClipDir, `mg-fullscreen-${fsIdx}.webm`);
-                fsIdx++;
-                if (!fs.existsSync(clipFile)) continue;
+            let fsInChunk = 0;
+            for (let fsIdx = 0; fsIdx < mgScenes.length; fsIdx++) {
+                const scene = mgScenes[fsIdx];
+                const absStart = scene.startTime || 0;
+                const absEnd = scene.endTime || (absStart + (scene.duration || 3));
 
-                const startT = scene.startTime || 0;
-                const dur = scene.duration || 3;
-                const endT = scene.endTime || (startT + dur);
+                // Skip fullscreen MGs outside this chunk
+                if (tw && (absStart >= tw.endTime || absEnd <= tw.startTime)) continue;
+
+                let clipFile = path.join(mgClipDir, `mg-fullscreen-${fsIdx}.mp4`);
+                if (!fs.existsSync(clipFile)) clipFile = path.join(mgClipDir, `mg-fullscreen-${fsIdx}.mkv`);
+                if (!fs.existsSync(clipFile)) clipFile = path.join(mgClipDir, `mg-fullscreen-${fsIdx}.webm`);
+                if (!fs.existsSync(clipFile)) {
+                    log(`⚠ Fullscreen MG ${fsIdx} (${scene.type || 'unknown'}) clip not found — skipping`);
+                    continue;
+                }
+
+                const startT = Math.max(0, toChunkRelative(absStart, tw));
+                const endT = Math.min(totalDur, toChunkRelative(absEnd, tw));
 
                 const inputIdx = inputs.length;
                 inputs.push(clipFile);
@@ -939,7 +977,9 @@ async function buildFilterGraph(plan, prepDir, overlayPrepDir, publicDir) {
                     `${baseLabel}[${delayedLabel}]overlay=0:0:format=auto:eof_action=pass:enable='between(t,${startT.toFixed(3)},${endT.toFixed(3)})'[${outLabel}]`
                 );
                 baseLabel = `[${outLabel}]`;
+                fsInChunk++;
             }
+            if (fsInChunk > 0) log(`Overlaying ${fsInChunk} fullscreen MG clips in filter graph`);
         }
     }
 
@@ -958,42 +998,152 @@ async function buildFilterGraph(plan, prepDir, overlayPrepDir, publicDir) {
 
 function getTrackScenes(plan, trackId) {
     return (plan.scenes || [])
-        .filter(s => s.trackId === trackId && !s.disabled && !s.isMGScene)
-        .sort((a, b) => (a.startTime || 0) - (b.startTime || 0));
+        .filter(s => (s.trackId || 'video-track-1') === trackId && !s.disabled && !s.isMGScene)
+        .sort((a, b) => {
+            // Primary: sort by startTime (chronological order)
+            const timeDiff = (a.startTime || 0) - (b.startTime || 0);
+            if (timeDiff !== 0) return timeDiff;
+            // Tiebreaker: sort by index (preserve array order when startTimes are equal)
+            return (a.index || 0) - (b.index || 0);
+        });
+}
+
+// ---------------------------------------------------------------------------
+// CHUNKED RENDERING — split timeline into manageable chunks
+// ---------------------------------------------------------------------------
+
+/**
+ * Filter items that overlap a time window.
+ * @param {Array} items
+ * @param {{ startTime: number, endTime: number }|null} tw - null = no filter
+ * @param {Function} getStart - item => startTime
+ * @param {Function} getEnd - item => endTime
+ */
+function filterByTimeWindow(items, tw, getStart, getEnd) {
+    if (!tw) return items;
+    return items.filter(item => getStart(item) < tw.endTime && getEnd(item) > tw.startTime);
+}
+
+/** Convert absolute time to chunk-relative time. */
+function toChunkRelative(t, tw) {
+    if (!tw) return t;
+    return Math.max(0, t - tw.startTime);
+}
+
+/**
+ * Split the timeline into ~60s chunks, snapping boundaries to scene ends
+ * so no scene is ever cut in half.
+ * Returns [{ startTime, endTime, chunkIndex }].
+ * Videos <= 3 min return a single chunk (no splitting).
+ */
+function computeChunkBoundaries(plan, targetChunkSec = 60) {
+    const totalDur = plan.totalDuration || 0;
+    const fps = plan.fps || 30;
+    if (totalDur <= 180) {
+        return [{ startTime: 0, endTime: totalDur, chunkIndex: 0 }];
+    }
+
+    const track1 = getTrackScenes(plan, 'video-track-1');
+    // Build sorted list of scene end times for snapping
+    const sceneEnds = track1.map(s => {
+        const end = s.endTime != null ? s.endTime : (s.startTime || 0) + getSceneDurationSec(s, fps);
+        return { start: s.startTime || 0, end };
+    }).sort((a, b) => a.start - b.start);
+
+    const chunks = [];
+    let cursor = 0;
+    let chunkIdx = 0;
+
+    while (cursor < totalDur - 0.1) {
+        const targetEnd = cursor + targetChunkSec;
+
+        // If close enough to end, take it all
+        if (targetEnd >= totalDur - 10) {
+            chunks.push({ startTime: cursor, endTime: totalDur, chunkIndex: chunkIdx });
+            break;
+        }
+
+        // Find scene that spans the target boundary
+        const spanning = sceneEnds.find(s => s.start < targetEnd && s.end > targetEnd);
+        let snapEnd;
+
+        if (spanning) {
+            // Include the full scene — extend chunk to scene end
+            snapEnd = spanning.end;
+        } else {
+            // No scene at boundary — use target directly
+            snapEnd = targetEnd;
+        }
+
+        // Sanity: don't let chunks be empty
+        if (snapEnd <= cursor + 0.1) snapEnd = targetEnd;
+
+        chunks.push({ startTime: cursor, endTime: snapEnd, chunkIndex: chunkIdx });
+        cursor = snapEnd;
+        chunkIdx++;
+    }
+
+    // Merge trailing chunk if too short (< 10s)
+    if (chunks.length >= 2) {
+        const last = chunks[chunks.length - 1];
+        if (last.endTime - last.startTime < 10) {
+            chunks[chunks.length - 2].endTime = last.endTime;
+            chunks.pop();
+        }
+    }
+
+    return chunks;
 }
 
 // ---------------------------------------------------------------------------
 // AUDIO MIXING
 // ---------------------------------------------------------------------------
 
-function buildAudioMix(plan, publicDir, inputs) {
+function buildAudioMix(plan, publicDir, inputs, timeWindow = null) {
     const audioFilters = [];
-    const audioInputs = [];
     let audioStreams = [];
+    const tw = timeWindow;
+    const chunkStart = tw ? tw.startTime : 0;
+    const chunkEnd = tw ? tw.endTime : Infinity;
 
-    // Voice-over
+    // Voice-over — trim to chunk window if needed
     const audioFile = resolveMediaPath(plan.audio, publicDir);
     if (audioFile && fs.existsSync(audioFile)) {
         const audioIdx = inputs.length;
         inputs.push(audioFile);
         const isMuted = plan.mutedTracks?.['audio-track'];
         if (!isMuted) {
-            audioStreams.push(`[${audioIdx}:a]`);
+            if (tw) {
+                // Trim voiceover to chunk time range and reset PTS
+                const voLabel = `vo${audioIdx}`;
+                audioFilters.push(
+                    `[${audioIdx}:a]atrim=start=${tw.startTime.toFixed(3)}:end=${tw.endTime.toFixed(3)},asetpts=PTS-STARTPTS[${voLabel}]`
+                );
+                audioStreams.push(`[${voLabel}]`);
+            } else {
+                audioStreams.push(`[${audioIdx}:a]`);
+            }
         }
     }
 
-    // SFX clips
+    // SFX clips — only include those overlapping this chunk's time window
     if (plan.sfxEnabled !== false && !plan.mutedTracks?.['sfx-track'] && plan.sfxClips?.length) {
         const sfxVolume = plan.sfxVolume || 0.35;
 
         for (const sfx of plan.sfxClips) {
+            const sfxStart = sfx.startTime || 0;
+            const sfxDur = sfx.duration || 2;
+            // Skip SFX outside this chunk
+            if (tw && (sfxStart >= chunkEnd || sfxStart + sfxDur < chunkStart)) continue;
+
             const sfxPath = findSfxFile(sfx.file, publicDir);
             if (!sfxPath) continue;
 
             const sfxIdx = inputs.length;
             inputs.push(sfxPath);
             const sfxLabel = `sfx${sfxIdx}`;
-            const delayMs = Math.max(0, Math.round((sfx.startTime || 0) * 1000));
+            // Chunk-relative delay
+            const delayMs = Math.max(0, Math.round((sfxStart - chunkStart) * 1000));
             const vol = (sfx.volume || sfxVolume).toFixed(2);
 
             audioFilters.push(
@@ -1115,13 +1265,16 @@ async function renderWithFFmpeg(plan, options = {}) {
     const pass1Timer = timer('Pass 1 — Scene prep');
     progressCallback({ percent: 5, message: 'Preparing scene clips...' });
 
-    const allScenes = (plan.scenes || []).filter(s => !s.isMGScene && !s.isOverlay && !s.disabled);
+    // Sort scenes by startTime so parallel prep processes them in chronological order
+    const allScenes = (plan.scenes || [])
+        .filter(s => !s.isMGScene && !s.disabled)
+        .sort((a, b) => (a.startTime || 0) - (b.startTime || 0));
     let preparedCount = 0;
 
-    // Log scene durations to confirm they're in seconds
+    log(`Scene order (sorted by startTime, ${allScenes.length} scenes):`);
     allScenes.forEach(s => {
         const dur = getSceneDurationSec(s, fps);
-        log(`  Plan scene ${s.index}: ${(s.mediaType || 'video')} dur=${dur.toFixed(2)}s (raw duration=${s.duration})`);
+        log(`  Scene ${s.index}: ${(s.startTime || 0).toFixed(2)}s-${(s.endTime || 0).toFixed(2)}s track=${s.trackId || 'video-track-1'} ${(s.mediaType || 'video')} dur=${dur.toFixed(2)}s`);
     });
 
     const prepareTasks = allScenes.map((scene) => async () => {
@@ -1164,135 +1317,158 @@ async function renderWithFFmpeg(plan, options = {}) {
     }
     pass15Timer();
 
-    // ==== PASS 2: Build filter graph & compose ====
-    const pass2Timer = timer('Pass 2 — FFmpeg compose + encode');
-    progressCallback({ percent: 42, message: 'Building composition...' });
+    // ==== PASS 2: Chunked compose + encode ====
+    const pass2Timer = timer('Pass 2 — Chunked compose + encode');
+    const chunks = computeChunkBoundaries(plan, 60);
+    log(`Rendering in ${chunks.length} chunk(s): ${chunks.map(c => `[${c.startTime.toFixed(1)}-${c.endTime.toFixed(1)}s]`).join(', ')}`);
 
-    const { inputs, filters, videoOutLabel } = await buildFilterGraph(plan, prepDir, mgClipDir, publicDir);
+    // Track if NVENC fails — skip GPU attempts for subsequent chunks
+    let nvencFailed = !_nvencAvailable;
 
-    // Add audio
-    const { audioFilters, audioOutLabel } = buildAudioMix(plan, publicDir, inputs);
-    const allFilters = [...filters, ...audioFilters];
-
-    // Write filter graph to file (avoids Windows command length limit)
-    const filterFile = path.join(prepDir, 'filter_graph.txt');
-    fs.writeFileSync(filterFile, allFilters.join(';\n'));
-
-    log(`Filter graph: ${allFilters.length} filters, ${inputs.length} inputs`);
-    log(`Inputs:\n${inputs.map((f, i) => {
-        if (typeof f === 'object') return `  [${i}] ${path.basename(f.file)}${f.streamLoop ? ' (looped)' : ''}`;
-        return `  [${i}] ${path.basename(f)}`;
-    }).join('\n')}`);
-    log(`Filter graph written to: ${filterFile}`);
-
-    // Build FFmpeg command
-    const inputArgs = [];
-    for (const inp of inputs) {
-        const file = typeof inp === 'object' ? inp.file : inp;
-        const streamLoop = typeof inp === 'object' && inp.streamLoop;
-        if (file.startsWith('color=') || file.startsWith('nullsrc')) {
-            inputArgs.push('-f', 'lavfi', '-i', file);
-        } else {
-            if (streamLoop) inputArgs.push('-stream_loop', '-1');
-            inputArgs.push('-i', file);
-        }
-    }
-
-    const buildNvencOutputArgs = (preset) => ([
-        '-filter_complex_script', filterFile,
-        '-map', `[${videoOutLabel}]`,
-        ...(audioOutLabel ? ['-map', `[${audioOutLabel}]`] : []),
-        // Keep NVENC args conservative for widest driver compatibility
-        '-c:v', 'h264_nvenc', '-preset', preset,
-        '-b:v', FINAL_VIDEO_BITRATE,
-        '-maxrate:v', FINAL_VIDEO_MAXRATE,
-        '-bufsize:v', FINAL_VIDEO_BUFSIZE,
-        '-profile:v', 'high',
-        '-pix_fmt', 'yuv420p',
-        ...(audioOutLabel ? ['-c:a', 'aac', '-b:a', '192k'] : []),
-        '-movflags', '+faststart',
-        '-t', String(Math.ceil(totalDuration + 1)),
-        '-y', outputPath
-    ]);
-
-    const runEncodePass = (args, modeLabel) => runFFmpeg(args, (pct, secs) => {
-        const percent = 45 + Math.round(pct * 0.55);
-        progressCallback({
-            percent: Math.min(99, percent),
-            message: `${modeLabel}: ${secs.toFixed(1)}s / ${totalDuration.toFixed(1)}s`
-        });
-    }, totalDuration);
-
-    if (_nvencAvailable) {
-        log('Compositing with NVENC GPU encoding...');
-        progressCallback({ percent: 45, message: 'Compositing & encoding (GPU)...' });
-    } else {
-        log('Compositing with CPU encoding (libx264)...');
-        progressCallback({ percent: 45, message: 'Compositing & encoding (CPU)...' });
-    }
-
-    const nvencArgsP4 = [...inputArgs, ...buildNvencOutputArgs(NVENC_PRESET_FAST)];
-    const nvencArgsCompat = [...inputArgs, ...buildNvencOutputArgs(NVENC_PRESET_COMPAT)];
-
-    try {
-        if (!_nvencAvailable) throw new Error('NVENC not available, skip to CPU');
-        await runEncodePass(nvencArgsP4, 'GPU Encoding');
-        log('✓ Compose used h264_nvenc (GPU)');
-    } catch (e) {
-        if (_nvencAvailable) {
-            log(`NVENC failed (preset=${NVENC_PRESET_FAST}): ${errorText(e).slice(-1500)}`);
-            log(`Retrying NVENC with compatibility preset=${NVENC_PRESET_COMPAT}...`);
-        }
-        try {
-            if (!_nvencAvailable) throw new Error('Skip compat too');
-            await runEncodePass(nvencArgsCompat, 'GPU Encoding (compat)');
-            log('✓ Compose used h264_nvenc compat (GPU)');
-        } catch (eCompat) {
-            // Fallback to CPU encoding
-            if (_nvencAvailable) {
-                log(`NVENC compatibility failed: ${errorText(eCompat).slice(-1500)}`);
+    // Helper: build input args from inputs array
+    function buildInputArgs(inputs) {
+        const args = [];
+        for (const inp of inputs) {
+            const file = typeof inp === 'object' ? inp.file : inp;
+            const streamLoop = typeof inp === 'object' && inp.streamLoop;
+            if (file.startsWith('color=') || file.startsWith('nullsrc')) {
+                args.push('-f', 'lavfi', '-i', file);
+            } else {
+                if (streamLoop) args.push('-stream_loop', '-1');
+                args.push('-i', file);
             }
-            log('Encoding with CPU (libx264)...');
-            progressCallback({ percent: 45, message: 'Encoding with CPU...' });
+        }
+        return args;
+    }
 
-            // Build CPU output args from scratch
-            const cpuOutputArgs = [
-                '-filter_complex_script', filterFile,
-                '-map', `[${videoOutLabel}]`,
-                ...(audioOutLabel ? ['-map', `[${audioOutLabel}]`] : []),
-                '-c:v', 'libx264', '-preset', 'medium', '-crf', CPU_FALLBACK_CRF,
-                '-pix_fmt', 'yuv420p',
-                ...(audioOutLabel ? ['-c:a', 'aac', '-b:a', '192k'] : []),
-                '-movflags', '+faststart',
-                '-t', String(Math.ceil(totalDuration + 1)),
-                '-y', outputPath
-            ];
-            const cpuArgs = [...inputArgs, ...cpuOutputArgs];
+    // Helper: encode a single chunk with NVENC → CPU fallback
+    async function encodeChunk(inputArgs, filterFile, videoOutLabel, audioOutLabel, chunkDuration, chunkOutFile, chunkLabel) {
+        const silenceTimeout = Math.max(120000, Math.round(chunkDuration * 3000));
+
+        const runEncode = (ffmpegArgs, modeLabel) => runFFmpeg(ffmpegArgs, (pct, secs) => {
+            progressCallback({
+                percent: Math.min(95, 42 + Math.round(pct * 0.5)),
+                message: `${chunkLabel} ${modeLabel}: ${secs.toFixed(1)}s / ${chunkDuration.toFixed(1)}s`
+            });
+        }, chunkDuration, null, silenceTimeout);
+
+        const commonOutputArgs = (encArgs) => [
+            '-filter_complex_script', filterFile,
+            '-map', `[${videoOutLabel}]`,
+            ...(audioOutLabel ? ['-map', `[${audioOutLabel}]`] : []),
+            ...encArgs,
+            '-pix_fmt', 'yuv420p',
+            ...(audioOutLabel ? ['-c:a', 'aac', '-b:a', '192k'] : []),
+            '-t', String(Math.ceil(chunkDuration + 0.5)),
+            '-y', chunkOutFile
+        ];
+
+        // Try NVENC if not previously failed
+        if (!nvencFailed) {
+            const nvencArgs = ['-c:v', 'h264_nvenc', '-preset', NVENC_PRESET_FAST,
+                '-b:v', FINAL_VIDEO_BITRATE, '-maxrate:v', FINAL_VIDEO_MAXRATE,
+                '-bufsize:v', FINAL_VIDEO_BUFSIZE, '-profile:v', 'high'];
             try {
-                await runEncodePass(cpuArgs, 'CPU Encoding');
-            } catch (cpuErr) {
-                logError(`CPU fallback also failed: ${errorText(cpuErr).slice(-1500)}`);
-                throw cpuErr;
+                await runEncode([...inputArgs, ...commonOutputArgs(nvencArgs)], 'GPU');
+                return;
+            } catch (e) {
+                log(`${chunkLabel} NVENC failed: ${errorText(e).slice(-500)}`);
+                // Try compat preset
+                try {
+                    const compatArgs = ['-c:v', 'h264_nvenc', '-preset', NVENC_PRESET_COMPAT,
+                        '-b:v', FINAL_VIDEO_BITRATE, '-profile:v', 'high'];
+                    await runEncode([...inputArgs, ...commonOutputArgs(compatArgs)], 'GPU compat');
+                    return;
+                } catch (e2) {
+                    log(`${chunkLabel} NVENC compat also failed, falling back to CPU for all remaining chunks`);
+                    nvencFailed = true;
+                }
             }
+        }
+
+        // CPU fallback
+        const cpuArgs = ['-c:v', 'libx264', '-preset', 'medium', '-crf', CPU_FALLBACK_CRF];
+        await runEncode([...inputArgs, ...commonOutputArgs(cpuArgs)], 'CPU');
+    }
+
+    const chunkOutputs = [];
+
+    for (const chunk of chunks) {
+        if (_cancelled) throw new Error('Cancelled');
+
+        const chunkDuration = chunk.endTime - chunk.startTime;
+        const chunkFile = path.join(prepDir, `chunk-${chunk.chunkIndex}.mp4`);
+        const chunkFilterFile = path.join(prepDir, `filter_graph_chunk${chunk.chunkIndex}.txt`);
+        const chunkLabel = chunks.length > 1 ? `Chunk ${chunk.chunkIndex + 1}/${chunks.length}` : 'Compose';
+
+        const basePct = chunks.length > 1
+            ? 42 + Math.round((chunk.chunkIndex / chunks.length) * 50)
+            : 42;
+        progressCallback({ percent: basePct, message: `${chunkLabel}: building filter graph...` });
+
+        const timeWindow = { startTime: chunk.startTime, endTime: chunk.endTime };
+        const { inputs, filters, videoOutLabel } = await buildFilterGraph(plan, prepDir, mgClipDir, publicDir, timeWindow);
+        const { audioFilters, audioOutLabel } = buildAudioMix(plan, publicDir, inputs, timeWindow);
+        const allFilters = [...filters, ...audioFilters];
+
+        fs.writeFileSync(chunkFilterFile, allFilters.join(';\n'));
+        log(`${chunkLabel}: ${allFilters.length} filters, ${inputs.length} inputs, ${chunkDuration.toFixed(1)}s (${chunk.startTime.toFixed(1)}-${chunk.endTime.toFixed(1)})`);
+
+        const inputArgs = buildInputArgs(inputs);
+
+        try {
+            await encodeChunk(inputArgs, chunkFilterFile, videoOutLabel, audioOutLabel, chunkDuration, chunkFile, chunkLabel);
+
+            if (!fs.existsSync(chunkFile) || fs.statSync(chunkFile).size < 1000) {
+                throw new Error(`${chunkLabel} output missing or empty`);
+            }
+            chunkOutputs.push(chunkFile);
+            log(`✓ ${chunkLabel} done`);
+        } catch (e) {
+            logError(`${chunkLabel} failed: ${errorText(e).slice(-1500)}`);
+            throw new Error(`${chunkLabel} failed: ${e.message}`);
         }
     }
 
-    // Cleanup prep directory (keep filter_graph.txt + mg-clips for debugging)
+    // ==== PASS 3: Stitch chunks (if multiple) ====
+    if (chunkOutputs.length === 1) {
+        // Single chunk — just rename to output
+        fs.renameSync(chunkOutputs[0], outputPath);
+        log('Single chunk — moved to output path');
+    } else {
+        const pass3Timer = timer('Pass 3 — Concat stitch');
+        progressCallback({ percent: 96, message: 'Stitching chunks...' });
+
+        const concatListFile = path.join(prepDir, 'concat_list.txt');
+        const concatContent = chunkOutputs.map(f => `file '${f.replace(/\\/g, '/')}'`).join('\n');
+        fs.writeFileSync(concatListFile, concatContent);
+
+        log(`Stitching ${chunkOutputs.length} chunks via concat demuxer`);
+        await runFFmpeg([
+            '-f', 'concat', '-safe', '0', '-i', concatListFile,
+            '-c', 'copy',
+            '-movflags', '+faststart',
+            '-y', outputPath
+        ]);
+
+        pass3Timer();
+    }
+
+    // Cleanup prep directory (keep filter graphs + mg-clips for debugging)
     try {
         const prepFiles = fs.readdirSync(prepDir);
         for (const f of prepFiles) {
-            if (f === 'filter_graph.txt' || f === 'mg-clips') continue; // keep for debugging
+            if (f.startsWith('filter_graph') || f === 'mg-clips' || f === 'concat_list.txt') continue;
             const fp = path.join(prepDir, f);
-            if (fs.statSync(fp).isDirectory()) {
-                // Clean mg-clips subdirectory
-                try {
+            try {
+                if (fs.statSync(fp).isDirectory()) {
                     const subFiles = fs.readdirSync(fp);
                     for (const sf of subFiles) fs.unlinkSync(path.join(fp, sf));
                     fs.rmdirSync(fp);
-                } catch (e2) { /* ignore */ }
-            } else {
-                fs.unlinkSync(fp);
-            }
+                } else {
+                    fs.unlinkSync(fp);
+                }
+            } catch (e2) { /* ignore */ }
         }
     } catch (e) { /* ignore cleanup errors */ }
 
@@ -1302,7 +1478,7 @@ async function renderWithFFmpeg(plan, options = {}) {
     if (fs.existsSync(outputPath)) {
         const sizeMB = (fs.statSync(outputPath).size / (1024 * 1024)).toFixed(1);
         log(`✅ Render complete: ${outputPath} (${sizeMB} MB) in ${totalSec}s`);
-        log(`Encoder: ${_nvencAvailable ? 'h264_nvenc (GPU)' : 'libx264 (CPU)'}`);
+        log(`Encoder: ${nvencFailed ? 'libx264 (CPU)' : 'h264_nvenc (GPU)'}`);
         return { success: true, outputPath };
     }
 

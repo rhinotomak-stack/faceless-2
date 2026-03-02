@@ -7,14 +7,11 @@ const { transcribeAudio } = require('./transcribe');
 const { createDirectorsBrief } = require('./directors-brief');
 const { analyzeAndCreateScenes } = require('./ai-director');
 const { planVisuals } = require('./ai-visual-planner');
-const { planTransitions, analyzeTransitionPlan } = require('./ai-transitions');
 // Existing modules
 const { analyzeSceneVisuals, analyzeSingleScene, createDefaultAnalysis, analyzeArticleHighlights } = require('./ai-vision');
 const { processArticleImages } = require('./article-image');
 const { processMotionGraphics, FULLSCREEN_MG_TYPES } = require('./ai-motion-graphics');
-const { processVisualEffects, selectOverlayFiles } = require('./ai-effects');
 const { downloadAllMedia, downloadBackgroundCanvas, retryPoorMedia } = require('./footage-manager');
-const { downloadOverlays, scanLocalOverlays } = require('./overlay-manager');
 const { loadRecipe } = require('./recipe-loader');
 
 // Clean a folder of old build artifacts (scene files, plans, audio)
@@ -438,82 +435,6 @@ async function buildVideo() {
         console.log('');
     }
 
-    // Step 6.25: Transition Planning (algorithmic, no AI cost)
-    console.log('═'.repeat(60));
-    console.log('🔀 Step 6.25: Transition Planning');
-    console.log('═'.repeat(60));
-    const transitions = planTransitions(scenesWithKeywords, scriptContext, allMGs, directorsBrief);
-    const transitionStats = analyzeTransitionPlan(transitions);
-    console.log(`   ✅ Planned ${transitionStats.total} transitions (${transitionStats.transitionRatio} are effects, rest are cuts)`);
-    if (Object.keys(transitionStats.typeBreakdown).length > 0) {
-        console.log(`      Types: ${Object.entries(transitionStats.typeBreakdown).map(([k, v]) => `${k}(${v})`).join(', ')}`);
-    }
-    console.log('');
-
-    // Step 6.5: AI Visual Effects (cinematic overlays)
-    console.log('═'.repeat(60));
-    console.log('🎨 Step 6.5: Visual Effects');
-    console.log('═'.repeat(60));
-    let visualEffects = [];
-    if (directorsBrief.tier.skipOverlays) {
-        console.log(`   ⏭️  Skipped (${directorsBrief.qualityTier} tier)\n`);
-    } else {
-        try {
-            visualEffects = await processVisualEffects(scenesWithKeywords, scriptContext, visualAnalysis, aiInstructions);
-            console.log(`   ✅ Applied visual effects to ${visualEffects.length} scenes\n`);
-        } catch (error) {
-            console.log(`   ⚠️ Visual effects failed: ${error.message}`);
-            console.log('   ℹ️ Continuing without visual effects...\n');
-        }
-    }
-
-    // Step 6.75: Overlay Videos — AI selection from local library + download fallback
-    console.log('═'.repeat(60));
-    console.log('🎭 Step 6.75: Overlay Videos');
-    console.log('═'.repeat(60));
-    let overlayScenes = [];
-    let aiSelectedOverlays = [];
-    if (directorsBrief.tier.skipOverlays) {
-        console.log(`   ⏭️  Skipped (${directorsBrief.qualityTier} tier)\n`);
-    } else {
-        try {
-            // Scan local overlay library
-            const availableOverlays = scanLocalOverlays();
-            console.log(`   📁 Found ${availableOverlays.length} overlay files in assets/overlays/`);
-
-            // Get theme overlay preferences
-            let themeOverlayPrefs = null;
-            try {
-                const { THEMES } = require('./themes');
-                const themeId = scriptContext?.themeId || 'neutral';
-                const theme = THEMES[themeId] || THEMES.neutral;
-                themeOverlayPrefs = theme?.overlays || null;
-                if (themeOverlayPrefs) {
-                    console.log(`   🎨 Theme "${themeId}" overlay prefs: prefer [${themeOverlayPrefs.preferred?.join(', ')}], avoid [${themeOverlayPrefs.avoid?.join(', ')}]`);
-                }
-            } catch (e) { /* themes not available, proceed without */ }
-
-            // AI selects best overlays from local library based on theme + content
-            if (availableOverlays.length > 0) {
-                try {
-                    aiSelectedOverlays = await selectOverlayFiles(availableOverlays, scenesWithKeywords, scriptContext, themeOverlayPrefs);
-                    if (aiSelectedOverlays.length > 0) {
-                        console.log(`   🎭 AI selected ${aiSelectedOverlays.length} overlay(s) from local library`);
-                    }
-                } catch (e) {
-                    console.log(`   ⚠️ AI overlay selection failed: ${e.message}`);
-                }
-            }
-
-            // Download remaining overlay types + merge AI-selected local overlays
-            overlayScenes = await downloadOverlays(visualEffects, scenesWithKeywords, aiSelectedOverlays);
-            console.log(`   ✅ ${overlayScenes.length} total overlay clips\n`);
-        } catch (error) {
-            console.log(`   ⚠️ Overlay processing failed: ${error.message}`);
-            console.log('   ℹ️ Code-generated VFX will be used as fallback\n');
-        }
-    }
-
     // Step 6.9: Search for article images (if articleHighlight MG exists)
     const hasArticleMG = mgScenes.some(mg => mg.type === 'articleHighlight');
     if (hasArticleMG) {
@@ -571,12 +492,9 @@ async function buildVideo() {
         height: config.video.height,
         scenes: scenesWithMedia,
         mgScenes: mgScenes,
-        overlayScenes: overlayScenes,
         motionGraphics: motionGraphics,
         mgStyle: mgStyle,
         mapStyle: mapStyle,
-        transitions: transitions,
-        visualEffects: visualEffects,
         scriptContext: scriptContext,
         visualAnalysis: visualAnalysis,
         ...(backgroundCanvasFile ? {
@@ -624,31 +542,6 @@ async function buildVideo() {
         scene.index = i;
         delete scene._fileIndex;
     }
-    // Copy overlay files (video .mp4 from temp + local image/video overlays from assets/overlays/)
-    for (let i = 0; i < overlayScenes.length; i++) {
-        const overlay = overlayScenes[i];
-        const ext = overlay.mediaExtension || '.mp4';
-        const srcIdx = overlay.index !== undefined ? overlay.index : i;
-        if (overlay.isLocal && overlay.sourceFile) {
-            // Local overlay from assets/overlays/ — copy directly
-            const srcOverlay = path.join(__dirname, '..', 'assets', 'overlays', overlay.sourceFile);
-            const destOverlay = path.join(publicDir, `overlay-${i}${ext}`);
-            if (fs.existsSync(srcOverlay)) {
-                fs.copyFileSync(srcOverlay, destOverlay);
-            }
-        } else {
-            // Downloaded overlay from temp (use source index for temp file)
-            const srcExt = overlay.mediaExtension || '.mp4';
-            const srcOverlay = path.join(config.paths.temp, `overlay-${srcIdx}${srcExt}`);
-            const destOverlay = path.join(publicDir, `overlay-${i}${ext}`);
-            if (fs.existsSync(srcOverlay)) {
-                fs.copyFileSync(srcOverlay, destOverlay);
-            }
-        }
-        overlay.index = i;
-    }
-    if (overlayScenes.length > 0) console.log(`   🎭 Copied ${overlayScenes.length} overlay files`);
-
     // Copy article image files (for articleHighlight image mode)
     for (const mg of mgScenes) {
         if (mg.articleImageFile) {

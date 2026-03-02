@@ -119,6 +119,13 @@
                         <option value="neutral">⚪ Neutral / Balanced</option>
                     </select>
                     <small style="display:block; margin-top:4px; color:#888">Controls background, colors, MG style, fonts</small>
+
+                    <label style="margin-top:12px">MG Animation Speed:</label>
+                    <div style="display:flex;align-items:center;gap:8px">
+                        <input type="range" id="mg-global-anim-speed" min="0.3" max="2" step="0.1" value="0.7" style="flex:1">
+                        <span id="mg-global-anim-speed-val" style="color:#aaa;font-size:12px;min-width:30px">0.7x</span>
+                    </div>
+                    <small style="display:block; margin-top:4px; color:#888">Default speed for all MG overlays (0.3=slow, 1=normal, 2=fast)</small>
                 </div>
 
                 <div class="panel-section">
@@ -136,67 +143,13 @@
                     </div>
                 </div>
 
-                <div class="panel-section">
-                    <h3>🎨 Style</h3>
-                    <label>Transitions:</label>
-                    <select id="transition-style">
-                        <option value="random">🎲 Random Mix</option>
-                        <option value="auto">🤖 Auto (Theme-Based)</option>
-                        <optgroup label="Smooth / Cinematic">
-                            <option value="fade">◐ Fade</option>
-                            <option value="dissolve">◑ Dissolve</option>
-                            <option value="crossfade">◑ Cross Fade</option>
-                            <option value="blur">◎ Blur</option>
-                            <option value="crossBlur">◎ Cross Blur</option>
-                            <option value="luma">▦ Luma Fade</option>
-                            <option value="ripple">≋ Ripple</option>
-                            <option value="reveal">◉ Iris Reveal</option>
-                            <option value="morph">◠ Morph</option>
-                            <option value="dreamFade">☁ Dream Fade</option>
-                        </optgroup>
-                        <optgroup label="Energetic / Dynamic">
-                            <option value="slide">→ Slide</option>
-                            <option value="wipe">▸ Wipe</option>
-                            <option value="zoom">⊕ Zoom</option>
-                            <option value="push">⇒ Push</option>
-                            <option value="swipe">⇝ Swipe</option>
-                            <option value="whip">↝ Whip Pan</option>
-                            <option value="bounce">⤳ Bounce</option>
-                            <option value="splitWipe">⫿ Split Wipe</option>
-                            <option value="shutterSlice">▤ Shutter Slice</option>
-                            <option value="zoomBlur">⊛ Zoom Blur</option>
-                        </optgroup>
-                        <optgroup label="Dramatic / Film">
-                            <option value="flash">⚡ Flash</option>
-                            <option value="cameraFlash">📸 Camera Flash</option>
-                            <option value="filmBurn">🔥 Film Burn</option>
-                            <option value="flare">✦ Lens Flare</option>
-                            <option value="lightLeak">☀ Light Leak</option>
-                            <option value="vignetteBlink">◉ Vignette Blink</option>
-                            <option value="shadowWipe">▰ Shadow Wipe</option>
-                            <option value="filmGrain">▩ Film Grain</option>
-                            <option value="ink">◕ Ink Bleed</option>
-                            <option value="directionalBlur">⟿ Directional Blur</option>
-                            <option value="colorFade">◈ Color Fade</option>
-                            <option value="spin">↻ Spin</option>
-                            <option value="prismShift">◇ Prism Shift</option>
-                        </optgroup>
-                        <optgroup label="Glitch / Tech">
-                            <option value="glitch">⚠ Glitch</option>
-                            <option value="pixelate">▩ Pixelate</option>
-                            <option value="mosaic">▧ Mosaic</option>
-                            <option value="dataMosh">⌁ Data Mosh</option>
-                            <option value="scanline">≡ Scanline</option>
-                            <option value="rgbSplit">◈ RGB Split</option>
-                            <option value="static">▣ TV Static</option>
-                        </optgroup>
-                    </select>
-                </div>
+                <!-- Transitions disabled - hard cut only -->
+                <select id="transition-style" style="display:none"><option value="cut" selected>Cut</option></select>
 
                 <div class="panel-section">
                     <h3>🔊 Sound Effects</h3>
                     <label class="source-toggle">
-                        <input type="checkbox" id="sfx-enabled" checked> Auto SFX on transitions
+                        <input type="checkbox" id="sfx-enabled" checked> Auto SFX on scene changes
                     </label>
                     <div class="setting-row" style="margin-top:8px">
                         <label>SFX Volume:</label>
@@ -263,13 +216,9 @@
                         </div>
                         <!-- Full-screen MG preview (V3 charts, timelines, rankings) -->
                         <div id="mg-v3-preview" class="mg-v3-preview-layer"></div>
-                        <!-- Overlay video preview (downloaded grain, dust, light leaks, bokeh) -->
-                        <video id="overlay-preview" class="overlay-preview-video" muted loop></video>
-                        <!-- Overlay image preview (PNG/JPG overlays like CRT, paper, scanlines) -->
-                        <img id="overlay-preview-img" class="overlay-preview-img" alt="">
-                        <!-- Shared transition elements -->
-                        <video id="video-transition-out" class="preview-video transition-out-video"></video>
-                        <img id="img-transition-out" class="preview-img transition-out-img">
+                        <!-- Transition elements (disabled - hard cut only) -->
+                        <video id="video-transition-out" class="preview-video transition-out-video" style="display:none"></video>
+                        <img id="img-transition-out" class="preview-img transition-out-img" style="display:none">
                         <!-- Motion Graphics overlay -->
                         <div id="mg-overlay" class="mg-overlay"></div>
                         <!-- Custom video controls overlaid on frame -->
@@ -512,6 +461,11 @@
                                 <label>Duration</label>
                                 <input type="range" id="mg-duration" class="property-slider" min="0.5" max="10" step="0.5" value="3">
                                 <span id="mg-duration-val" class="property-value">3.0s</span>
+                            </div>
+                            <div class="property-row">
+                                <label>Anim Speed</label>
+                                <input type="range" id="mg-anim-speed" class="property-slider" min="0.3" max="2" step="0.1" value="1">
+                                <span id="mg-anim-speed-val" class="property-value">1.0x</span>
                             </div>
                         </div>
 

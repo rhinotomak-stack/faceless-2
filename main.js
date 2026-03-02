@@ -690,10 +690,12 @@ let activeProcessType = null; // 'build' or 'render'
 let processCancelled = false;
 
 ipcMain.handle('cancel-process', async () => {
-    // Cancel FFmpeg render if active
+    // Cancel FFmpeg render if active (in-process async, no child process)
+    let ffmpegCancelled = false;
     try {
         const { cancelRender } = require('./src/ffmpeg-renderer');
         cancelRender();
+        ffmpegCancelled = true;
     } catch (e) { /* module may not be loaded */ }
 
     if (activeProcess) {
@@ -717,6 +719,12 @@ ipcMain.handle('cancel-process', async () => {
         }
         return { success: true, message: `${type} cancelled` };
     }
+
+    // FFmpeg render runs in-process (no activeProcess), but cancelRender() was called
+    if (ffmpegCancelled) {
+        return { success: true, message: 'render cancelled' };
+    }
+
     return { success: false, message: 'No active process' };
 });
 

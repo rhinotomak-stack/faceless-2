@@ -2,6 +2,7 @@ import { Composition, registerRoot, staticFile } from 'remotion';
 import { VideoComposition } from './Composition';
 import { MGPreRenderComposition, MGBatchComposition } from './MGPreRender';
 
+
 const fps = 30;
 
 export const RemotionRoot = () => {

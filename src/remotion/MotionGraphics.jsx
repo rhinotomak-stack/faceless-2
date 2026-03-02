@@ -1188,8 +1188,19 @@ const MAP_ACCENTS = {
 let _cachedWorldGeo = null;
 
 const MapChart = ({ mg, scriptContext }) => {
-    const [geoData, setGeoData] = useState(_cachedWorldGeo);
-    const [handle] = useState(() => _cachedWorldGeo ? null : delayRender('Loading world map'));
+    // Use pre-loaded geo data if available (passed from FFmpeg renderer to avoid fetch in headless Chromium)
+    const [geoData, setGeoData] = useState(() => {
+        if (_cachedWorldGeo) return _cachedWorldGeo;
+        if (mg._preloadedGeo) {
+            try {
+                const countries = feature(mg._preloadedGeo, mg._preloadedGeo.objects.countries);
+                _cachedWorldGeo = countries;
+                return countries;
+            } catch (e) { /* fall through to fetch */ }
+        }
+        return null;
+    });
+    const [handle] = useState(() => geoData ? null : delayRender('Loading world map'));
     const frame = useCurrentFrame();
     const { fps } = useVideoConfig();
     const anim = useAnimationLifecycle(mg);
@@ -1198,6 +1209,10 @@ const MapChart = ({ mg, scriptContext }) => {
     const ac = MAP_ACCENTS[mg.style] || MAP_ACCENTS.clean;
 
     useEffect(() => {
+        if (geoData) {
+            if (handle) continueRender(handle);
+            return;
+        }
         if (_cachedWorldGeo) {
             setGeoData(_cachedWorldGeo);
             if (handle) continueRender(handle);

@@ -201,68 +201,14 @@ const state = {
     audioClipTrack: 'audio-track',
     // Preview zoom ('fit' or number like 25, 50, 100, 200)
     previewZoom: 'fit',
-    // Transition system - modular for easy extension
+    // Transition system - disabled (hard cut only)
     transition: {
-        style: 'random', // Current selected style
-        duration: 500, // Duration in ms
+        style: 'cut',
+        duration: 0,
         isTransitioning: false,
-        activeVideoIndex: 0, // 0 or 1 - which video element is currently active
-        // All available transition types for cycling
-        types: ['fade', 'dissolve', 'crossfade', 'blur', 'crossBlur', 'luma', 'ripple', 'reveal', 'morph', 'dreamFade', 'filmBurn',
-                'slide', 'wipe', 'zoom', 'push', 'swipe', 'whip', 'bounce', 'splitWipe', 'shutterSlice', 'zoomBlur',
-                'flash', 'cameraFlash', 'flare', 'lightLeak', 'vignetteBlink', 'shadowWipe', 'filmGrain', 'ink', 'directionalBlur', 'colorFade', 'spin', 'prismShift',
-                'glitch', 'pixelate', 'mosaic', 'dataMosh', 'scanline', 'rgbSplit', 'static'],
-        // Metadata for UI (icons + names)
-        metadata: {
-            // Smart / Auto
-            random: { name: 'Random Mix', icon: '🎲', description: 'Random each time' },
-            auto: { name: 'Auto', icon: '🤖', description: 'Theme-based selection' },
-            cut: { name: 'Cut', icon: '✂', description: 'Instant cut' },
-            // Smooth / Cinematic
-            fade: { name: 'Fade', icon: '◐', description: 'Simple crossfade' },
-            dissolve: { name: 'Dissolve', icon: '◑', description: 'Soft dissolve' },
-            crossfade: { name: 'Crossfade', icon: '◑', description: 'Smooth crossfade' },
-            blur: { name: 'Blur', icon: '◎', description: 'Blur transition' },
-            crossBlur: { name: 'Cross Blur', icon: '◎', description: 'Blur crossfade' },
-            luma: { name: 'Luma Fade', icon: '▦', description: 'Luminance wipe' },
-            ripple: { name: 'Ripple', icon: '≋', description: 'Ripple dissolve' },
-            reveal: { name: 'Iris Reveal', icon: '◉', description: 'Center iris reveal' },
-            morph: { name: 'Morph', icon: '◠', description: 'Shape morph' },
-            dreamFade: { name: 'Dream Fade', icon: '☁', description: 'Dreamy blur fade' },
-            filmBurn: { name: 'Film Burn', icon: '🔥', description: 'Warm film burn' },
-            // Energetic / Dynamic
-            slide: { name: 'Slide', icon: '→', description: 'Slide left/right' },
-            wipe: { name: 'Wipe', icon: '▸', description: 'Horizontal wipe' },
-            zoom: { name: 'Zoom', icon: '⊕', description: 'Zoom in/out' },
-            push: { name: 'Push', icon: '⇒', description: 'Push off screen' },
-            swipe: { name: 'Swipe', icon: '⇝', description: 'Fast swipe' },
-            whip: { name: 'Whip Pan', icon: '↝', description: 'Fast whip pan' },
-            bounce: { name: 'Bounce', icon: '⤳', description: 'Bounce in' },
-            splitWipe: { name: 'Split Wipe', icon: '⫿', description: 'Split from center' },
-            shutterSlice: { name: 'Shutter Slice', icon: '▤', description: 'Shutter reveal' },
-            zoomBlur: { name: 'Zoom Blur', icon: '⊛', description: 'Zoom with blur' },
-            // Dramatic / Film
-            flash: { name: 'Flash', icon: '⚡', description: 'White flash cut' },
-            cameraFlash: { name: 'Camera Flash', icon: '📸', description: 'Camera flash with shutter' },
-            flare: { name: 'Lens Flare', icon: '✦', description: 'Cinematic lens flare' },
-            lightLeak: { name: 'Light Leak', icon: '☀', description: 'Warm light leak' },
-            vignetteBlink: { name: 'Vignette Blink', icon: '◉', description: 'Eye blink vignette' },
-            shadowWipe: { name: 'Shadow Wipe', icon: '▰', description: 'Dark shadow wipe' },
-            filmGrain: { name: 'Film Grain', icon: '▩', description: 'Vintage film grain' },
-            ink: { name: 'Ink Bleed', icon: '◕', description: 'Ink spreading reveal' },
-            directionalBlur: { name: 'Dir. Blur', icon: '⟿', description: 'Directional blur' },
-            colorFade: { name: 'Color Fade', icon: '◈', description: 'Fade through color' },
-            spin: { name: 'Spin', icon: '↻', description: 'Spin transition' },
-            prismShift: { name: 'Prism Shift', icon: '◇', description: 'Rainbow prism' },
-            // Glitch / Tech
-            glitch: { name: 'Glitch', icon: '⚠', description: 'Digital glitch' },
-            pixelate: { name: 'Pixelate', icon: '▩', description: 'Pixelation effect' },
-            mosaic: { name: 'Mosaic', icon: '▧', description: 'Mosaic tiles' },
-            dataMosh: { name: 'Data Mosh', icon: '⌁', description: 'Data corruption' },
-            scanline: { name: 'Scanline', icon: '≡', description: 'CRT scanlines' },
-            rgbSplit: { name: 'RGB Split', icon: '◈', description: 'Color channel split' },
-            static: { name: 'TV Static', icon: '▣', description: 'Television static' },
-        }
+        activeVideoIndex: 0,
+        types: [],
+        metadata: { cut: { name: 'Cut', icon: '✂', description: 'Instant cut' } }
     },
     volume: 1,
     isMuted: false,
@@ -292,7 +238,6 @@ const state = {
             { id: 'video-track-3', label: 'V3', type: 'video' },
             { id: 'video-track-2', label: 'V2', type: 'video' },
             { id: 'video-track-1', label: 'V1', type: 'video', main: true },
-            { id: 'overlay-track', label: 'VFX', type: 'overlay' },
             { id: 'mg-track', label: 'MG', type: 'graphics' },
             { id: 'audio-track', label: 'VO', type: 'audio' },
             { id: 'music-track', label: 'MUS', type: 'audio' },
@@ -300,17 +245,17 @@ const state = {
         ],
         trackHeights: {
             'video-track-3': 28, 'video-track-2': 28, 'video-track-1': 40,
-            'overlay-track': 32, 'mg-track': 32,
+            'mg-track': 32,
             'audio-track': 36, 'music-track': 28, 'sfx-track': 22
         },
         trackMinHeights: {
             'video-track-3': 22, 'video-track-2': 22, 'video-track-1': 28,
-            'overlay-track': 22, 'mg-track': 22,
+            'mg-track': 22,
             'audio-track': 26, 'music-track': 22, 'sfx-track': 18
         },
         trackMaxHeights: {
             'video-track-3': 120, 'video-track-2': 120, 'video-track-1': 120,
-            'overlay-track': 80, 'mg-track': 80,
+            'mg-track': 80,
             'audio-track': 80, 'music-track': 80, 'sfx-track': 60
         }
     }
@@ -539,7 +484,6 @@ async function init() {
     setupPanelSections();
     setupVideoControls();
     setupClipPropertyListeners();
-    setupOverlayPropertyListeners();
     setupMgPropertyListeners();
     setupPreviewDrag();
     setupPreviewZoom();
@@ -618,16 +562,20 @@ function setupEventListeners() {
         });
         elements.aiInstructions.addEventListener('change', saveSettings);
     }
+    // Global MG animation speed slider
+    const globalAnimSpeedEl = document.getElementById('mg-global-anim-speed');
+    if (globalAnimSpeedEl) {
+        globalAnimSpeedEl.addEventListener('input', (e) => {
+            const val = parseFloat(e.target.value);
+            document.getElementById('mg-global-anim-speed-val').textContent = `${val.toFixed(1)}x`;
+        });
+    }
     // Footage source toggle listeners
     ['srcPexels', 'srcPixabay', 'srcYouTube', 'srcNewsVideo', 'srcUnsplash', 'srcGoogleCSE', 'srcBing', 'srcDuckDuckGo', 'srcGoogleScrape'].forEach(key => {
         if (elements[key]) elements[key].addEventListener('change', saveSettings);
     });
-    elements.transitionStyle.addEventListener('change', () => {
-        state.transition.style = elements.transitionStyle.value;
-        generateSfxClips();
-        renderTimeline();
-        saveSettings();
-    });
+    // Transition style listener (disabled - hard cut only)
+    // elements.transitionStyle is hidden, always 'cut'
     // SFX controls
     if (elements.sfxEnabled) {
         elements.sfxEnabled.addEventListener('change', () => {
@@ -1095,15 +1043,6 @@ function updateClipProperties() {
 
     const scene = state.scenes[state.selectedClipIndex];
 
-    // Overlay clip selected?
-    if (scene.isOverlay) {
-        if (emptyState) emptyState.classList.add('hidden');
-        if (titleEl) titleEl.textContent = 'Overlay Properties';
-        updateOverlayProperties(scene);
-        expandPropertiesSection();
-        return;
-    }
-
     // Full-screen MG scene on V3 — show MG properties panel
     if (scene.isMGScene) {
         if (emptyState) emptyState.classList.add('hidden');
@@ -1228,6 +1167,12 @@ function updateMgProperties() {
     if (typeEl) typeEl.value = mg.type || 'headline';
     if (styleEl) styleEl.value = mg.style || state.mgStyle || 'clean';
 
+    // Animation speed slider
+    const animSpeedEl = document.getElementById('mg-anim-speed');
+    const animSpeedVal = document.getElementById('mg-anim-speed-val');
+    if (animSpeedEl) animSpeedEl.value = mg.animationSpeed || 1;
+    if (animSpeedVal) animSpeedVal.textContent = `${(mg.animationSpeed || 1).toFixed(1)}x`;
+
     // Show map style row only for mapChart
     const mapStyleRow = document.getElementById('mg-map-style-row');
     const mapStyleEl = document.getElementById('mg-map-style');
@@ -1258,6 +1203,13 @@ function updateMgPropertiesForScene(scene) {
     if (durVal) durVal.textContent = `${(dur || 5).toFixed(1)}s`;
     if (typeEl) typeEl.value = mg.type || scene.type || 'barChart';
     if (styleEl) styleEl.value = mg.style || scene.style || state.mgStyle || 'clean';
+
+    // Animation speed slider
+    const animSpeedEl = document.getElementById('mg-anim-speed');
+    const animSpeedVal = document.getElementById('mg-anim-speed-val');
+    const animSpeed = mg.animationSpeed || scene.animationSpeed || 1;
+    if (animSpeedEl) animSpeedEl.value = animSpeed;
+    if (animSpeedVal) animSpeedVal.textContent = `${animSpeed.toFixed(1)}x`;
 
     // Show map style row only for mapChart
     const sceneType = mg.type || scene.type;
@@ -1499,214 +1451,6 @@ function populateBackgroundDropdown() {
     }
 }
 
-// ========== Dynamic Overlay Metadata ==========
-// Built-in overlay types with known colors/icons
-const BUILTIN_OVERLAY_META = {
-    grain:        { label: 'Grain',       icon: '🌾', colorClass: 'overlay-grain' },
-    dust:         { label: 'Dust',        icon: '✨', colorClass: 'overlay-dust' },
-    lightLeak:    { label: 'Light Leak',  icon: '🔆', colorClass: 'overlay-lightleak' },
-    blurVignette: { label: 'Bokeh',       icon: '💠', colorClass: 'overlay-bokeh' },
-};
-
-// Color palette for dynamically-discovered overlays (rotates through these)
-const OVERLAY_COLOR_PALETTE = [
-    { bg: 'linear-gradient(135deg, #dc2626, #f87171)', border: 'rgba(248,113,113,0.5)' },
-    { bg: 'linear-gradient(135deg, #059669, #34d399)', border: 'rgba(52,211,153,0.5)' },
-    { bg: 'linear-gradient(135deg, #7c3aed, #a78bfa)', border: 'rgba(167,139,250,0.5)' },
-    { bg: 'linear-gradient(135deg, #d97706, #fbbf24)', border: 'rgba(251,191,36,0.5)' },
-    { bg: 'linear-gradient(135deg, #0891b2, #22d3ee)', border: 'rgba(34,211,238,0.5)' },
-    { bg: 'linear-gradient(135deg, #be185d, #f472b6)', border: 'rgba(244,114,182,0.5)' },
-    { bg: 'linear-gradient(135deg, #4f46e5, #818cf8)', border: 'rgba(129,140,248,0.5)' },
-    { bg: 'linear-gradient(135deg, #65a30d, #a3e635)', border: 'rgba(163,230,53,0.5)' },
-];
-
-// Icon map for detected overlay types
-const OVERLAY_TYPE_ICONS = {
-    crt: '📺', vhs: '📼', scanline: '📡', paper: '📄', texture: '🧱',
-    film: '🎞️', noise: '📟', scratch: '⚡', damage: '💥', digital: '💻',
-    tv: '📺', static: '📡', retro: '📻', vintage: '🎥', glitch: '⚠',
-};
-
-function getOverlayMeta(overlayType) {
-    if (!overlayType) return { label: 'Overlay', icon: '🎭', colorClass: '' };
-    // Check built-in types first
-    if (BUILTIN_OVERLAY_META[overlayType]) return BUILTIN_OVERLAY_META[overlayType];
-    // Dynamic: generate label and pick icon based on name keywords
-    const label = overlayType.length > 12 ? overlayType.substring(0, 12) + '…' : overlayType;
-    const lowerType = overlayType.toLowerCase();
-    let icon = '🎭';
-    for (const [keyword, ico] of Object.entries(OVERLAY_TYPE_ICONS)) {
-        if (lowerType.includes(keyword)) { icon = ico; break; }
-    }
-    // Use 'overlay-dynamic' class — color applied inline via data attribute
-    return { label, icon, colorClass: 'overlay-dynamic' };
-}
-
-// Get a dynamic color for a non-builtin overlay type (deterministic hash)
-function getOverlayDynamicColor(overlayType) {
-    let hash = 0;
-    for (let i = 0; i < overlayType.length; i++) hash = ((hash << 5) - hash) + overlayType.charCodeAt(i);
-    const idx = Math.abs(hash) % OVERLAY_COLOR_PALETTE.length;
-    return OVERLAY_COLOR_PALETTE[idx];
-}
-
-// ========== Overlay Picker ==========
-async function showOverlayPicker() {
-    // Remove existing picker if open
-    const existing = document.getElementById('overlay-picker-popup');
-    if (existing) { existing.remove(); return; }
-
-    // Rescan overlays folder each time picker opens (detects newly added files)
-    try {
-        state.availableOverlays = await window.electronAPI.scanOverlays();
-    } catch (e) { /* keep existing list */ }
-
-    if (!state.availableOverlays || state.availableOverlays.length === 0) {
-        console.log('No overlays found in assets/overlays/');
-        return;
-    }
-
-    const popup = document.createElement('div');
-    popup.id = 'overlay-picker-popup';
-    popup.className = 'overlay-picker-popup';
-
-    let html = '<div class="overlay-picker-header"><span>Add Overlay</span><button class="overlay-picker-close">&times;</button></div>';
-    html += '<div class="overlay-picker-grid">';
-    for (const ov of state.availableOverlays) {
-        const isVideo = ov.mediaType === 'video';
-        const icon = isVideo ? '🎬' : '🖼️';
-        const sizeKB = Math.round(ov.size / 1024);
-        const sizeLabel = sizeKB > 1024 ? `${(sizeKB / 1024).toFixed(1)}MB` : `${sizeKB}KB`;
-        html += `<div class="overlay-picker-item" data-overlay-file="${ov.filename}" data-overlay-name="${ov.name}" data-overlay-ext="${ov.ext}" data-overlay-media="${ov.mediaType}" title="${ov.filename} (${sizeLabel})">
-            <span class="overlay-picker-icon">${icon}</span>
-            <span class="overlay-picker-name">${ov.name}</span>
-            <span class="overlay-picker-ext">${ov.ext}</span>
-        </div>`;
-    }
-    html += '</div>';
-    popup.innerHTML = html;
-
-    // Position near the VFX track "+" button
-    const addBtn = document.querySelector('.overlay-add-btn');
-    if (addBtn) {
-        const rect = addBtn.getBoundingClientRect();
-        popup.style.position = 'fixed';
-        popup.style.left = `${rect.right + 4}px`;
-        popup.style.top = `${rect.top}px`;
-    }
-
-    document.body.appendChild(popup);
-
-    // Close button
-    popup.querySelector('.overlay-picker-close').addEventListener('click', () => popup.remove());
-
-    // Click outside to close
-    setTimeout(() => {
-        const closeHandler = (e) => {
-            if (!popup.contains(e.target) && !e.target.closest('.overlay-add-btn')) {
-                popup.remove();
-                document.removeEventListener('click', closeHandler);
-            }
-        };
-        document.addEventListener('click', closeHandler);
-    }, 100);
-
-    // Item click — add overlay to VFX track
-    popup.querySelectorAll('.overlay-picker-item').forEach(item => {
-        item.addEventListener('click', () => {
-            const filename = item.dataset.overlayFile;
-            const name = item.dataset.overlayName;
-            const ext = item.dataset.overlayExt;
-            const mediaType = item.dataset.overlayMedia;
-            addOverlayToTrack(filename, name, ext, mediaType);
-            popup.remove();
-        });
-    });
-}
-
-function addOverlayToTrack(filename, name, ext, mediaType) {
-    // Place overlay at playhead, spanning to end of timeline (or 10s if no duration)
-    const startTime = state.currentTime || 0;
-    const endTime = state.totalDuration > 0 ? state.totalDuration : startTime + 10;
-
-    const overlayScene = {
-        trackId: 'overlay-track',
-        isOverlay: true,
-        overlayType: name,
-        blendMode: 'screen',
-        overlayIntensity: 0.5,
-        mediaType: mediaType,
-        mediaExtension: ext,
-        sourceFile: filename,
-        isLocal: true,
-        startTime: startTime,
-        endTime: endTime,
-        text: name,
-        scale: 1,
-    };
-
-    state.scenes.push(overlayScene);
-    renderTracks();
-    console.log(`Added overlay "${name}" (${filename}) to VFX track at ${startTime.toFixed(1)}s`);
-}
-
-function applyOverlayPreviewStyles(scene) {
-    const overlayVideo = document.getElementById('overlay-preview');
-    const overlayImg = document.getElementById('overlay-preview-img');
-    if (!scene?.isOverlay) return;
-    const opacity = scene.overlayIntensity !== undefined ? scene.overlayIntensity : 0.5;
-    const blend = scene.blendMode || 'screen';
-    const transform = scene.scale && scene.scale !== 1 ? `scale(${scene.scale})` : '';
-    if (overlayVideo) {
-        overlayVideo.style.opacity = opacity;
-        overlayVideo.style.mixBlendMode = blend;
-        overlayVideo.style.transform = transform;
-    }
-    if (overlayImg) {
-        overlayImg.style.opacity = opacity;
-        overlayImg.style.mixBlendMode = blend;
-        overlayImg.style.transform = transform;
-    }
-}
-
-function setupOverlayPropertyListeners() {
-    const intensityEl = document.getElementById('overlay-intensity');
-    const blendEl = document.getElementById('overlay-blend');
-    const scaleEl = document.getElementById('overlay-scale');
-
-    if (intensityEl) {
-        intensityEl.addEventListener('input', (e) => {
-            if (state.selectedClipIndex < 0) return;
-            const scene = state.scenes[state.selectedClipIndex];
-            if (!scene?.isOverlay) return;
-            const val = parseFloat(e.target.value);
-            scene.overlayIntensity = val;
-            document.getElementById('overlay-intensity-val').textContent = `${Math.round(val * 100)}%`;
-            applyOverlayPreviewStyles(scene);
-        });
-    }
-    if (blendEl) {
-        blendEl.addEventListener('change', (e) => {
-            if (state.selectedClipIndex < 0) return;
-            const scene = state.scenes[state.selectedClipIndex];
-            if (!scene?.isOverlay) return;
-            scene.blendMode = e.target.value;
-            applyOverlayPreviewStyles(scene);
-        });
-    }
-    if (scaleEl) {
-        scaleEl.addEventListener('input', (e) => {
-            if (state.selectedClipIndex < 0) return;
-            const scene = state.scenes[state.selectedClipIndex];
-            if (!scene?.isOverlay) return;
-            const val = parseFloat(e.target.value);
-            scene.scale = val;
-            document.getElementById('overlay-scale-val').textContent = val.toFixed(2);
-            applyOverlayPreviewStyles(scene);
-        });
-    }
-}
-
 function setupMgPropertyListeners() {
     const textEl = document.getElementById('mg-text');
     const subtextEl = document.getElementById('mg-subtext');
@@ -1803,6 +1547,19 @@ function setupMgPropertyListeners() {
         typeEl.addEventListener('change', () => {
             const mapStyleRow = document.getElementById('mg-map-style-row');
             if (mapStyleRow) mapStyleRow.style.display = typeEl.value === 'mapChart' ? '' : 'none';
+        });
+    }
+
+    // Animation speed slider
+    const animSpeedEl = document.getElementById('mg-anim-speed');
+    if (animSpeedEl) {
+        animSpeedEl.addEventListener('input', (e) => {
+            const active = getActiveMG();
+            if (!active) return;
+            const val = parseFloat(e.target.value);
+            active.mg.animationSpeed = val;
+            if (active.mg.mgData) active.mg.mgData.animationSpeed = val;
+            document.getElementById('mg-anim-speed-val').textContent = `${val.toFixed(1)}x`;
         });
     }
 }
@@ -2116,15 +1873,14 @@ async function saveProject(silent = false) {
         return;
     }
     try {
-        // Update the plan with current scene state (separate overlays from regular scenes)
-        state.videoPlan.scenes = state.scenes.filter(s => !s.isOverlay && !s.isMGScene).map((s, i) => ({
+        // Update the plan with current scene state
+        state.videoPlan.scenes = state.scenes.filter(s => !s.isMGScene).map((s, i) => ({
             ...s,
             index: i,
             originalStartTime: s.originalStartTime,
             originalEndTime: s.originalEndTime
         }));
         state.videoPlan.mgScenes = state.scenes.filter(s => s.isMGScene && !s.disabled).map(s => ({ ...s }));
-        state.videoPlan.overlayScenes = state.scenes.filter(s => s.isOverlay && !s.disabled).map(s => ({ ...s }));
         state.videoPlan.mutedTracks = { ...state.mutedTracks };
         state.videoPlan.totalDuration = state.totalDuration;
         state.videoPlan.transitionStyle = elements.transitionStyle.value;
@@ -2215,18 +1971,12 @@ function actuallyStartPlayback() {
     // Start all active track videos
     if (activeScenes.length > 0) {
         activeScenes.forEach(({ scene }) => {
-            if (scene.isOverlay) return; // overlay handled separately
             const trackNum = scene.trackId?.match(/video-track-(\d)/)?.[1] || '1';
             const video = getActiveTrackVideo(trackNum);
             if (video && video.src) {
                 video.play().catch(e => console.warn('Video play failed:', e));
             }
         });
-        // Start overlay preview if active
-        const overlayPrev = document.getElementById('overlay-preview');
-        if (overlayPrev?.src && overlayPrev.classList.contains('active')) {
-            overlayPrev.play().catch(() => {});
-        }
     } else {
         // In a gap - show placeholder
         elements.videoContainer?.classList.add('hidden');
@@ -2271,11 +2021,10 @@ function stopPlayback() {
         elements.bgVideo.load();
     }
 
-    // Pause all track video elements (both A and B buffers) + transition-out + overlay preview
-    const overlayPreview = document.getElementById('overlay-preview');
+    // Pause all track video elements (both A and B buffers)
     [elements.videoTrack1, elements.videoTrack2, elements.videoTrack3,
      elements.videoTrack1B, elements.videoTrack2B, elements.videoTrack3B,
-     elements.videoTransitionOut, overlayPreview].forEach(video => {
+     elements.videoTransitionOut].forEach(video => {
         if (video && !video.paused) {
             video.pause();
         }
@@ -2327,12 +2076,8 @@ function startPlaybackLoop() {
         const audio = elements.previewAudio;
         const activeScenes = getActiveScenesAtTime(state.currentTime);
         const activeMediaScenes = activeScenes.filter(({ scene }) =>
-            !scene.isOverlay && !scene.isMGScene && !scene.disabled
+            !scene.isMGScene && !scene.disabled
         );
-        const activeOverlayScenes = activeScenes.filter(({ scene }) =>
-            scene.isOverlay && !scene.disabled
-        );
-
         // Use audio as the master clock - it plays continuously through gaps
         if (audio?.src && !audio.paused) {
             state.currentTime = audio.currentTime;
@@ -2366,9 +2111,7 @@ function startPlaybackLoop() {
         // Check if active scenes changed
         const mediaIndices = activeMediaScenes.map(s => s.index).join(',');
         const prevMediaIndices = (state.activeSceneIndices || []).join(',');
-        const overlayIndices = activeOverlayScenes.map(s => s.index).join(',');
-        const prevOverlayIndices = (state.activeOverlaySceneIndices || []).join(',');
-        const shouldReload = mediaIndices !== prevMediaIndices || overlayIndices !== prevOverlayIndices;
+        const shouldReload = mediaIndices !== prevMediaIndices;
 
         if (shouldReload && !state._sceneLoadPending) {
             // Don't update activeSceneIndices yet — wait until load completes
@@ -2377,11 +2120,10 @@ function startPlaybackLoop() {
             loadActiveScenes(activeScenes).then(() => {
                 state._sceneLoadPending = false;
                 state.activeSceneIndices = activeMediaScenes.map(s => s.index);
-                state.activeOverlaySceneIndices = activeOverlayScenes.map(s => s.index);
                 // After load completes, ensure videos are playing
                 if (state.isPlaying) {
                     getActiveScenesAtTime(state.currentTime).forEach(({ scene }) => {
-                        if (scene.mediaType === 'image' || scene.isOverlay || scene.isMGScene) return;
+                        if (scene.mediaType === 'image' || scene.isMGScene) return;
                         const tn = scene.trackId?.match(/video-track-(\d)/)?.[1] || '1';
                         const vid = getActiveTrackVideo(tn);
                         if (vid && vid.paused && vid.src) {
@@ -3110,240 +2852,41 @@ function escapeHTML(str) {
 }
 
 /**
- * Perform a visual transition between clips.
- * REVERSED approach to avoid black flash:
- *   - trackVideo keeps OLD clip (already loaded, visible = no black)
- *   - transOut has NEW clip (loaded in background)
- *   - trackVideo animates OUT, transOut animates IN
- *   - After animation: swap source to track video, clear transOut
- *
- * @param {HTMLVideoElement} trackVideo - Track video (has old clip, will animate out)
- * @param {HTMLVideoElement} transOut - Transition element (has new clip, will animate in)
- * @param {number} sceneIndex - The incoming scene index
- * @param {string} newVideoUrl - The new video URL to set on track after transition
- * @param {Object} scene - The incoming scene object
+ * Hard-cut transition between clips (no animation).
  */
 async function performTrackTransition(trackVideo, transOut, sceneIndex, newVideoUrl, scene) {
-    const container = elements.videoContainer;
-    if (!container || !transOut || !trackVideo) return;
-
-    state.transition.isTransitioning = true;
-
-    // Determine transition type - per-scene or global
-    const sceneData = state.scenes[sceneIndex];
-    let transitionType;
-    if (sceneData?.transitionType && sceneData.transitionType !== 'random' && sceneData.transitionType !== 'auto') {
-        transitionType = sceneData.transitionType;
-    } else {
-        transitionType = state.transition.style;
-    }
-    if (transitionType === 'random' || transitionType === 'auto') {
-        transitionType = state.transition.types[Math.floor(Math.random() * state.transition.types.length)];
-    }
-
-    // Cut = instant swap, no animation
-    if (transitionType === 'cut') {
-        trackVideo.pause();
-        trackVideo.src = newVideoUrl;
-        trackVideo.load();
-        const sceneTime = (state.currentTime - scene.startTime) + (scene.mediaOffset || 0);
-        trackVideo.currentTime = sceneTime;
-        trackVideo.volume = getSceneVolume(scene);
-        trackVideo.muted = false;
-        trackVideo.classList.remove('outgoing');
-        trackVideo.classList.add('active');
-        applySceneTransformToVideo(trackVideo, scene);
-        transOut.pause();
-        transOut.src = '';
-        state.transition.isTransitioning = false;
-        if (state.isPlaying) trackVideo.play().catch(() => {});
-        return;
-    }
-
-    // Wait for new video to have at least first frame before animating
-    try {
-        await waitForVideoReady(transOut, 1500);
-    } catch (e) {
-        // Timeout - proceed anyway
-    }
-
-    // Reset container transition class
-    container.className = 'video-transition-container';
-
-    // Set CSS variable for transition duration
-    container.style.setProperty('--transition-duration', `${state.transition.duration}ms`);
-
-    // Track video = outgoing (old clip, already visible)
-    trackVideo.classList.add('outgoing');
-
-    // Transition-out = incoming (new clip, starts hidden per CSS animation)
-    transOut.classList.add('incoming');
-
-    // Force reflow
-    void container.offsetHeight;
-
-    // Apply transition class to container - triggers CSS animations
-    container.classList.add(`transition-${transitionType}`);
-
-    // Play the incoming video during transition
-    transOut.play().catch(() => {});
-
-    // Wait for transition duration
-    await new Promise(resolve => setTimeout(resolve, state.transition.duration + 50));
-
-    // Transition complete - swap source to track video
+    if (!trackVideo) return;
     trackVideo.pause();
     trackVideo.src = newVideoUrl;
     trackVideo.load();
-
-    // Wait for the new source to be ready before cleaning up transOut
-    if (trackVideo.readyState < 2) {
-        await new Promise(resolve => {
-            trackVideo.addEventListener('canplay', resolve, { once: true });
-            setTimeout(resolve, 500);
-        });
-    }
-
     const sceneTime = (state.currentTime - scene.startTime) + (scene.mediaOffset || 0);
     trackVideo.currentTime = sceneTime;
     trackVideo.volume = getSceneVolume(scene);
     trackVideo.muted = false;
-
-    // Clean up track video
     trackVideo.classList.remove('outgoing');
     trackVideo.classList.add('active');
-    trackVideo.style.opacity = '';
-    trackVideo.style.transform = '';
-    trackVideo.style.filter = '';
-    trackVideo.style.clipPath = '';
-    trackVideo.style.visibility = '';
     applySceneTransformToVideo(trackVideo, scene);
-
-    // Resume playback on track video BEFORE cleaning up transOut (prevents flash)
-    if (state.isPlaying) {
-        trackVideo.play().catch(() => {});
-    }
-
-    // Clean up transition-out AFTER track video is playing
-    transOut.pause();
-    transOut.src = '';
-    transOut.classList.remove('incoming');
-    transOut.style.visibility = '';
-    transOut.style.opacity = '';
-    transOut.style.zIndex = '';
-    transOut.style.transform = '';
-    transOut.style.filter = '';
-    transOut.style.clipPath = '';
-
-    // Reset container
-    container.className = 'video-transition-container';
-
+    if (transOut) { transOut.pause(); transOut.src = ''; }
     state.transition.isTransitioning = false;
+    if (state.isPlaying) trackVideo.play().catch(() => {});
 }
 
 /**
- * Perform a CSS-animated transition between two images.
- * Works like performTrackTransition but for <img> elements.
+ * Hard-cut transition between images (no animation).
  */
 async function performImageTransition(trackImg, transOutImg, scene, newImgUrl) {
-    const container = elements.videoContainer;
-    if (!container || !transOutImg || !trackImg) return;
-
-    state.transition.isTransitioning = true;
-
-    // Determine transition type
-    const sceneData = scene;
-    let transitionType;
-    if (sceneData?.transitionType && sceneData.transitionType !== 'random' && sceneData.transitionType !== 'auto') {
-        transitionType = sceneData.transitionType;
-    } else {
-        transitionType = state.transition.style;
-    }
-    if (transitionType === 'random' || transitionType === 'auto') {
-        transitionType = state.transition.types[Math.floor(Math.random() * state.transition.types.length)];
-    }
-
-    // Cut = instant swap, no animation
-    if (transitionType === 'cut') {
-        trackImg.src = newImgUrl;
-        updateKenBurnsTransform(trackImg, scene);
-        trackImg.classList.remove('outgoing');
-        trackImg.classList.add('active');
-        state.transition.isTransitioning = false;
-        return;
-    }
-
-    // Load new image into transition-out element
-    transOutImg.src = newImgUrl;
-    // Match incoming image fit/crop/transform to render pipeline during transition
-    transOutImg.style.objectFit = scene.fitMode || 'cover';
-    updateKenBurnsTransform(transOutImg, scene);
-
-    // Wait for new image to load
-    await new Promise((resolve) => {
-        if (transOutImg.complete && transOutImg.naturalWidth > 0) return resolve();
-        const timeout = setTimeout(resolve, 1500);
-        transOutImg.onload = () => { clearTimeout(timeout); resolve(); };
-        transOutImg.onerror = () => { clearTimeout(timeout); resolve(); };
-    });
-
-    // Reset container transition class
-    container.className = 'video-transition-container';
-
-    // Set CSS variable for transition duration
-    container.style.setProperty('--transition-duration', `${state.transition.duration}ms`);
-
-    // Track img = outgoing (old image, already visible)
-    trackImg.classList.add('outgoing');
-
-    // Transition-out img = incoming (new image, starts hidden per CSS animation)
-    transOutImg.classList.add('incoming');
-
-    // Force reflow
-    void container.offsetHeight;
-
-    // Apply transition class to container - triggers CSS animations
-    container.classList.add(`transition-${transitionType}`);
-
-    // Wait for transition duration
-    await new Promise(resolve => setTimeout(resolve, state.transition.duration + 50));
-
-    // Transition complete - swap source to track img
+    if (!trackImg) return;
     trackImg.src = newImgUrl;
-    trackImg.style.objectFit = scene.fitMode || 'cover';
     updateKenBurnsTransform(trackImg, scene);
-
-    // Clean up track img
     trackImg.classList.remove('outgoing');
     trackImg.classList.add('active');
-    trackImg.style.opacity = '';
-    trackImg.style.filter = '';
-    trackImg.style.visibility = '';
-
-    // Clean up transition-out img
-    transOutImg.src = '';
-    transOutImg.classList.remove('incoming');
-    transOutImg.style.visibility = '';
-    transOutImg.style.opacity = '';
-    transOutImg.style.zIndex = '';
-    transOutImg.style.transform = '';
-    transOutImg.style.filter = '';
-    transOutImg.style.clipPath = '';
-
-    // Reset container
-    container.className = 'video-transition-container';
-
     state.transition.isTransitioning = false;
 }
 
 // Helper to reset video element to clean state
 function resetVideoTransitionState(videoElement) {
     if (!videoElement) return;
-
-    // Remove all transition-related classes
     videoElement.classList.remove('active', 'outgoing', 'incoming');
-
-    // Clear any inline styles that might interfere with CSS
     videoElement.style.opacity = '';
     videoElement.style.transform = '';
     videoElement.style.filter = '';
@@ -3351,44 +2894,26 @@ function resetVideoTransitionState(videoElement) {
     videoElement.style.visibility = '';
 }
 
-// Fallback simple transition (no visual effects)
+// Simple scene jump (no visual effects)
 async function simpleTransitionToScene(nextIndex, wasPlaying) {
-    // Pause all track videos (both A and B buffers)
     [elements.videoTrack1, elements.videoTrack2, elements.videoTrack3,
      elements.videoTrack1B, elements.videoTrack2B, elements.videoTrack3B].forEach(video => {
-        if (video && !video.paused) {
-            video.pause();
-        }
+        if (video && !video.paused) video.pause();
     });
 
     const nextScene = state.scenes[nextIndex];
     state.currentTime = nextScene.startTime;
-
     updateSceneHighlight(nextIndex);
-
-    // Load all active scenes at this time
     await loadActiveScenes();
 
-    // Resume playback if needed
     if (wasPlaying && state.isPlaying) {
         const activeScenes = getActiveScenesAtTime(state.currentTime);
         activeScenes.forEach(({ scene }) => {
             const trackNum = scene.trackId?.match(/video-track-(\d)/)?.[1] || '1';
             const video = getActiveTrackVideo(trackNum);
-            if (video && video.src) {
-                video.play().catch(e => console.warn('Video play failed:', e));
-            }
+            if (video && video.src) video.play().catch(e => console.warn('Video play failed:', e));
         });
     }
-}
-
-// Get the transition type for a specific scene
-function getSceneTransitionType(sceneIndex) {
-    const scene = state.scenes[sceneIndex];
-    if (scene && scene.transitionType) {
-        return scene.transitionType;
-    }
-    return state.transition.style;
 }
 
 // ========================================
@@ -3667,24 +3192,9 @@ async function loadVideoPlan({ freshBuild = false } = {}) {
                 elements.btnRender.disabled = false;
             }
 
-            // Apply planned transitions from ai-transitions.js to scenes
-            if (plan.transitions && Array.isArray(plan.transitions)) {
-                for (const trans of plan.transitions) {
-                    // Find the target scene (toSceneIndex) in state.scenes by matching the plan scene
-                    // The plan uses indices into the original scenes array
-                    const targetScene = state.scenes.find((s, i) => {
-                        // Match by original index or position in non-MG scenes
-                        return s.index === trans.toSceneIndex || (!s.isMGScene && !s.isOverlay && state.scenes.filter(sc => !sc.isMGScene && !sc.isOverlay).indexOf(s) === trans.toSceneIndex);
-                    });
-                    if (targetScene && trans.type !== 'cut') {
-                        targetScene.transitionType = trans.type;
-                        targetScene.transitionDuration = trans.duration || 500;
-                    }
-                }
-                console.log(`Applied ${plan.transitions.filter(t => t.type !== 'cut').length} planned transitions`);
-            }
+            // Transitions disabled - hard cut only, skip planned transitions
 
-            // Generate SFX AFTER planned transitions are applied so SFX matches transition types
+            // Generate SFX for scene change points
             generateSfxClips();
 
             // Load motion graphics from plan
@@ -3756,7 +3266,7 @@ async function loadVideoPlan({ freshBuild = false } = {}) {
                     .map(s => ({ start: s.startTime, end: s.endTime }));
                 const carved = [];
                 for (const scene of state.scenes) {
-                    if (scene.isMGScene || scene.isOverlay || scene.trackId === 'overlay-track') {
+                    if (scene.isMGScene) {
                         carved.push(scene);
                         continue;
                     }
@@ -3795,24 +3305,13 @@ async function loadVideoPlan({ freshBuild = false } = {}) {
                 console.log(`Loaded ${seenIds.size} full-screen MGs onto V3 (carved gaps in V2)`);
             }
 
-            // Load overlay scenes as first-class timeline clips
-            if (plan.overlayScenes && plan.overlayScenes.length > 0) {
-                for (const overlay of plan.overlayScenes) {
-                    state.scenes.push({
-                        ...overlay,
-                        trackId: 'overlay-track',
-                    });
-                }
-                console.log(`Loaded ${plan.overlayScenes.length} overlay clips`);
-            }
-
             renderScenes();
             renderTimeline();
 
             // Pre-cache ALL scene media URLs upfront so playback never waits for IPC
             console.log(`[PreCache] Pre-caching media URLs for ${state.scenes.length} scenes...`);
             const cachePromises = state.scenes
-                .filter(s => !s.isMGScene && !s.isOverlay)
+                .filter(s => !s.isMGScene)
                 .map((scene, i) => {
                     const idx = scene.index !== undefined ? scene.index : i;
                     return getCachedMediaUrl(idx, scene.mediaExtension).catch(() => null);
@@ -3889,7 +3388,7 @@ function generateSfxClips() {
     // Group scenes by track — only video tracks get transition SFX
     const trackGroups = {};
     state.scenes.forEach((scene, idx) => {
-        if (scene.isOverlay || scene.isMGScene) return; // Skip overlay/MG scenes
+        if (scene.isMGScene) return; // Skip MG scenes
         const trackId = scene.trackId || 'video-track-1';
         if (!trackId.startsWith('video-track-')) return; // Only video tracks
         if (!trackGroups[trackId]) trackGroups[trackId] = [];
@@ -3941,7 +3440,7 @@ function generateSfxClips() {
 
 function renderScenes() {
     // Filter out overlay and MG scenes from the scene list
-    const displayScenes = state.scenes.filter(s => !s.isOverlay && !s.isMGScene);
+    const displayScenes = state.scenes.filter(s => !s.isMGScene);
     if (displayScenes.length === 0) { elements.sceneList.innerHTML = '<p class="empty-state">No scenes yet</p>'; return; }
     elements.sceneList.innerHTML = displayScenes.map((scene) => {
         const i = state.scenes.indexOf(scene);
@@ -4076,19 +3575,10 @@ function renderTracks() {
         const isMuted = state.mutedTracks[track.id] || false;
         const muteIcon = isMuted ? svgMuted : svgUnmuted;
         const muteClass = isMuted ? 'track-muted' : '';
-        // Auto-expand VFX track to fit stacked overlay lanes
         let trackHeight = state.timeline.trackHeights[track.id] || 36;
-        if (track.id === 'overlay-track') {
-            const overlayCount = state.scenes.filter(s => s.isOverlay && (s.trackId || 'overlay-track') === 'overlay-track').length;
-            if (overlayCount > 1) {
-                const neededHeight = overlayCount * 14 + 4;
-                trackHeight = Math.max(trackHeight, Math.min(neededHeight, state.timeline.trackMaxHeights['overlay-track'] || 80));
-            }
-        }
         const mgTestBtn = track.id === 'mg-track' ? `<button class="mg-test-btn" data-action="inject-test-mg" title="Inject 6 test MGs">+</button>` : '';
-        const overlayAddBtn = track.id === 'overlay-track' ? `<button class="overlay-add-btn" data-action="add-overlay" title="Add overlay from library">+</button>` : '';
         html += `<div class="timeline-row ${muteClass}" data-track="${track.id}" style="height:${trackHeight}px">
-            <div class="track-label"><span class="track-label-text">${track.label}</span>${mgTestBtn}${overlayAddBtn}<button class="track-mute-btn ${isMuted ? 'muted' : ''}" data-track-mute="${track.id}" title="${isMuted ? 'Unmute' : 'Mute'} track">${muteIcon}</button></div>
+            <div class="track-label"><span class="track-label-text">${track.label}</span>${mgTestBtn}<button class="track-mute-btn ${isMuted ? 'muted' : ''}" data-track-mute="${track.id}" title="${isMuted ? 'Unmute' : 'Mute'} track">${muteIcon}</button></div>
             <div class="track-content ${track.type}-track" data-track="${track.id}">`;
 
         // Audio clip on its current track - use actual audio duration, not totalDuration
@@ -4157,38 +3647,13 @@ function renderTracks() {
             });
         }
 
-        // Scene clips with transition icons (includes overlay clips on overlay-track)
+        // Scene clips on this track
         const trackScenes = state.scenes.filter(s => (s.trackId || 'video-track-1') === track.id);
         let overlayLaneIndex = 0; // Track overlay lane for vertical stacking
         trackScenes.forEach((scene, i) => {
             const idx = state.scenes.indexOf(scene);
             const left = scene.startTime * state.timeline.zoom;
             const width = (scene.endTime - scene.startTime) * state.timeline.zoom;
-
-            // Overlay clips get per-type color styling + vertical lane stacking
-            if (scene.isOverlay) {
-                const meta = getOverlayMeta(scene.overlayType);
-                const isDisabled = scene.disabled === true;
-                const eyeIcon = isDisabled ? '👁️‍🗨️' : '👁️';
-                // For dynamic (non-builtin) overlays, apply inline color
-                let inlineColor = '';
-                if (meta.colorClass === 'overlay-dynamic') {
-                    const dColor = getOverlayDynamicColor(scene.overlayType || 'overlay');
-                    inlineColor = `background:${dColor.bg} !important;border-color:${dColor.border} !important;`;
-                }
-                // Stack overlapping overlays in lanes (each lane ~14px tall)
-                const laneHeight = 14;
-                const topOffset = overlayLaneIndex * laneHeight;
-                overlayLaneIndex++;
-                html += `<div class="timeline-clip clip-overlay ${meta.colorClass} ${isDisabled ? 'clip-disabled' : ''} ${state.selectedClipIndices.includes(idx) ? 'selected' : ''}"
-                    data-index="${idx}" style="left:${left}px;width:${width}px;top:${topOffset}px;height:${laneHeight}px;${inlineColor}" title="${meta.label} overlay${isDisabled ? ' [OFF]' : ''}">
-                    <div class="clip-trim-handle clip-trim-handle-left" data-index="${idx}" data-edge="left"></div>
-                    <span class="clip-label">${meta.icon} ${meta.label}</span>
-                    <button class="clip-toggle-btn" data-toggle-idx="${idx}" title="${isDisabled ? 'Enable' : 'Disable'} effect">${eyeIcon}</button>
-                    <div class="clip-trim-handle clip-trim-handle-right" data-index="${idx}" data-edge="right"></div>
-                </div>`;
-                return;
-            }
 
             // Full-screen MG scene on V3
             if (scene.isMGScene) {
@@ -4217,21 +3682,11 @@ function renderTracks() {
                 return;
             }
 
-            // Add transition icon before clip (except for first clip)
-            if (i > 0 && !scene.isOverlay) {
-                const transitionType = scene.transitionType || state.transition.style;
-                const transitionIcon = getTransitionIcon(transitionType);
-                const transitionName = getTransitionName(transitionType);
-                html += `<div class="transition-icon" data-scene="${idx}" style="left:${left}px" title="${transitionName} (click to cycle)">
-                    ${transitionIcon}
-                </div>`;
-            }
-
             const mediaClass = scene.mediaType === 'image' ? 'clip-image' : 'clip-video';
             const isDisabled = scene.disabled === true;
             const eyeIcon = isDisabled ? '👁️‍🗨️' : '👁️';
             // Clip separator line for adjacent clips
-            if (i > 0 && !scene.isOverlay) {
+            if (i > 0) {
                 const prevScene = trackScenes[i - 1];
                 if (Math.abs(prevScene.endTime - scene.startTime) < 0.05) {
                     html += `<div class="clip-separator" style="left:${left}px"></div>`;
@@ -4298,15 +3753,6 @@ function renderTracks() {
         });
     });
 
-    // Transition icon click - cycle through transition types
-    document.querySelectorAll('.transition-icon').forEach(icon => {
-        icon.addEventListener('click', (e) => {
-            e.stopPropagation();
-            const sceneIdx = parseInt(icon.dataset.scene);
-            cycleSceneTransition(sceneIdx);
-        });
-    });
-
     // Click empty track to seek (only if not marquee selecting)
     document.querySelectorAll('.track-content').forEach(tc => {
         tc.addEventListener('click', (e) => {
@@ -4332,10 +3778,7 @@ function renderTracks() {
             btn.closest('.timeline-row').classList.toggle('track-muted', isMuted);
             applyTrackVolumes();
             // Sync MG track mute with MG enable flag
-            // Note: overlay-track mute is independent of the AI VFX checkbox
-            if (trackId === 'overlay-track') {
-                saveSettings();
-            } else if (trackId === 'mg-track') {
+            if (trackId === 'mg-track') {
                 state.mgEnabled = !isMuted;
                 if (elements.mgEnabled) elements.mgEnabled.checked = !isMuted;
                 saveSettings();
@@ -4351,15 +3794,7 @@ function renderTracks() {
         });
     });
 
-    // Overlay "+" add button
-    document.querySelectorAll('[data-action="add-overlay"]').forEach(btn => {
-        btn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            showOverlayPicker();
-        });
-    });
-
-    // Per-clip toggle buttons (overlay and MG clips)
+    // Per-clip toggle buttons (MG clips)
     document.querySelectorAll('.clip-toggle-btn').forEach(btn => {
         btn.addEventListener('click', (e) => {
             e.stopPropagation();
@@ -4463,7 +3898,7 @@ async function loadClipThumbnails() {
     document.querySelectorAll('.timeline-clip[data-index]').forEach(async (clipEl) => {
         const idx = parseInt(clipEl.dataset.index);
         const scene = state.scenes[idx];
-        if (!scene || scene.isOverlay) return;
+        if (!scene) return;
 
         // Check cache first
         if (thumbnailCache[idx] !== undefined) {
@@ -4615,36 +4050,6 @@ function highlightClipsInMarquee(mLeft, mTop, mWidth, mHeight, addToExisting) {
         const idx = parseInt(c.dataset.index);
         c.classList.toggle('selected', newSelection.includes(idx));
     });
-}
-
-// Get icon for transition type - uses metadata for extensibility
-function getTransitionIcon(type) {
-    const meta = state.transition.metadata[type];
-    return meta ? meta.icon : '◐';
-}
-
-// Get transition name for display
-function getTransitionName(type) {
-    const meta = state.transition.metadata[type];
-    return meta ? meta.name : type;
-}
-
-// Cycle through transition types for a scene
-function cycleSceneTransition(sceneIndex) {
-    const scene = state.scenes[sceneIndex];
-    if (!scene) return;
-
-    // All cyclable types from state (already includes all expanded types)
-    const allTypes = ['cut', ...state.transition.types];
-    const currentType = scene.transitionType || 'fade';
-    const currentIdx = allTypes.indexOf(currentType);
-    const nextIdx = (currentIdx + 1) % allTypes.length;
-
-    scene.transitionType = allTypes[nextIdx];
-    const transitionName = getTransitionName(scene.transitionType);
-    showToast(`Scene ${sceneIndex + 1}: ${transitionName}`, 'info');
-    generateSfxClips(); // Regenerate SFX to match new transition type
-    renderTimeline();
 }
 
 // Logarithmic zoom slider: maps 0-1000 slider range to 0.5-200 px/s zoom
@@ -5351,7 +4756,7 @@ function preloadUpcomingScenes(currentTime, force) {
         // Find the next video scene on this track (starts after current time, within 15s)
         const nextScene = state.scenes.find(s =>
             s.trackId === trackId &&
-            !s.isOverlay && !s.isMGScene && !s.disabled &&
+            !s.isMGScene && !s.disabled &&
             s.mediaType !== 'image' &&
             s.startTime > currentTime &&
             s.startTime - currentTime < 15
@@ -5381,7 +4786,7 @@ async function loadActiveScenes(activeScenes) {
     // Determine which tracks have active scenes
     const activeTracks = new Set();
     activeScenes.forEach(({ scene }) => {
-        if (!scene.isOverlay && !scene.isMGScene && !scene.disabled) {
+        if (!scene.isMGScene && !scene.disabled) {
             const tn = scene.trackId?.match(/video-track-(\d)/)?.[1] || '1';
             activeTracks.add(tn);
         }
@@ -5428,96 +4833,6 @@ async function loadActiveScenes(activeScenes) {
         elements.videoControls.classList.remove('hidden');
     }
 
-    // Handle overlay scenes — show ALL active overlay clips in preview (stacked)
-    const overlayVideo = document.getElementById('overlay-preview');
-    const overlayImg = document.getElementById('overlay-preview-img');
-    const activeOverlays = activeScenes.filter(s => s.scene.isOverlay && !s.scene.disabled);
-
-    // Clean up old dynamic overlay elements
-    const container = elements.videoContainer;
-    if (container) {
-        container.querySelectorAll('.overlay-preview-dynamic').forEach(el => {
-            if (el.tagName === 'VIDEO' && !el.paused) el.pause();
-            el.classList.remove('active');
-        });
-    }
-
-    if (activeOverlays.length > 0 && !state.mutedTracks['overlay-track']) {
-        // Use the static elements for the first overlay, create dynamic elements for extras
-        for (let oi = 0; oi < activeOverlays.length; oi++) {
-            const ov = activeOverlays[oi].scene;
-            const isImage = ov.mediaType === 'image' || ['.jpg', '.jpeg', '.png', '.gif'].includes(ov.mediaExtension);
-            const opacity = ov.overlayIntensity !== undefined ? ov.overlayIntensity : 0.5;
-            const blend = ov.blendMode || 'screen';
-            const transform = ov.scale && ov.scale !== 1 ? `scale(${ov.scale})` : '';
-
-            try {
-                let overlayUrl = null;
-                if (ov.isLocal && ov.sourceFile) {
-                    overlayUrl = await window.electronAPI.getOverlayUrl(ov.sourceFile);
-                } else {
-                    const overlayIdx = ov.index !== undefined ? ov.index : activeOverlays[oi].index;
-                    overlayUrl = await getCachedMediaUrl(overlayIdx, ov.mediaExtension || '.mp4', 'overlay');
-                }
-                if (!overlayUrl) continue;
-
-                if (oi === 0) {
-                    // First overlay: use static elements
-                    if (isImage) {
-                        if (overlayVideo) { overlayVideo.classList.remove('active'); overlayVideo.pause(); }
-                        if (overlayImg) {
-                            if (overlayImg.src !== overlayUrl) overlayImg.src = overlayUrl;
-                            overlayImg.classList.add('active');
-                            overlayImg.style.opacity = opacity;
-                            overlayImg.style.mixBlendMode = blend;
-                            overlayImg.style.transform = transform;
-                        }
-                    } else {
-                        if (overlayImg) overlayImg.classList.remove('active');
-                        if (overlayVideo) {
-                            if (overlayVideo.src !== overlayUrl) { overlayVideo.src = overlayUrl; overlayVideo.load(); }
-                            overlayVideo.classList.add('active');
-                            overlayVideo.style.opacity = opacity;
-                            overlayVideo.style.mixBlendMode = blend;
-                            overlayVideo.style.transform = transform;
-                            if (overlayVideo.paused && state.isPlaying) overlayVideo.play().catch(() => {});
-                        }
-                    }
-                } else if (container) {
-                    // Extra overlays: reuse or create dynamic elements
-                    const elId = `overlay-dyn-${oi}`;
-                    let dynEl = container.querySelector(`#${elId}`);
-                    if (!dynEl) {
-                        if (isImage) {
-                            dynEl = document.createElement('img');
-                            dynEl.className = 'overlay-preview-img overlay-preview-dynamic';
-                        } else {
-                            dynEl = document.createElement('video');
-                            dynEl.className = 'overlay-preview-video overlay-preview-dynamic';
-                            dynEl.muted = true;
-                            dynEl.loop = true;
-                        }
-                        dynEl.id = elId;
-                        container.appendChild(dynEl);
-                    }
-                    if (isImage) {
-                        if (dynEl.src !== overlayUrl) dynEl.src = overlayUrl;
-                    } else {
-                        if (dynEl.src !== overlayUrl) { dynEl.src = overlayUrl; dynEl.load(); }
-                        if (dynEl.paused && state.isPlaying) dynEl.play().catch(() => {});
-                    }
-                    dynEl.style.opacity = opacity;
-                    dynEl.style.mixBlendMode = blend;
-                    dynEl.style.transform = transform;
-                    dynEl.classList.add('active');
-                }
-            } catch (e) { /* overlay preview is best-effort */ }
-        }
-    } else {
-        if (overlayVideo) { overlayVideo.classList.remove('active'); if (!overlayVideo.paused) overlayVideo.pause(); }
-        if (overlayImg) overlayImg.classList.remove('active');
-    }
-
     // Clear V3 MG preview layer if exists
     const mgV3Layer = document.getElementById('mg-v3-preview');
     if (mgV3Layer) {
@@ -5528,7 +4843,6 @@ async function loadActiveScenes(activeScenes) {
     // Load and show each active scene on its track (in parallel for speed)
     const sceneLoadPromises = [];
     for (const { scene, index } of activeScenes) {
-        if (scene.isOverlay) continue; // Already handled above
         if (scene.disabled) continue; // Skip disabled clips
 
         // Full-screen MG scene on V3: render as HTML overlay (synchronous, no IPC)
@@ -5723,7 +5037,7 @@ async function loadActiveScenes(activeScenes) {
 
     // ===== Background layer rendering =====
     // Find primary visible scene (lowest track, non-overlay, non-MG) and show its background
-    const primaryScene = activeScenes.find(s => !s.scene.isOverlay && !s.scene.isMGScene && !s.scene.disabled);
+    const primaryScene = activeScenes.find(s => !s.scene.isMGScene && !s.scene.disabled);
     if (primaryScene && primaryScene.scene.background && primaryScene.scene.background !== 'none') {
         const bgType = primaryScene.scene.background;
         const scene = primaryScene.scene;
@@ -5842,10 +5156,9 @@ async function renderVideo() {
     state.isProcessing = true; elements.btnRender.disabled = true; showProgress(true); startTimer();
     try {
         // Save current scene state + transition style + SFX into the plan before rendering
-        // Separate overlay scenes from regular scenes for the renderer
-        state.videoPlan.scenes = state.scenes.filter(s => !s.isOverlay && !s.isMGScene).map((s, i) => ({ ...s, index: i }));
+        // Separate MG scenes from regular scenes for the renderer
+        state.videoPlan.scenes = state.scenes.filter(s => !s.isMGScene).map((s, i) => ({ ...s, index: i }));
         state.videoPlan.mgScenes = state.scenes.filter(s => s.isMGScene && !s.disabled).map(s => ({ ...s }));
-        state.videoPlan.overlayScenes = state.scenes.filter(s => s.isOverlay && !s.disabled).map(s => ({ ...s }));
         state.videoPlan.totalDuration = state.totalDuration;
         state.videoPlan.transitionStyle = elements.transitionStyle.value;
         // Add SFX data to plan
@@ -5873,7 +5186,8 @@ async function renderVideo() {
                 duration: mg.duration,
                 position: mg.position,
                 sceneIndex: mg.sceneIndex,
-                style: mg.style || state.mgStyle || 'clean'
+                style: mg.style || state.mgStyle || 'clean',
+                animationSpeed: mg.animationSpeed || undefined,
             };
             // Preserve animatedIcons-specific fields
             if (mg.type === 'animatedIcons') {
@@ -5888,6 +5202,10 @@ async function renderVideo() {
         });
         // Save muted tracks so Composition.jsx can mute audio accordingly
         state.videoPlan.mutedTracks = { ...state.mutedTracks };
+        // Global MG animation speed
+        const globalAnimSpeed = parseFloat(document.getElementById('mg-global-anim-speed')?.value) || 1.0;
+        if (!state.videoPlan.scriptContext) state.videoPlan.scriptContext = {};
+        state.videoPlan.scriptContext.mgAnimationSpeed = globalAnimSpeed;
         await window.electronAPI.saveVideoPlan(state.videoPlan);
 
         const rendererSelect = document.getElementById('renderer-select');
@@ -6243,9 +5561,9 @@ function loadSettings() {
             if (elements.ollamaModelRow) {
                 elements.ollamaModelRow.style.display = (s.aiProvider || 'ollama') === 'ollama' ? 'block' : 'none';
             }
-            elements.transitionStyle.value = s.transitionStyle || 'random';
-            state.transition.style = s.transitionStyle || 'random';
-            state.transition.duration = s.transitionDuration || 500;
+            // Transitions disabled - always hard cut
+            state.transition.style = 'cut';
+            state.transition.duration = 0;
             state.volume = s.volume !== undefined ? s.volume : 1;
             if (elements.volumeSlider) {
                 elements.volumeSlider.value = state.volume;
@@ -6293,9 +5611,9 @@ function applyProjectSettings(s) {
         if (elements.ollamaModelRow) {
             elements.ollamaModelRow.style.display = (s.aiProvider || 'ollama') === 'ollama' ? 'block' : 'none';
         }
-        elements.transitionStyle.value = s.transitionStyle || 'random';
-        state.transition.style = s.transitionStyle || 'random';
-        state.transition.duration = s.transitionDuration || 500;
+        // Transitions disabled - always hard cut
+        state.transition.style = 'cut';
+        state.transition.duration = 0;
         state.volume = s.volume !== undefined ? s.volume : 1;
         if (elements.volumeSlider) elements.volumeSlider.value = state.volume;
         // SFX

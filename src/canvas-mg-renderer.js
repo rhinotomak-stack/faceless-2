@@ -12,8 +12,16 @@ const { spawn } = require('child_process');
 const { getStyle, makeShadow, parseKeyValuePairs, MG_BACKGROUNDS } = require('./mg-style-utils');
 
 const FFMPEG_PATH = process.env.FFMPEG_PATH || 'C:\\ffmg\\bin\\ffmpeg.exe';
-const W = 1920;
-const H = 1080;
+// Render at 2x resolution for supersampled anti-aliased text, then downscale in FFmpeg.
+// Without this, canvas text edges look jagged compared to browser-rendered Remotion.
+// We use ctx.scale(SUPERSAMPLE, SUPERSAMPLE) so all renderers work in logical 1920x1080
+// coordinates — no need to multiply individual pixel values.
+const SUPERSAMPLE = 2;
+const S = SUPERSAMPLE;
+const W = 1920;   // logical width  (renderers use this)
+const H = 1080;   // logical height (renderers use this)
+const PW = W * S; // physical width  (canvas buffer + FFmpeg use this)
+const PH = H * S; // physical height (canvas buffer + FFmpeg use this)
 
 // Canvas module (lazy loaded)
 let _canvas = null;
@@ -140,10 +148,14 @@ function interpolate(value, inputRange, outputRange, opts = {}) {
 
 function easeOutCubic(t) { return 1 - Math.pow(1 - Math.max(0, Math.min(1, t)), 3); }
 
+// animationSpeed: 1.0 = normal, <1 = slower/smoother, >1 = faster/snappier
+// Passed via mg._animationSpeed (set from scriptContext.mgAnimationSpeed)
 function computeAnimationState(frame, fps, mg) {
+    const speed = mg._animationSpeed || 1.0;
     const totalFrames = Math.max(1, Math.round((mg.duration || 3) * fps));
-    const enterFrames = Math.max(1, Math.min(Math.round(0.5 * fps), Math.round(totalFrames * 0.35)));
-    const exitFrames  = Math.max(1, Math.min(Math.round(0.3 * fps), Math.round(totalFrames * 0.2)));
+    // Speed multiplier scales the enter/exit window: lower speed = longer enter/exit
+    const enterFrames = Math.max(1, Math.min(Math.round((0.5 / speed) * fps), Math.round(totalFrames * 0.35)));
+    const exitFrames  = Math.max(1, Math.min(Math.round((0.3 / speed) * fps), Math.round(totalFrames * 0.2)));
 
     const enterSpring = springValue(frame, fps, { damping: 18, stiffness: 100, durationInFrames: enterFrames });
     const enterLinear = clamp01((frame) / enterFrames);
@@ -161,7 +173,7 @@ function computeAnimationState(frame, fps, mg) {
         : 0;
     const idleScale = 1 + Math.sin(idlePhase) * 0.003;
 
-    return { frame, fps, totalFrames, enterFrames, exitFrames, enterSpring, enterLinear, exitProgress, isExiting, opacity, idleScale };
+    return { frame, fps, totalFrames, enterFrames, exitFrames, enterSpring, enterLinear, exitProgress, isExiting, opacity, idleScale, speed };
 }
 
 function clamp01(v) { return Math.max(0, Math.min(1, v)); }
@@ -294,7 +306,7 @@ function parseRGBA(rgba) {
 
 // 1. HEADLINE
 function renderHeadline(ctx, frame, fps, mg, s, anim, isFullScreen) {
-    const { enterSpring, enterLinear, isExiting, exitProgress, opacity, idleScale } = anim;
+    const { enterSpring, enterLinear, isExiting, exitProgress, opacity, idleScale, speed } = anim;
     const scale = isExiting
         ? interpolate(exitProgress, [0, 1], [0.97, 1])
         : interpolate(enterSpring, [0, 1], [0.88, 1]);
@@ -303,14 +315,14 @@ function renderHeadline(ctx, frame, fps, mg, s, anim, isFullScreen) {
         : interpolate(enterSpring, [0, 1], [30, 0]);
     const blur = isExiting ? 0 : interpolate(enterLinear, [0, 0.6], [6, 0], { extrapolateRight: 'clamp' });
 
-    // Accent bar
-    const barDelay = Math.round(0.15 * fps);
-    const barSpring = springValue(Math.max(0, frame - barDelay), fps, { damping: 18, stiffness: 100, durationInFrames: Math.round(0.4 * fps) });
+    // Accent bar — matched to Remotion: delay 0.25s, damping 20, duration 0.3s
+    const barDelay = Math.round((0.25 / speed) * fps);
+    const barSpring = springValue(Math.max(0, frame - barDelay), fps, { damping: 20, stiffness: 100, durationInFrames: Math.round((0.3 / speed) * fps) });
     const barWidth = barSpring * 300;
 
-    // Subtext
+    // Subtext — matched to Remotion: damping 18
     const subDelay = Math.round(0.2 * fps);
-    const subSpring = springValue(Math.max(0, frame - subDelay), fps, { damping: 16, stiffness: 100 });
+    const subSpring = springValue(Math.max(0, frame - subDelay), fps, { damping: 18, stiffness: 100 });
     const subOpacity = isExiting ? exitProgress : subSpring;
 
     ctx.save();
@@ -353,18 +365,16 @@ function renderHeadline(ctx, frame, fps, mg, s, anim, isFullScreen) {
 
 // 2. LOWER THIRD
 function renderLowerThird(ctx, frame, fps, mg, s, anim, isFullScreen) {
-    const { enterSpring, enterLinear, isExiting, exitProgress, opacity, idleScale, enterFrames } = anim;
+    const { enterSpring, enterLinear, isExiting, exitProgress, opacity, idleScale, enterFrames, speed } = anim;
     const clipAmount = interpolate(enterSpring, [0, 1], [0, 100]);
-    const barScaleY = springValue(Math.max(0, frame - Math.round(0.08 * fps)), fps, { damping: 14, stiffness: 120, durationInFrames: Math.round(0.35 * fps) });
+    const barScaleY = springValue(Math.max(0, frame - Math.round((0.15 / speed) * fps)), fps, { damping: 20, stiffness: 120, durationInFrames: Math.round((0.35 / speed) * fps) });
 
-    const textDelay = Math.round(0.12 * fps);
-    const textSpring = springValue(Math.max(0, frame - textDelay), fps, { damping: 16, stiffness: 100, durationInFrames: Math.round(0.3 * fps) });
+    const textDelay = Math.round((0.2 / speed) * fps);
+    const textSpring = springValue(Math.max(0, frame - textDelay), fps, { damping: 18, stiffness: 100, durationInFrames: Math.round((0.3 / speed) * fps) });
     const textSlideX = interpolate(textSpring, [0, 1], [-15, 0]);
 
-    const subDelay = Math.round(0.2 * fps);
-    const subSpring = springValue(Math.max(0, frame - subDelay), fps, { damping: 16, stiffness: 100 });
-
-    const barWidth = interpolate(enterLinear, [0.1, 0.6], [0, 100], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' });
+    const subDelay = Math.round((0.35 / speed) * fps);
+    const subSpring = springValue(Math.max(0, frame - subDelay), fps, { damping: 18, stiffness: 100 });
 
     ctx.save();
     ctx.globalAlpha = Math.min(1, isExiting ? exitProgress : opacity);
@@ -399,14 +409,6 @@ function renderLowerThird(ctx, frame, fps, mg, s, anim, isFullScreen) {
     }
 
     ctx.restore();
-
-    // Bottom wipe bar (outside clip)
-    if (barWidth > 0) {
-        ctx.save();
-        ctx.globalAlpha = 0.7 * (isExiting ? exitProgress : opacity);
-        drawGradientRect(ctx, baseX, baseY + 130, 700 * barWidth / 100, 3, s.primary, 'transparent');
-        ctx.restore();
-    }
 }
 
 // 3. STAT COUNTER
@@ -430,7 +432,8 @@ function renderStatCounter(ctx, frame, fps, mg, s, anim, isFullScreen) {
     const scale = isExiting
         ? interpolate(exitProgress, [0, 1], [0.95, 1])
         : interpolate(enterSpring, [0, 1], [0.5, 1]);
-    const blur = isExiting ? 0 : interpolate(enterLinear, [0, 0.6], [4, 0], { extrapolateRight: 'clamp' });
+    // Matched to Remotion: blur clears at 40% (was 60%)
+    const blur = isExiting ? 0 : interpolate(enterLinear, [0, 0.4], [4, 0], { extrapolateRight: 'clamp' });
 
     ctx.save();
     ctx.globalAlpha = Math.min(1, opacity);
@@ -465,14 +468,14 @@ function renderStatCounter(ctx, frame, fps, mg, s, anim, isFullScreen) {
 
 // 4. CALLOUT
 function renderCallout(ctx, frame, fps, mg, s, anim, isFullScreen) {
-    const { enterSpring, enterLinear, isExiting, exitProgress, opacity, idleScale } = anim;
+    const { enterSpring, enterLinear, isExiting, exitProgress, opacity, idleScale, speed } = anim;
     const scale = isExiting
         ? interpolate(exitProgress, [0, 1], [0.97, 1])
         : interpolate(enterSpring, [0, 1], [0.92, 1]);
     const blur = isExiting ? 0 : interpolate(enterLinear, [0, 0.5], [3, 0], { extrapolateRight: 'clamp' });
 
-    const quoteDelay = Math.round(0.1 * fps);
-    const quoteSpring = springValue(Math.max(0, frame - quoteDelay), fps, { damping: 16, stiffness: 100, durationInFrames: Math.round(0.3 * fps) });
+    const quoteDelay = Math.round((0.1 / speed) * fps);
+    const quoteSpring = springValue(Math.max(0, frame - quoteDelay), fps, { damping: 16, stiffness: 100, durationInFrames: Math.round((0.3 / speed) * fps) });
     const quoteY = interpolate(quoteSpring, [0, 1], [-15, 0]);
 
     ctx.save();
@@ -550,9 +553,14 @@ function renderBulletList(ctx, frame, fps, mg, s, anim, isFullScreen) {
         const itemDelay = Math.round(enterFrames * 0.2 + i * staggerDelay);
         const itemSpring = springValue(Math.max(0, frame - itemDelay), fps, { damping: 16, stiffness: 120 });
         const slideX = interpolate(itemSpring, [0, 1], [40, 0]);
+        // Matched to Remotion: blur animation on each item during entrance
+        const itemBlur = interpolate(itemSpring, [0, 0.5], [3, 0], { extrapolateRight: 'clamp' });
 
         const y = pos.y + i * 50;
         ctx.globalAlpha = Math.min(1, (isExiting ? exitProgress : 1)) * itemSpring;
+
+        ctx.save();
+        if (itemBlur > 0.5) ctx.filter = `blur(${itemBlur.toFixed(1)}px)`;
 
         // Dot
         ctx.beginPath();
@@ -573,6 +581,8 @@ function renderBulletList(ctx, frame, fps, mg, s, anim, isFullScreen) {
         ctx.textAlign = 'left';
         ctx.textBaseline = 'middle';
         drawTextShadowed(ctx, item, pos.x + 26 + slideX, y + 15, s, false);
+
+        ctx.restore();
     });
 
     ctx.restore();
@@ -600,8 +610,9 @@ function wrapTextWords(ctx, text, maxWidth) {
 
 function renderFocusWord(ctx, frame, fps, mg, s, anim, isFullScreen) {
     const { enterLinear, isExiting, exitProgress, opacity } = anim;
+    const speed = mg._animationSpeed || 1.0;
 
-    const snapSpring = springValue(frame, fps, { damping: 20, stiffness: 250, durationInFrames: Math.round(0.4 * fps) });
+    const snapSpring = springValue(frame, fps, { damping: 20, stiffness: 250, durationInFrames: Math.round((0.4 / speed) * fps) });
     const scale = isExiting
         ? interpolate(exitProgress, [0, 1], [1.3, 1])
         : interpolate(snapSpring, [0, 1], [1.8, 1]);
@@ -613,11 +624,9 @@ function renderFocusWord(ctx, frame, fps, mg, s, anim, isFullScreen) {
 
     ctx.save();
 
-    // Dark scrim overlay for contrast (matches Remotion's AbsoluteFill rgba scrim)
-    if (isFullScreen) {
-        ctx.fillStyle = `rgba(0,0,0,${scrimOpacity.toFixed(3)})`;
-        ctx.fillRect(0, 0, W, H);
-    }
+    // Dark scrim overlay for contrast — Remotion always draws this (no isFullScreen check)
+    ctx.fillStyle = `rgba(0,0,0,${scrimOpacity.toFixed(3)})`;
+    ctx.fillRect(0, 0, W, H);
 
     ctx.globalAlpha = Math.min(1, opacity);
     ctx.translate(W / 2, H / 2);
@@ -708,7 +717,8 @@ function renderProgressBar(ctx, frame, fps, mg, s, anim, isFullScreen) {
     const label = (mg.text || '').replace(/[\d,.]+%?/, '').trim() || mg.subtext || '';
 
     const fillStart = Math.round(enterFrames * 0.5);
-    const fillEnd = Math.max(fillStart + 1, Math.min(enterFrames + Math.round(fps * 1.2), totalFrames - 15));
+    // Matched to Remotion: fill duration +0.3s (was +1.2s — 4x too slow)
+    const fillEnd = Math.max(fillStart + 1, Math.min(enterFrames + Math.round(fps * 0.3), totalFrames - 15));
     const fillProgress = easeOutCubic(interpolate(frame, [fillStart, fillEnd], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' }));
     const currentPct = Math.round(targetPct * fillProgress);
 
@@ -939,7 +949,7 @@ function renderDonutChart(ctx, frame, fps, mg, s, anim, isFullScreen) {
 
 // 10. COMPARISON CARD
 function renderComparisonCard(ctx, frame, fps, mg, s, anim, isFullScreen) {
-    const { enterSpring, isExiting, exitProgress, opacity, idleScale } = anim;
+    const { enterSpring, isExiting, exitProgress, opacity, idleScale, speed } = anim;
 
     const parts = (mg.text || '').split(/\s+vs\.?\s+/i);
     const itemA = parts[0] || 'A';
@@ -949,11 +959,11 @@ function renderComparisonCard(ctx, frame, fps, mg, s, anim, isFullScreen) {
         ? interpolate(exitProgress, [0, 1], [60, 0])
         : interpolate(enterSpring, [0, 1], [200, 0]);
 
-    const vsDelay = Math.round(0.3 * fps);
-    const vsSpring = springValue(Math.max(0, frame - vsDelay), fps, { damping: 12, stiffness: 150, durationInFrames: Math.round(0.4 * fps) });
+    const vsDelay = Math.round((0.3 / speed) * fps);
+    const vsSpring = springValue(Math.max(0, frame - vsDelay), fps, { damping: 12, stiffness: 150, durationInFrames: Math.round((0.4 / speed) * fps) });
 
-    const subDelay = Math.round(0.5 * fps);
-    const subOpacity = interpolate(frame, [subDelay, subDelay + Math.round(fps * 0.3)], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' });
+    const subDelay = Math.round((0.5 / speed) * fps);
+    const subOpacity = interpolate(frame, [subDelay, subDelay + Math.round((0.3 / speed) * fps)], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' });
 
     ctx.save();
     ctx.globalAlpha = Math.min(1, opacity);
@@ -1139,6 +1149,8 @@ function renderRankingList(ctx, frame, fps, mg, s, anim, isFullScreen) {
         const rowDelay = Math.round(enterFrames * 0.2 + i * staggerDelay);
         const rowSpring = springValue(Math.max(0, frame - rowDelay), fps, { damping: 16, stiffness: 120 });
         const slideX = interpolate(rowSpring, [0, 1], [50, 0]);
+        // Matched to Remotion: blur animation on each row during entrance
+        const rowBlur = interpolate(rowSpring, [0, 0.5], [3, 0], { extrapolateRight: 'clamp' });
         const numVal = parseFloat(item.value) || 0;
         const barDelay = rowDelay + Math.round(fps * 0.15);
         const barRaw = interpolate(frame, [barDelay, barDelay + Math.round(fps * 0.6)], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' });
@@ -1147,6 +1159,9 @@ function renderRankingList(ctx, frame, fps, mg, s, anim, isFullScreen) {
         const ry = 50 + i * rowH;
 
         ctx.globalAlpha = Math.min(1, opacity) * (isExiting ? exitProgress : rowSpring);
+
+        ctx.save();
+        if (rowBlur > 0.5) ctx.filter = `blur(${rowBlur.toFixed(1)}px)`;
 
         // Rank number
         setFont(ctx, '900', 30, s.fontHeading);
@@ -1168,6 +1183,8 @@ function renderRankingList(ctx, frame, fps, mg, s, anim, isFullScreen) {
         ctx.textBaseline = 'middle';
         ctx.fillText(item.value, listW + slideX, ry + 12);
 
+        ctx.filter = 'none';
+
         // Bar background
         ctx.fillStyle = 'rgba(255,255,255,0.1)';
         roundRect(ctx, 60 + slideX, ry + 28, listW - 60, 8, 4);
@@ -1182,6 +1199,8 @@ function renderRankingList(ctx, frame, fps, mg, s, anim, isFullScreen) {
             roundRect(ctx, 60 + slideX, ry + 28, barWidth, 8, 4);
             ctx.fill();
         }
+
+        ctx.restore();
     });
 
     ctx.restore();
@@ -1336,8 +1355,10 @@ function canRenderWithCanvas(mgType) {
 
 async function renderMGToWebM(mg, outputPath, fps, scriptContext, isFullScreen) {
     const { createCanvas } = getCanvasModule();
-    const canvas = createCanvas(W, H);
+    const canvas = createCanvas(PW, PH);  // physical resolution (e.g. 3840x2160 at 2x)
     const ctx = canvas.getContext('2d');
+    // Per-MG animationSpeed overrides global scriptContext.mgAnimationSpeed
+    mg._animationSpeed = mg.animationSpeed || scriptContext.mgAnimationSpeed || 1.0;
     const s = getStyle(mg, scriptContext);
     const totalFrames = Math.max(1, Math.round((mg.duration || 3) * fps));
     const renderFn = CANVAS_RENDERERS[mg.type];
@@ -1346,16 +1367,19 @@ async function renderMGToWebM(mg, outputPath, fps, scriptContext, isFullScreen) 
         throw new Error(`No canvas renderer for MG type: ${mg.type}`);
     }
 
-    // Spawn FFmpeg: raw RGBA → FFV1 lossless in MKV with guaranteed alpha.
-    // VP8/VP9 WebM alpha is unreliable across FFmpeg/libvpx builds.
-    // FFV1 is FFmpeg's native lossless codec — alpha channel always works.
+    // Spawn FFmpeg: raw RGBA → downscale (if supersampled) → FFV1 lossless in MKV with guaranteed alpha.
+    // Supersampling at 2x then downscaling gives smooth anti-aliased text edges.
+    const vfArgs = SUPERSAMPLE > 1
+        ? ['-vf', `scale=${W}:${H}:flags=lanczos`]
+        : [];
     const ffmpeg = spawn(FFMPEG_PATH, [
         '-y',
         '-f', 'rawvideo',
         '-pixel_format', 'rgba',
-        '-video_size', `${W}x${H}`,
+        '-video_size', `${PW}x${PH}`,
         '-framerate', String(fps),
         '-i', 'pipe:0',
+        ...vfArgs,
         '-c:v', 'ffv1',
         '-pix_fmt', 'yuva444p',
         '-level', '3',
@@ -1367,7 +1391,11 @@ async function renderMGToWebM(mg, outputPath, fps, scriptContext, isFullScreen) 
     ffmpeg.stderr.on('data', d => { ffmpegError += d.toString(); });
 
     for (let frame = 0; frame < totalFrames; frame++) {
-        ctx.clearRect(0, 0, W, H);
+        ctx.clearRect(0, 0, PW, PH);  // physical pixels, no transform active
+
+        // Apply supersampling scale — all renderers work in logical 1920x1080 coordinates
+        ctx.save();
+        ctx.scale(S, S);
 
         // FocusWord and kineticText are transparent overlays (scrim handled internally)
         // Other fullscreen MGs get opaque background + scale(1.5)
@@ -1385,8 +1413,10 @@ async function renderMGToWebM(mg, outputPath, fps, scriptContext, isFullScreen) 
 
         if (isFullScreen && !transparentFullscreen) ctx.restore();
 
-        // Get raw RGBA and pipe to FFmpeg
-        const imageData = ctx.getImageData(0, 0, W, H);
+        ctx.restore();  // pop supersampling scale
+
+        // Get raw RGBA at physical resolution and pipe to FFmpeg
+        const imageData = ctx.getImageData(0, 0, PW, PH);
         const buf = Buffer.from(imageData.data.buffer);
 
         // Diagnostic: check alpha channel on first frame of first non-fullscreen MG
