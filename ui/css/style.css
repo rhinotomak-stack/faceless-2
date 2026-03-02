@@ -3254,6 +3254,21 @@ select:focus {
 /* ========================================
    MOTION GRAPHICS PREVIEW OVERLAY
    ======================================== */
+/* WebGL2 Compositor Engine canvas */
+.compositor-canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 100; /* Above all HTML layers when active */
+    display: none; /* Hidden until compositor mode is enabled */
+    image-rendering: auto;
+}
+.compositor-canvas.active {
+    display: block;
+}
+
 .mg-overlay {
     position: absolute;
     top: 0;

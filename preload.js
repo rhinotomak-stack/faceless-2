@@ -171,6 +171,30 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getRecentProjects: () => ipcRenderer.invoke('get-recent-projects'),
     addRecentProject: () => ipcRenderer.invoke('add-recent-project'),
 
+    // ========================================
+    // WebGL2 Compositor Engine - Export IPC
+    // ========================================
+
+    // Start WebGL2 export (spawns FFmpeg with raw RGBA pipe)
+    startWebGLExport: (options) => {
+        return ipcRenderer.invoke('start-webgl-export', options);
+    },
+
+    // Send a single raw RGBA frame buffer to FFmpeg
+    sendExportFrame: (frameBuffer) => {
+        return ipcRenderer.invoke('export-frame', frameBuffer);
+    },
+
+    // Finish export (close FFmpeg stdin, mux audio, return output path)
+    finishWebGLExport: () => {
+        return ipcRenderer.invoke('finish-webgl-export');
+    },
+
+    // Cancel an in-progress WebGL2 export
+    cancelWebGLExport: () => {
+        return ipcRenderer.invoke('cancel-webgl-export');
+    },
+
     // Remove listeners (cleanup)
     removeAllListeners: (channel) => {
         ipcRenderer.removeAllListeners(channel);

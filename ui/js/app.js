@@ -258,7 +258,10 @@ const state = {
             'mg-track': 80,
             'audio-track': 80, 'music-track': 80, 'sfx-track': 60
         }
-    }
+    },
+    // WebGL2 Compositor Engine state
+    compositor: null,           // Compositor instance
+    compositorActive: false,    // Whether compositor preview is active
 };
 
 const TRACK_HEADER_WIDTH = 100;
@@ -523,6 +526,9 @@ async function init() {
     } catch (e) {
         console.log('No saved project to restore');
     }
+
+    // Initialize WebGL2 Compositor Engine
+    initCompositor();
 
     console.log('🎬 YTA ABDO EMPIRE UI Ready');
 }
@@ -1989,6 +1995,11 @@ function actuallyStartPlayback() {
         audio.play().catch(e => console.warn('Audio play failed:', e));
     }
 
+    // Start compositor videos if in compositor mode
+    if (state.compositorActive && state.compositor) {
+        state.compositor.playVideos(state.currentTime);
+    }
+
     // Start the playback loop
     startPlaybackLoop();
 }
@@ -2006,6 +2017,9 @@ function stopPlayback() {
         cancelAnimationFrame(state.playbackAnimationFrame);
         state.playbackAnimationFrame = null;
     }
+
+    // Pause compositor videos
+    if (state.compositor) state.compositor.pauseVideos();
 
     // Reset scene load flag and per-track swap flags
     state._sceneLoadPending = false;
@@ -2074,6 +2088,42 @@ function startPlaybackLoop() {
         if (!state.isPlaying) return;
 
         const audio = elements.previewAudio;
+
+        // === WebGL2 Compositor path (when active, bypasses HTML preview) ===
+        if (state.compositorActive && state.compositor && state.compositor.isInitialized) {
+            // Audio is still the master clock
+            if (audio?.src && !audio.paused) {
+                state.currentTime = audio.currentTime;
+            }
+            // Check end of timeline
+            if (state.currentTime >= state.totalDuration) {
+                state.currentTime = state.totalDuration;
+                stopPlayback();
+                updatePlayhead();
+                updateTimeDisplay();
+                return;
+            }
+            // Render the frame via WebGL2 engine
+            state.compositor.renderAtTime(state.currentTime);
+            // Sync audio
+            if (audio?.src && !audio.paused) {
+                const audioDiff = Math.abs(audio.currentTime - state.currentTime);
+                if (audioDiff > 0.2) {
+                    audio.currentTime = Math.min(state.currentTime, audio.duration || state.totalDuration);
+                }
+            }
+            // Update UI (playhead, time, scene highlight)
+            updatePlayhead();
+            updateTimeDisplay();
+            const activeScenes = getActiveScenesAtTime(state.currentTime);
+            const activeMediaScenes = activeScenes.filter(({ scene }) => !scene.isMGScene && !scene.disabled);
+            updateSceneHighlight(activeMediaScenes.length > 0 ? activeMediaScenes[0].index : -1);
+            // Continue loop
+            state.playbackAnimationFrame = requestAnimationFrame(loop);
+            return;
+        }
+
+        // === Original HTML-based preview path ===
         const activeScenes = getActiveScenesAtTime(state.currentTime);
         const activeMediaScenes = activeScenes.filter(({ scene }) =>
             !scene.isMGScene && !scene.disabled
@@ -3318,6 +3368,11 @@ async function loadVideoPlan({ freshBuild = false } = {}) {
                 });
             await Promise.all(cachePromises);
             console.log(`[PreCache] Done. Cached ${Object.keys(state._mediaUrlCache).length} URLs`);
+
+            // Load plan into WebGL2 compositor if it's initialized
+            if (state.compositor) {
+                loadPlanIntoCompositor().catch(e => console.warn('[Compositor] Plan load deferred:', e.message));
+            }
 
             // Pre-buffer the SECOND video scene into the buffer element for instant first transition
             preloadUpcomingScenes(0, true);
@@ -4577,7 +4632,12 @@ async function seekToTime(time) {
     cleanupVideoHandlers();
 
     // Load all active scenes at this time
-    await loadActiveScenes();
+    if (state.compositorActive && state.compositor && state.compositor.isInitialized) {
+        // WebGL2 compositor: just render the frame
+        state.compositor.renderAtTime(state.currentTime);
+    } else {
+        await loadActiveScenes();
+    }
 
     // Sync audio
     const audio = elements.previewAudio;
@@ -4590,7 +4650,7 @@ async function seekToTime(time) {
     updateSceneHighlight(activeScenes.length > 0 ? activeScenes[0].index : -1);
     updatePlayhead();
     updateTimeDisplay();
-    updateMGOverlay();
+    if (!state.compositorActive) updateMGOverlay();
 
     // Resume if was playing and within content
     if (wasPlaying && activeScenes.length > 0) {
@@ -5151,6 +5211,147 @@ function updateSceneHighlight(index) {
 // ========================================
 // Render Video
 // ========================================
+// ========================================
+// WebGL2 Compositor Engine Integration
+// ========================================
+
+/**
+ * Initialize the WebGL2 compositor engine.
+ * Called once during init() — creates the engine but does NOT activate it.
+ */
+function initCompositor() {
+    const canvas = document.getElementById('compositor-canvas');
+    if (!canvas) {
+        console.warn('[Compositor] Canvas element not found');
+        return;
+    }
+
+    try {
+        state.compositor = new Compositor(canvas, {
+            width: 1920, height: 1080, fps: 30,
+        });
+        console.log('[Compositor] Engine created (not yet active)');
+
+        // Wire up the compositor toggle button
+        const toggleBtn = document.getElementById('btn-compositor-toggle');
+        if (toggleBtn) {
+            toggleBtn.style.display = 'inline-block';
+            toggleBtn.addEventListener('click', () => {
+                setCompositorMode(!state.compositorActive);
+            });
+        }
+
+        // Auto-activate when WebGL2 renderer is selected
+        const rendererSelect = document.getElementById('renderer-select');
+        if (rendererSelect) {
+            rendererSelect.addEventListener('change', () => {
+                if (rendererSelect.value === 'webgl2' && !state.compositorActive) {
+                    setCompositorMode(true);
+                }
+            });
+        }
+    } catch (e) {
+        console.error('[Compositor] Failed to create engine:', e);
+        state.compositor = null;
+    }
+}
+
+/**
+ * Toggle between HTML preview and WebGL2 compositor preview.
+ */
+function setCompositorMode(active) {
+    state.compositorActive = active;
+    const canvas = document.getElementById('compositor-canvas');
+    const htmlLayers = document.querySelectorAll('.track-wrapper, .mg-overlay, .mg-v3-preview-layer, .bg-media');
+    const toggleBtn = document.getElementById('btn-compositor-toggle');
+
+    if (active) {
+        // Initialize if not yet done
+        if (state.compositor && !state.compositor.isInitialized) {
+            state.compositor.init();
+        }
+        // Load plan into compositor if we have one
+        if (state.compositor && state.videoPlan) {
+            loadPlanIntoCompositor();
+        }
+        if (canvas) canvas.classList.add('active');
+        htmlLayers.forEach(el => el.style.visibility = 'hidden');
+        if (toggleBtn) {
+            toggleBtn.textContent = 'Engine: ON';
+            toggleBtn.style.background = '#22c55e';
+            toggleBtn.style.color = '#000';
+        }
+        // Render current frame immediately
+        if (state.compositor && state.compositor.isInitialized) {
+            state.compositor.renderAtTime(state.currentTime);
+        }
+        console.log('[Compositor] Preview mode ENABLED');
+    } else {
+        if (canvas) canvas.classList.remove('active');
+        htmlLayers.forEach(el => el.style.visibility = '');
+        if (toggleBtn) {
+            toggleBtn.textContent = 'Engine: OFF';
+            toggleBtn.style.background = '';
+            toggleBtn.style.color = '';
+        }
+        // Pause compositor videos
+        if (state.compositor) state.compositor.pauseVideos();
+        console.log('[Compositor] Preview mode DISABLED');
+    }
+}
+
+/**
+ * Load the current video plan into the compositor engine.
+ * Uses getCachedMediaUrl as the URL resolver.
+ */
+async function loadPlanIntoCompositor() {
+    if (!state.compositor || !state.videoPlan) return;
+
+    try {
+        await state.compositor.loadPlan(state.videoPlan, async (sceneIndex, ext) => {
+            return getCachedMediaUrl(sceneIndex, ext);
+        });
+    } catch (e) {
+        console.error('[Compositor] Failed to load plan:', e);
+    }
+}
+
+/**
+ * Run WebGL2 export pipeline.
+ * Renders all frames via the engine and pipes to FFmpeg via IPC.
+ */
+async function renderVideoWebGL2() {
+    if (!state.compositor || !state.videoPlan) {
+        showToast('Compositor not initialized or no plan loaded', 'error');
+        return;
+    }
+
+    // Ensure compositor is initialized and plan is loaded
+    if (!state.compositor.isInitialized) {
+        state.compositor.init();
+    }
+    await loadPlanIntoCompositor();
+
+    const pipeline = new ExportPipeline(state.compositor);
+    pipeline.onProgress((data) => {
+        updateProgress(data.percent, `Rendering frame ${data.currentFrame}/${data.totalFrames} (${data.fps} fps)`);
+        if (mainWindow) {
+            mainWindow.webContents.send('render-progress', {
+                percent: data.percent,
+                message: `Frame ${data.currentFrame}/${data.totalFrames}`,
+            });
+        }
+    });
+
+    const result = await pipeline.start({
+        width: 1920,
+        height: 1080,
+        fps: state.videoPlan.fps || 30,
+    });
+
+    return result;
+}
+
 async function renderVideo() {
     if (!state.videoPlan || state.isProcessing) return;
     state.isProcessing = true; elements.btnRender.disabled = true; showProgress(true); startTimer();
@@ -5209,11 +5410,24 @@ async function renderVideo() {
         await window.electronAPI.saveVideoPlan(state.videoPlan);
 
         const rendererSelect = document.getElementById('renderer-select');
-        const useFFmpeg = rendererSelect && rendererSelect.value === 'ffmpeg';
-        updateProgress(5, useFFmpeg ? '🎬 Starting FFmpeg GPU render...' : '🎬 Starting Remotion render...');
-        const result = useFFmpeg
-            ? await window.electronAPI.runRenderFFmpeg()
-            : await window.electronAPI.runRender();
+        const rendererValue = rendererSelect ? rendererSelect.value : 'ffmpeg';
+        const useFFmpeg = rendererValue === 'ffmpeg';
+        const useWebGL2 = rendererValue === 'webgl2';
+
+        if (useWebGL2) {
+            updateProgress(5, 'Starting WebGL2 WYSIWYG render...');
+        } else {
+            updateProgress(5, useFFmpeg ? 'Starting FFmpeg GPU render...' : 'Starting Remotion render...');
+        }
+
+        let result;
+        if (useWebGL2) {
+            result = await renderVideoWebGL2();
+        } else if (useFFmpeg) {
+            result = await window.electronAPI.runRenderFFmpeg();
+        } else {
+            result = await window.electronAPI.runRender();
+        }
         if (result.success) {
             stopTimer();
             const renderTime = getElapsedString();

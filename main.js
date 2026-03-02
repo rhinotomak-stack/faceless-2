@@ -1776,6 +1776,243 @@ ipcMain.handle('run-render-ffmpeg', async () => {
     }
 });
 
+// ========================================
+// WebGL2 Compositor Engine - Export IPC
+// ========================================
+
+const WEBGL_FFMPEG_PATH = process.env.FFMPEG_PATH || 'C:\\ffmg\\bin\\ffmpeg.exe';
+
+// NVENC availability cache (shared with ffmpeg-renderer if loaded)
+let _webglNvencAvailable = null;
+
+async function probeNvencForWebGL() {
+    if (_webglNvencAvailable !== null) return _webglNvencAvailable;
+    try {
+        await new Promise((resolve, reject) => {
+            const { execFile } = require('child_process');
+            execFile(WEBGL_FFMPEG_PATH, [
+                '-f', 'lavfi', '-i', 'color=c=black:s=64x64:d=0.1',
+                '-c:v', 'h264_nvenc', '-preset', 'p4',
+                '-f', 'null', '-'
+            ], { timeout: 10000 }, (err) => {
+                if (err) reject(err); else resolve();
+            });
+        });
+        _webglNvencAvailable = true;
+        console.log('[WebGL Export] NVENC GPU encoder available');
+    } catch {
+        _webglNvencAvailable = false;
+        console.log('[WebGL Export] NVENC not available, will use CPU (libx264)');
+    }
+    return _webglNvencAvailable;
+}
+
+// State for the active WebGL export
+let _webglExport = null;
+
+ipcMain.handle('start-webgl-export', async (event, options) => {
+    try {
+        const { width, height, fps, totalFrames } = options;
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        const videoFile = path.join(TEMP_PATH, `webgl-video-${timestamp}.mp4`);
+        const outputFile = path.join(OUTPUT_PATH, `video-${timestamp}.mp4`);
+
+        // Ensure output dirs exist
+        if (!fs.existsSync(OUTPUT_PATH)) fs.mkdirSync(OUTPUT_PATH, { recursive: true });
+        if (!fs.existsSync(TEMP_PATH)) fs.mkdirSync(TEMP_PATH, { recursive: true });
+
+        // Probe NVENC
+        const useGpu = await probeNvencForWebGL();
+        const encArgs = useGpu
+            ? ['-c:v', 'h264_nvenc', '-preset', 'p4', '-b:v', '18M', '-maxrate:v', '24M', '-bufsize:v', '48M']
+            : ['-c:v', 'libx264', '-preset', 'medium', '-crf', '22'];
+
+        console.log(`[WebGL Export] Starting: ${width}x${height} @ ${fps}fps, ${totalFrames} frames, encoder: ${useGpu ? 'NVENC' : 'libx264'}`);
+
+        const ffmpegProc = spawn(WEBGL_FFMPEG_PATH, [
+            '-y',
+            '-f', 'rawvideo',
+            '-pixel_format', 'rgba',
+            '-video_size', `${width}x${height}`,
+            '-framerate', String(fps),
+            '-i', 'pipe:0',
+            ...encArgs,
+            '-pix_fmt', 'yuv420p',
+            '-an',  // No audio (muxed later)
+            videoFile
+        ], { stdio: ['pipe', 'pipe', 'pipe'] });
+
+        let ffmpegStderr = '';
+        ffmpegProc.stderr.on('data', (data) => {
+            ffmpegStderr += data.toString();
+        });
+
+        _webglExport = {
+            proc: ffmpegProc,
+            videoFile,
+            outputFile,
+            totalFrames,
+            width, height, fps,
+            stderr: ffmpegStderr,
+            framesWritten: 0,
+        };
+
+        return { success: true, videoFile, outputFile };
+    } catch (err) {
+        console.error('[WebGL Export] start error:', err.message);
+        return { success: false, error: err.message };
+    }
+});
+
+ipcMain.handle('export-frame', async (event, frameBuffer) => {
+    const exp = _webglExport;
+    if (!exp || !exp.proc || exp.proc.killed) {
+        return { success: false, error: 'No active export process' };
+    }
+
+    try {
+        const buf = Buffer.from(frameBuffer);
+        const canWrite = exp.proc.stdin.write(buf);
+        exp.framesWritten++;
+        if (!canWrite) {
+            // Wait for drain before accepting more frames (backpressure)
+            await new Promise(resolve => exp.proc.stdin.once('drain', resolve));
+        }
+        return { success: true };
+    } catch (err) {
+        return { success: false, error: err.message };
+    }
+});
+
+ipcMain.handle('finish-webgl-export', async () => {
+    const exp = _webglExport;
+    if (!exp || !exp.proc) {
+        return { success: false, error: 'No active export process' };
+    }
+
+    try {
+        // Close FFmpeg stdin to signal end of input
+        exp.proc.stdin.end();
+
+        // Wait for FFmpeg to finish encoding
+        const exitCode = await new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => {
+                try { exp.proc.kill('SIGTERM'); } catch (_) {}
+                reject(new Error('FFmpeg timeout'));
+            }, 120000); // 2 minute timeout
+
+            exp.proc.on('close', (code) => {
+                clearTimeout(timeout);
+                resolve(code);
+            });
+            exp.proc.on('error', (err) => {
+                clearTimeout(timeout);
+                reject(err);
+            });
+        });
+
+        if (exitCode !== 0) {
+            throw new Error(`FFmpeg exited with code ${exitCode}`);
+        }
+
+        console.log(`[WebGL Export] Video encoded: ${exp.videoFile} (${exp.framesWritten} frames)`);
+
+        // Mux audio if available
+        const finalOutput = await _webglMuxAudio(exp);
+
+        _webglExport = null;
+        return { success: true, outputPath: finalOutput };
+
+    } catch (err) {
+        console.error('[WebGL Export] finish error:', err.message);
+        _webglExport = null;
+        return { success: false, error: err.message };
+    }
+});
+
+ipcMain.handle('cancel-webgl-export', async () => {
+    if (_webglExport && _webglExport.proc) {
+        try {
+            if (process.platform === 'win32' && _webglExport.proc.pid) {
+                exec(`taskkill /pid ${_webglExport.proc.pid} /f /t`, () => {});
+            } else {
+                _webglExport.proc.kill('SIGTERM');
+            }
+        } catch (_) {}
+        _webglExport = null;
+    }
+    return { success: true };
+});
+
+/**
+ * Mux the WebGL-rendered video with the project's audio track.
+ * Returns the final output file path.
+ */
+async function _webglMuxAudio(exp) {
+    // Find the audio file
+    const planPath = path.join(PUBLIC_PATH, 'video-plan.json');
+    let audioFile = null;
+
+    if (fs.existsSync(planPath)) {
+        try {
+            const plan = JSON.parse(fs.readFileSync(planPath, 'utf8'));
+            if (plan.audio) {
+                // Check public, then temp, then input
+                for (const dir of [PUBLIC_PATH, TEMP_PATH, INPUT_PATH]) {
+                    const candidate = path.join(dir, plan.audio);
+                    if (fs.existsSync(candidate)) {
+                        audioFile = candidate;
+                        break;
+                    }
+                }
+            }
+        } catch (_) {}
+    }
+
+    if (!audioFile) {
+        // No audio — just rename video file to output
+        const dest = exp.outputFile;
+        fs.copyFileSync(exp.videoFile, dest);
+        console.log('[WebGL Export] No audio to mux, video only:', dest);
+        return dest;
+    }
+
+    // Mux video + audio using FFmpeg
+    console.log('[WebGL Export] Muxing audio:', audioFile);
+    return new Promise((resolve, reject) => {
+        const muxProc = spawn(WEBGL_FFMPEG_PATH, [
+            '-y',
+            '-i', exp.videoFile,
+            '-i', audioFile,
+            '-c:v', 'copy',        // No re-encode of video
+            '-c:a', 'aac', '-b:a', '192k',
+            '-shortest',
+            '-movflags', '+faststart',
+            exp.outputFile
+        ], { stdio: ['ignore', 'pipe', 'pipe'] });
+
+        muxProc.on('close', (code) => {
+            // Clean up temp video file
+            try { fs.unlinkSync(exp.videoFile); } catch (_) {}
+
+            if (code === 0) {
+                console.log('[WebGL Export] Final output:', exp.outputFile);
+                resolve(exp.outputFile);
+            } else {
+                // Fallback: use video-only file
+                fs.copyFileSync(exp.videoFile, exp.outputFile);
+                resolve(exp.outputFile);
+            }
+        });
+
+        muxProc.on('error', (err) => {
+            // Fallback: use video-only
+            try { fs.copyFileSync(exp.videoFile, exp.outputFile); } catch (_) {}
+            resolve(exp.outputFile);
+        });
+    });
+}
+
 // Open output folder
 ipcMain.handle('open-output-folder', async () => {
     shell.openPath(OUTPUT_PATH);

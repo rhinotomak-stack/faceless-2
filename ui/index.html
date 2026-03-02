@@ -36,7 +36,9 @@
                 <select id="renderer-select" title="Render engine" style="padding:6px 8px;border-radius:6px;background:#2a2a3e;color:#fff;border:1px solid #444;font-size:12px;cursor:pointer;">
                     <option value="ffmpeg">FFmpeg (Fast + Close Quality)</option>
                     <option value="remotion">Remotion (Full)</option>
+                    <option value="webgl2">WebGL2 Engine (WYSIWYG)</option>
                 </select>
+                <button id="btn-compositor-toggle" class="btn btn-secondary" title="Toggle WebGL2 preview engine" style="font-size:11px;padding:4px 8px;display:none;">Engine: OFF</button>
                 <button id="btn-render" class="btn btn-primary">Render Video</button>
             </div>
         </header>
@@ -221,6 +223,8 @@
                         <img id="img-transition-out" class="preview-img transition-out-img" style="display:none">
                         <!-- Motion Graphics overlay -->
                         <div id="mg-overlay" class="mg-overlay"></div>
+                        <!-- WebGL2 Compositor Engine canvas (WYSIWYG preview + export) -->
+                        <canvas id="compositor-canvas" class="compositor-canvas" width="1920" height="1080"></canvas>
                         <!-- Custom video controls overlaid on frame -->
                         <div id="video-controls" class="video-controls hidden">
                             <button id="btn-play" class="control-btn">▶</button>
@@ -538,6 +542,16 @@
             </div>
         </footer>
     </div>
+
+    <!-- WebGL2 Compositor Engine modules (loaded before app.js) -->
+    <script src="js/compositor/ShaderLib.js"></script>
+    <script src="js/compositor/TextureManager.js"></script>
+    <script src="js/compositor/AnimationUtils.js"></script>
+    <script src="js/compositor/SceneGraph.js"></script>
+    <script src="js/compositor/TransitionRenderer.js"></script>
+    <script src="js/compositor/MGRenderer.js"></script>
+    <script src="js/compositor/Compositor.js"></script>
+    <script src="js/compositor/ExportPipeline.js"></script>
 
     <script src="js/app.js"></script>
 </body>
