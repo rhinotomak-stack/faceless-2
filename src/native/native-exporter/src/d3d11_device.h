@@ -17,5 +17,7 @@ ID3D11Device* getDevice();
 ID3D11DeviceContext* getContext();
 ID3D11Texture2D* getRenderTarget();
 std::string getAdapterDescription();
+uint32_t getAdapterVendorId();
+LUID getAdapterLuid();
 
 } // namespace nativeexporter

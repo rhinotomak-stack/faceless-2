@@ -5,9 +5,12 @@
 
 namespace nativeexporter {
 
+using PNVENCODEAPICREATEINSTANCE = decltype(&NvEncodeAPICreateInstance);
+using PNVENCODEAPIGETMAXSUPPORTEDVERSION = decltype(&NvEncodeAPIGetMaxSupportedVersion);
+
 static HMODULE s_nvencDll = nullptr;
 static NV_ENCODE_API_FUNCTION_LIST s_funcList = {};
-static NvEncodeAPICreateInstance_t s_createInstance = nullptr;
+static PNVENCODEAPICREATEINSTANCE s_createInstance = nullptr;
 static uint32_t s_maxApiVersion = 0;
 
 bool loadNvenc() {
@@ -60,7 +63,7 @@ bool loadNvenc() {
 
     if (!s_nvencDll) return false;
 
-    s_createInstance = (NvEncodeAPICreateInstance_t)
+    s_createInstance = (PNVENCODEAPICREATEINSTANCE)
         GetProcAddress(s_nvencDll, "NvEncodeAPICreateInstance");
     if (!s_createInstance) {
         fprintf(stderr, "[NVENC] GetProcAddress(NvEncodeAPICreateInstance) failed\n");
@@ -72,16 +75,24 @@ bool loadNvenc() {
     fprintf(stderr, "[NVENC] DLL loaded, NvEncodeAPICreateInstance found\n");
 
     // Check max supported version
-    auto getMaxVer = (NvEncodeAPIGetMaxSupportedVersion_t)
+    auto getMaxVer = (PNVENCODEAPIGETMAXSUPPORTEDVERSION)
         GetProcAddress(s_nvencDll, "NvEncodeAPIGetMaxSupportedVersion");
     if (getMaxVer) {
         uint32_t maxVer = 0;
-        getMaxVer(&maxVer);
-        uint32_t maxMajor = maxVer & 0xFF;
-        uint32_t maxMinor = (maxVer >> 24) & 0xFF;
-        fprintf(stderr, "[NVENC] Max supported API version: %u.%u (our: %u.%u)\n",
-                maxMajor, maxMinor, NVENCAPI_MAJOR_VERSION, NVENCAPI_MINOR_VERSION);
-        s_maxApiVersion = maxVer;
+        NVENCSTATUS verStatus = getMaxVer(&maxVer);
+        if (verStatus == NV_ENC_SUCCESS) {
+            s_maxApiVersion = maxVer;
+            fprintf(stderr, "[NVENC] NvEncodeAPIGetMaxSupportedVersion: status=SUCCESS maxSupportedVersion=0x%08X\n",
+                    s_maxApiVersion);
+        } else {
+            s_maxApiVersion = 0;
+            fprintf(stderr, "[NVENC] NvEncodeAPIGetMaxSupportedVersion failed: status=%u\n", verStatus);
+        }
+        fprintf(stderr, "[NVENC] NVENCAPI_VERSION(header)=0x%08X\n", (unsigned)NVENCAPI_VERSION);
+    } else {
+        s_maxApiVersion = 0;
+        fprintf(stderr, "[NVENC] NvEncodeAPIGetMaxSupportedVersion not found in nvEncodeAPI64.dll\n");
+        fprintf(stderr, "[NVENC] NVENCAPI_VERSION(header)=0x%08X\n", (unsigned)NVENCAPI_VERSION);
     }
 
     // Populate function list
@@ -109,9 +120,14 @@ NV_ENCODE_API_FUNCTION_LIST* getNvencFunctions() {
     return s_nvencDll ? &s_funcList : nullptr;
 }
 
+uint32_t getNvencMaxSupportedApiVersion() {
+    return s_maxApiVersion;
+}
+
 void unloadNvenc() {
     memset(&s_funcList, 0, sizeof(s_funcList));
     s_createInstance = nullptr;
+    s_maxApiVersion = 0;
     if (s_nvencDll) {
         FreeLibrary(s_nvencDll);
         s_nvencDll = nullptr;

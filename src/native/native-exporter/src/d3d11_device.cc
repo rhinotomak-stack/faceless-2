@@ -18,6 +18,8 @@ static ID3D11Texture2D* s_renderTarget = nullptr;
 static ID3D11RenderTargetView* s_rtv = nullptr;
 static IDXGIAdapter1* s_adapter = nullptr;
 static std::string s_adapterDesc;
+static uint32_t s_adapterVendorId = 0;
+static LUID s_adapterLuid = {};
 static uint32_t s_width = 0, s_height = 0;
 
 bool initD3D11() {
@@ -64,6 +66,8 @@ bool initD3D11() {
         if (!nvidiaAdapter && desc.VendorId == 0x10DE) {
             nvidiaAdapter = adapter;
             s_adapterDesc = narrowDesc;
+            s_adapterVendorId = desc.VendorId;
+            s_adapterLuid = desc.AdapterLuid;
             fprintf(stderr, "[D3D11]     >> SELECTED (NVIDIA)\n");
         } else {
             adapter->Release();
@@ -77,13 +81,16 @@ bool initD3D11() {
         return false;
     }
     s_adapter = nvidiaAdapter;
+    fprintf(stderr, "[D3D11] Selected adapter VendorId=0x%04X LUID=%08X:%08X\n",
+            s_adapterVendorId,
+            s_adapterLuid.HighPart, s_adapterLuid.LowPart);
 
     // Step 2: Create D3D11 device
     D3D_FEATURE_LEVEL featureLevels[] = { D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0 };
     D3D_FEATURE_LEVEL actualLevel;
 
-    // Attempt A: BGRA_SUPPORT (always needed for BGRA textures)
-    UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+    // Attempt A: BGRA_SUPPORT + VIDEO_SUPPORT (VIDEO is optional for this addon)
+    UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT;
 
     hr = D3D11CreateDevice(
         s_adapter,
@@ -96,28 +103,31 @@ bool initD3D11() {
         &actualLevel,
         &s_context
     );
-    fprintf(stderr, "[D3D11] CreateDevice(BGRA_SUPPORT): hr=0x%08X\n", (unsigned)hr);
+    fprintf(stderr, "[D3D11] CreateDevice(BGRA_SUPPORT|VIDEO_SUPPORT): hr=0x%08X\n", (unsigned)hr);
 
-    // Attempt B: no flags
+    // Attempt B: BGRA_SUPPORT only
     if (FAILED(hr)) {
+        flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
         hr = D3D11CreateDevice(
             s_adapter,
             D3D_DRIVER_TYPE_UNKNOWN,
             nullptr,
-            0,
+            flags,
             featureLevels, 2,
             D3D11_SDK_VERSION,
             &s_device,
             &actualLevel,
             &s_context
         );
-        fprintf(stderr, "[D3D11] CreateDevice(no flags): hr=0x%08X\n", (unsigned)hr);
+        fprintf(stderr, "[D3D11] CreateDevice(BGRA_SUPPORT): hr=0x%08X\n", (unsigned)hr);
     }
 
     if (FAILED(hr)) {
         fprintf(stderr, "[D3D11] ERROR: D3D11CreateDevice failed\n");
         s_adapter->Release();
         s_adapter = nullptr;
+        s_adapterVendorId = 0;
+        s_adapterLuid = {};
         return false;
     }
 
@@ -232,11 +242,15 @@ void shutdown() {
     if (s_adapter) { s_adapter->Release(); s_adapter = nullptr; }
     s_width = s_height = 0;
     s_adapterDesc.clear();
+    s_adapterVendorId = 0;
+    s_adapterLuid = {};
 }
 
 ID3D11Device* getDevice() { return s_device; }
 ID3D11DeviceContext* getContext() { return s_context; }
 ID3D11Texture2D* getRenderTarget() { return s_renderTarget; }
 std::string getAdapterDescription() { return s_adapterDesc; }
+uint32_t getAdapterVendorId() { return s_adapterVendorId; }
+LUID getAdapterLuid() { return s_adapterLuid; }
 
 } // namespace nativeexporter
