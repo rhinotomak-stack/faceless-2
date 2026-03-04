@@ -249,6 +249,7 @@ void shutdown() {
 ID3D11Device* getDevice() { return s_device; }
 ID3D11DeviceContext* getContext() { return s_context; }
 ID3D11Texture2D* getRenderTarget() { return s_renderTarget; }
+ID3D11RenderTargetView* getRTV() { return s_rtv; }
 std::string getAdapterDescription() { return s_adapterDesc; }
 uint32_t getAdapterVendorId() { return s_adapterVendorId; }
 LUID getAdapterLuid() { return s_adapterLuid; }

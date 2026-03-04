@@ -8,7 +8,9 @@
         "src/addon.cc",
         "src/d3d11_device.cc",
         "src/nvenc_loader.cc",
-        "src/nvenc_encoder.cc"
+        "src/nvenc_encoder.cc",
+        "src/compositor.cc",
+        "src/texture_loader.cc"
       ],
       "include_dirs": [
         "<!@(node -p \"require('node-addon-api').include\")",
@@ -24,7 +26,10 @@
         ["OS=='win'", {
           "libraries": [
             "-ld3d11.lib",
-            "-ldxgi.lib"
+            "-ldxgi.lib",
+            "-ld3dcompiler.lib",
+            "-lwindowscodecs.lib",
+            "-lole32.lib"
           ],
           "msvs_settings": {
             "VCCLCompilerTool": {

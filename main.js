@@ -2473,6 +2473,69 @@ ipcMain.handle('native-export-start', async (event, opts) => {
     }
 });
 
+ipcMain.handle('native-compose-export', async (event, opts) => {
+    if (!_nativeExporterAddon || !_nativeExporterAddon.composeAndEncode) {
+        return { ok: false, reason: 'Native exporter addon not loaded or missing composeAndEncode' };
+    }
+
+    try {
+        const { width, height, fps, totalFrames, layers } = opts;
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        const h264File = path.join(TEMP_PATH, `compose-${timestamp}.h264`);
+        const videoFile = path.join(TEMP_PATH, `compose-${timestamp}.mp4`);
+        const outputFile = path.join(OUTPUT_PATH, `compose-${timestamp}.mp4`);
+
+        if (!fs.existsSync(OUTPUT_PATH)) fs.mkdirSync(OUTPUT_PATH, { recursive: true });
+        if (!fs.existsSync(TEMP_PATH)) fs.mkdirSync(TEMP_PATH, { recursive: true });
+
+        console.log(`[NativeCompose] Starting: ${width}x${height} @ ${fps}fps, ${totalFrames} frames, ${layers.length} layers`);
+
+        const encResult = _nativeExporterAddon.composeAndEncode({
+            width, height, fps, totalFrames, layers,
+            outputPath: h264File,
+            bitrate: opts.bitrate || 18000000,
+            maxBitrate: opts.maxBitrate || 24000000,
+            gop: opts.gop || (fps * 2),
+            bframes: opts.bframes !== undefined ? opts.bframes : 2,
+            preset: opts.preset || 5,
+            rc: opts.rc || 'vbr_hq',
+        });
+
+        if (!encResult.ok) {
+            console.error('[NativeCompose] Failed:', encResult.reason);
+            return encResult;
+        }
+
+        console.log(`[NativeCompose] Encoded ${encResult.frames} frames in ${encResult.elapsed.toFixed(2)}s (${encResult.fps.toFixed(1)} fps)`);
+
+        // Wrap .h264 → .mp4
+        await new Promise((resolve, reject) => {
+            const wrapProc = spawn(WEBGL_FFMPEG_PATH, [
+                '-y', '-r', String(fps),
+                '-i', h264File,
+                '-c:v', 'copy',
+                '-movflags', '+faststart',
+                videoFile
+            ], { stdio: ['ignore', 'pipe', 'pipe'] });
+            let wrapErr = '';
+            wrapProc.stderr.on('data', d => { wrapErr += d.toString(); });
+            wrapProc.on('close', code => code === 0 ? resolve() : reject(new Error(`FFmpeg wrap exit ${code}: ${wrapErr.slice(-200)}`)));
+            wrapProc.on('error', reject);
+        });
+
+        // Mux audio
+        const finalOutput = await _webglMuxAudio({ videoFile, outputFile });
+
+        try { fs.unlinkSync(h264File); } catch (_) {}
+
+        console.log(`[NativeCompose] Output: ${finalOutput}`);
+        return { ok: true, outputPath: finalOutput, frames: encResult.frames, elapsed: encResult.elapsed, fps: encResult.fps };
+    } catch (err) {
+        console.error('[NativeCompose] Error:', err.message);
+        return { ok: false, reason: err.message };
+    }
+});
+
 ipcMain.handle('native-export-cancel', async () => {
     if (_nativeExporterAddon) {
         try { _nativeExporterAddon.cancel(); } catch (_) {}

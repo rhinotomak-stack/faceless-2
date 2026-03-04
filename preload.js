@@ -225,6 +225,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // ========================================
     nativeExportProbe: () => ipcRenderer.invoke('native-export-probe'),
     nativeExportStart: (opts) => ipcRenderer.invoke('native-export-start', opts),
+    nativeComposeExport: (opts) => ipcRenderer.invoke('native-compose-export', opts),
     nativeExportCancel: () => ipcRenderer.invoke('native-export-cancel'),
 });
 
