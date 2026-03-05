@@ -228,6 +228,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     nativeComposeExport: (opts) => ipcRenderer.invoke('native-compose-export', opts),
     nativeExportCancel: () => ipcRenderer.invoke('native-export-cancel'),
     preRenderMGsPNG: (opts) => ipcRenderer.invoke('pre-render-mgs-png', opts),
+
+    // Bake-and-Play: MG cache access for preview compositor
+    getMGCacheUrl: (hash, frameName) => ipcRenderer.invoke('get-mg-cache-url', hash, frameName),
+    getMGCacheDir: () => ipcRenderer.invoke('get-mg-cache-dir'),
+    checkMGCache: (hash) => ipcRenderer.invoke('check-mg-cache', hash),
 });
 
 console.log('✅ Electron preload script loaded');

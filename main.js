@@ -66,7 +66,7 @@ function acquireProjectLock() {
                         return true;
                     }
                 }
-            } catch (_) {}
+            } catch (_) { }
             // Can't read lock file or invalid PID — overwrite
             fs.writeFileSync(lockFile, String(process.pid));
             return true;
@@ -85,7 +85,7 @@ function releaseProjectLock() {
                 fs.unlinkSync(lockFile);
             }
         }
-    } catch (_) {}
+    } catch (_) { }
 }
 
 // Project-specific paths (isolated per instance)
@@ -521,35 +521,41 @@ function createWindow() {
         {
             label: 'Help',
             submenu: [
-                { label: 'Create Desktop Shortcut', click: async () => {
-                    const result = await ipcMain.emit('create-desktop-shortcut') || {};
-                    // Call directly instead of through IPC
-                    try {
-                        const desktopDir = path.join(require('os').homedir(), 'Desktop');
-                        const shortcutPath = path.join(desktopDir, 'YTA Empire 2.lnk');
-                        const electronExe = process.execPath;
-                        const icon = getShortcutIconPath();
-                        const ps = `$ws = New-Object -ComObject WScript.Shell; $sc = $ws.CreateShortcut('${shortcutPath.replace(/'/g, "''")}'); $sc.TargetPath = '${electronExe.replace(/'/g, "''")}'; $sc.Arguments = '""${APP_ROOT.replace(/'/g, "''")}""'; $sc.WorkingDirectory = '${APP_ROOT.replace(/'/g, "''")}'; $sc.IconLocation = '${icon.replace(/'/g, "''")}'; $sc.Description = 'YTA Empire 2'; $sc.Save();`;
-                        execSync(`powershell -Command "${ps.replace(/"/g, '\\"')}"`, { stdio: 'ignore' });
-                        dialog.showMessageBox(mainWindow, { title: 'Shortcut Created', message: 'Desktop shortcut created successfully!', type: 'info' });
-                    } catch (e) {
-                        dialog.showMessageBox(mainWindow, { title: 'Error', message: `Failed to create shortcut: ${e.message}`, type: 'error' });
+                {
+                    label: 'Create Desktop Shortcut', click: async () => {
+                        const result = await ipcMain.emit('create-desktop-shortcut') || {};
+                        // Call directly instead of through IPC
+                        try {
+                            const desktopDir = path.join(require('os').homedir(), 'Desktop');
+                            const shortcutPath = path.join(desktopDir, 'YTA Empire 2.lnk');
+                            const electronExe = process.execPath;
+                            const icon = getShortcutIconPath();
+                            const ps = `$ws = New-Object -ComObject WScript.Shell; $sc = $ws.CreateShortcut('${shortcutPath.replace(/'/g, "''")}'); $sc.TargetPath = '${electronExe.replace(/'/g, "''")}'; $sc.Arguments = '""${APP_ROOT.replace(/'/g, "''")}""'; $sc.WorkingDirectory = '${APP_ROOT.replace(/'/g, "''")}'; $sc.IconLocation = '${icon.replace(/'/g, "''")}'; $sc.Description = 'YTA Empire 2'; $sc.Save();`;
+                            execSync(`powershell -Command "${ps.replace(/"/g, '\\"')}"`, { stdio: 'ignore' });
+                            dialog.showMessageBox(mainWindow, { title: 'Shortcut Created', message: 'Desktop shortcut created successfully!', type: 'info' });
+                        } catch (e) {
+                            dialog.showMessageBox(mainWindow, { title: 'Error', message: `Failed to create shortcut: ${e.message}`, type: 'error' });
+                        }
                     }
-                }},
-                { label: 'Open Project Logs', click: async () => {
-                    const logsDir = ensureLogsDir(PROJECT_DIR);
-                    await shell.openPath(logsDir);
-                }},
-                { label: 'Tail Project Logs (Live)', click: async () => {
-                    const result = tailProjectLogsLive(PROJECT_DIR);
-                    if (!result.success) {
-                        dialog.showMessageBox(mainWindow, {
-                            title: 'Log Tail Failed',
-                            message: result.error || 'Could not tail project logs.',
-                            type: 'error'
-                        });
+                },
+                {
+                    label: 'Open Project Logs', click: async () => {
+                        const logsDir = ensureLogsDir(PROJECT_DIR);
+                        await shell.openPath(logsDir);
                     }
-                }},
+                },
+                {
+                    label: 'Tail Project Logs (Live)', click: async () => {
+                        const result = tailProjectLogsLive(PROJECT_DIR);
+                        if (!result.success) {
+                            dialog.showMessageBox(mainWindow, {
+                                title: 'Log Tail Failed',
+                                message: result.error || 'Could not tail project logs.',
+                                type: 'error'
+                            });
+                        }
+                    }
+                },
                 { type: 'separator' },
                 { label: 'About', click: () => dialog.showMessageBox(mainWindow, { title: 'YTA Empire 2', message: 'AI-powered video generator', type: 'info' }) }
             ]
@@ -753,7 +759,7 @@ ipcMain.handle('cancel-process', async () => {
             }
         } catch (e) {
             console.error('Error killing process:', e);
-            try { activeProcess.kill('SIGKILL'); } catch (_) {}
+            try { activeProcess.kill('SIGKILL'); } catch (_) { }
         }
         return { success: true, message: `${type} cancelled` };
     }
@@ -1700,9 +1706,9 @@ ipcMain.handle('run-render', async () => {
                 } else {
                     // If GPU/compositor path failed, auto-retry with CPU
                     const nvencFailed = errorOutput.includes('nvenc') ||
-                                       errorOutput.includes('NVENC') ||
-                                       errorOutput.includes('hardware acceleration') ||
-                                       errorOutput.includes('No capable devices found');
+                        errorOutput.includes('NVENC') ||
+                        errorOutput.includes('hardware acceleration') ||
+                        errorOutput.includes('No capable devices found');
                     const compositorPipeFailed =
                         /write EOF/i.test(errorOutput) ||
                         /Could not extract frame from compositor/i.test(errorOutput) ||
@@ -1732,7 +1738,7 @@ ipcMain.handle('run-render', async () => {
                     let errorMsg = errorOutput || `Render failed with code ${code}`;
                     if (errorMsg.includes('EPERM') || errorMsg.includes('ENOENT')) {
                         errorMsg += '\n\nThis may be caused by Windows Defender blocking Remotion files. ' +
-                                   'Add an exclusion in Windows Security for your node_modules folder.';
+                            'Add an exclusion in Windows Security for your node_modules folder.';
                     }
                     resolve({ success: false, error: errorMsg });
                 }
@@ -1999,7 +2005,7 @@ ipcMain.handle('finish-webgl-export', async () => {
         // Wait for FFmpeg to finish encoding
         const exitCode = await new Promise((resolve, reject) => {
             const timeout = setTimeout(() => {
-                try { exp.proc.kill('SIGTERM'); } catch (_) {}
+                try { exp.proc.kill('SIGTERM'); } catch (_) { }
                 reject(new Error('FFmpeg timeout'));
             }, 120000); // 2 minute timeout
 
@@ -2036,11 +2042,11 @@ ipcMain.handle('cancel-webgl-export', async () => {
     if (_webglExport && _webglExport.proc) {
         try {
             if (process.platform === 'win32' && _webglExport.proc.pid) {
-                exec(`taskkill /pid ${_webglExport.proc.pid} /f /t`, () => {});
+                exec(`taskkill /pid ${_webglExport.proc.pid} /f /t`, () => { });
             } else {
                 _webglExport.proc.kill('SIGTERM');
             }
-        } catch (_) {}
+        } catch (_) { }
         _webglExport = null;
     }
     return { success: true };
@@ -2068,7 +2074,7 @@ async function _webglMuxAudio(exp) {
                     }
                 }
             }
-        } catch (_) {}
+        } catch (_) { }
     }
 
     if (!audioFile) {
@@ -2107,7 +2113,7 @@ async function _webglMuxAudio(exp) {
 
         muxProc.on('close', (code) => {
             // Clean up temp video file
-            try { fs.unlinkSync(exp.videoFile); } catch (_) {}
+            try { fs.unlinkSync(exp.videoFile); } catch (_) { }
 
             if (code === 0) {
                 console.log('[WebGL Export] Final output:', exp.outputFile);
@@ -2121,7 +2127,7 @@ async function _webglMuxAudio(exp) {
 
         muxProc.on('error', (err) => {
             // Fallback: use video-only
-            try { fs.copyFileSync(exp.videoFile, exp.outputFile); } catch (_) {}
+            try { fs.copyFileSync(exp.videoFile, exp.outputFile); } catch (_) { }
             resolve(exp.outputFile);
         });
     });
@@ -2306,7 +2312,7 @@ ipcMain.handle('v2-encode-frame', async (event, opts) => {
         if (exp.framesWritten < 3) {
             const cx = Math.floor(exp.width / 2), cy = Math.floor(exp.height / 2);
             const off = (cy * exp.width + cx) * 4;
-            console.log(`[V2 Export] Frame ${opts.frameIndex || exp.framesWritten} center RGBA=(${buf[off]},${buf[off+1]},${buf[off+2]},${buf[off+3]})`);
+            console.log(`[V2 Export] Frame ${opts.frameIndex || exp.framesWritten} center RGBA=(${buf[off]},${buf[off + 1]},${buf[off + 2]},${buf[off + 3]})`);
         }
 
         const canWrite = exp.proc.stdin.write(buf);
@@ -2347,7 +2353,7 @@ ipcMain.handle('v2-flush-encoder', async () => {
 
         const exitCode = await new Promise((resolve, reject) => {
             const timeout = setTimeout(() => {
-                try { exp.proc.kill('SIGTERM'); } catch (_) {}
+                try { exp.proc.kill('SIGTERM'); } catch (_) { }
                 reject(new Error('FFmpeg timeout'));
             }, 120000);
 
@@ -2475,7 +2481,7 @@ ipcMain.handle('native-export-start', async (event, opts) => {
         const finalOutput = await _webglMuxAudio(exp);
 
         // Clean up .h264 temp file
-        try { fs.unlinkSync(h264File); } catch (_) {}
+        try { fs.unlinkSync(h264File); } catch (_) { }
 
         console.log(`[NativeExport] Output: ${finalOutput}`);
         return { ok: true, outputPath: finalOutput, frames: encResult.frames, elapsed: encResult.elapsed, fps: encResult.fps };
@@ -2547,7 +2553,7 @@ ipcMain.handle('native-compose-export', async (event, opts) => {
             audioTrimEndSec: opts.audioTrimEndSec,
         });
 
-        try { fs.unlinkSync(h264File); } catch (_) {}
+        try { fs.unlinkSync(h264File); } catch (_) { }
 
         console.log(`[NativeCompose] Output: ${finalOutput}`);
         return { ok: true, outputPath: finalOutput, frames: encResult.frames, elapsed: encResult.elapsed, fps: encResult.fps };
@@ -2559,7 +2565,7 @@ ipcMain.handle('native-compose-export', async (event, opts) => {
 
 ipcMain.handle('native-export-cancel', async () => {
     if (_nativeExporterAddon) {
-        try { _nativeExporterAddon.cancel(); } catch (_) {}
+        try { _nativeExporterAddon.cancel(); } catch (_) { }
     }
     return { ok: true };
 });
@@ -2579,6 +2585,29 @@ ipcMain.handle('pre-render-mgs-png', async (event, opts) => {
         console.error('[PreRenderMG] Error:', err.message);
         return { ok: false, reason: err.message };
     }
+});
+
+// Get file:// URL for an MG bake cache frame PNG
+ipcMain.handle('get-mg-cache-url', async (event, hash, frameName) => {
+    const framePath = path.join(TEMP_PATH, 'mg-png-cache', hash, frameName);
+    if (!fs.existsSync(framePath)) return null;
+    return 'file:///' + framePath.replace(/\\/g, '/');
+});
+
+// Get the mg-png-cache directory path
+ipcMain.handle('get-mg-cache-dir', async () => {
+    return path.join(TEMP_PATH, 'mg-png-cache');
+});
+
+// Check if an MG cache manifest exists and is complete
+ipcMain.handle('check-mg-cache', async (event, hash) => {
+    const manifestPath = path.join(TEMP_PATH, 'mg-png-cache', hash, 'manifest.json');
+    if (!fs.existsSync(manifestPath)) return null;
+    try {
+        const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+        if (manifest.complete) return manifest;
+    } catch (_) { }
+    return null;
 });
 
 // Open output folder
@@ -2963,7 +2992,7 @@ function registerFvpFileAssociation() {
         const content = Buffer.from(regContent, 'utf16le');
         fs.writeFileSync(regFile, Buffer.concat([bom, content]));
         execSync(`reg import "${regFile}"`, { stdio: 'ignore' });
-        try { fs.unlinkSync(regFile); } catch (_) {} // Clean up
+        try { fs.unlinkSync(regFile); } catch (_) { } // Clean up
 
         console.log('✅ .fvp file association registered');
         return { success: true };

@@ -63,6 +63,13 @@ class Compositor {
         this._pboWriteIndex = 0;     // next PBO to write into
         this._pboFrameBytes = 0;     // w * h * 4
         this._pboReady = false;
+
+        // Bake-and-Play: pre-rendered MG PNG cache
+        // _mgHashMap: Map<mgObject, { hash, manifest }> — precomputed in loadPlan
+        this._mgHashMap = new Map();
+        // _mgBakeCache: Map<hash, { images: Map<localFrame, HTMLImageElement>, pending: Set<localFrame> }>
+        this._mgBakeCache = new Map();
+        this._mgBakeReady = false;
     }
 
     // ========================================================================
@@ -131,6 +138,12 @@ class Compositor {
         this._mediaUrls = {};
 
         this.destroyPBOs();
+
+        // Bake-and-Play cleanup
+        this._mgHashMap.clear();
+        this._mgBakeCache.clear();
+        this._mgBakeReady = false;
+
         this.gl = null;
         this._initialized = false;
         console.log('[Compositor] Destroyed');
@@ -161,6 +174,9 @@ class Compositor {
         // Preload video/image elements for all non-MG scenes
         const mediaScenes = this.sceneGraph.scenes.filter(s => !s.isMGScene && s.mediaType !== 'motion-graphic');
         await this._preloadMedia(mediaScenes);
+
+        // Bake-and-Play: precompute MG hashes (sync lookup in render loop)
+        await this._precomputeMGHashes(plan);
 
         console.log('[Compositor] Plan loaded:', this.sceneGraph.totalFrames, 'frames,',
             mediaScenes.length, 'media scenes,', this.sceneGraph.motionGraphics.length, 'MG overlays');
@@ -355,7 +371,7 @@ class Compositor {
                 if (scene.isMGScene || scene.mediaType === 'motion-graphic') {
                     // Render the MG as a fullscreen graphic
                     const localFrame = frame - scene._startFrame;
-                    const mgTex = this.mgRenderer.renderMG(scene, localFrame, this._scriptContext);
+                    const mgTex = this._getMGTexture(scene, localFrame, this._scriptContext);
                     if (mgTex) {
                         if (i > 0) {
                             gl.enable(gl.BLEND);
@@ -390,7 +406,7 @@ class Compositor {
             gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
 
             for (const { mg, localFrame } of activeMGs) {
-                const mgTex = this.mgRenderer.renderMG(mg, localFrame, this._scriptContext);
+                const mgTex = this._getMGTexture(mg, localFrame, this._scriptContext);
                 if (mgTex) {
                     this._blitTexture(mgTex.texture, 1.0, 1, 1, 0, 0);
                 }
@@ -441,6 +457,177 @@ class Compositor {
         }
 
         return this.textureManager.get(texId);
+    }
+
+    // ========================================================================
+    // BAKE-AND-PLAY: MG TEXTURE FROM PRE-RENDERED CACHE
+    // ========================================================================
+
+    /**
+     * Get MG texture — cache-first, live-render fallback. FULLY SYNCHRONOUS.
+     * Called from renderFrame() hot path. No awaits, no crypto — just map lookups.
+     */
+    _getMGTexture(mg, localFrame, scriptContext) {
+        const hashInfo = this._mgHashMap.get(mg);
+        if (hashInfo && hashInfo.manifest) {
+            const cacheEntry = this._mgBakeCache.get(hashInfo.hash);
+            if (cacheEntry) {
+                const clampedFrame = Math.min(localFrame, hashInfo.manifest.frameCount - 1);
+                const img = cacheEntry.images.get(clampedFrame);
+                if (img && img.complete && img.naturalWidth > 0) {
+                    // CACHE HIT
+                    const texId = `mg-bake-${hashInfo.hash}-${clampedFrame}`;
+                    const entry = this.textureManager.createOrUpdate(texId, img);
+                    this._prefetchMGFrames(hashInfo.hash, clampedFrame, hashInfo.manifest.frameCount);
+                    return entry;
+                }
+                // Image not yet loaded — trigger preload
+                this._prefetchMGFrames(hashInfo.hash, clampedFrame, hashInfo.manifest.frameCount);
+            }
+        }
+        // CACHE MISS — fallback to live Canvas2D rendering
+        return this.mgRenderer.renderMG(mg, localFrame, scriptContext);
+    }
+
+    /**
+     * Precompute deterministic hashes for all MGs during loadPlan() (async OK here).
+     * Checks main process for existing bake cache manifests.
+     */
+    async _precomputeMGHashes(plan) {
+        this._mgHashMap.clear();
+        this._mgBakeCache.clear();
+        this._mgBakeReady = false;
+
+        const fps = this.fps;
+        const tileW = 1920, tileH = 1080;
+        const api = window.electronAPI;
+        if (!api || !api.checkMGCache) {
+            console.log('[Compositor] No electronAPI.checkMGCache — bake-and-play disabled');
+            return;
+        }
+
+        const mgObjects = [];
+        if (this.sceneGraph && this.sceneGraph.motionGraphics) {
+            for (const mg of this.sceneGraph.motionGraphics) {
+                mgObjects.push({ mg, isFullScreen: false });
+            }
+        }
+        if (this.sceneGraph && this.sceneGraph.scenes) {
+            for (const scene of this.sceneGraph.scenes) {
+                if (scene.isMGScene || scene.mediaType === 'motion-graphic') {
+                    mgObjects.push({ mg: scene, isFullScreen: true });
+                }
+            }
+        }
+        if (mgObjects.length === 0) return;
+
+        const checkPromises = mgObjects.map(async ({ mg, isFullScreen }) => {
+            const data = JSON.stringify({
+                type: mg.type,
+                text: mg.text || '',
+                subtext: mg.subtext || '',
+                style: mg.style || 'clean',
+                position: mg.position || 'center',
+                duration: mg.duration || 3,
+                animationSpeed: mg.animationSpeed || 1.0,
+                data: mg.data || null,
+                fps, tileW, tileH, isFullScreen,
+            });
+            const hash = await this._sha1(data);
+            const shortHash = hash.slice(0, 16);
+            const manifest = await api.checkMGCache(shortHash);
+
+            this._mgHashMap.set(mg, { hash: shortHash, manifest });
+
+            if (manifest) {
+                if (!this._mgBakeCache.has(shortHash)) {
+                    this._mgBakeCache.set(shortHash, { images: new Map(), pending: new Set() });
+                }
+                console.log(`[Compositor] MG bake HIT: ${mg.type} [${shortHash}] (${manifest.frameCount} frames)`);
+            } else {
+                console.log(`[Compositor] MG bake MISS: ${mg.type} [${shortHash}] (live render)`);
+            }
+        });
+
+        await Promise.all(checkPromises);
+        this._mgBakeReady = true;
+        console.log(`[Compositor] Bake-and-Play: ${mgObjects.length} MGs hashed, ${this._mgBakeCache.size} cached`);
+
+        // Fire-and-forget: background bake for uncached MGs
+        if (api.preRenderMGsPNG && mgObjects.some(({ mg }) => {
+            const info = this._mgHashMap.get(mg);
+            return info && !info.manifest;
+        })) {
+            const bakeOpts = {
+                motionGraphics: (this.sceneGraph.motionGraphics || []),
+                mgScenes: this.sceneGraph.scenes.filter(s => s.isMGScene),
+                scenes: this.sceneGraph.scenes,
+                scriptContext: this._scriptContext,
+                fps: this.fps,
+            };
+            api.preRenderMGsPNG(bakeOpts).then(() => {
+                console.log('[Compositor] Background MG bake done — refreshing cache');
+                this._precomputeMGHashes({ scriptContext: this._scriptContext });
+            }).catch(err => console.warn('[Compositor] Background MG bake error:', err));
+        }
+    }
+
+    /**
+     * Preload MG frames N-2..N+4 via Image + img.decode(). Evicts outside window.
+     * Fire-and-forget (no blocking). Called from _getMGTexture hot path.
+     */
+    _prefetchMGFrames(hash, currentFrame, totalFrames) {
+        const entry = this._mgBakeCache.get(hash);
+        if (!entry) return;
+
+        const BEHIND = 2, AHEAD = 4;
+        const wStart = Math.max(0, currentFrame - BEHIND);
+        const wEnd = Math.min(totalFrames - 1, currentFrame + AHEAD);
+
+        // Evict outside window
+        for (const [f] of entry.images) {
+            if (f < wStart || f > wEnd) {
+                this.textureManager.release(`mg-bake-${hash}-${f}`);
+                entry.images.delete(f);
+            }
+        }
+
+        // Preload missing frames
+        const api = window.electronAPI;
+        if (!api || !api.getMGCacheUrl) return;
+
+        for (let f = wStart; f <= wEnd; f++) {
+            if (entry.images.has(f) || entry.pending.has(f)) continue;
+            entry.pending.add(f);
+
+            const frameName = `frame_${String(f).padStart(6, '0')}.png`;
+            api.getMGCacheUrl(hash, frameName).then(async (url) => {
+                entry.pending.delete(f);
+                if (!url) return;
+                const img = new Image();
+                img.src = url;
+                try {
+                    await img.decode(); // Background PNG decode — no main-thread stutter
+                    entry.images.set(f, img);
+                } catch (_) { /* decode failed — live render handles it */ }
+            }).catch(() => entry.pending.delete(f));
+        }
+    }
+
+    /**
+     * SHA-1 via SubtleCrypto (async, only called in loadPlan context).
+     * Returns hex string matching crypto.createHash('sha1') from Node.js.
+     */
+    async _sha1(str) {
+        if (typeof crypto !== 'undefined' && crypto.subtle) {
+            const buf = new TextEncoder().encode(str);
+            const hashBuf = await crypto.subtle.digest('SHA-1', buf);
+            return Array.from(new Uint8Array(hashBuf)).map(b => b.toString(16).padStart(2, '0')).join('');
+        }
+        // Fallback FNV-1a (won't match mg-png-renderer — bake cache misses, safe)
+        let h = 2166136261;
+        for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
+        return (h >>> 0).toString(16).padStart(8, '0');
     }
 
     /**
@@ -518,9 +705,9 @@ class Compositor {
 
         const positions = new Float32Array([
             -1, -1,  // bottom-left
-             1, -1,  // bottom-right
-            -1,  1,  // top-left
-             1,  1,  // top-right
+            1, -1,  // bottom-right
+            -1, 1,  // top-left
+            1, 1,  // top-right
         ]);
 
         const buf = gl.createBuffer();
@@ -784,7 +971,7 @@ class Compositor {
             if (currentTimeSeconds >= sceneStart && currentTimeSeconds < sceneEnd) {
                 const localTime = currentTimeSeconds - sceneStart + (scene.mediaOffset || 0);
                 vid.currentTime = localTime;
-                vid.play().catch(() => {});
+                vid.play().catch(() => { });
             }
         }
     }
