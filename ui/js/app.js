@@ -5657,7 +5657,7 @@ async function renderVideoNative() {
                     endFrame: absEnd,
                     trackNum: 3,
                     opacity: 1.0,
-                    fitMode: 'contain',
+                    fitMode: 'cover',
                     seqDir: mgLayer.seqDir,
                     seqPattern: mgLayer.seqPattern,
                     seqFrameCount: mgLayer.seqFrameCount,

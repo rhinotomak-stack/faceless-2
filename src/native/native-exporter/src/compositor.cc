@@ -694,6 +694,15 @@ void renderFrame(uint32_t frameNum, const RenderPlan& plan,
 
             const LoadedTexture& tex = s_textures[layer.layerIndex];
 
+            // One-time diagnostic: log first imageSequence draw
+            static bool s_firstImgSeqDraw = false;
+            if (!s_firstImgSeqDraw) {
+                fprintf(stderr, "[Compositor] DRAW imgSeq layerIdx=%d tex=%ux%u srv=%p fit=%s track=%u frame=%u\n",
+                        layer.layerIndex, tex.width, tex.height, (void*)tex.srv,
+                        layer.fitMode.c_str(), layer.trackNum, frameNum);
+                s_firstImgSeqDraw = true;
+            }
+
             // Compute fit-mode using tile dimensions vs render target
             float srcAspect = (float)tex.width / (float)tex.height;
             float dstAspect = (float)width / (float)height;
@@ -738,8 +747,8 @@ void renderFrame(uint32_t frameNum, const RenderPlan& plan,
                 s_ctx->Unmap(s_cbuffer, 0);
             }
 
-            // Use straight-alpha shader for PNG overlays (not premultiplied)
-            s_ctx->PSSetShader(s_psBlitStraight, nullptr, 0);
+            // WIC already outputs PBGRA (premultiplied), so use standard PS_BLIT
+            s_ctx->PSSetShader(s_psBlit, nullptr, 0);
             s_ctx->PSSetConstantBuffers(0, 1, &s_cbuffer);
             s_ctx->PSSetShaderResources(0, 1, &tex.srv);
             s_ctx->PSSetSamplers(0, 1, &s_sampler);

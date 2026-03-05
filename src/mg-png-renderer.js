@@ -179,34 +179,14 @@ async function renderRemotionMG(mg, outDir, fps, scriptContext, tileW, tileH, is
 
 /**
  * Get tile dimensions for an MG based on type and whether it's fullscreen.
+ * NOTE: All MGs render at 1920x1080 because the canvas-mg-renderer positions
+ * content using W=1920, H=1080 coordinates. Smaller tiles would cause content
+ * to be drawn off-canvas. The native compositor blits these as full-frame
+ * overlays with alpha blending (transparent areas stay transparent).
  */
 function getTileDimensions(mg, isFullScreen) {
-    if (isFullScreen) return { w: FULLSCREEN_TILE.w, h: FULLSCREEN_TILE.h };
-
-    // Overlay MGs: use small tiles based on type
-    switch (mg.type) {
-        case 'lowerThird':
-        case 'subscribeCTA':
-            return { w: 1024, h: 256 };
-        case 'headline':
-        case 'callout':
-        case 'bulletList':
-        case 'rankingList':
-            return { w: 1024, h: 512 };
-        case 'barChart':
-        case 'donutChart':
-        case 'comparisonCard':
-        case 'timeline':
-            return { w: 1280, h: 720 };
-        case 'focusWord':
-        case 'kineticText':
-            return { w: 1920, h: 1080 };
-        case 'statCounter':
-        case 'progressBar':
-            return { w: 800, h: 300 };
-        default:
-            return { w: 1024, h: 512 };
-    }
+    // All MGs render at full frame size for correct positioning
+    return { w: FULLSCREEN_TILE.w, h: FULLSCREEN_TILE.h };
 }
 
 /**
