@@ -166,6 +166,34 @@ bool updateTextureWIC(ID3D11DeviceContext* ctx, const std::string& path,
 }
 
 // ============================================================================
+// decodeImageToRAM — thread-safe WIC decode to PBGRA pixels (no D3D11)
+// ============================================================================
+bool decodeImageToRAM(const std::string& path,
+                      std::vector<BYTE>& outPixels,
+                      uint32_t& outW, uint32_t& outH) {
+    return decodeToPixels(path, outPixels, outW, outH);
+}
+
+// ============================================================================
+// updateTextureFromRAM — fast GPU upload from pre-decoded pixels
+// ============================================================================
+bool updateTextureFromRAM(ID3D11DeviceContext* ctx,
+                          ID3D11Texture2D* texture,
+                          const std::vector<BYTE>& pixels,
+                          uint32_t w, uint32_t h,
+                          uint32_t expectedW, uint32_t expectedH) {
+    if (!ctx || !texture || pixels.empty()) return false;
+    if (w != expectedW || h != expectedH) {
+        fprintf(stderr, "[TexLoader] updateTextureFromRAM: size mismatch %ux%u vs %ux%u\n",
+                w, h, expectedW, expectedH);
+        return false;
+    }
+    UINT stride = w * 4;
+    ctx->UpdateSubresource(texture, 0, nullptr, pixels.data(), stride, 0);
+    return true;
+}
+
+// ============================================================================
 void releaseTexture(LoadedTexture& tex) {
     if (tex.srv) { tex.srv->Release(); tex.srv = nullptr; }
     if (tex.texture) { tex.texture->Release(); tex.texture = nullptr; }

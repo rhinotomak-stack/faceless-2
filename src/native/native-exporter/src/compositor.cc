@@ -5,6 +5,12 @@
 #include <cstring>
 #include <vector>
 #include <cmath>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <unordered_map>
+#include <queue>
+#include <list>
 
 namespace nativeexporter {
 
@@ -195,6 +201,98 @@ static std::vector<LoadedTexture> s_textures;
 static std::vector<VideoDecoder> s_videoDecoders;
 static uint32_t s_planFps = 30; // cached for time→frame conversion
 
+// ============================================================================
+// Phase 5A: Prefetch worker + LRU RAM cache
+// ============================================================================
+static const int PREFETCH_CACHE_MAX = 60;
+static const int PREFETCH_LOOKAHEAD = 16;
+
+struct CachedFrame {
+    std::vector<BYTE> pixels;
+    uint32_t w = 0;
+    uint32_t h = 0;
+};
+
+// LRU cache: key = file path, value = decoded pixels
+static std::unordered_map<std::string, CachedFrame> s_ramCache;
+static std::list<std::string> s_lruOrder;  // front = most recently used
+static std::mutex s_cacheMtx;
+
+// Prefetch work queue
+static std::queue<std::string> s_prefetchQueue;
+static std::mutex s_queueMtx;
+static std::condition_variable s_queueCV;
+static bool s_workerStop = false;
+static std::thread s_workerThread;
+static uint32_t s_prefetchHits = 0;
+static uint32_t s_prefetchMisses = 0;
+
+static void prefetchWorkerFunc() {
+    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    while (true) {
+        std::string path;
+        {
+            std::unique_lock<std::mutex> lock(s_queueMtx);
+            s_queueCV.wait(lock, [] { return s_workerStop || !s_prefetchQueue.empty(); });
+            if (s_workerStop && s_prefetchQueue.empty()) break;
+            path = std::move(s_prefetchQueue.front());
+            s_prefetchQueue.pop();
+        }
+
+        // Check if already cached
+        {
+            std::lock_guard<std::mutex> lock(s_cacheMtx);
+            if (s_ramCache.count(path)) continue;
+        }
+
+        // Decode on background thread (no D3D11 calls)
+        CachedFrame frame;
+        if (decodeImageToRAM(path, frame.pixels, frame.w, frame.h)) {
+            std::lock_guard<std::mutex> lock(s_cacheMtx);
+            // Evict LRU entries if cache is full
+            while ((int)s_ramCache.size() >= PREFETCH_CACHE_MAX && !s_lruOrder.empty()) {
+                auto& evictKey = s_lruOrder.back();
+                s_ramCache.erase(evictKey);
+                s_lruOrder.pop_back();
+            }
+            s_ramCache[path] = std::move(frame);
+            s_lruOrder.push_front(path);
+        }
+    }
+    CoUninitialize();
+}
+
+static void startPrefetchWorker() {
+    s_workerStop = false;
+    s_prefetchHits = 0;
+    s_prefetchMisses = 0;
+    s_workerThread = std::thread(prefetchWorkerFunc);
+    fprintf(stderr, "[Compositor] Prefetch worker started (cache max=%d, lookahead=%d)\n",
+            PREFETCH_CACHE_MAX, PREFETCH_LOOKAHEAD);
+}
+
+static void stopPrefetchWorker() {
+    {
+        std::lock_guard<std::mutex> lock(s_queueMtx);
+        s_workerStop = true;
+    }
+    s_queueCV.notify_all();
+    if (s_workerThread.joinable()) s_workerThread.join();
+    // Clear cache
+    {
+        std::lock_guard<std::mutex> lock(s_cacheMtx);
+        s_ramCache.clear();
+        s_lruOrder.clear();
+    }
+    // Drain queue
+    {
+        std::lock_guard<std::mutex> lock(s_queueMtx);
+        while (!s_prefetchQueue.empty()) s_prefetchQueue.pop();
+    }
+    fprintf(stderr, "[Compositor] Prefetch worker stopped (hits=%u misses=%u)\n",
+            s_prefetchHits, s_prefetchMisses);
+}
+
 // Constant buffer data — 64 bytes, 16-byte aligned (4 x float4)
 struct alignas(16) CBData {
     float row0[4];      // solid: RGBA color; image: fitScaleX, fitScaleY, fitOffsetX, fitOffsetY
@@ -253,6 +351,9 @@ bool initCompositor(ID3D11Device* device, ID3D11DeviceContext* ctx) {
 
     s_device = device;
     s_ctx = ctx;
+
+    // Start prefetch worker (Phase 5A)
+    startPrefetchWorker();
 
     fprintf(stderr, "[Compositor] Compiling shaders...\n");
 
@@ -444,7 +545,7 @@ void advanceVideoFrame(uint32_t frameNum, const RenderPlan& plan) {
 void advanceImageSequences(uint32_t frameNum, const RenderPlan& plan) {
     if (!s_ctx || s_textures.empty()) return;
 
-    static int s_lastMissingLog = -1; // avoid spamming logs for same missing frame
+    static int s_lastMissingLog = -1;
     static bool s_firstOverlayLogged = false;
 
     for (const auto& layer : plan.layers) {
@@ -456,12 +557,12 @@ void advanceImageSequences(uint32_t frameNum, const RenderPlan& plan) {
         uint32_t localFrame = (frameNum - layer.startFrame) + layer.seqLocalStart;
         if (localFrame >= layer.seqFrameCount) localFrame = layer.seqFrameCount - 1;
 
-        // Build path: seqDir / sprintf(seqPattern, localFrame)
+        // Build path for current frame
         char frameName[512];
         snprintf(frameName, sizeof(frameName), layer.seqPattern.c_str(), localFrame);
         std::string framePath = layer.seqDir + "/" + frameName;
 
-        // Diagnostic: log first overlay every 30 frames
+        // Diagnostic logging (every 30 frames)
         if (!s_firstOverlayLogged || (frameNum % 30 == 0)) {
             fprintf(stderr, "[Compositor] imgSeq[%d] frame=%u local=%u path='%s' tex=%ux%u\n",
                     layer.layerIndex, frameNum, localFrame, framePath.c_str(),
@@ -469,13 +570,50 @@ void advanceImageSequences(uint32_t frameNum, const RenderPlan& plan) {
             s_firstOverlayLogged = true;
         }
 
+        // Queue prefetch for next PREFETCH_LOOKAHEAD frames
+        {
+            std::lock_guard<std::mutex> lock(s_queueMtx);
+            for (int ahead = 1; ahead <= PREFETCH_LOOKAHEAD; ahead++) {
+                uint32_t futureLocal = localFrame + ahead;
+                if (futureLocal >= layer.seqFrameCount) break;
+                char futName[512];
+                snprintf(futName, sizeof(futName), layer.seqPattern.c_str(), futureLocal);
+                std::string futPath = layer.seqDir + "/" + futName;
+                s_prefetchQueue.push(std::move(futPath));
+            }
+        }
+        s_queueCV.notify_one();
+
+        // Try cache hit first (zero-I/O hot path)
         LoadedTexture& tex = s_textures[layer.layerIndex];
-        if (!updateTextureWIC(s_ctx, framePath, tex.texture, tex.width, tex.height)) {
-            // Log once per missing frame, keep last uploaded frame
-            if ((int)localFrame != s_lastMissingLog) {
-                fprintf(stderr, "[Compositor] imageSequence: missing frame '%s', keeping last\n",
-                        framePath.c_str());
-                s_lastMissingLog = (int)localFrame;
+        bool uploaded = false;
+        {
+            std::lock_guard<std::mutex> lock(s_cacheMtx);
+            auto it = s_ramCache.find(framePath);
+            if (it != s_ramCache.end()) {
+                // Cache hit — fast GPU upload
+                uploaded = updateTextureFromRAM(s_ctx, tex.texture,
+                                               it->second.pixels,
+                                               it->second.w, it->second.h,
+                                               tex.width, tex.height);
+                if (uploaded) {
+                    s_prefetchHits++;
+                    // Move to front of LRU
+                    s_lruOrder.remove(framePath);
+                    s_lruOrder.push_front(framePath);
+                }
+            }
+        }
+
+        if (!uploaded) {
+            // Cache miss — synchronous fallback
+            s_prefetchMisses++;
+            if (!updateTextureWIC(s_ctx, framePath, tex.texture, tex.width, tex.height)) {
+                if ((int)localFrame != s_lastMissingLog) {
+                    fprintf(stderr, "[Compositor] imageSequence: missing frame '%s', keeping last\n",
+                            framePath.c_str());
+                    s_lastMissingLog = (int)localFrame;
+                }
             }
         }
     }
@@ -766,6 +904,9 @@ void renderFrame(uint32_t frameNum, const RenderPlan& plan,
 }
 
 void shutdownCompositor() {
+    // Stop prefetch worker (Phase 5A)
+    stopPrefetchWorker();
+
     // Close video decoders
     bool hadVideoDecoders = !s_videoDecoders.empty();
     s_videoDecoders.clear();
