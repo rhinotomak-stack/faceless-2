@@ -3,7 +3,7 @@
  * This file creates the desktop app window and bridges the UI to Node.js
  */
 
-const { app, BrowserWindow, ipcMain, dialog, shell, Menu, Notification } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu, Notification, protocol, net } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
@@ -600,7 +600,24 @@ if (process.env.EXPORT_V2 !== '0') {
 // ========================================
 app.setAppUserModelId('YTA Empire 2');
 
+// Register asset:// as a privileged scheme (must be before app.whenReady)
+protocol.registerSchemesAsPrivileged([
+    { scheme: 'asset', privileges: { bypassCSP: true, supportFetchAPI: true, stream: true } }
+]);
+
 app.whenReady().then(async () => {
+    // Register asset:// protocol handler for serving local files securely
+    // Raw string manipulation to avoid URL parser mangling Windows drive letters
+    protocol.handle('asset', (request) => {
+        // Strip scheme prefix: "asset:///C:/path" or "asset://C:/path" → "C:/path"
+        let filePath = request.url.replace(/^asset:\/{2,3}/, '');
+        filePath = decodeURIComponent(filePath);
+        // Restore drive colon if URL parser stripped it (C/path → C:/path)
+        if (/^[A-Za-z]\//.test(filePath)) {
+            filePath = filePath[0] + ':' + filePath.slice(1);
+        }
+        return net.fetch('file:///' + filePath);
+    });
     // If app launched without an explicit project argument, ask user at startup.
     if (!hasExplicitProject) {
         const selectedProjectPath = await promptStartupProjectPath();
@@ -2583,7 +2600,34 @@ ipcMain.handle('pre-render-mgs-png', async (event, opts) => {
         return { ok: true, layers: result.layers };
     } catch (err) {
         console.error('[PreRenderMG] Error:', err.message);
-        return { ok: false, reason: err.message };
+        // Salvage any individually cached MGs even if the batch failed
+        const cacheDir = path.join(TEMP_PATH, 'mg-png-cache');
+        const salvaged = [];
+        try {
+            if (fs.existsSync(cacheDir)) {
+                for (const dir of fs.readdirSync(cacheDir)) {
+                    const mPath = path.join(cacheDir, dir, 'manifest.json');
+                    if (fs.existsSync(mPath)) {
+                        const m = JSON.parse(fs.readFileSync(mPath, 'utf8'));
+                        if (m.complete) {
+                            salvaged.push({
+                                seqDir: path.join(cacheDir, dir),
+                                seqPattern: 'frame_%06d.png',
+                                seqFrameCount: m.frameCount,
+                                seqLocalStart: 0,
+                                tileW: m.width, tileH: m.height,
+                                isFullScreen: m.isFullScreen || false,
+                                mgIndex: m.mgIndex != null ? m.mgIndex : -1,
+                                category: m.category || 'overlay',
+                                mgType: m.type,
+                            });
+                        }
+                    }
+                }
+            }
+        } catch (_) {}
+        console.log(`[PreRenderMG] Salvaged ${salvaged.length} cached MGs after error`);
+        return { ok: false, reason: err.message, layers: salvaged };
     }
 });
 
@@ -2591,7 +2635,7 @@ ipcMain.handle('pre-render-mgs-png', async (event, opts) => {
 ipcMain.handle('get-mg-cache-url', async (event, hash, frameName) => {
     const framePath = path.join(TEMP_PATH, 'mg-png-cache', hash, frameName);
     if (!fs.existsSync(framePath)) return null;
-    return 'file:///' + framePath.replace(/\\/g, '/');
+    return 'asset:///' + framePath.replace(/\\/g, '/');
 });
 
 // Get the mg-png-cache directory path

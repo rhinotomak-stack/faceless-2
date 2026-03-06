@@ -4807,6 +4807,64 @@ function getSceneAtTime(time) {
 }
 
 /**
+ * Compute Ken Burns start/end transform values for native export.
+ * Returns { sStart, sEnd, txStart, txEnd, tyStart, tyEnd } in native units
+ * (scale as factor, translate as pixels).
+ */
+function computeKenBurnsForExport(scene, rtW, rtH) {
+    const none = { sStart: 1, sEnd: 1, txStart: 0, txEnd: 0, tyStart: 0, tyEnd: 0 };
+    if (scene.kenBurnsEnabled === false) return none;
+
+    const originalIndex = scene.index !== undefined ? scene.index : 0;
+    const kbTypes = [
+        'zoomIn', 'zoomOut',
+        'panLeft', 'panRight', 'panUp', 'panDown',
+        'zoomPanRight', 'zoomPanLeft',
+        'zoomOutPanRight', 'zoomOutPanLeft',
+        'driftTopLeftToBottomRight', 'driftBottomRightToTopLeft',
+        'driftTopRightToBottomLeft', 'driftBottomLeftToTopRight',
+    ];
+    const kbType = kbTypes[(originalIndex * 13 + 7) % kbTypes.length];
+    const gentle = scene.fitMode === 'contain';
+    const s = gentle ? 0.4 : 1;
+
+    // Helper: evaluate Ken Burns at progress p (0=start, 1=end)
+    // Returns { scale, txPct, tyPct } where tx/ty are in % of RT size
+    function evalKB(p) {
+        let scale = 1, txPct = 0, tyPct = 0;
+        switch (kbType) {
+            case 'zoomIn':    scale = 1 + (0.03 + p * 0.12) * s; break;
+            case 'zoomOut':   scale = 1 + (0.15 - p * 0.12) * s; break;
+            case 'panLeft':   scale = 1 + 0.12 * s; txPct = (3 - p * 6) * s; break;
+            case 'panRight':  scale = 1 + 0.12 * s; txPct = (-3 + p * 6) * s; break;
+            case 'panUp':     scale = 1 + 0.12 * s; tyPct = (3 - p * 6) * s; break;
+            case 'panDown':   scale = 1 + 0.12 * s; tyPct = (-3 + p * 6) * s; break;
+            case 'zoomPanRight':    scale = 1 + (0.05 + p * 0.1) * s; txPct = (-2 + p * 4) * s; break;
+            case 'zoomPanLeft':     scale = 1 + (0.05 + p * 0.1) * s; txPct = (2 - p * 4) * s; break;
+            case 'zoomOutPanRight': scale = 1 + (0.15 - p * 0.08) * s; txPct = (-2 + p * 4) * s; break;
+            case 'zoomOutPanLeft':  scale = 1 + (0.15 - p * 0.08) * s; txPct = (2 - p * 4) * s; break;
+            case 'driftTopLeftToBottomRight':  scale = 1 + 0.15 * s; txPct = (-2 + p * 4) * s; tyPct = (-2 + p * 4) * s; break;
+            case 'driftBottomRightToTopLeft':  scale = 1 + 0.15 * s; txPct = (2 - p * 4) * s; tyPct = (2 - p * 4) * s; break;
+            case 'driftTopRightToBottomLeft':  scale = 1 + 0.15 * s; txPct = (2 - p * 4) * s; tyPct = (-2 + p * 4) * s; break;
+            case 'driftBottomLeftToTopRight':  scale = 1 + 0.15 * s; txPct = (-2 + p * 4) * s; tyPct = (2 - p * 4) * s; break;
+        }
+        return { scale, txPct, tyPct };
+    }
+
+    const start = evalKB(0);
+    const end = evalKB(1);
+    // Convert translate from % of RT to pixels
+    return {
+        sStart: start.scale,
+        sEnd: end.scale,
+        txStart: start.txPct / 100 * rtW,
+        txEnd: end.txPct / 100 * rtW,
+        tyStart: start.tyPct / 100 * rtH,
+        tyEnd: end.tyPct / 100 * rtH,
+    };
+}
+
+/**
  * Update Ken Burns transform on an image element based on current time
  */
 function updateKenBurnsTransform(img, scene) {
@@ -4976,6 +5034,10 @@ function preloadUpcomingScenes(currentTime, force) {
  * Load all scenes that are active at the current time across all tracks
  */
 async function loadActiveScenes(activeScenes) {
+    // When compositor is active, it handles all rendering — skip HTML scene loading
+    if (state.compositorActive && state.compositor && state.compositor.isInitialized) {
+        return;
+    }
     // Use passed-in activeScenes to avoid duplicate getActiveScenesAtTime call
     if (!activeScenes) activeScenes = getActiveScenesAtTime(state.currentTime);
 
@@ -5074,7 +5136,13 @@ async function loadActiveScenes(activeScenes) {
                     return;
                 }
 
-                console.log(`[Preview] Loading scene ${index} on track ${trackNum}, isImage=${isImage}, url=${mediaUrl.substring(mediaUrl.lastIndexOf('/') + 1)}`);
+                // Only log when source actually changes (avoid spamming console)
+                const prevUrl = state._lastLoadedUrls && state._lastLoadedUrls[`t${trackNum}`];
+                if (prevUrl !== mediaUrl) {
+                    console.log(`[Preview] Loading scene ${index} on track ${trackNum}, isImage=${isImage}, url=${mediaUrl.substring(mediaUrl.lastIndexOf('/') + 1)}`);
+                    if (!state._lastLoadedUrls) state._lastLoadedUrls = {};
+                    state._lastLoadedUrls[`t${trackNum}`] = mediaUrl;
+                }
 
                 if (isImage && img) {
                     // IMAGE SCENE: show img, hide both video buffers for this track
@@ -5524,12 +5592,18 @@ async function renderVideoNative() {
             });
 
             if (!mgResult.ok) {
-                console.warn(`[NativeExport] MG pre-render failed: ${mgResult.reason} — continuing without MGs`);
-                showToast(`MG pre-render failed: ${mgResult.reason}`, 'warning');
+                console.warn(`[NativeExport] MG pre-render failed: ${mgResult.reason} — checking individually cached MGs`);
+                // Even if the batch failed, individual MGs may have been cached from previous runs
+                mgLayers = mgResult.layers || [];
+                if (mgLayers.length === 0) {
+                    showToast(`MG pre-render failed: ${mgResult.reason}`, 'warning');
+                } else {
+                    showToast(`MG pre-render partially failed — using ${mgLayers.length} cached MGs`, 'warning');
+                }
             } else {
                 mgLayers = mgResult.layers || [];
-                console.log(`[NativeExport] Pre-rendered ${mgLayers.length} MG sequences`);
             }
+            console.log(`[NativeExport] Pre-rendered ${mgLayers.length} MG sequences`);
         }
 
         // ── Build native RenderPlan ───────────────────────────────
@@ -5571,8 +5645,13 @@ async function renderVideoNative() {
             layers.push({ ...layerObj, startFrame: sf, endFrame: ef });
         }
 
-        // Image layers from plan scenes
+        // Image layers from plan scenes (with Ken Burns animation)
         for (const scene of imageScenes) {
+            // Compute Ken Burns start/end transforms (mirrors updateKenBurnsTransform)
+            const kb = computeKenBurnsForExport(scene, width, height);
+            const userScale = scene.scale !== undefined ? scene.scale : 1;
+            const userTX = (scene.posX || 0) / 100 * width;
+            const userTY = (scene.posY || 0) / 100 * height;
             addLayer({
                 type: 'image',
                 mediaPath: scene.mediaFile,
@@ -5580,10 +5659,14 @@ async function renderVideoNative() {
                 endFrame: Math.round(scene.endTime * fps),
                 trackNum: 2,
                 fitMode: scene.fitMode || 'cover',
-                translateX: scene.posX || 0,
-                translateY: scene.posY || 0,
-                scaleX: scene.scale || 1,
-                scaleY: scene.scale || 1,
+                translateX: userTX + kb.txStart,
+                translateY: userTY + kb.tyStart,
+                translateXEnd: userTX + kb.txEnd,
+                translateYEnd: userTY + kb.tyEnd,
+                scaleX: userScale * kb.sStart,
+                scaleY: userScale * kb.sStart,
+                scaleXEnd: userScale * kb.sEnd,
+                scaleYEnd: userScale * kb.sEnd,
                 rotationRad: 0,
                 opacity: 1.0,
                 anchorX: 0.5,
@@ -5591,13 +5674,17 @@ async function renderVideoNative() {
             });
         }
 
-        // Video layers from plan scenes (MF decode + NV12/BGRA)
+        // Video layers from plan scenes (MF decode + NV12/BGRA, with Ken Burns)
         for (const scene of videoScenes) {
             const absStart = Math.round(scene.startTime * fps);
             const absEnd = Math.round(scene.endTime * fps);
             // If in-point cuts into this clip, adjust trimStartSec so video starts at the right point
             const clippedStart = Math.max(absStart, frameOffset);
             const trimAdjust = (clippedStart - absStart) / fps;
+            const kb = computeKenBurnsForExport(scene, width, height);
+            const userScale = scene.scale !== undefined ? scene.scale : 1;
+            const userTX = (scene.posX || 0) / 100 * width;
+            const userTY = (scene.posY || 0) / 100 * height;
             addLayer({
                 type: 'video',
                 mediaPath: scene.mediaFile,
@@ -5606,10 +5693,14 @@ async function renderVideoNative() {
                 trackNum: 2,
                 fitMode: scene.fitMode || 'cover',
                 trimStartSec: (scene.trimStart || 0) + trimAdjust,
-                translateX: scene.posX || 0,
-                translateY: scene.posY || 0,
-                scaleX: scene.scale || 1,
-                scaleY: scene.scale || 1,
+                translateX: userTX + kb.txStart,
+                translateY: userTY + kb.tyStart,
+                translateXEnd: userTX + kb.txEnd,
+                translateYEnd: userTY + kb.tyEnd,
+                scaleX: userScale * kb.sStart,
+                scaleY: userScale * kb.sStart,
+                scaleXEnd: userScale * kb.sEnd,
+                scaleYEnd: userScale * kb.sEnd,
                 rotationRad: 0,
                 opacity: 1.0,
                 anchorX: 0.5,

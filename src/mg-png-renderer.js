@@ -29,8 +29,8 @@ const S = SUPERSAMPLE;
 const OVERLAY_TILE = { w: 1024, h: 256 };   // lower thirds, callouts, etc.
 const FULLSCREEN_TILE = { w: 1920, h: 1080 };
 
-const CANVAS_CONCURRENCY = 3;
-const REMOTION_CONCURRENCY = 2;
+const CANVAS_CONCURRENCY = 1;  // Sequential to avoid OOM crashes (2x supersample = large buffers)
+const REMOTION_CONCURRENCY = 1;
 
 function log(msg) { console.log(`[MGPngRenderer] ${msg}`); }
 
@@ -81,6 +81,13 @@ async function renderCanvasMG(mg, outDir, fps, scriptContext, tileW, tileH, isFu
         ctx.fillRect(0, 0, tileW, tileH);
     }
 
+    // Reuse downscale canvas across frames to avoid OOM from per-frame allocation
+    let outCanvas = null, outCtx = null;
+    if (S > 1) {
+        outCanvas = createCanvas(tileW, tileH);
+        outCtx = outCanvas.getContext('2d');
+    }
+
     for (let frame = 0; frame < totalFrames; frame++) {
         ctx.clearRect(0, 0, PW, PH);
         ctx.save();
@@ -105,9 +112,7 @@ async function renderCanvasMG(mg, outDir, fps, scriptContext, tileW, tileH, isFu
         // Encode to PNG (with downscale if supersampled)
         let pngBuf;
         if (S > 1) {
-            // Downscale: render to target-size canvas then encode
-            const outCanvas = createCanvas(tileW, tileH);
-            const outCtx = outCanvas.getContext('2d');
+            outCtx.clearRect(0, 0, tileW, tileH);
             outCtx.drawImage(canvas, 0, 0, PW, PH, 0, 0, tileW, tileH);
             pngBuf = outCanvas.toBuffer('image/png');
         } else {
@@ -329,6 +334,13 @@ async function renderMGsToPNG(opts, cacheDir, progressCb = () => {}) {
                 fps,
                 width: job.tile.w,
                 height: job.tile.h,
+                tileX: 0,
+                tileY: 0,
+                tileW: job.tile.w,
+                tileH: job.tile.h,
+                isFullScreen: job.isFullScreen,
+                mgIndex: job.index,
+                category: job.category,
                 premultipliedAlpha: true,
                 complete: true,
             };
@@ -347,28 +359,41 @@ async function renderMGsToPNG(opts, cacheDir, progressCb = () => {}) {
         progressCb(50, `Rendering ${remotionJobs.length} Remotion MGs...`);
         let done = 0;
         const remotionFns = remotionJobs.map(job => async () => {
-            const totalFrames = await renderRemotionMG(
-                job.mg, job.jobDir, fps, scriptContext,
-                job.tile.w, job.tile.h, job.isFullScreen
-            );
-            const manifest = {
-                hash: job.hash,
-                type: job.mg.type,
-                frameCount: totalFrames,
-                fps,
-                width: job.tile.w,
-                height: job.tile.h,
-                premultipliedAlpha: false,
-                complete: true,
-            };
-            fs.writeFileSync(path.join(job.jobDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
-            done++;
-            progressCb(50 + Math.round((done / remotionJobs.length) * 40), `Remotion MG ${done}/${remotionJobs.length}`);
-            return { job, manifest, jobDir: job.jobDir };
+            try {
+                const totalFrames = await renderRemotionMG(
+                    job.mg, job.jobDir, fps, scriptContext,
+                    job.tile.w, job.tile.h, job.isFullScreen
+                );
+                const manifest = {
+                    hash: job.hash,
+                    type: job.mg.type,
+                    frameCount: totalFrames,
+                    fps,
+                    width: job.tile.w,
+                    height: job.tile.h,
+                    tileX: 0,
+                    tileY: 0,
+                    tileW: job.tile.w,
+                    tileH: job.tile.h,
+                    isFullScreen: job.isFullScreen,
+                    mgIndex: job.index,
+                    category: job.category,
+                    premultipliedAlpha: false,
+                    complete: true,
+                };
+                fs.writeFileSync(path.join(job.jobDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
+                done++;
+                progressCb(50 + Math.round((done / remotionJobs.length) * 40), `Remotion MG ${done}/${remotionJobs.length}`);
+                return { job, manifest, jobDir: job.jobDir };
+            } catch (err) {
+                log(`Remotion MG ${job.mg.type} [${job.hash}] FAILED: ${err.message} — skipping`);
+                done++;
+                return null; // skip this MG, don't kill the whole batch
+            }
         });
 
         const remotionResults = await runWithConcurrency(remotionFns, REMOTION_CONCURRENCY);
-        cachedResults.push(...remotionResults);
+        cachedResults.push(...remotionResults.filter(r => r !== null));
     }
 
     // Build output layers

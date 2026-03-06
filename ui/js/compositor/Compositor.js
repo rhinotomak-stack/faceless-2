@@ -67,9 +67,11 @@ class Compositor {
         // Bake-and-Play: pre-rendered MG PNG cache
         // _mgHashMap: Map<mgObject, { hash, manifest }> — precomputed in loadPlan
         this._mgHashMap = new Map();
-        // _mgBakeCache: Map<hash, { images: Map<localFrame, HTMLImageElement>, pending: Set<localFrame> }>
+        // _mgBakeCache: Map<hash, { images: Map<localFrame, HTMLImageElement>, pending: Set<localFrame>, failed: Set<localFrame> }>
         this._mgBakeCache = new Map();
         this._mgBakeReady = false;
+        // Bake lock: tracks which hashes are currently being baked (prevents re-trigger)
+        this._activeBakes = new Set();
     }
 
     // ========================================================================
@@ -143,6 +145,7 @@ class Compositor {
         this._mgHashMap.clear();
         this._mgBakeCache.clear();
         this._mgBakeReady = false;
+        this._activeBakes.clear();
 
         this.gl = null;
         this._initialized = false;
@@ -377,7 +380,8 @@ class Compositor {
                             gl.enable(gl.BLEND);
                             gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
                         }
-                        this._blitTexture(mgTex.texture, 1.0, 1, 1, 0, 0);
+                        const bp = this._mgBlitParams(mgTex);
+                        this._blitTexture(mgTex.texture, 1.0, bp.sx, bp.sy, bp.ox, bp.oy);
                         if (i > 0) gl.disable(gl.BLEND);
                     }
                     continue;
@@ -408,7 +412,8 @@ class Compositor {
             for (const { mg, localFrame } of activeMGs) {
                 const mgTex = this._getMGTexture(mg, localFrame, this._scriptContext);
                 if (mgTex) {
-                    this._blitTexture(mgTex.texture, 1.0, 1, 1, 0, 0);
+                    const bp = this._mgBlitParams(mgTex);
+                    this._blitTexture(mgTex.texture, 1.0, bp.sx, bp.sy, bp.ox, bp.oy);
                 }
             }
 
@@ -475,18 +480,28 @@ class Compositor {
                 const clampedFrame = Math.min(localFrame, hashInfo.manifest.frameCount - 1);
                 const img = cacheEntry.images.get(clampedFrame);
                 if (img && img.complete && img.naturalWidth > 0) {
-                    // CACHE HIT
+                    // CACHE HIT — return texture + tile metadata from manifest
                     const texId = `mg-bake-${hashInfo.hash}-${clampedFrame}`;
                     const entry = this.textureManager.createOrUpdate(texId, img);
+                    // Prefetch nearby frames (pure Map lookups + Image loads, NO IPC bake calls)
                     this._prefetchMGFrames(hashInfo.hash, clampedFrame, hashInfo.manifest.frameCount);
+                    const m = hashInfo.manifest;
+                    entry._tile = {
+                        x: m.tileX || 0,
+                        y: m.tileY || 0,
+                        w: m.tileW || m.width || this.width,
+                        h: m.tileH || m.height || this.height,
+                    };
                     return entry;
                 }
-                // Image not yet loaded — trigger preload
+                // Image not yet loaded — prefetch but do NOT trigger bake
                 this._prefetchMGFrames(hashInfo.hash, clampedFrame, hashInfo.manifest.frameCount);
             }
         }
-        // CACHE MISS — fallback to live Canvas2D rendering
-        return this.mgRenderer.renderMG(mg, localFrame, scriptContext);
+        // CACHE MISS — silent fallback to live Canvas2D rendering. No IPC, no bake trigger.
+        const result = this.mgRenderer.renderMG(mg, localFrame, scriptContext);
+        if (result) result._tile = null;
+        return result;
     }
 
     /**
@@ -541,7 +556,7 @@ class Compositor {
 
             if (manifest) {
                 if (!this._mgBakeCache.has(shortHash)) {
-                    this._mgBakeCache.set(shortHash, { images: new Map(), pending: new Set() });
+                    this._mgBakeCache.set(shortHash, { images: new Map(), pending: new Set(), failed: new Set() });
                 }
                 console.log(`[Compositor] MG bake HIT: ${mg.type} [${shortHash}] (${manifest.frameCount} frames)`);
             } else {
@@ -553,23 +568,61 @@ class Compositor {
         this._mgBakeReady = true;
         console.log(`[Compositor] Bake-and-Play: ${mgObjects.length} MGs hashed, ${this._mgBakeCache.size} cached`);
 
-        // Fire-and-forget: background bake for uncached MGs
-        if (api.preRenderMGsPNG && mgObjects.some(({ mg }) => {
-            const info = this._mgHashMap.get(mg);
-            return info && !info.manifest;
-        })) {
-            const bakeOpts = {
-                motionGraphics: (this.sceneGraph.motionGraphics || []),
-                mgScenes: this.sceneGraph.scenes.filter(s => s.isMGScene),
-                scenes: this.sceneGraph.scenes,
-                scriptContext: this._scriptContext,
-                fps: this.fps,
-            };
-            api.preRenderMGsPNG(bakeOpts).then(() => {
-                console.log('[Compositor] Background MG bake done — refreshing cache');
-                this._precomputeMGHashes({ scriptContext: this._scriptContext });
-            }).catch(err => console.warn('[Compositor] Background MG bake error:', err));
+        // Trigger ONE background bake for all uncached MGs (guarded by _activeBakes lock)
+        this._triggerBackgroundBake();
+    }
+
+    /**
+     * Trigger a single background bake for uncached MGs. Guarded by _activeBakes.
+     * ONLY called from _precomputeMGHashes (loadPlan path). NEVER from render loop.
+     */
+    _triggerBackgroundBake() {
+        const api = window.electronAPI;
+        if (!api || !api.preRenderMGsPNG) return;
+
+        // Collect uncached hashes that aren't already being baked
+        const uncachedHashes = [];
+        for (const [mg, info] of this._mgHashMap) {
+            if (!info.manifest && !this._activeBakes.has(info.hash)) {
+                uncachedHashes.push(info.hash);
+            }
         }
+        if (uncachedHashes.length === 0) return;
+
+        // Lock all hashes before starting
+        for (const h of uncachedHashes) this._activeBakes.add(h);
+        console.log(`[Compositor] Background bake starting for ${uncachedHashes.length} MGs`);
+
+        const bakeOpts = {
+            motionGraphics: (this.sceneGraph.motionGraphics || []),
+            mgScenes: this.sceneGraph.scenes.filter(s => s.isMGScene),
+            scenes: this.sceneGraph.scenes,
+            scriptContext: this._scriptContext,
+            fps: this.fps,
+        };
+
+        api.preRenderMGsPNG(bakeOpts).then(async () => {
+            console.log('[Compositor] Background bake complete — refreshing manifests');
+            // Unlock and refresh manifests (but do NOT re-trigger bake)
+            for (const h of uncachedHashes) this._activeBakes.delete(h);
+            // Re-check manifests for newly baked MGs
+            for (const [mg, info] of this._mgHashMap) {
+                if (!info.manifest) {
+                    const manifest = await api.checkMGCache(info.hash);
+                    if (manifest) {
+                        info.manifest = manifest;
+                        if (!this._mgBakeCache.has(info.hash)) {
+                            this._mgBakeCache.set(info.hash, { images: new Map(), pending: new Set(), failed: new Set() });
+                        }
+                        console.log(`[Compositor] MG bake now available: ${mg.type} [${info.hash}] (${manifest.frameCount} frames)`);
+                    }
+                }
+            }
+        }).catch(err => {
+            // Unlock on failure — but do NOT retry automatically
+            console.warn('[Compositor] Background bake failed:', err.message || err);
+            for (const h of uncachedHashes) this._activeBakes.delete(h);
+        });
     }
 
     /**
@@ -596,21 +649,28 @@ class Compositor {
         const api = window.electronAPI;
         if (!api || !api.getMGCacheUrl) return;
 
+        // Track failed frames to avoid infinite retry loops (memory leak)
+        if (!entry.failed) entry.failed = new Set();
+
         for (let f = wStart; f <= wEnd; f++) {
-            if (entry.images.has(f) || entry.pending.has(f)) continue;
+            if (entry.images.has(f) || entry.pending.has(f) || entry.failed.has(f)) continue;
             entry.pending.add(f);
 
             const frameName = `frame_${String(f).padStart(6, '0')}.png`;
             api.getMGCacheUrl(hash, frameName).then(async (url) => {
                 entry.pending.delete(f);
-                if (!url) return;
+                if (!url) { entry.failed.add(f); return; }
                 const img = new Image();
                 img.src = url;
                 try {
-                    await img.decode(); // Background PNG decode — no main-thread stutter
+                    await img.decode();
                     entry.images.set(f, img);
-                } catch (_) { /* decode failed — live render handles it */ }
-            }).catch(() => entry.pending.delete(f));
+                } catch (_) {
+                    // Mark as failed so we don't retry endlessly
+                    entry.failed.add(f);
+                    img.src = ''; // Release the failed image's network resources
+                }
+            }).catch(() => { entry.pending.delete(f); entry.failed.add(f); });
         }
     }
 
@@ -673,6 +733,29 @@ class Compositor {
         }
 
         this._blitTexture(texEntry.texture, opacity, scaleX, scaleY, offsetX, offsetY);
+    }
+
+    /**
+     * Compute blit params (scaleX, scaleY, offsetX, offsetY) from MG tile metadata.
+     * If tile covers the full canvas (tileW==canvasW, tileH==canvasH), returns identity (1,1,0,0).
+     * For sub-tiles, computes UV scale/offset to position the tile correctly.
+     */
+    _mgBlitParams(mgTex) {
+        if (!mgTex._tile || (mgTex._tile.w === this.width && mgTex._tile.h === this.height && mgTex._tile.x === 0 && mgTex._tile.y === 0)) {
+            return { sx: 1, sy: 1, ox: 0, oy: 0 };
+        }
+        const t = mgTex._tile;
+        // Tile covers a sub-region of the canvas. The blit shader maps UVs as:
+        //   uv = (v_texCoord - 0.5) / scale + 0.5 - offset
+        // To place the tile at (tileX, tileY) with size (tileW, tileH) on canvas (W, H):
+        //   scaleX = tileW / canvasW, scaleY = tileH / canvasH
+        //   offsetX = (tileX / canvasW) + (tileW / canvasW) / 2 - 0.5
+        //   offsetY = (tileY / canvasH) + (tileH / canvasH) / 2 - 0.5
+        const sx = t.w / this.width;
+        const sy = t.h / this.height;
+        const ox = (t.x / this.width) + sx / 2 - 0.5;
+        const oy = (t.y / this.height) + sy / 2 - 0.5;
+        return { sx, sy, ox, oy };
     }
 
     /**
