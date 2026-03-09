@@ -1,6 +1,7 @@
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
+const { execSync } = require('child_process');
 
 // Domains known to serve watermarked preview images
 const WATERMARK_DOMAINS = [
@@ -96,11 +97,52 @@ class BaseProvider {
                     fs.unlinkSync(outputPath);
                     reject(new Error(`Downloaded file too small (${stat.size} bytes), likely not a valid media file`));
                 } else {
-                    resolve(outputPath);
+                    // Sanitize images to PNG via ffmpeg
+                    const finalPath = this._sanitizeImage(outputPath);
+                    resolve(finalPath);
                 }
             });
             writer.on('error', reject);
         });
+    }
+
+    /**
+     * Sanitize web images to PNG using ffmpeg.
+     * Web images (especially from Google/Bing) are often WebP disguised as .jpg,
+     * or have broken headers. This re-encodes everything as proper PNG.
+     * Returns the final file path (may differ from input if extension changed).
+     */
+    _sanitizeImage(filePath) {
+        const ext = path.extname(filePath).toLowerCase();
+        if (!['.jpg', '.jpeg', '.png', '.webp', '.bmp'].includes(ext)) return filePath;
+
+        const ffmpeg = process.env.FFMPEG_PATH || 'C:/ffmg/bin/ffmpeg.exe';
+        if (!fs.existsSync(ffmpeg)) return filePath;
+
+        const tmpPath = filePath + '.sanitize.png';
+
+        try {
+            execSync(`"${ffmpeg}" -y -i "${filePath}" -frames:v 1 "${tmpPath}"`, {
+                stdio: 'pipe', timeout: 15000
+            });
+
+            if (fs.existsSync(tmpPath) && fs.statSync(tmpPath).size > 1000) {
+                const finalPath = filePath.replace(/\.[^.]+$/, '.png');
+                fs.copyFileSync(tmpPath, finalPath);
+                fs.unlinkSync(tmpPath);
+                if (finalPath !== filePath && fs.existsSync(filePath)) {
+                    fs.unlinkSync(filePath);
+                }
+                console.log(`  🔧 Sanitized to PNG: ${path.basename(finalPath)}`);
+                return finalPath;
+            } else {
+                if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
+                return filePath;
+            }
+        } catch (e) {
+            if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
+            return filePath;
+        }
     }
 
     /**

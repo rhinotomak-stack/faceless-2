@@ -57,17 +57,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
         return ipcRenderer.invoke('run-render-ffmpeg');
     },
 
-    // Render video via Preview Capture (pixel-perfect HTML capture)
-    runRenderPreviewCapture: (opts) => {
-        return ipcRenderer.invoke('run-render-preview-capture', opts);
-    },
-
-    // Capture-mode IPC (used by hidden capture window only)
-    onCaptureLoadPlan: (cb) => ipcRenderer.on('capture-load-plan', (e, data) => cb(data)),
-    onCaptureSeekFrame: (cb) => ipcRenderer.on('capture-seek-frame', (e, data) => cb(data)),
-    sendCaptureReady: () => ipcRenderer.send('capture-ready'),
-    sendCaptureFrameReady: () => ipcRenderer.send('capture-frame-ready'),
-
     // Open output folder
     openOutputFolder: () => {
         return ipcRenderer.invoke('open-output-folder');
@@ -244,6 +233,22 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getMGCacheUrl: (hash, frameName) => ipcRenderer.invoke('get-mg-cache-url', hash, frameName),
     getMGCacheDir: () => ipcRenderer.invoke('get-mg-cache-dir'),
     checkMGCache: (hash) => ipcRenderer.invoke('check-mg-cache', hash),
+
+    // ========================================
+    // MLT Render Engine (Kdenlive architecture)
+    // ========================================
+    mltCheck: () => ipcRenderer.invoke('mlt-check'),
+    mltGetPresets: () => ipcRenderer.invoke('mlt-get-presets'),
+    mltRender: (opts) => ipcRenderer.invoke('mlt-render', opts),
+    mltCancelRender: (opts) => ipcRenderer.invoke('mlt-cancel-render', opts),
+    mltGetJobs: () => ipcRenderer.invoke('mlt-get-jobs'),
+    mltCleanupJobs: () => ipcRenderer.invoke('mlt-cleanup-jobs'),
+    onMltRenderProgress: (callback) => {
+        ipcRenderer.on('render-progress', (event, data) => callback(data));
+    },
+    onMltRenderStatus: (callback) => {
+        ipcRenderer.on('render-status', (event, data) => callback(data));
+    },
 });
 
 console.log('✅ Electron preload script loaded');

@@ -312,6 +312,7 @@ const elements = {
     fileInput: document.getElementById('file-input'),
     audioInfo: document.getElementById('audio-info'),
     audioName: document.getElementById('audio-name'),
+    smartAiToggle: document.getElementById('smart-ai-toggle'),
     aiProvider: document.getElementById('ai-provider'),
     ollamaModelRow: document.getElementById('ollama-model-row'),
     ollamaModel: document.getElementById('ollama-model'),
@@ -729,6 +730,20 @@ function setupEventListeners() {
         elements.btnOpenProject.addEventListener('click', openExistingProject);
     }
     elements.btnRefresh.addEventListener('click', refreshApp);
+    // Smart AI toggle — dims AI settings when off
+    if (elements.smartAiToggle) {
+        const updateSmartAI = () => {
+            const on = elements.smartAiToggle.checked;
+            elements.aiProvider.disabled = !on;
+            if (elements.aiInstructions) elements.aiInstructions.disabled = !on;
+            if (elements.ollamaModel) elements.ollamaModel.disabled = !on;
+            if (elements.ollamaVisionModel) elements.ollamaVisionModel.disabled = !on;
+            elements.aiProvider.parentElement.style.opacity = on ? '1' : '0.4';
+            if (elements.aiInstructions) elements.aiInstructions.style.opacity = on ? '1' : '0.4';
+        };
+        elements.smartAiToggle.addEventListener('change', () => { updateSmartAI(); saveSettings(); });
+        updateSmartAI();
+    }
     elements.aiProvider.addEventListener('change', () => {
         // Show/hide Ollama model selection
         if (elements.ollamaModelRow) {
@@ -3430,7 +3445,8 @@ async function generateVideo() {
             aiInstructions: state.aiInstructions,
             buildQuality: elements.buildQuality.value,
             buildFormat: elements.buildFormat.value,
-            buildTheme: elements.buildTheme.value
+            buildTheme: elements.buildTheme.value,
+            smartAI: elements.smartAiToggle ? elements.smartAiToggle.checked : true
         });
         if (result.success) {
             updateProgress(90, '📋 Loading video plan...'); await loadVideoPlan({ freshBuild: true });
@@ -3813,8 +3829,12 @@ function renderScenes() {
     if (displayScenes.length === 0) { elements.sceneList.innerHTML = '<p class="empty-state">No scenes yet</p>'; return; }
     elements.sceneList.innerHTML = displayScenes.map((scene) => {
         const i = state.scenes.indexOf(scene);
+        const trType = scene.transition?.type || 'cut';
+        const trIcons = { cut: '✂️', crossfade: '🔀', flash: '⚡', fade_to_black: '⬛' };
+        const trLabels = { cut: 'Cut', crossfade: 'Crossfade', flash: 'Flash', fade_to_black: 'Fade to Black' };
+        const trBadge = i > 0 ? `<span class="scene-transition-badge" title="${trLabels[trType] || trType}">${trIcons[trType] || ''} ${trLabels[trType] || trType}</span>` : '';
         return `<div class="scene-card" data-index="${i}">
-            <div class="scene-number">Scene ${i + 1}</div>
+            <div class="scene-number">Scene ${i + 1}${trBadge}</div>
             <div class="scene-text">${scene.text}</div>
             <div class="scene-keyword">🔍 ${scene.keyword}</div>
         </div>`;
@@ -4057,6 +4077,15 @@ function renderTracks() {
             const mediaClass = scene.mediaType === 'image' ? 'clip-image' : 'clip-video';
             const isDisabled = scene.disabled === true;
             const eyeIcon = isDisabled ? '👁️‍🗨️' : '👁️';
+            // Transition icon between clips
+            const trType = scene.transition?.type || 'cut';
+            const trIcons = { cut: '✂️', crossfade: '🔀', flash: '⚡', fade_to_black: '⬛' };
+            const trIcon = trIcons[trType] || '';
+            const trLabel = { cut: 'Cut', crossfade: 'Crossfade', flash: 'Flash', fade_to_black: 'Fade to Black' }[trType] || trType;
+            // Show transition marker between clips (skip first scene)
+            if (i > 0 && trIcon) {
+                html += `<div class="transition-marker" style="left:${left - 8}px" title="${trLabel}">${trIcon}</div>`;
+            }
             // Clip separator line for adjacent clips
             if (i > 0) {
                 const prevScene = trackScenes[i - 1];
@@ -5731,44 +5760,6 @@ async function loadPlanIntoCompositor() {
 }
 
 /**
- * Run Preview Capture renderer — pixel-perfect HTML preview capture.
- * Creates hidden BrowserWindow, captures each frame via capturePage(), encodes with NVENC.
- */
-async function renderVideoPreviewCapture() {
-    try {
-        const plan = state.videoPlan;
-        if (!plan || !plan.scenes || plan.scenes.length === 0) {
-            showToast('No video plan loaded — cannot render', 'error');
-            return { success: false, error: 'No video plan' };
-        }
-
-        const fps = plan.fps || 30;
-        const { inSec, outSec } = getRenderRange();
-        const fullDuration = plan.totalDuration || state.totalDuration || 10;
-        const renderInSec = Math.min(inSec, fullDuration);
-        const renderOutSec = Math.min(outSec, fullDuration);
-
-        const rangeLabel = (state.inPoint !== null || state.outPoint !== null)
-            ? ` [${formatTime(renderInSec)}→${formatTime(renderOutSec)}]` : '';
-
-        updateProgress(10, `Starting Preview Capture renderer${rangeLabel}...`);
-
-        // Send the full plan + render range to main process
-        const result = await window.electronAPI.runRenderPreviewCapture({
-            plan: plan,
-            fps,
-            inPoint: renderInSec,
-            outPoint: renderOutSec,
-        });
-
-        return result;
-    } catch (e) {
-        console.error('[PreviewCapture] Error:', e);
-        return { success: false, error: e.message };
-    }
-}
-
-/**
  * Run Native D3D11 + NVENC export — builds RenderPlan from video plan.
  * Milestone D1: eligibility gate + image-only RenderPlan builder.
  */
@@ -6155,11 +6146,8 @@ async function renderVideo() {
         const useFFmpeg = rendererValue === 'ffmpeg';
         const useWebGL2 = rendererValue === 'webgl2';
         const useNative = rendererValue === 'native';
-        const usePreviewCapture = rendererValue === 'preview-capture';
 
-        if (usePreviewCapture) {
-            updateProgress(5, 'Starting Preview Capture (pixel-perfect) render...');
-        } else if (useNative) {
+        if (useNative) {
             updateProgress(5, 'Starting Native D3D11 + NVENC render...');
         } else if (useWebGL2) {
             updateProgress(5, 'Starting WebGL2 WYSIWYG render...');
@@ -6168,9 +6156,7 @@ async function renderVideo() {
         }
 
         let result;
-        if (usePreviewCapture) {
-            result = await renderVideoPreviewCapture();
-        } else if (useNative) {
+        if (useNative) {
             result = await renderVideoNative();
         } else if (useWebGL2) {
             result = await renderVideoWebGL2();
@@ -6485,6 +6471,7 @@ function clearScenes() {
 
 function saveSettings() {
     localStorage.setItem('faceless-settings', JSON.stringify({
+        smartAI: elements.smartAiToggle?.checked !== false,
         aiProvider: elements.aiProvider.value,
         ollamaModel: elements.ollamaModel?.value || 'gemma3:12b',
         ollamaVisionModel: elements.ollamaVisionModel?.value || 'llava',
@@ -6522,6 +6509,7 @@ function loadSettings() {
     try {
         const s = JSON.parse(localStorage.getItem('faceless-settings'));
         if (s) {
+            if (elements.smartAiToggle) elements.smartAiToggle.checked = s.smartAI !== false;
             elements.aiProvider.value = s.aiProvider || 'ollama';
             // Restore Ollama model selections
             if (elements.ollamaModel) elements.ollamaModel.value = s.ollamaModel || 'gemma3:12b';

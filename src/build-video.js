@@ -14,16 +14,15 @@ const { processMotionGraphics, FULLSCREEN_MG_TYPES } = require('./ai-motion-grap
 const { downloadAllMedia, downloadBackgroundCanvas, retryPoorMedia } = require('./footage-manager');
 const { loadRecipe } = require('./recipe-loader');
 
-// Clean a folder of old build artifacts (scene files, plans, audio)
+// Clean a folder of old build artifacts — removes ALL media and plan files
 function cleanFolder(folderPath, label) {
     if (!fs.existsSync(folderPath)) return;
     const files = fs.readdirSync(folderPath);
     let cleaned = 0;
+    const mediaExts = new Set(['.mp4', '.jpg', '.jpeg', '.png', '.webp', '.bmp', '.gif', '.webm', '.mov', '.mkv', '.mp3', '.wav']);
     for (const file of files) {
-        // Remove scene files, plan, and audio files from previous builds
-        if (/^(scene-\d+\.(mp4|jpg|png|webp)|overlay-\d+\.(mp4|jpg|jpeg|png|gif|webm|mov)|bg-.+\.(mp4|jpg|jpeg|png|gif|webm|mov)|frame-\d+\.jpg|article-\d+\.(jpg|png|webp))$/.test(file) ||
-            file === 'video-plan.json' ||
-            file.endsWith('.mp3') || file.endsWith('.wav')) {
+        const ext = path.extname(file).toLowerCase();
+        if (mediaExts.has(ext) || file === 'video-plan.json') {
             try {
                 fs.unlinkSync(path.join(folderPath, file));
                 cleaned++;
@@ -31,6 +30,185 @@ function cleanFolder(folderPath, label) {
         }
     }
     if (cleaned > 0) console.log(`   🧹 Cleaned ${cleaned} old files from ${label}`);
+}
+
+// ====================================================================
+// DUMB MODE: No AI, uses Whisper segments + random keywords/MGs
+// ====================================================================
+async function buildDumbVideo(transcription, audioFile, directorsBrief) {
+    const { downloadAllMedia, downloadBackgroundCanvas } = require('./footage-manager');
+    const { createDefaultAnalysis } = require('./ai-vision');
+    const { assignTransitions } = require('./ai-director');
+
+    const fps = config.video.fps;
+    const segments = transcription.segments || [];
+    const audioDuration = transcription.duration || (segments.length > 0 ? segments[segments.length - 1].end : 0);
+
+    // Build scenes from Whisper segments
+    console.log('📝 Creating scenes from Whisper segments...');
+    const scenes = segments.map((seg, i) => ({
+        index: i,
+        text: seg.text.trim(),
+        startTime: seg.start,
+        endTime: seg.end,
+        duration: Math.round((seg.end - seg.start) * fps),
+        words: seg.words || []
+    }));
+    // Extend last scene to audio end
+    if (scenes.length > 0 && audioDuration > scenes[scenes.length - 1].endTime + 0.3) {
+        scenes[scenes.length - 1].endTime = audioDuration;
+        scenes[scenes.length - 1].duration = Math.round((audioDuration - scenes[scenes.length - 1].startTime) * fps);
+    }
+    console.log(`   ✅ ${scenes.length} scenes from Whisper\n`);
+
+    // Generate simple keywords from scene text (extract 2-3 key words)
+    console.log('🔑 Generating keywords from text...');
+    const stopWords = new Set(['the','a','an','is','are','was','were','be','been','being','have','has','had','do','does','did','will','would','shall','should','may','might','must','can','could','and','but','or','nor','for','yet','so','in','on','at','to','from','by','with','of','it','its','this','that','these','those','i','you','he','she','we','they','me','him','her','us','them','my','your','his','our','their','not','no','if','then','than','as','just','also','very','really','about','up','out','into','over','after','before']);
+    for (const scene of scenes) {
+        const words = scene.text.replace(/[^\w\s]/g, '').toLowerCase().split(/\s+/)
+            .filter(w => w.length > 3 && !stopWords.has(w));
+        const unique = [...new Set(words)].slice(0, 3);
+        scene.keyword = unique.join(' ') || 'abstract background';
+        scene.mediaType = 'video';
+        scene.sourceHint = 'stock';
+        scene.framing = 'fullscreen';
+        scene.backgroundId = 'none';
+        scene.background = 'none';
+    }
+    console.log(`   ✅ Keywords assigned\n`);
+
+    // Assign random transitions
+    console.log('🎬 Assigning random transitions...');
+    const defaultContext = { pacing: 'moderate' };
+    assignTransitions(scenes, defaultContext);
+    console.log('');
+
+    // Download media (no vision AI)
+    console.log('═'.repeat(60));
+    console.log('🎥 Downloading Media (no vision analysis)');
+    console.log('═'.repeat(60));
+    const downloadResult = await downloadAllMedia(scenes, defaultContext, {
+        inlineVision: false,
+        skipVisionAI: true
+    });
+    let scenesWithMedia = downloadResult.scenes;
+
+    // Generate random MGs (simple overlay types only)
+    console.log('\n═'.repeat(60));
+    console.log('✨ Generating Random Motion Graphics');
+    console.log('═'.repeat(60));
+    const overlayTypes = ['lowerThird', 'headline', 'callout', 'focusWord', 'statCounter'];
+    const motionGraphics = [];
+    for (let i = 0; i < scenesWithMedia.length; i++) {
+        const scene = scenesWithMedia[i];
+        // ~60% chance of getting an MG
+        if (Math.random() > 0.6) continue;
+        const type = overlayTypes[Math.floor(Math.random() * overlayTypes.length)];
+        const dur = scene.endTime - scene.startTime;
+        if (dur < 1.5) continue;
+
+        // Extract a short phrase from scene text for MG content
+        const mgText = scene.text.split(/[,.!?]/).filter(s => s.trim().length > 3)[0]?.trim() || scene.text.substring(0, 30);
+
+        motionGraphics.push({
+            type,
+            text: mgText.substring(0, 40),
+            subtext: '',
+            startTime: scene.startTime + 0.3,
+            duration: Math.min(dur - 0.5, 3),
+            endTime: scene.startTime + 0.3 + Math.min(dur - 0.5, 3),
+            position: ['bottom-left', 'bottom-right', 'center'][Math.floor(Math.random() * 3)],
+            sceneIndex: i,
+            category: 'overlay',
+            style: 'clean'
+        });
+    }
+    console.log(`   ✅ Placed ${motionGraphics.length} random MGs\n`);
+
+    // Create default visual analysis
+    const visualAnalysis = scenes.map((_, i) => createDefaultAnalysis(i));
+
+    // Assign final indices
+    scenesWithMedia.forEach((scene, i) => { scene._fileIndex = i; scene.index = i; });
+
+    // Build video plan
+    console.log('📋 Creating video plan...');
+    const scriptContext = {
+        summary: scenes[0]?.text?.substring(0, 80) || '',
+        theme: '', tone: '', mood: '', pacing: 'moderate', visualStyle: 'cinematic',
+        entities: [], keyStats: [], mainPoints: [], targetAudience: '', emotionalArc: '',
+        format: 'documentary', sections: [],
+        ctaDetected: false, ctaStartTime: null, hookEndTime: null,
+        densityTarget: 3, themeId: 'neutral'
+    };
+
+    const videoPlan = {
+        audio: audioFile,
+        totalDuration: audioDuration,
+        fps: config.video.fps,
+        width: config.video.width,
+        height: config.video.height,
+        scenes: scenesWithMedia,
+        mgScenes: [],
+        motionGraphics,
+        mgStyle: 'clean',
+        mapStyle: 'dark',
+        scriptContext,
+        visualAnalysis
+    };
+
+    const PROJECT_DIR = process.env.PROJECT_DIR || path.join(__dirname, '..');
+    const publicDir = path.join(PROJECT_DIR, 'public');
+    if (!fs.existsSync(publicDir)) fs.mkdirSync(publicDir, { recursive: true });
+
+    // Save plan
+    const planPath = path.join(config.paths.temp, 'video-plan.json');
+    fs.writeFileSync(planPath, JSON.stringify(videoPlan, (k, v) => k === '_fileIndex' ? undefined : v, 2));
+    fs.copyFileSync(planPath, path.join(publicDir, 'video-plan.json'));
+
+    // Copy audio
+    fs.copyFileSync(
+        path.join(config.paths.input, audioFile),
+        path.join(publicDir, audioFile)
+    );
+
+    // Copy media files
+    console.log('📂 Copying files to public folder...');
+    for (let i = 0; i < scenesWithMedia.length; i++) {
+        const scene = scenesWithMedia[i];
+        const ext = scene.mediaExtension || '.mp4';
+        const srcIdx = scene._fileIndex !== undefined ? scene._fileIndex : i;
+        const srcMedia = path.join(config.paths.temp, `scene-${srcIdx}${ext}`);
+        const destName = `scene-${i}-asset${ext}`;
+        const destMedia = path.join(publicDir, destName);
+        if (fs.existsSync(srcMedia)) fs.copyFileSync(srcMedia, destMedia);
+        scene.mediaFile = path.join(publicDir, destName);
+        scene.index = i;
+        delete scene._fileIndex;
+    }
+
+    // Copy SFX
+    const sfxDir = path.join(__dirname, '..', 'assets', 'sfx');
+    if (fs.existsSync(sfxDir)) {
+        const sfxFiles = fs.readdirSync(sfxDir).filter(f => f.endsWith('.mp3') || f.endsWith('.wav'));
+        for (const sfxFile of sfxFiles) {
+            fs.copyFileSync(path.join(sfxDir, sfxFile), path.join(publicDir, sfxFile));
+        }
+        if (sfxFiles.length > 0) console.log(`   🔊 Copied ${sfxFiles.length} SFX files`);
+    }
+
+    // Re-save plan with updated paths
+    fs.writeFileSync(
+        path.join(publicDir, 'video-plan.json'),
+        JSON.stringify(videoPlan, null, 2)
+    );
+    console.log(`   ✅ Plan saved\n`);
+
+    console.log('🎬 ==========================================');
+    console.log('✅ DUMB BUILD COMPLETE! (0 AI credits used)');
+    console.log('🎬 ==========================================\n');
+
+    return videoPlan;
 }
 
 async function buildVideo() {
@@ -75,6 +253,20 @@ async function buildVideo() {
     console.log('🎙️ Step 2: Transcribing audio...');
     const audioPath = path.join(config.paths.input, audioFile);
     const transcription = await transcribeAudio(audioPath);
+
+    // ====================================================================
+    // DUMB MODE: Skip all AI calls, use Whisper segments + random stuff
+    // ====================================================================
+    const hasDumbFlag = process.argv.includes('--dumb');
+    const smartAIEnv = (process.env.SMART_AI || '').trim().toLowerCase();
+    const smartAI = !hasDumbFlag && smartAIEnv !== 'false' && smartAIEnv !== '0';
+    console.log(`   🧠 Smart AI: ${smartAI ? 'ON' : 'OFF'} (env="${process.env.SMART_AI}", flag=${hasDumbFlag})`);
+    if (!smartAI) {
+        console.log('\n⚡ DUMB MODE — No AI credits used');
+        console.log('═'.repeat(60));
+        const dumbResult = await buildDumbVideo(transcription, audioFile, directorsBrief);
+        return dumbResult;
+    }
 
     // Step 3: AI Director — Scene creation + context analysis + format detection
     // NEW: Uses ai-director.js which combines scene splitting + context + CTA/hook detection
@@ -328,6 +520,8 @@ async function buildVideo() {
         }
     }
 
+    // Step 5.7: Image-to-MP4 conversion (DISABLED — images sanitized to PNG at download time)
+
     // Step 6: AI Motion Graphics (now with both script context AND visual analysis)
     console.log('═'.repeat(60));
     console.log('✨ Step 6: AI Motion Graphics');
@@ -526,7 +720,7 @@ async function buildVideo() {
         path.join(publicDir, audioFile)
     );
 
-    // Copy media files (videos and images)
+    // Copy media files (videos and images) with asset naming convention
     // After gap-carving, scenes may have different indices than their source files
     // Use _fileIndex (original download index) for source, array position for destination
     for (let i = 0; i < scenesWithMedia.length; i++) {
@@ -534,11 +728,13 @@ async function buildVideo() {
         const ext = scene.mediaExtension || '.mp4';
         const srcIdx = scene._fileIndex !== undefined ? scene._fileIndex : i;
         const srcMedia = path.join(config.paths.temp, `scene-${srcIdx}${ext}`);
-        const destMedia = path.join(publicDir, `scene-${i}${ext}`);
+        const destName = `scene-${i}-asset${ext}`;
+        const destMedia = path.join(publicDir, destName);
         if (fs.existsSync(srcMedia)) {
             fs.copyFileSync(srcMedia, destMedia);
         }
-        // Update scene index to match destination file name
+        // Update scene to reference public path
+        scene.mediaFile = path.join(publicDir, destName);
         scene.index = i;
         delete scene._fileIndex;
     }
@@ -609,7 +805,14 @@ async function buildVideo() {
     }
     if (iconsCopied > 0) console.log(`   🎯 Copied ${iconsCopied} icon SVGs`);
 
-    console.log(`   ✅ Files copied to public folder\n`);
+    console.log(`   ✅ Files copied to public folder`);
+
+    // Re-save video plan with updated public mediaFile paths
+    fs.writeFileSync(
+        path.join(publicDir, 'video-plan.json'),
+        JSON.stringify(videoPlan, null, 2)
+    );
+    console.log(`   ✅ Updated video-plan.json with public paths\n`);
 
     // Done!
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);

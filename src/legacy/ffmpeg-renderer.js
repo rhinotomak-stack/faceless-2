@@ -516,8 +516,8 @@ async function preRenderMGs(plan, publicDir, prepDir, progressCallback) {
             return mgClipDir;
         }
 
-        const appRoot = path.resolve(__dirname, '..');
-        const rootFile = path.join(appRoot, 'src', 'remotion', 'Root.jsx');
+        const appRoot = path.resolve(__dirname, '..', '..');
+        const rootFile = path.join(appRoot, 'src', 'legacy', 'remotion', 'Root.jsx');
 
         // Windows: find Remotion binaries
         let binariesDirectory = null;
@@ -1178,7 +1178,7 @@ function findSfxFile(filename, publicDir) {
     // Check assets/sfx
     const assetsDir = path.join(path.dirname(publicDir), 'assets', 'sfx');
     // Try project root assets
-    const appRoot = path.dirname(require.main?.filename || __dirname);
+    const appRoot = path.dirname(require.main?.filename || path.resolve(__dirname, '..', '..'));
     const inAssets = path.join(appRoot, 'assets', 'sfx', filename);
     if (fs.existsSync(inAssets)) return inAssets;
     return null;

@@ -5,18 +5,20 @@
   "main": "main.js",
   "scripts": {
     "build": "node src/build-video.js",
-    "preview": "npx remotion preview src/remotion/Root.jsx",
-    "render": "npx remotion render src/remotion/Root.jsx FacelessVideo output/video.mp4",
-    "all": "node src/build-video.js && npx remotion render src/remotion/Root.jsx FacelessVideo output/video.mp4",
+    "preview": "npx remotion preview src/legacy/remotion/Root.jsx",
+    "render": "npx remotion render src/legacy/remotion/Root.jsx FacelessVideo output/video.mp4",
+    "all": "node src/build-video.js && npx remotion render src/legacy/remotion/Root.jsx FacelessVideo output/video.mp4",
     "start": "electron .",
     "start:v2": "set EXPORT_V2=1&& electron .",
-    "dev": "electron . --dev"
+    "dev": "electron . --dev",
+    "setup-empire": "echo Setup removed"
   },
   "devDependencies": {
     "electron": "^40.1.0",
     "electron-builder": "^26.7.0",
     "pixelmatch": "^5.3.0",
     "pngjs": "^7.0.0",
+    "rcedit": "^5.0.2",
     "typescript": "^5.9.3",
     "webpack": "^5.105.0"
   },

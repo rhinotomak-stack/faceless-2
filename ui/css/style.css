@@ -496,6 +496,25 @@ select:focus {
     margin-top: 3px;
 }
 
+.toggle-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    margin-bottom: 6px;
+}
+.toggle-row input[type="checkbox"] {
+    width: 16px;
+    height: 16px;
+    accent-color: var(--primary);
+    cursor: pointer;
+}
+.toggle-label {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
 /* Buttons */
 .btn {
     display: inline-flex;
@@ -2050,6 +2069,18 @@ select:focus {
     color: var(--primary);
     font-weight: 600;
     margin-bottom: 4px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.scene-transition-badge {
+    font-size: 0.6rem;
+    color: var(--text-secondary);
+    background: rgba(255,255,255,0.06);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-weight: 400;
 }
 
 .scene-card .scene-text {
@@ -2745,6 +2776,21 @@ select:focus {
     background: rgba(255,255,255,0.12);
     z-index: 8;
     pointer-events: none;
+}
+
+/* Transition markers between clips */
+.transition-marker {
+    position: absolute;
+    top: -2px;
+    width: 16px;
+    height: 16px;
+    font-size: 10px;
+    line-height: 16px;
+    text-align: center;
+    z-index: 12;
+    pointer-events: auto;
+    cursor: default;
+    filter: drop-shadow(0 1px 2px rgba(0,0,0,0.6));
 }
 
 /* Clip Trim Handles */

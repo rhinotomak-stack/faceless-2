@@ -162,7 +162,7 @@ async function renderRemotionMG(mg, outDir, fps, scriptContext, tileW, tileH, is
 
     const totalFrames = Math.max(1, Math.round((mg.duration || 3) * fps));
     const rootFile = path.join(__dirname, 'remotion', 'Root.jsx');
-    const publicDir = path.join(__dirname, '..', 'public');
+    const publicDir = path.join(__dirname, '..', '..', 'public');
 
     const binOpts = {};
     if (fs.existsSync('C:\\ffmg\\bin\\ffmpeg.exe')) {

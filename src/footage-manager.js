@@ -63,7 +63,7 @@ const IMAGE_SOURCE_MAP = {
 
 // Default provider priority order (when no smart hint available)
 const VIDEO_PRIORITY = ['pexels', 'pixabay', 'youtube', 'newsVideo'];
-const IMAGE_PRIORITY = ['pexels', 'pixabay', 'googleCSE', 'bing', 'unsplash', 'duckduckgo', 'googleScrape'];
+const IMAGE_PRIORITY = ['pexels', 'pixabay', 'googleCSE', 'bing', 'unsplash', 'googleScrape'];
 
 // ============ SMART SOURCE PRIORITY ============
 
@@ -71,39 +71,39 @@ const IMAGE_PRIORITY = ['pexels', 'pixabay', 'googleCSE', 'bing', 'unsplash', 'd
 const SOURCE_PRIORITY_MAP = {
     'stock': {
         video: ['pexels', 'pixabay', 'youtube', 'newsVideo'],
-        image: ['pexels', 'pixabay', 'unsplash', 'googleCSE', 'bing', 'duckduckgo', 'googleScrape']
+        image: ['pexels', 'pixabay', 'unsplash', 'googleCSE', 'bing', 'googleScrape']
     },
     'youtube': {
         video: ['youtube', 'pexels', 'pixabay', 'newsVideo'],
-        image: ['duckduckgo', 'googleScrape', 'googleCSE', 'bing', 'pexels', 'pixabay', 'unsplash']
+        image: ['googleScrape', 'googleCSE', 'bing', 'pexels', 'pixabay', 'unsplash']
     },
     'web-image': {
         video: ['pexels', 'pixabay', 'youtube', 'newsVideo'],
-        image: ['googleCSE', 'bing', 'googleScrape', 'duckduckgo', 'pexels', 'pixabay', 'unsplash']
+        image: ['googleCSE', 'bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash']
     },
     'news': {
         video: ['newsVideo', 'youtube', 'pexels', 'pixabay'],
-        image: ['googleCSE', 'bing', 'googleScrape', 'duckduckgo', 'pexels', 'pixabay', 'unsplash']
+        image: ['googleCSE', 'bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash']
     },
 };
 
 // Theme-level fallback when AI source hint is missing
 const THEME_PRIORITY_MAP = {
     // News/factual themes → prefer real footage (news sites, YouTube)
-    politics:      { video: ['newsVideo', 'youtube', 'pexels', 'pixabay'], image: ['googleCSE', 'bing', 'googleScrape', 'duckduckgo', 'pexels', 'pixabay', 'unsplash'] },
-    finance:       { video: ['newsVideo', 'youtube', 'pexels', 'pixabay'], image: ['googleCSE', 'bing', 'googleScrape', 'duckduckgo', 'pexels', 'pixabay', 'unsplash'] },
-    business:      { video: ['youtube', 'newsVideo', 'pexels', 'pixabay'], image: ['googleCSE', 'bing', 'googleScrape', 'duckduckgo', 'pexels', 'pixabay', 'unsplash'] },
-    technology:    { video: ['youtube', 'pexels', 'pixabay', 'newsVideo'], image: ['googleCSE', 'bing', 'googleScrape', 'duckduckgo', 'pexels', 'pixabay', 'unsplash'] },
-    crime:         { video: ['newsVideo', 'youtube', 'pexels', 'pixabay'], image: ['googleScrape', 'duckduckgo', 'googleCSE', 'bing', 'pexels', 'pixabay', 'unsplash'] },
-    documentary:   { video: ['youtube', 'newsVideo', 'pexels', 'pixabay'], image: ['googleScrape', 'duckduckgo', 'googleCSE', 'bing', 'pexels', 'pixabay', 'unsplash'] },
+    politics:      { video: ['newsVideo', 'youtube', 'pexels', 'pixabay'], image: ['googleCSE', 'bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
+    finance:       { video: ['newsVideo', 'youtube', 'pexels', 'pixabay'], image: ['googleCSE', 'bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
+    business:      { video: ['youtube', 'newsVideo', 'pexels', 'pixabay'], image: ['googleCSE', 'bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
+    technology:    { video: ['youtube', 'pexels', 'pixabay', 'newsVideo'], image: ['googleCSE', 'bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
+    crime:         { video: ['newsVideo', 'youtube', 'pexels', 'pixabay'], image: ['googleScrape', 'googleCSE', 'bing', 'pexels', 'pixabay', 'unsplash'] },
+    documentary:   { video: ['youtube', 'newsVideo', 'pexels', 'pixabay'], image: ['googleScrape', 'googleCSE', 'bing', 'pexels', 'pixabay', 'unsplash'] },
     // Aesthetic themes → prefer stock footage
-    nature:        { video: ['pexels', 'pixabay', 'youtube', 'newsVideo'], image: ['pexels', 'pixabay', 'unsplash', 'duckduckgo', 'googleScrape', 'googleCSE', 'bing'] },
-    travel:        { video: ['pexels', 'pixabay', 'youtube', 'newsVideo'], image: ['pexels', 'pixabay', 'unsplash', 'duckduckgo', 'googleScrape', 'googleCSE', 'bing'] },
-    lifestyle:     { video: ['pexels', 'pixabay', 'youtube', 'newsVideo'], image: ['pexels', 'unsplash', 'pixabay', 'duckduckgo', 'googleScrape', 'googleCSE', 'bing'] },
+    nature:        { video: ['pexels', 'pixabay', 'youtube', 'newsVideo'], image: ['pexels', 'pixabay', 'unsplash', 'googleScrape', 'googleCSE', 'bing'] },
+    travel:        { video: ['pexels', 'pixabay', 'youtube', 'newsVideo'], image: ['pexels', 'pixabay', 'unsplash', 'googleScrape', 'googleCSE', 'bing'] },
+    lifestyle:     { video: ['pexels', 'pixabay', 'youtube', 'newsVideo'], image: ['pexels', 'unsplash', 'pixabay', 'googleScrape', 'googleCSE', 'bing'] },
     // Other
-    history:       { video: ['youtube', 'newsVideo', 'pexels', 'pixabay'], image: ['googleScrape', 'duckduckgo', 'googleCSE', 'bing', 'pexels', 'pixabay', 'unsplash'] },
-    entertainment: { video: ['youtube', 'pexels', 'pixabay', 'newsVideo'], image: ['googleScrape', 'duckduckgo', 'googleCSE', 'bing', 'pexels', 'pixabay', 'unsplash'] },
-    sports:        { video: ['youtube', 'pexels', 'pixabay', 'newsVideo'], image: ['googleScrape', 'duckduckgo', 'googleCSE', 'bing', 'pexels', 'pixabay', 'unsplash'] },
+    history:       { video: ['youtube', 'newsVideo', 'pexels', 'pixabay'], image: ['googleScrape', 'googleCSE', 'bing', 'pexels', 'pixabay', 'unsplash'] },
+    entertainment: { video: ['youtube', 'pexels', 'pixabay', 'newsVideo'], image: ['googleScrape', 'googleCSE', 'bing', 'pexels', 'pixabay', 'unsplash'] },
+    sports:        { video: ['youtube', 'pexels', 'pixabay', 'newsVideo'], image: ['googleScrape', 'googleCSE', 'bing', 'pexels', 'pixabay', 'unsplash'] },
 };
 
 /**
@@ -142,7 +142,7 @@ function getEnabledSources() {
         if (raw) return JSON.parse(raw);
     } catch (e) { }
     // Default: all on except API-key-only ones
-    return { pexels: true, pixabay: true, unsplash: true, googleCSE: false, bing: false, duckduckgo: true, googleScrape: true, youtube: false, newsVideo: false };
+    return { pexels: true, pixabay: true, unsplash: true, googleCSE: false, bing: false, duckduckgo: false, googleScrape: true, youtube: false, newsVideo: false };
 }
 
 function initProviders(scriptContext) {
@@ -311,12 +311,13 @@ async function downloadMedia(keyword, mediaType, filenameBase, sceneDuration = 1
                 try {
                     const outputPath = path.join(config.paths.temp, filenameBase + ext);
                     console.log(`  ⬇️  [${provider.name}] Downloading${attempt > 0 ? ` (attempt ${attempt + 1})` : ''}...`);
-                    await provider.download(selected.url, outputPath, { duration: sceneDuration, keyword: keyword, _directVideoUrl: selected._directVideoUrl || null });
-                    console.log(`  ✅ [${provider.name}] Downloaded: ${filenameBase}${ext}`);
+                    const finalPath = await provider.download(selected.url, outputPath, { duration: sceneDuration, keyword: keyword, _directVideoUrl: selected._directVideoUrl || null });
+                    const finalExt = path.extname(finalPath);
+                    console.log(`  ✅ [${provider.name}] Downloaded: ${path.basename(finalPath)}`);
 
                     return {
-                        path: outputPath,
-                        ext: ext,
+                        path: finalPath,
+                        ext: finalExt,
                         provider: provider.name,
                         mediaType: mediaType,
                         mediaWidth: selected.width || 0,
@@ -602,11 +603,11 @@ async function retryPoorMedia(keyword, mediaType, filenameBase, sceneDuration = 
             if (!selected) continue;
 
             const outputPath = path.join(config.paths.temp, filenameBase + ext);
-            await provider.download(selected.url, outputPath, { duration: sceneDuration, keyword, _directVideoUrl: selected._directVideoUrl || null });
+            const finalPath = await provider.download(selected.url, outputPath, { duration: sceneDuration, keyword, _directVideoUrl: selected._directVideoUrl || null });
 
             return {
-                path: outputPath,
-                ext,
+                path: finalPath,
+                ext: path.extname(finalPath),
                 provider: provider.name,
                 mediaType,
                 mediaWidth: selected.width || 0,
@@ -634,11 +635,11 @@ async function retryPoorMedia(keyword, mediaType, filenameBase, sceneDuration = 
                 if (!selected) continue;
 
                 const outputPath = path.join(config.paths.temp, filenameBase + ext);
-                await provider.download(selected.url, outputPath, { duration: sceneDuration, keyword: variant, _directVideoUrl: selected._directVideoUrl || null });
+                const finalPath = await provider.download(selected.url, outputPath, { duration: sceneDuration, keyword: variant, _directVideoUrl: selected._directVideoUrl || null });
 
                 return {
-                    path: outputPath,
-                    ext,
+                    path: finalPath,
+                    ext: path.extname(finalPath),
                     provider: provider.name,
                     mediaType,
                     mediaWidth: selected.width || 0,

@@ -804,6 +804,9 @@ async function analyzeAndCreateScenes(transcription, directorsBrief) {
         // Post-processing: Auto-split scenes longer than 8 seconds
         scenes = autoSplitLongScenes(scenes, allWords, audioDuration, fps, 8.0);
 
+        // Assign transitions between scenes
+        assignTransitions(scenes, scriptContext);
+
         // Map listicle sections to scene indices
         if (scriptContext.format === 'listicle' && scriptContext.sections.length > 0) {
             scriptContext.sections = _mapSectionsToScenes(scriptContext.sections, scenes);
@@ -818,11 +821,90 @@ async function analyzeAndCreateScenes(transcription, directorsBrief) {
         console.log(`   ❌ AI Director failed: ${error.message}`);
         console.log('   ↩️ Falling back to Whisper segments...\n');
 
+        const fallbackScenes = createScenesFromWhisper(transcription);
+        assignTransitions(fallbackScenes, _defaultContext(fullScript));
         return {
-            scenes: createScenesFromWhisper(transcription),
+            scenes: fallbackScenes,
             scriptContext: _defaultContext(fullScript)
         };
     }
+}
+
+// ============================================================
+// TRANSITION ASSIGNMENT
+// ============================================================
+
+/**
+ * Assign transitions between scenes.
+ * Types: "cut" (hard cut), "crossfade", "flash", "fade_to_black"
+ *
+ * Rules:
+ *  - Scene 0 (first scene): always "cut" (no intro transition)
+ *  - Last scene: "fade_to_black" (natural ending)
+ *  - After a long pause (>0.5s gap between scenes): "fade_to_black"
+ *  - Fast pacing / short scenes (<3s): prefer "cut" (70%) or "flash" (30%)
+ *  - Topic change (different keywords): prefer "crossfade"
+ *  - Default mix: 50% cut, 30% crossfade, 15% flash, 5% fade_to_black
+ */
+function assignTransitions(scenes, scriptContext) {
+    if (!scenes || scenes.length === 0) return;
+
+    const pacing = (scriptContext && scriptContext.pacing) || 'moderate';
+    const isFast = pacing === 'fast' || pacing === 'rapid';
+
+    for (let i = 0; i < scenes.length; i++) {
+        const scene = scenes[i];
+
+        // First scene — no transition in
+        if (i === 0) {
+            scene.transition = { type: 'cut', duration: 0 };
+            continue;
+        }
+
+        // Last scene — fade out
+        if (i === scenes.length - 1) {
+            scene.transition = { type: 'fade_to_black', duration: 0.5 };
+            continue;
+        }
+
+        const prev = scenes[i - 1];
+        const gap = scene.startTime - prev.endTime;
+        const sceneDuration = scene.endTime - scene.startTime;
+
+        // Gap between scenes — natural pause = fade to black
+        if (gap > 0.5) {
+            scene.transition = { type: 'fade_to_black', duration: 0.4 };
+            continue;
+        }
+
+        // Very short scene or fast pacing — hard cut or flash
+        if (isFast || sceneDuration < 3) {
+            const r = Math.random();
+            scene.transition = r < 0.7
+                ? { type: 'cut', duration: 0 }
+                : { type: 'flash', duration: 0.15 };
+            continue;
+        }
+
+        // Default: weighted random
+        const r = Math.random();
+        if (r < 0.45) {
+            scene.transition = { type: 'cut', duration: 0 };
+        } else if (r < 0.80) {
+            scene.transition = { type: 'crossfade', duration: 0.5 };
+        } else if (r < 0.93) {
+            scene.transition = { type: 'flash', duration: 0.15 };
+        } else {
+            scene.transition = { type: 'fade_to_black', duration: 0.4 };
+        }
+    }
+
+    const counts = {};
+    scenes.forEach(s => {
+        const t = s.transition?.type || 'cut';
+        counts[t] = (counts[t] || 0) + 1;
+    });
+    console.log(`   🎬 Transitions: ${Object.entries(counts).map(([k,v]) => `${k}=${v}`).join(', ')}`);
 }
 
 // ============================================================
@@ -898,5 +980,6 @@ module.exports = {
     buildScenesFromAnchors,
     findWordIndex,
     normalize,
-    createScenesFromWhisper
+    createScenesFromWhisper,
+    assignTransitions
 };

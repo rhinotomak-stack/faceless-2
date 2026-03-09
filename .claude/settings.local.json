@@ -7,7 +7,10 @@
       "Bash(node -e:*)",
       "Bash(ffmpeg:*)",
       "Bash(python3:*)",
-      "WebFetch(domain:docs.vidrush.ai)"
+      "WebFetch(domain:docs.vidrush.ai)",
+      "WebFetch(domain:github.com)",
+      "Bash(where melt)",
+      "Bash(where melt.exe)"
     ]
   }
 }

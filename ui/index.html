@@ -38,7 +38,6 @@
                     <option value="remotion">Remotion (Full)</option>
                     <option value="webgl2">WebGL2 Engine (WYSIWYG)</option>
                     <option value="native">Native D3D11 (GPU)</option>
-                    <option value="preview-capture">Preview Capture (Pixel-Perfect)</option>
                 </select>
                 <button id="btn-compositor-toggle" class="btn btn-secondary" title="Toggle WebGL2 preview engine" style="font-size:11px;padding:4px 8px;display:none;">Engine: OFF</button>
                 <label id="legacy-export-label" style="display:none;align-items:center;gap:4px;font-size:11px;color:#aaa;cursor:pointer;" title="Use legacy per-frame seeking export (slower, for A/B hash comparison)"><input type="checkbox" id="legacy-export-toggle" style="cursor:pointer;">Legacy</label>
@@ -65,6 +64,11 @@
 
                 <div class="panel-section">
                     <h3>🤖 AI Settings</h3>
+                    <label class="toggle-row">
+                        <input type="checkbox" id="smart-ai-toggle" checked>
+                        <span class="toggle-label">Smart AI (uses API credits)</span>
+                    </label>
+                    <small class="ai-instructions-hint" id="smart-ai-hint">When OFF: no AI calls, uses Whisper segments + random keywords/transitions/MGs. Free!</small>
                     <label>AI Provider:</label>
                     <select id="ai-provider">
                         <option value="ollama">Ollama (Free, Local)</option>
