@@ -783,7 +783,7 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
     const themeId = scriptContext?.themeId || 'neutral';
     const theme = getTheme(themeId);
     const allowedMGs = theme.allowedMGs || Object.keys(POSITION_MAP);
-    console.log(`  MG Style: ${mgStyle} | Map Style: ${mapStyle} | Niche: ${theme.name}`);
+    console.log(`  MG Style: ${mgStyle} | Niche: ${theme.name}`);
     console.log(`  Allowed MGs: ${allowedMGs.join(', ')}\n`);
 
     const results = [];
@@ -909,7 +909,7 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
         }
     }
 
-    console.log(`\n  Motion graphics placed: ${results.length}/${scenes.length} scenes (style: ${mgStyle}, map: ${mapStyle})\n`);
+    console.log(`\n  Motion graphics placed: ${results.length}/${scenes.length} scenes (style: ${mgStyle})\n`);
     return { motionGraphics: results, mgStyle, mapStyle };
 }
 

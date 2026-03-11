@@ -92,6 +92,8 @@ class ExportPipeline {
         this._lastLogTime = Date.now();
         this._lastLogFrames = 0;
         this.compositor._exporting = true;
+        // Switch to full resolution for export
+        this.compositor._setExportResolution();
 
         // Verify Node.js require() is available (needs contextIsolation: false + sandbox: false)
         if (typeof _spawn !== 'function') {
@@ -263,6 +265,7 @@ class ExportPipeline {
             this._running = false;
             this._ffmpegProc = null;
             this.compositor._exporting = false;
+            this.compositor._restorePreviewResolution();
             this.compositor._resetVideosForPreview();
             if (this._pboEnabled) {
                 this.compositor.destroyPBOs();

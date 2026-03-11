@@ -64,6 +64,9 @@ class Compositor {
         this._pboFrameBytes = 0;     // w * h * 4
         this._pboReady = false;
 
+        // Preview resolution scaling (0.5 = half-res for performance)
+        this._previewScale = 0.5;
+
     }
 
     // ========================================================================
@@ -76,8 +79,11 @@ class Compositor {
     init() {
         if (this._initialized) return;
 
-        this.canvas.width = this.width;
-        this.canvas.height = this.height;
+        // Use preview resolution for canvas (CSS scales it up)
+        const rw = this._renderWidth();
+        const rh = this._renderHeight();
+        this.canvas.width = rw;
+        this.canvas.height = rh;
 
         const gl = this.canvas.getContext('webgl2', {
             alpha: false,              // Opaque canvas (composites on black)
@@ -110,17 +116,18 @@ class Compositor {
         // Sub-components
         this.textureManager = new TextureManager(gl);
         this.mgRenderer = new MGRenderer(this.textureManager, this.fps);
+        this.mgRenderer.setPreviewScale(this._previewScale);
         this.transitionRenderer = new TransitionRenderer(gl);
         this.transitionRenderer.init();
 
         // Transition FBOs — offscreen render targets for scene-A and scene-B
         this._transitionFBOs = [
-            this._createFBO(gl, this.width, this.height),
-            this._createFBO(gl, this.width, this.height),
+            this._createFBO(gl, rw, rh),
+            this._createFBO(gl, rw, rh),
         ];
 
         this._initialized = true;
-        console.log('[Compositor] Initialized WebGL2 engine', this.width, 'x', this.height, '@', this.fps, 'fps');
+        console.log('[Compositor] Initialized WebGL2 engine', rw, 'x', rh, `(preview scale ${this._previewScale})`, '@', this.fps, 'fps');
     }
 
     /**
@@ -340,7 +347,9 @@ class Compositor {
         const gl = this.gl;
         this._currentFrame = frame;
 
-        gl.viewport(0, 0, this.width, this.height);
+        const rw = this._renderWidth();
+        const rh = this._renderHeight();
+        gl.viewport(0, 0, rw, rh);
         gl.clearColor(0, 0, 0, 1);
         gl.clear(gl.COLOR_BUFFER_BIT);
 
@@ -939,7 +948,7 @@ class Compositor {
 
         // Restore rendering to the screen framebuffer
         gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-        gl.viewport(0, 0, this.width, this.height);
+        gl.viewport(0, 0, this._renderWidth(), this._renderHeight());
 
         return fboEntry.texture;
     }
@@ -1292,6 +1301,97 @@ class Compositor {
                     this.textureManager.release(`scene-${scene.index}`);
                 }
             }
+        }
+    }
+
+    // ========================================================================
+    // PREVIEW RESOLUTION SCALING
+    // ========================================================================
+
+    /** Current render width — scaled for preview, full for export */
+    _renderWidth() {
+        if (this._exporting) return this.width;
+        return Math.round(this.width * this._previewScale);
+    }
+
+    /** Current render height — scaled for preview, full for export */
+    _renderHeight() {
+        if (this._exporting) return this.height;
+        return Math.round(this.height * this._previewScale);
+    }
+
+    /**
+     * Set preview scale factor (0.25 = quarter, 0.5 = half, 1.0 = full).
+     * Resizes canvas and FBOs immediately.
+     */
+    setPreviewScale(scale) {
+        this._previewScale = Math.max(0.25, Math.min(1.0, scale));
+        if (this._initialized && !this._exporting) {
+            this._applyResolution();
+        }
+        // Also scale the MG offscreen canvas
+        if (this.mgRenderer) {
+            this.mgRenderer.setPreviewScale(this._previewScale);
+        }
+    }
+
+    /**
+     * Resize canvas + FBOs to match current render resolution.
+     * Called when switching between preview and export modes.
+     */
+    _applyResolution() {
+        const gl = this.gl;
+        if (!gl) return;
+
+        const rw = this._renderWidth();
+        const rh = this._renderHeight();
+
+        this.canvas.width = rw;
+        this.canvas.height = rh;
+
+        // Resize transition FBOs
+        if (this._transitionFBOs) {
+            for (const fbo of this._transitionFBOs) {
+                gl.bindTexture(gl.TEXTURE_2D, fbo.texture);
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, rw, rh, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+                fbo.width = rw;
+                fbo.height = rh;
+            }
+            gl.bindTexture(gl.TEXTURE_2D, null);
+        }
+
+        console.log(`[Compositor] Resolution set to ${rw}x${rh} (scale: ${this._previewScale})`);
+    }
+
+    /**
+     * Switch to full resolution for export. Call before starting export.
+     */
+    _setExportResolution() {
+        this.canvas.width = this.width;
+        this.canvas.height = this.height;
+        const gl = this.gl;
+        if (gl && this._transitionFBOs) {
+            for (const fbo of this._transitionFBOs) {
+                gl.bindTexture(gl.TEXTURE_2D, fbo.texture);
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, this.width, this.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+                fbo.width = this.width;
+                fbo.height = this.height;
+            }
+            gl.bindTexture(gl.TEXTURE_2D, null);
+        }
+        // MG renderer at full res for export
+        if (this.mgRenderer) this.mgRenderer.setPreviewScale(1.0);
+        console.log(`[Compositor] Export resolution: ${this.width}x${this.height}`);
+    }
+
+    /**
+     * Restore preview resolution after export completes.
+     */
+    _restorePreviewResolution() {
+        if (!this._exporting) {
+            this._applyResolution();
+            // Restore MG renderer to preview scale
+            if (this.mgRenderer) this.mgRenderer.setPreviewScale(this._previewScale);
         }
     }
 

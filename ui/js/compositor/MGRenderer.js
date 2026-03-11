@@ -9,11 +9,28 @@ class MGRenderer {
     constructor(textureManager, fps) {
         this.textureManager = textureManager;
         this.fps = fps;
-        // Offscreen canvas for 2D drawing (full 1920x1080)
+        // Offscreen canvas for 2D drawing
         this._canvas = document.createElement('canvas');
         this._canvas.width = 1920;
         this._canvas.height = 1080;
         this._ctx = this._canvas.getContext('2d', { willReadFrequently: false });
+        // Preview scale (1.0 = full, 0.5 = half-res for faster Canvas2D)
+        this._previewScale = 1.0;
+    }
+
+    /**
+     * Set preview scale. Resizes the offscreen canvas.
+     * Drawing code still uses 1920x1080 coordinates via ctx.scale().
+     */
+    setPreviewScale(scale) {
+        this._previewScale = Math.max(0.25, Math.min(1.0, scale));
+        const w = Math.round(1920 * this._previewScale);
+        const h = Math.round(1080 * this._previewScale);
+        if (this._canvas.width !== w || this._canvas.height !== h) {
+            this._canvas.width = w;
+            this._canvas.height = h;
+            console.log(`[MGRenderer] Canvas resized to ${w}x${h} (scale: ${this._previewScale})`);
+        }
     }
 
     /**
@@ -22,6 +39,9 @@ class MGRenderer {
      */
     renderMG(mg, localFrame, scriptContext) {
         const ctx = this._ctx;
+        const s_ = this._previewScale;
+        // Scale canvas context so all drawing code uses 1920x1080 coordinates
+        ctx.setTransform(s_, 0, 0, s_, 0, 0);
         ctx.clearRect(0, 0, 1920, 1080);
 
         const s = this._getStyle(mg, scriptContext);

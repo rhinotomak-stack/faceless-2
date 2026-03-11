@@ -5948,6 +5948,21 @@ function initCompositor() {
             });
         }
 
+        // Wire up preview quality selector
+        const qualitySelect = document.getElementById('preview-quality');
+        if (qualitySelect) {
+            qualitySelect.addEventListener('change', () => {
+                const scale = parseFloat(qualitySelect.value) || 0.5;
+                if (state.compositor) {
+                    state.compositor.setPreviewScale(scale);
+                    // Re-render current frame at new resolution
+                    if (state.compositorActive && state.compositor.isInitialized) {
+                        state.compositor.renderAtTime(state.currentTime);
+                    }
+                }
+            });
+        }
+
         // Auto-activate when WebGL2 renderer is selected + show legacy toggle
         const rendererSelect = document.getElementById('renderer-select');
         const legacyLabel = document.getElementById('legacy-export-label');
@@ -5977,6 +5992,7 @@ function setCompositorMode(active) {
     const canvas = document.getElementById('compositor-canvas');
     const htmlLayers = document.querySelectorAll('.track-wrapper, .mg-overlay, .mg-v3-preview-layer, .bg-media');
     const toggleBtn = document.getElementById('btn-compositor-toggle');
+    const qualitySelect = document.getElementById('preview-quality');
 
     if (active) {
         // Initialize if not yet done
@@ -5994,6 +6010,7 @@ function setCompositorMode(active) {
             toggleBtn.style.background = '#22c55e';
             toggleBtn.style.color = '#000';
         }
+        if (qualitySelect) qualitySelect.style.display = '';
         // Render current frame immediately
         if (state.compositor && state.compositor.isInitialized) {
             state.compositor.renderAtTime(state.currentTime);
@@ -6007,6 +6024,7 @@ function setCompositorMode(active) {
             toggleBtn.style.background = '';
             toggleBtn.style.color = '';
         }
+        if (qualitySelect) qualitySelect.style.display = 'none';
         // Pause compositor videos
         if (state.compositor) state.compositor.pauseVideos();
         console.log('[Compositor] Preview mode DISABLED');
