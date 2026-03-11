@@ -1,12 +1,21 @@
 /**
- * YTA Empire 2 - Electron Preload Script
- * This safely exposes Electron APIs to the renderer (UI)
+ * YTA Empire WEBGL - Electron Preload Script
+ * Exposes Electron IPC + Node.js primitives to the renderer.
+ * Both windows use contextIsolation: false, so direct window assignment works.
  */
 
-const { contextBridge, ipcRenderer, webUtils } = require('electron');
+const { ipcRenderer, webUtils } = require('electron');
+const { spawn } = require('child_process');
+const _nodePath = require('path');
+const _nodeFs = require('fs');
 
-// Expose protected methods to the renderer process
-contextBridge.exposeInMainWorld('electronAPI', {
+// Expose Node.js primitives for direct FFmpeg spawn (bypasses IPC for frame data)
+window._nodeSpawn = spawn;
+window._nodePath = _nodePath;
+window._nodeFs = _nodeFs;
+
+// Expose Electron IPC methods to the renderer process
+window.electronAPI = {
     // Copy file to project folder
     copyFile: (sourcePath, destFolder) => {
         return ipcRenderer.invoke('copy-file', sourcePath, destFolder);
@@ -45,16 +54,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // Get file URL for video playback
     getFileUrl: (filePath) => {
         return ipcRenderer.invoke('get-file-url', filePath);
-    },
-
-    // Render video with Remotion
-    runRender: () => {
-        return ipcRenderer.invoke('run-render');
-    },
-
-    // Render video with FFmpeg (GPU-accelerated)
-    runRenderFFmpeg: () => {
-        return ipcRenderer.invoke('run-render-ffmpeg');
     },
 
     // Open output folder
@@ -172,30 +171,22 @@ contextBridge.exposeInMainWorld('electronAPI', {
     addRecentProject: () => ipcRenderer.invoke('add-recent-project'),
 
     // ========================================
-    // WebGL2 Compositor Engine - Export IPC
+    // WebGL2 Compositor Engine - Export
     // ========================================
 
-    // Start WebGL2 export (spawns FFmpeg with raw RGBA pipe)
+    // Legacy IPC export (kept for backward compat)
     startWebGLExport: (options) => {
         return ipcRenderer.invoke('start-webgl-export', options);
     },
-
-    // Send a single raw RGBA frame buffer to FFmpeg
     sendExportFrame: (frameBuffer) => {
         return ipcRenderer.invoke('export-frame', frameBuffer);
     },
-
-    // Send a batch of raw RGBA frame buffers to FFmpeg (reduces IPC round-trips)
     sendExportFramesBatch: (batchPayload) => {
         return ipcRenderer.invoke('export-frames-batch', batchPayload);
     },
-
-    // Finish export (close FFmpeg stdin, mux audio, return output path)
     finishWebGLExport: () => {
         return ipcRenderer.invoke('finish-webgl-export');
     },
-
-    // Cancel an in-progress WebGL2 export
     cancelWebGLExport: () => {
         return ipcRenderer.invoke('cancel-webgl-export');
     },
@@ -205,50 +196,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
         ipcRenderer.removeAllListeners(channel);
     },
 
-    // ========================================
-    // V2 GPU-Native Export
-    // ========================================
-    v2Probe: () => ipcRenderer.invoke('v2-probe'),
-    // Target management
-    v2CreateTargets: (opts) => ipcRenderer.invoke('v2-create-targets', opts),
-    v2BeginFrame: (idx) => ipcRenderer.invoke('v2-begin-frame', idx),
-    v2EndFrame: (idx) => ipcRenderer.invoke('v2-end-frame', idx),
-    v2DestroyTargets: () => ipcRenderer.invoke('v2-destroy-targets'),
-    // Encoder
-    v2InitEncoder: (opts) => ipcRenderer.invoke('v2-init-encoder', opts),
-    v2EncodeFrame: (opts) => ipcRenderer.invoke('v2-encode-frame', opts),
-    v2FlushEncoder: () => ipcRenderer.invoke('v2-flush-encoder'),
-    v2CloseEncoder: () => ipcRenderer.invoke('v2-close-encoder'),
-
-    // ========================================
-    // Native D3D11 + NVENC Export
-    // ========================================
-    nativeExportProbe: () => ipcRenderer.invoke('native-export-probe'),
-    nativeExportStart: (opts) => ipcRenderer.invoke('native-export-start', opts),
-    nativeComposeExport: (opts) => ipcRenderer.invoke('native-compose-export', opts),
-    nativeExportCancel: () => ipcRenderer.invoke('native-export-cancel'),
-    preRenderMGsPNG: (opts) => ipcRenderer.invoke('pre-render-mgs-png', opts),
-
-    // Bake-and-Play: MG cache access for preview compositor
-    getMGCacheUrl: (hash, frameName) => ipcRenderer.invoke('get-mg-cache-url', hash, frameName),
-    getMGCacheDir: () => ipcRenderer.invoke('get-mg-cache-dir'),
-    checkMGCache: (hash) => ipcRenderer.invoke('check-mg-cache', hash),
-
-    // ========================================
-    // MLT Render Engine (Kdenlive architecture)
-    // ========================================
-    mltCheck: () => ipcRenderer.invoke('mlt-check'),
-    mltGetPresets: () => ipcRenderer.invoke('mlt-get-presets'),
-    mltRender: (opts) => ipcRenderer.invoke('mlt-render', opts),
-    mltCancelRender: (opts) => ipcRenderer.invoke('mlt-cancel-render', opts),
-    mltGetJobs: () => ipcRenderer.invoke('mlt-get-jobs'),
-    mltCleanupJobs: () => ipcRenderer.invoke('mlt-cleanup-jobs'),
-    onMltRenderProgress: (callback) => {
-        ipcRenderer.on('render-progress', (event, data) => callback(data));
+    // Get export config (FFmpeg path, encoder args, output paths) for direct-spawn mode
+    getExportConfig: (options) => {
+        return ipcRenderer.invoke('get-export-config', options);
     },
-    onMltRenderStatus: (callback) => {
-        ipcRenderer.on('render-status', (event, data) => callback(data));
+
+    // Mux audio onto a finished video file (uses main process for path resolution)
+    muxAudio: (videoFile, outputFile) => {
+        return ipcRenderer.invoke('mux-audio', videoFile, outputFile);
     },
-});
+};
 
 console.log('✅ Electron preload script loaded');

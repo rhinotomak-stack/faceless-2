@@ -23,9 +23,13 @@ const THEMES = {
 
         // Background canvas (video texture behind all footage)
         background: 'tech-grid',
+        canvasBackground: 'matrixDots',
 
         // Motion graphics style
         mgStyle: 'neon',
+
+        // Allowed MG types for this niche
+        allowedMGs: ['kineticText', 'statCounter', 'barChart', 'focusWord', 'animatedIcons', 'progressBar', 'headline', 'comparisonCard'],
 
         // Color palette
         colors: {
@@ -70,7 +74,10 @@ const THEMES = {
         description: 'Natural, organic, wildlife, environment',
 
         background: 'nature',
+        canvasBackground: 'organicNoise',
         mgStyle: 'cinematic',
+
+        allowedMGs: ['headline', 'lowerThird', 'callout', 'mapChart', 'timeline', 'focusWord', 'bulletList', 'statCounter'],
 
         colors: {
             primary: '#8B4513',      // Earth brown
@@ -110,7 +117,10 @@ const THEMES = {
         description: 'Crime, mystery, thriller, dark content',
 
         background: 'dark',
+        canvasBackground: 'vignette',
         mgStyle: 'cinematic',
+
+        allowedMGs: ['headline', 'lowerThird', 'callout', 'timeline', 'articleHighlight', 'focusWord', 'mapChart', 'kineticText'],
 
         colors: {
             primary: '#dc143c',      // Crime red
@@ -150,7 +160,10 @@ const THEMES = {
         description: 'Business, professional, educational content',
 
         background: 'light',
+        canvasBackground: 'gridLines',
         mgStyle: 'clean',
+
+        allowedMGs: ['barChart', 'donutChart', 'timeline', 'statCounter', 'bulletList', 'comparisonCard', 'lowerThird', 'progressBar', 'headline', 'articleHighlight'],
 
         colors: {
             primary: '#0066cc',      // Corporate blue
@@ -190,7 +203,10 @@ const THEMES = {
         description: 'High-end, elegant, fashion, lifestyle',
 
         background: 'warm',
+        canvasBackground: 'softGlow',
         mgStyle: 'elegant',
+
+        allowedMGs: ['headline', 'lowerThird', 'focusWord', 'kineticText', 'callout', 'statCounter', 'donutChart', 'rankingList'],
 
         colors: {
             primary: '#d4af37',      // Gold
@@ -230,7 +246,10 @@ const THEMES = {
         description: 'Sports, action, high-energy content',
 
         background: 'dark',
+        canvasBackground: 'energyBurst',
         mgStyle: 'bold',
+
+        allowedMGs: ['statCounter', 'rankingList', 'comparisonCard', 'headline', 'focusWord', 'kineticText', 'progressBar', 'barChart', 'lowerThird'],
 
         colors: {
             primary: '#ff4500',      // Orange red
@@ -270,7 +289,10 @@ const THEMES = {
         description: 'General-purpose, balanced, versatile',
 
         background: 'neutral',
+        canvasBackground: 'subtleGrain',
         mgStyle: 'clean',
+
+        allowedMGs: ['headline', 'lowerThird', 'statCounter', 'callout', 'bulletList', 'focusWord', 'progressBar', 'barChart', 'donutChart', 'comparisonCard', 'timeline', 'rankingList', 'kineticText', 'mapChart', 'articleHighlight', 'animatedIcons'],
 
         colors: {
             primary: '#4a90e2',      // Soft blue

@@ -30,6 +30,9 @@ class MGRenderer {
             _animationSpeed: mg._animationSpeed || 1.0,
         });
 
+        // Draw MG background if set
+        this._renderMGBackground(ctx, mg, anim);
+
         let rendered = false;
         switch (mg.type) {
             case 'headline':
@@ -88,6 +91,10 @@ class MGRenderer {
                 this._renderSubscribeCTA(ctx, localFrame, this.fps, mg, s, anim);
                 rendered = true;
                 break;
+            case 'mapChart':
+                this._renderMapChart(ctx, localFrame, this.fps, mg, s, anim);
+                rendered = true;
+                break;
             default:
                 // Fallback: render any unknown MG type as a headline so text is visible
                 if (mg.text) {
@@ -132,6 +139,151 @@ class MGRenderer {
         if (!s.fontBody) s.fontBody = 'Arial, sans-serif';
 
         return s;
+    }
+
+    // ========================================================================
+    // MG BACKGROUND RENDERING
+    // ========================================================================
+
+    _renderMGBackground(ctx, mg, anim) {
+        const bg = mg.mgBackground;
+        if (!bg || bg === 'none') return;
+
+        const W = 1920, H = 1080;
+        const alpha = Math.min(1, anim.opacity);
+
+        ctx.save();
+
+        if (bg === 'scrim-light') {
+            ctx.fillStyle = `rgba(0,0,0,${(0.2 * alpha).toFixed(3)})`;
+            ctx.fillRect(0, 0, W, H);
+        } else if (bg === 'scrim') {
+            ctx.fillStyle = `rgba(0,0,0,${(0.4 * alpha).toFixed(3)})`;
+            ctx.fillRect(0, 0, W, H);
+        } else if (bg === 'scrim-dark') {
+            ctx.fillStyle = `rgba(0,0,0,${(0.6 * alpha).toFixed(3)})`;
+            ctx.fillRect(0, 0, W, H);
+        } else if (bg === 'solid-black') {
+            ctx.globalAlpha = alpha;
+            ctx.fillStyle = '#000000';
+            ctx.fillRect(0, 0, W, H);
+        } else if (bg === 'solid-dark') {
+            ctx.globalAlpha = alpha;
+            ctx.fillStyle = '#111111';
+            ctx.fillRect(0, 0, W, H);
+        } else if (bg.startsWith('gradient:')) {
+            const gradientId = bg.replace('gradient:', '');
+            const gradients = window.GRADIENT_BACKGROUNDS;
+            const css = gradients ? gradients[gradientId] : null;
+            if (css) {
+                ctx.globalAlpha = alpha;
+                this._drawCSSGradientOnCanvas(ctx, css, W, H);
+            }
+        }
+
+        ctx.restore();
+    }
+
+    /**
+     * Parse and draw a CSS gradient string onto a Canvas2D context.
+     * Supports linear-gradient and radial-gradient with common syntax.
+     */
+    _drawCSSGradientOnCanvas(ctx, css, W, H) {
+        // Split layered gradients (e.g., "repeating-linear-gradient(...), linear-gradient(...)")
+        const layers = this._splitGradientLayers(css);
+        // Draw back-to-front
+        for (let i = layers.length - 1; i >= 0; i--) {
+            this._drawSingleGradientOnCanvas(ctx, layers[i].trim(), W, H);
+        }
+    }
+
+    _splitGradientLayers(css) {
+        const layers = [];
+        let depth = 0, start = 0;
+        for (let i = 0; i < css.length; i++) {
+            if (css[i] === '(') depth++;
+            else if (css[i] === ')') depth--;
+            else if (css[i] === ',' && depth === 0) {
+                layers.push(css.slice(start, i));
+                start = i + 1;
+            }
+        }
+        layers.push(css.slice(start));
+        return layers;
+    }
+
+    _drawSingleGradientOnCanvas(ctx, css, W, H) {
+        const isRadial = css.startsWith('radial-gradient');
+        const isLinear = css.startsWith('linear-gradient') || css.startsWith('repeating-linear-gradient');
+        if (!isRadial && !isLinear) return;
+
+        const inner = css.match(/\((.+)\)$/s);
+        if (!inner) return;
+        const content = inner[1];
+
+        if (isLinear) {
+            let angle = 180; // default: top to bottom
+            let stopsStr = content;
+            const angleMatch = content.match(/^(\d+)deg\s*,\s*/);
+            if (angleMatch) {
+                angle = parseFloat(angleMatch[1]);
+                stopsStr = content.slice(angleMatch[0].length);
+            }
+            const rad = (angle - 90) * Math.PI / 180;
+            const cx = W / 2, cy = H / 2;
+            const len = Math.abs(W * Math.cos(rad)) + Math.abs(H * Math.sin(rad));
+            const dx = Math.cos(rad) * len / 2;
+            const dy = Math.sin(rad) * len / 2;
+            const grad = ctx.createLinearGradient(cx - dx, cy - dy, cx + dx, cy + dy);
+            this._addStops(grad, stopsStr);
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, W, H);
+        } else {
+            // Radial gradient
+            let cx = W * 0.5, cy = H * 0.5;
+            let stopsStr = content;
+            const posMatch = content.match(/^ellipse\s+at\s+(\d+)%\s+(\d+)%\s*,\s*/);
+            if (posMatch) {
+                cx = W * parseFloat(posMatch[1]) / 100;
+                cy = H * parseFloat(posMatch[2]) / 100;
+                stopsStr = content.slice(posMatch[0].length);
+            }
+            const radius = Math.max(W, H);
+            const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius);
+            this._addStops(grad, stopsStr);
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, W, H);
+        }
+    }
+
+    _addStops(grad, stopsStr) {
+        const parts = stopsStr.split(/,(?![^(]*\))/);
+        const stops = [];
+        for (const p of parts) {
+            const m = p.trim().match(/^(.+?)\s+(\d+(?:\.\d+)?)(%|px)?\s*$/);
+            if (m) {
+                stops.push({ color: m[1].trim(), pos: parseFloat(m[2]) / 100 });
+            } else {
+                stops.push({ color: p.trim(), pos: null });
+            }
+        }
+        // Auto-distribute stops without explicit position
+        for (let i = 0; i < stops.length; i++) {
+            if (stops[i].pos === null) {
+                if (i === 0) stops[i].pos = 0;
+                else if (i === stops.length - 1) stops[i].pos = 1;
+                else {
+                    let prev = i - 1, next = i + 1;
+                    while (next < stops.length && stops[next].pos === null) next++;
+                    const p0 = stops[prev].pos || 0;
+                    const p1 = (next < stops.length ? stops[next].pos : 1) || 1;
+                    stops[i].pos = p0 + (p1 - p0) * (i - prev) / (next - prev);
+                }
+            }
+        }
+        for (const s of stops) {
+            try { grad.addColorStop(Math.max(0, Math.min(1, s.pos)), s.color); } catch (e) { /* skip invalid */ }
+        }
     }
 
     // ========================================================================
@@ -363,11 +515,25 @@ class MGRenderer {
         ctx.save();
         ctx.globalAlpha = Math.min(1, isExiting ? exitProgress : opacity);
 
-        const baseX = 60;
-        const baseY = 1080 - 200;
+        // Compute position based on mg.position
+        const pos = (mg.position || 'bottom-left').toLowerCase().replace(/\s+/g, '-');
+        const boxW = 700, boxH = 200, margin = 60;
+        let baseX, baseY;
+        if (pos.includes('top')) {
+            baseY = margin + 20;
+        } else {
+            baseY = 1080 - boxH - margin;
+        }
+        if (pos.includes('right')) {
+            baseX = 1920 - boxW - margin;
+        } else if (pos === 'center' || pos === 'top' || pos === 'bottom') {
+            baseX = (1920 - boxW) / 2;
+        } else {
+            baseX = margin;
+        }
 
         ctx.beginPath();
-        ctx.rect(baseX, baseY - 20, 700 * (clipAmount / 100), 200);
+        ctx.rect(baseX, baseY - 20, boxW * (clipAmount / 100), boxH);
         ctx.clip();
 
         const accentH = 120 * barScaleY;
@@ -1277,6 +1443,162 @@ class MGRenderer {
         ctx.fillText(text, 18, 0);
 
         ctx.restore();
+    }
+
+    // ========================================================================
+    // 15. MAP CHART
+    // ========================================================================
+
+    _renderMapChart(ctx, frame, fps, mg, s, anim) {
+        const { interpolate } = AnimationUtils;
+        const { totalFrames, opacity, enterProgress } = anim;
+        const W = 1920, H = 1080;
+
+        // Map visual styles
+        const MAP_STYLES = {
+            dark:      { ocean: '#0a1628', land: '#1a2744', border: 'rgba(30,58,95,0.4)', pin: '#00d4ff', label: '#ffffff', labelBg: 'rgba(10,22,40,0.88)' },
+            natural:   { ocean: '#1a4a6e', land: '#3a6b4a', border: 'rgba(42,80,56,0.4)', pin: '#ffffff', label: '#ffffff', labelBg: 'rgba(15,30,20,0.88)' },
+            satellite: { ocean: '#050d1a', land: '#141e14', border: 'rgba(26,48,32,0.3)', pin: '#00ffcc', label: '#ffffff', labelBg: 'rgba(5,10,15,0.9)' },
+            light:     { ocean: '#d4e6f1', land: '#ecf0f1', border: 'rgba(189,195,199,0.6)', pin: '#e74c3c', label: '#2c3e50', labelBg: 'rgba(255,255,255,0.92)' },
+            political: { ocean: '#b8d4e8', land: '#f0e6d3', border: 'rgba(138,122,106,0.5)', pin: '#c0392b', label: '#2c1810', labelBg: 'rgba(240,230,211,0.92)' },
+        };
+        const mps = MAP_STYLES[mg.mapStyle || 'dark'] || MAP_STYLES.dark;
+
+        // Country coordinates for geographic positioning
+        const MAP_COORDS = {
+            'China': [104, 35], 'United States': [-98, 39], 'USA': [-98, 39],
+            'India': [78, 22], 'Japan': [138, 36], 'Germany': [10.5, 51.2],
+            'United Kingdom': [-2, 54], 'UK': [-2, 54], 'France': [2.2, 46.2],
+            'Brazil': [-51, -10], 'Italy': [12.5, 42.5], 'Canada': [-106, 56],
+            'Russia': [100, 60], 'South Korea': [128, 36], 'Australia': [134, -25],
+            'Spain': [-3.7, 40.4], 'Mexico': [-102, 23], 'Indonesia': [118, -2],
+            'Norway': [9, 62], 'Turkey': [35, 39], 'Saudi Arabia': [45, 24],
+            'South Africa': [25, -29], 'Argentina': [-64, -34], 'Nigeria': [8, 10],
+            'Egypt': [30, 27], 'Thailand': [101, 15], 'Vietnam': [108, 16],
+            'Taiwan': [121, 24], 'Pakistan': [70, 30], 'Philippines': [122, 13],
+        };
+
+        // 1. Fill ocean background
+        ctx.fillStyle = mps.ocean;
+        ctx.fillRect(0, 0, W, H);
+
+        // 2. Draw land mass (simplified ellipse continents)
+        ctx.fillStyle = mps.land;
+        const continents = [
+            // [cx%, cy%, rx%, ry%] — rough continent shapes
+            [25, 35, 12, 18],   // North America
+            [30, 62, 7, 14],    // South America
+            [52, 35, 10, 20],   // Europe/Africa
+            [55, 62, 7, 12],    // Southern Africa
+            [72, 35, 15, 18],   // Asia
+            [78, 68, 8, 8],     // Australia
+        ];
+        for (const [cx, cy, rx, ry] of continents) {
+            ctx.beginPath();
+            ctx.ellipse(cx / 100 * W, cy / 100 * H, rx / 100 * W, ry / 100 * H, 0, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        // 3. Draw grid lines
+        ctx.strokeStyle = mps.border;
+        ctx.lineWidth = 1;
+        for (let x = 0; x < W; x += W / 8) {
+            ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+        }
+        for (let y = 0; y < H; y += H / 6) {
+            ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+        }
+
+        // 4. Title
+        const title = mg.text || '';
+        if (title) {
+            ctx.font = `bold 42px ${s.fontFamily || 'Arial'}`;
+            ctx.fillStyle = mps.label;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'top';
+            ctx.shadowColor = 'rgba(0,0,0,0.5)';
+            ctx.shadowBlur = 8;
+            ctx.fillText(title, W / 2, 40);
+            ctx.shadowBlur = 0;
+        }
+
+        // 5. Parse items and place pins
+        const items = MGRenderer._parseKeyValuePairs(mg.subtext || '');
+        const pinPositions = items.slice(0, 8).map((item, i) => {
+            const coords = MAP_COORDS[item.label];
+            let x, y;
+            if (coords) {
+                x = ((coords[0] + 180) / 360) * W * 0.85 + W * 0.07;
+                y = ((90 - coords[1]) / 180) * H * 0.80 + H * 0.05;
+            } else {
+                const hash = (item.label || '').split('').reduce((a, c) => a + c.charCodeAt(0), 0);
+                x = W * 0.12 + ((hash * 7 + i * 137) % 76) / 100 * W;
+                y = H * 0.15 + ((hash * 13 + i * 89) % 60) / 100 * H;
+            }
+            return { ...item, x, y, i };
+        });
+
+        const elapsed = frame / fps;
+        const enterDur = 0.5 / (mg._animationSpeed || 1);
+
+        for (const pin of pinPositions) {
+            const pinProgress = Math.min(1, Math.max(0, (elapsed - enterDur * 0.3 - pin.i * 0.15) / 0.3));
+            if (pinProgress <= 0) continue;
+
+            const bounce = pinProgress < 1 ? (1 - pinProgress) * 10 : 0;
+            const py = pin.y - bounce;
+            const pinAlpha = pinProgress * opacity;
+
+            ctx.globalAlpha = pinAlpha;
+
+            // Pin dot with glow
+            ctx.fillStyle = mps.pin;
+            ctx.shadowColor = mps.pin;
+            ctx.shadowBlur = 12;
+            ctx.beginPath();
+            ctx.arc(pin.x, py, 8, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.shadowBlur = 0;
+
+            // Pin ring
+            ctx.strokeStyle = mps.pin;
+            ctx.lineWidth = 2;
+            const ringRadius = 14 + (1 - pinProgress) * 10;
+            ctx.beginPath();
+            ctx.arc(pin.x, py, ringRadius, 0, Math.PI * 2);
+            ctx.stroke();
+
+            // Label background
+            const labelText = pin.label || '';
+            const valueText = pin.value && pin.value !== '0' ? pin.value : '';
+            ctx.font = `bold 20px ${s.fontFamily || 'Arial'}`;
+            const labelW = ctx.measureText(labelText).width;
+            const valueW = valueText ? ctx.measureText(valueText).width : 0;
+            const boxW = Math.max(labelW, valueW) + 20;
+            const boxH = valueText ? 52 : 32;
+            const boxX = pin.x - boxW / 2;
+            const boxY = py - 28 - boxH;
+
+            ctx.fillStyle = mps.labelBg;
+            ctx.beginPath();
+            MGRenderer._roundRect(ctx, boxX, boxY, boxW, boxH, 6);
+            ctx.fill();
+
+            // Label text
+            ctx.fillStyle = mps.label;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(labelText, pin.x, boxY + (valueText ? 16 : boxH / 2));
+
+            // Value text
+            if (valueText) {
+                ctx.fillStyle = mps.pin;
+                ctx.font = `bold 18px ${s.fontFamily || 'Arial'}`;
+                ctx.fillText(valueText, pin.x, boxY + 38);
+            }
+
+            ctx.globalAlpha = 1;
+        }
     }
 
     /**

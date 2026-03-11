@@ -1,5 +1,5 @@
 /**
- * YTA Empire 2 - Electron Main Process
+ * YTA Empire WEBGL - Electron Main Process
  * This file creates the desktop app window and bridges the UI to Node.js
  */
 
@@ -317,10 +317,11 @@ function createStartupWindow() {
             fullscreenable: false,
             autoHideMenuBar: true,
             backgroundColor: '#0a0a0a',
-            title: 'YTA Empire 2 — Start',
+            title: 'YTA Empire WEBGL — Start',
             webPreferences: {
                 nodeIntegration: false,
-                contextIsolation: true,
+                contextIsolation: false,
+                sandbox: false,
                 preload: path.join(__dirname, 'preload.js')
             },
             icon: getWindowIconPath() || undefined
@@ -463,7 +464,8 @@ function createWindow() {
         titleBarStyle: 'default',
         webPreferences: {
             nodeIntegration: false,
-            contextIsolation: true,
+            contextIsolation: false,
+            sandbox: false,
             preload: path.join(__dirname, 'preload.js')
         },
         icon: getWindowIconPath() || undefined
@@ -474,7 +476,7 @@ function createWindow() {
 
     // Set window title with project name
     if (PROJECT_NAME) {
-        mainWindow.setTitle(`YTA Empire 2 — ${PROJECT_NAME}`);
+        mainWindow.setTitle(`YTA Empire WEBGL — ${PROJECT_NAME}`);
     }
 
     // Load the UI
@@ -527,10 +529,10 @@ function createWindow() {
                         // Call directly instead of through IPC
                         try {
                             const desktopDir = path.join(require('os').homedir(), 'Desktop');
-                            const shortcutPath = path.join(desktopDir, 'YTA Empire 2.lnk');
+                            const shortcutPath = path.join(desktopDir, 'YTA Empire WEBGL.lnk');
                             const electronExe = process.execPath;
                             const icon = getShortcutIconPath();
-                            const ps = `$ws = New-Object -ComObject WScript.Shell; $sc = $ws.CreateShortcut('${shortcutPath.replace(/'/g, "''")}'); $sc.TargetPath = '${electronExe.replace(/'/g, "''")}'; $sc.Arguments = '""${APP_ROOT.replace(/'/g, "''")}""'; $sc.WorkingDirectory = '${APP_ROOT.replace(/'/g, "''")}'; $sc.IconLocation = '${icon.replace(/'/g, "''")}'; $sc.Description = 'YTA Empire 2'; $sc.Save();`;
+                            const ps = `$ws = New-Object -ComObject WScript.Shell; $sc = $ws.CreateShortcut('${shortcutPath.replace(/'/g, "''")}'); $sc.TargetPath = '${electronExe.replace(/'/g, "''")}'; $sc.Arguments = '""${APP_ROOT.replace(/'/g, "''")}""'; $sc.WorkingDirectory = '${APP_ROOT.replace(/'/g, "''")}'; $sc.IconLocation = '${icon.replace(/'/g, "''")}'; $sc.Description = 'YTA Empire WEBGL'; $sc.Save();`;
                             execSync(`powershell -Command "${ps.replace(/"/g, '\\"')}"`, { stdio: 'ignore' });
                             dialog.showMessageBox(mainWindow, { title: 'Shortcut Created', message: 'Desktop shortcut created successfully!', type: 'info' });
                         } catch (e) {
@@ -557,7 +559,7 @@ function createWindow() {
                     }
                 },
                 { type: 'separator' },
-                { label: 'About', click: () => dialog.showMessageBox(mainWindow, { title: 'YTA Empire 2', message: 'AI-powered video generator', type: 'info' }) }
+                { label: 'About', click: () => dialog.showMessageBox(mainWindow, { title: 'YTA Empire WEBGL', message: 'AI-powered video generator', type: 'info' }) }
             ]
         }
     ]);
@@ -572,7 +574,7 @@ function createWindow() {
         mainWindow = null;
     });
 
-    console.log('🎬 YTA Empire 2 started');
+    console.log('🎬 YTA Empire WEBGL started');
 }
 
 // ========================================
@@ -598,7 +600,7 @@ if (process.env.EXPORT_V2 !== '0') {
 // ========================================
 // App Lifecycle
 // ========================================
-app.setAppUserModelId('YTA Empire 2');
+app.setAppUserModelId('YTA Empire WEBGL');
 
 // Register asset:// as a privileged scheme (must be before app.whenReady)
 protocol.registerSchemesAsPrivileged([
@@ -751,19 +753,6 @@ let activeProcessType = null; // 'build' or 'render'
 let processCancelled = false;
 
 ipcMain.handle('cancel-process', async () => {
-    // Cancel FFmpeg render if active (in-process async, no child process)
-    let ffmpegCancelled = false;
-    try {
-        const { cancelRender } = require('./src/legacy/ffmpeg-renderer');
-        cancelRender();
-        ffmpegCancelled = true;
-    } catch (e) { /* module may not be loaded */ }
-
-    // Cancel MG PNG pre-render if active
-    try {
-        const { cancelMGRender } = require('./src/legacy/mg-png-renderer');
-        cancelMGRender();
-    } catch (e) { /* module may not be loaded */ }
 
     if (activeProcess) {
         const type = activeProcessType || 'process';
@@ -787,12 +776,17 @@ ipcMain.handle('cancel-process', async () => {
         return { success: true, message: `${type} cancelled` };
     }
 
-    // FFmpeg render runs in-process (no activeProcess), but cancelRender() was called
-    if (ffmpegCancelled) {
+    // Legacy: WebGL export via main-process FFmpeg (kept for backward compat)
+    if (_webglExport && _webglExport.proc) {
+        try {
+            _webglExport.proc.stdin.end();
+            _webglExport.proc.kill('SIGTERM');
+        } catch (_) { }
         return { success: true, message: 'render cancelled' };
     }
 
-    return { success: false, message: 'No active process' };
+    // Direct-spawn mode: FFmpeg runs in renderer, cancelled via ExportPipeline.cancel()
+    return { success: true, message: 'No active main-process export (direct-spawn mode)' };
 });
 
 // Run the build pipeline
@@ -1013,7 +1007,7 @@ ipcMain.handle('save-project-file', async (event, data) => {
         // Write .fvp file to project root
         fs.writeFileSync(getProjectFilePath(), JSON.stringify(fvpData, null, 2));
 
-        // Also write video-plan.json to public/ and temp/ (Remotion render needs it)
+        // Also write video-plan.json to public/ and temp/ (renderer needs it)
         if (data.videoPlan) {
             const planData = JSON.stringify(data.videoPlan, null, 2);
             [path.join(PUBLIC_PATH, 'video-plan.json'), path.join(TEMP_PATH, 'video-plan.json')].forEach(p => {
@@ -1170,685 +1164,7 @@ ipcMain.handle('get-audio-path', async (event, filename) => {
     }
 });
 
-function normalizeMediaExt(ext, isImage) {
-    if (!ext || typeof ext !== 'string') return isImage ? '.jpg' : '.mp4';
-    const normalized = ext.startsWith('.') ? ext.toLowerCase() : `.${ext.toLowerCase()}`;
-    return normalized;
-}
 
-function findExistingSceneFileInDir(dir, idx, exts) {
-    for (const ext of exts) {
-        const p = path.join(dir, `scene-${idx}${ext}`);
-        if (fs.existsSync(p)) return p;
-    }
-    return null;
-}
-
-/**
- * Ensure every scene referenced by video-plan.json exists in /public before rendering.
- * This prevents mass 404s from crashing/stressing the compositor on long GPU renders.
- */
-function ensureRenderSceneFiles(plan) {
-    if (!plan || !Array.isArray(plan.scenes)) {
-        return { repaired: 0, unresolved: 0, scanned: 0 };
-    }
-
-    let repaired = 0;
-    let unresolved = 0;
-    let scanned = 0;
-    let fileIdx = 0;
-
-    const lastGoodByExt = new Map();
-    const imageExts = ['.jpg', '.jpeg', '.png', '.webp'];
-    const videoExts = ['.mp4'];
-
-    for (const scene of plan.scenes) {
-        if (scene?.isMGScene) continue;
-        scanned++;
-
-        const isImage = scene.mediaType === 'image';
-        const expectedExt = isImage
-            ? normalizeMediaExt(scene.mediaExtension, true)
-            : '.mp4'; // Composition always loads video scenes as .mp4
-        const dest = path.join(PUBLIC_PATH, `scene-${fileIdx}${expectedExt}`);
-
-        if (fs.existsSync(dest)) {
-            lastGoodByExt.set(expectedExt, dest);
-            fileIdx++;
-            continue;
-        }
-
-        const candidates = [];
-
-        // Candidate 1: scene.mediaFile absolute path or basename in common dirs
-        if (typeof scene.mediaFile === 'string' && scene.mediaFile.trim()) {
-            const raw = scene.mediaFile.trim();
-            if (path.isAbsolute(raw)) {
-                candidates.push(raw);
-            } else {
-                candidates.push(path.join(PUBLIC_PATH, raw));
-                candidates.push(path.join(TEMP_PATH, raw));
-                candidates.push(path.join(INPUT_PATH, raw));
-                candidates.push(path.join(PUBLIC_PATH, path.basename(raw)));
-                candidates.push(path.join(TEMP_PATH, path.basename(raw)));
-            }
-        }
-
-        // Candidate 2: indexed scene files in temp/public
-        const idxCandidates = [scene.index, scene._fileIndex, fileIdx]
-            .filter((v) => Number.isInteger(v) && v >= 0);
-        const probeExts = isImage
-            ? [expectedExt, ...imageExts.filter((e) => e !== expectedExt)]
-            : ['.mp4'];
-        for (const idx of idxCandidates) {
-            const hitPublic = findExistingSceneFileInDir(PUBLIC_PATH, idx, probeExts);
-            if (hitPublic) candidates.push(hitPublic);
-            const hitTemp = findExistingSceneFileInDir(TEMP_PATH, idx, probeExts);
-            if (hitTemp) candidates.push(hitTemp);
-        }
-
-        // Candidate 3: previous good file with same expected extension
-        if (lastGoodByExt.has(expectedExt)) {
-            candidates.push(lastGoodByExt.get(expectedExt));
-        }
-
-        // Candidate 4: any existing scene file of expected extension in temp/public
-        const anyByExpected = [
-            ...fs.readdirSync(TEMP_PATH).filter((n) => n.startsWith('scene-') && n.toLowerCase().endsWith(expectedExt)),
-            ...fs.readdirSync(PUBLIC_PATH).filter((n) => n.startsWith('scene-') && n.toLowerCase().endsWith(expectedExt))
-        ].map((n) => (fs.existsSync(path.join(TEMP_PATH, n)) ? path.join(TEMP_PATH, n) : path.join(PUBLIC_PATH, n)));
-        if (anyByExpected.length > 0) {
-            candidates.push(anyByExpected[0]);
-        }
-
-        // Candidate 5 (images only): any image file if exact extension not found
-        if (isImage) {
-            for (const ext of imageExts) {
-                if (ext === expectedExt) continue;
-                if (lastGoodByExt.has(ext)) candidates.push(lastGoodByExt.get(ext));
-                const anyTemp = fs.readdirSync(TEMP_PATH).find((n) => n.startsWith('scene-') && n.toLowerCase().endsWith(ext));
-                if (anyTemp) candidates.push(path.join(TEMP_PATH, anyTemp));
-                const anyPublic = fs.readdirSync(PUBLIC_PATH).find((n) => n.startsWith('scene-') && n.toLowerCase().endsWith(ext));
-                if (anyPublic) candidates.push(path.join(PUBLIC_PATH, anyPublic));
-            }
-        }
-
-        const source = candidates.find((c) => c && fs.existsSync(c));
-        if (source) {
-            fs.copyFileSync(source, dest);
-            repaired++;
-            lastGoodByExt.set(expectedExt, dest);
-            console.log(`   ⚠️ Recovered missing scene-${fileIdx}${expectedExt} from ${path.basename(source)}`);
-        } else {
-            unresolved++;
-            console.log(`   ❌ Missing scene-${fileIdx}${expectedExt} and no fallback source found`);
-        }
-
-        fileIdx++;
-    }
-
-    return { repaired, unresolved, scanned };
-}
-
-// Render video with Remotion
-ipcMain.handle('run-render', async () => {
-    try {
-        console.log('🎬 Starting Remotion render...');
-
-        const isWindows = process.platform === 'win32';
-        let remotionBinariesDir = null;
-
-        // Check if Remotion CLI is installed
-        // Use the JS entry point directly (not .cmd wrapper) to avoid Windows EPERM
-        // when multiple instances try to spawn the same .cmd file simultaneously
-        const remotionCliJs = path.join(APP_ROOT, 'node_modules', '@remotion', 'cli', 'remotion-cli.js');
-        const remotionBinLegacy = path.join(APP_ROOT, 'node_modules', '.bin', isWindows ? 'remotion.cmd' : 'remotion');
-        if (!fs.existsSync(remotionCliJs) && !fs.existsSync(remotionBinLegacy)) {
-            return {
-                success: false,
-                error: 'Remotion is not installed. Run: npm install remotion @remotion/cli @remotion/bundler react react-dom'
-            };
-        }
-
-        if (isWindows) {
-            remotionBinariesDir = ensureWindowsRemotionBinariesDir();
-        }
-
-        // Copy SFX assets to public for Remotion to access via staticFile()
-        const sfxSourceDir = path.join(APP_ROOT, 'assets', 'sfx');
-        if (fs.existsSync(sfxSourceDir)) {
-            const sfxFiles = fs.readdirSync(sfxSourceDir).filter(f => f.endsWith('.mp3') || f.endsWith('.wav'));
-            for (const f of sfxFiles) {
-                const dest = path.join(PUBLIC_PATH, f);
-                if (!fs.existsSync(dest)) {
-                    fs.copyFileSync(path.join(sfxSourceDir, f), dest);
-                }
-            }
-        }
-
-        // Ensure output folder exists
-        if (!fs.existsSync(OUTPUT_PATH)) {
-            fs.mkdirSync(OUTPUT_PATH, { recursive: true });
-        }
-
-        // Ensure plan is available in public for staticFile('video-plan.json')
-        const publicPlanPath = path.join(PUBLIC_PATH, 'video-plan.json');
-        const tempPlanPath = path.join(TEMP_PATH, 'video-plan.json');
-        if (!fs.existsSync(publicPlanPath) && fs.existsSync(tempPlanPath)) {
-            fs.copyFileSync(tempPlanPath, publicPlanPath);
-            console.log(`Copied plan to public: ${publicPlanPath}`);
-        }
-        if (!fs.existsSync(publicPlanPath)) {
-            return {
-                success: false,
-                error: `video-plan.json not found for this project.\nExpected: ${publicPlanPath}\nRun Generate first, then try Render again.`
-            };
-        }
-
-        let renderPlan = null;
-        try {
-            renderPlan = JSON.parse(fs.readFileSync(publicPlanPath, 'utf8'));
-        } catch (planError) {
-            return {
-                success: false,
-                error: `Failed to read video-plan.json: ${planError.message}`
-            };
-        }
-
-        // Preflight: repair missing scene-N files in /public so render workers don't spam 404s.
-        // This is especially important for long GPU renders where compositor stability matters.
-        const repairStats = ensureRenderSceneFiles(renderPlan);
-        if (repairStats.scanned > 0) {
-            console.log(
-                `Scene file preflight: scanned=${repairStats.scanned}, repaired=${repairStats.repaired}, unresolved=${repairStats.unresolved}`
-            );
-        }
-        if (repairStats.unresolved > 0) {
-            console.log(
-                `⚠️ ${repairStats.unresolved} scene files are still missing. Render may show black frames for those scenes.`
-            );
-        }
-
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-        const outputFile = path.join(OUTPUT_PATH, `video-${timestamp}.mp4`);
-
-        // Send initial progress
-        if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('render-progress', { percent: 5, message: 'Starting render...' });
-        }
-
-        return new Promise((resolve, reject) => {
-            // Render concurrency tuning:
-            // GPU + long videos can become unstable with high Chromium concurrency on some systems.
-            const cpuCount = require('os').cpus().length;
-            const defaultConcurrency = Math.max(2, Math.floor(cpuCount * 0.5));
-            const gpuCapRaw = parseInt(process.env.RENDER_GPU_MAX_CONCURRENCY || '4', 10);
-            const gpuConcurrencyCap = Number.isFinite(gpuCapRaw) && gpuCapRaw > 0 ? gpuCapRaw : 4;
-            const estimatedFrames = (() => {
-                const duration = Number(renderPlan?.totalDuration);
-                const fpsFromPlan = Number(renderPlan?.fps || 30);
-                if (!Number.isFinite(duration) || duration <= 0 || !Number.isFinite(fpsFromPlan) || fpsFromPlan <= 0) {
-                    return null;
-                }
-                return Math.ceil(duration * fpsFromPlan);
-            })();
-            const longVideoAutoCapEnabled = process.env.RENDER_GPU_LONG_VIDEO_CAP !== '0';
-            let effectiveGpuCap = gpuConcurrencyCap;
-            if (longVideoAutoCapEnabled && Number.isFinite(estimatedFrames)) {
-                if (estimatedFrames >= 24000) {
-                    effectiveGpuCap = Math.min(effectiveGpuCap, 1);
-                } else if (estimatedFrames >= 12000) {
-                    effectiveGpuCap = Math.min(effectiveGpuCap, 2);
-                }
-            }
-            const concurrency = Math.max(1, Math.min(defaultConcurrency, effectiveGpuCap));
-            if (Number.isFinite(estimatedFrames)) {
-                console.log(`Estimated render length: ${estimatedFrames} frames`);
-            }
-            if (effectiveGpuCap !== gpuConcurrencyCap) {
-                console.log(`Applying long-render GPU cap: ${effectiveGpuCap} (original cap=${gpuConcurrencyCap})`);
-            }
-            console.log(`Rendering with ${concurrency} threads (${cpuCount} CPU cores detected, GPU cap=${effectiveGpuCap})`);
-
-            // Use node + JS entry point directly to avoid Windows .cmd EPERM
-            // when multiple instances render simultaneously
-            const useDirectJs = fs.existsSync(remotionCliJs);
-            // Use Electron's bundled Node runtime for direct JS execution to avoid
-            // system-Node compatibility issues (e.g. non-LTS Node 21 crashes).
-            const spawnCmd = useDirectJs ? process.execPath : remotionBinLegacy;
-            const useShell = !useDirectJs && isWindows;
-            const shellQuotePath = (p) => (useShell && /\s/.test(p) ? `"${p}"` : p);
-            const spawnArgs = [
-                ...(useDirectJs ? [remotionCliJs] : []),
-                'render',
-                'src/legacy/remotion/Root.jsx',
-                'FacelessVideo',
-                shellQuotePath(outputFile),
-                `--concurrency=${concurrency}`,
-                '--hardware-acceleration=if-possible',
-                '--gl=angle',
-                `--public-dir=${shellQuotePath(PUBLIC_PATH)}`,
-                '--bundle-cache=false',
-                ...(remotionBinariesDir ? [`--binaries-directory=${shellQuotePath(remotionBinariesDir)}`] : [])
-            ];
-            console.log(`🎮 GPU Rendering: ENABLED (if available, NVIDIA NVENC + ANGLE GL)`);
-            console.log(`Spawning: ${spawnCmd} ${spawnArgs.join(' ')}`);
-            console.log(`Public dir: ${PUBLIC_PATH}`);
-
-            const renderProcess = spawn(spawnCmd, spawnArgs, {
-                cwd: APP_ROOT,
-                shell: useShell,
-                env: {
-                    ...process.env,
-                    ...(useDirectJs ? { ELECTRON_RUN_AS_NODE: '1' } : {}),
-                    FORCE_COLOR: '0',
-                    PROJECT_DIR: PROJECT_DIR,
-                    // Tell Remotion where to find public assets (video-plan.json, scene files, etc.)
-                    REMOTION_PUBLIC_DIR: PUBLIC_PATH
-                }
-            });
-            activeProcess = renderProcess;
-            activeProcessType = 'render';
-            processCancelled = false;
-
-            let output = '';
-            let errorOutput = '';
-            let encoderMode = 'unknown'; // gpu | cpu | unknown
-            let didFallbackToCpu = false;
-            let modeBannerPrinted = false;
-
-            const detectEncoderMode = (text, forceCpu = false) => {
-                const t = String(text || '');
-
-                // If this stream is from fallback process, it's CPU mode by definition.
-                if (forceCpu && encoderMode !== 'cpu') {
-                    encoderMode = 'cpu';
-                    console.log('RUNNING ON CPU: fallback render process is active');
-                    modeBannerPrinted = true;
-                    return;
-                }
-
-                if (/(h264_nvenc|hevc_nvenc)/i.test(t) && encoderMode !== 'gpu') {
-                    encoderMode = 'gpu';
-                    console.log('RUNNING ON GPU: NVENC encoder confirmed');
-                    modeBannerPrinted = true;
-                    return;
-                }
-
-                if (/(libx264|libx265)/i.test(t) && encoderMode !== 'cpu') {
-                    encoderMode = 'cpu';
-                    console.log('RUNNING ON CPU: software encoder detected');
-                    modeBannerPrinted = true;
-                }
-            };
-
-            const parseProgress = (text) => {
-                if (!mainWindow || mainWindow.isDestroyed()) return;
-
-                // Match "Rendered X/Y" (rendering phase = 0-80%)
-                const renderMatch = text.match(/Rendered\s+(\d+)\s*\/\s*(\d+)/);
-                if (renderMatch) {
-                    const current = parseInt(renderMatch[1]);
-                    const total = parseInt(renderMatch[2]);
-                    const percent = Math.round((current / total) * 80);
-                    mainWindow.webContents.send('render-progress', {
-                        percent,
-                        message: `Rendering: ${current}/${total} frames`
-                    });
-                    return;
-                }
-
-                // Match "Encoded X/Y" (encoding phase = 80-100%)
-                const encodeMatch = text.match(/Encoded\s+(\d+)\s*\/\s*(\d+)/);
-                if (encodeMatch) {
-                    const current = parseInt(encodeMatch[1]);
-                    const total = parseInt(encodeMatch[2]);
-                    const percent = 80 + Math.round((current / total) * 20);
-                    mainWindow.webContents.send('render-progress', {
-                        percent,
-                        message: `Encoding: ${current}/${total} frames`
-                    });
-                    return;
-                }
-            };
-
-            const startCpuFallback = () => {
-                didFallbackToCpu = true;
-                console.log('FELL BACK TO CPU: continuing render with software encoding');
-                if (mainWindow && !mainWindow.isDestroyed()) {
-                    mainWindow.webContents.send('render-progress', { percent: 5, message: 'GPU unavailable, retrying with CPU...' });
-                }
-                const cpuArgs = spawnArgs
-                    .map((a) => a.startsWith('--hardware-acceleration=') ? '--hardware-acceleration=disable' : a)
-                    .filter((a) => !a.startsWith('--gl='))
-                    .map((a) => a.startsWith('--concurrency=') ? `--concurrency=${Math.max(1, Math.min(concurrency, 2))}` : a);
-                const cpuProcess = spawn(spawnCmd, cpuArgs, {
-                    cwd: APP_ROOT, shell: useShell,
-                    env: {
-                        ...process.env,
-                        ...(useDirectJs ? { ELECTRON_RUN_AS_NODE: '1' } : {}),
-                        FORCE_COLOR: '0',
-                        PROJECT_DIR: PROJECT_DIR,
-                        REMOTION_PUBLIC_DIR: PUBLIC_PATH
-                    }
-                });
-                activeProcess = cpuProcess;
-                activeProcessType = 'render';
-                cpuProcess.stdout.on('data', (d) => {
-                    const t = d.toString();
-                    console.log(t);
-                    detectEncoderMode(t, true);
-                    parseProgress(t);
-                });
-                cpuProcess.stderr.on('data', (d) => {
-                    const t = d.toString();
-                    console.error(t);
-                    detectEncoderMode(t, true);
-                    parseProgress(t);
-                });
-                cpuProcess.on('close', (cpuCode) => {
-                    activeProcess = null; activeProcessType = null;
-                    if (fs.existsSync(outputFile)) {
-                        console.log('✅ CPU fallback render complete:', outputFile);
-                        console.log('FINAL RENDER MODE: CPU (fallback)');
-                        resolve({ success: true, outputPath: outputFile });
-                    } else {
-                        resolve({ success: false, error: `Render failed (GPU + CPU). Code: ${cpuCode}` });
-                    }
-                });
-                cpuProcess.on('error', (e) => resolve({ success: false, error: e.message }));
-            };
-
-            const upsertFlag = (args, prefix, value) => {
-                const val = `${prefix}${value}`;
-                let found = false;
-                const next = args.map((a) => {
-                    if (a.startsWith(prefix)) {
-                        found = true;
-                        return val;
-                    }
-                    return a;
-                });
-                if (!found) {
-                    next.push(val);
-                }
-                return next;
-            };
-
-            const removeFlag = (args, prefix) => args.filter((a) => !a.startsWith(prefix));
-
-            const startSafeGpuRetry = () => {
-                const retryProfiles = [
-                    { label: 'angle-egl', gl: 'angle-egl' },
-                    { label: 'vulkan', gl: 'vulkan' },
-                    { label: 'auto-gl', gl: null },
-                ];
-
-                const runProfile = (idx) => {
-                    if (idx >= retryProfiles.length) {
-                        console.log('⚠️ All GPU retry profiles failed, switching to CPU fallback...');
-                        startCpuFallback();
-                        return;
-                    }
-
-                    const profile = retryProfiles[idx];
-                    let profileArgs = [...spawnArgs];
-                    profileArgs = upsertFlag(profileArgs, '--concurrency=', 1);
-                    profileArgs = upsertFlag(profileArgs, '--offthreadvideo-threads=', 1);
-                    profileArgs = upsertFlag(profileArgs, '--offthreadvideo-cache-size-in-bytes=', 268435456);
-                    profileArgs = upsertFlag(profileArgs, '--media-cache-size-in-bytes=', 268435456);
-                    if (profile.gl === null) {
-                        profileArgs = removeFlag(profileArgs, '--gl=');
-                    } else {
-                        profileArgs = upsertFlag(profileArgs, '--gl=', profile.gl);
-                    }
-
-                    console.log(
-                        `🔁 Retrying GPU with profile ${idx + 1}/${retryProfiles.length}: ` +
-                        `gl=${profile.gl ?? 'auto'}, concurrency=1, offthreadvideo-threads=1`
-                    );
-
-                    const safeGpuProcess = spawn(spawnCmd, profileArgs, {
-                        cwd: APP_ROOT,
-                        shell: useShell,
-                        env: {
-                            ...process.env,
-                            ...(useDirectJs ? { ELECTRON_RUN_AS_NODE: '1' } : {}),
-                            FORCE_COLOR: '0',
-                            PROJECT_DIR: PROJECT_DIR,
-                            REMOTION_PUBLIC_DIR: PUBLIC_PATH
-                        }
-                    });
-
-                    activeProcess = safeGpuProcess;
-                    activeProcessType = 'render';
-
-                    safeGpuProcess.stdout.on('data', (d) => {
-                        const t = d.toString();
-                        console.log(t);
-                        detectEncoderMode(t);
-                        parseProgress(t);
-                    });
-
-                    safeGpuProcess.stderr.on('data', (d) => {
-                        const t = d.toString();
-                        console.error(t);
-                        detectEncoderMode(t);
-                        parseProgress(t);
-                    });
-
-                    safeGpuProcess.on('close', (safeCode) => {
-                        activeProcess = null;
-                        activeProcessType = null;
-
-                        if (fs.existsSync(outputFile)) {
-                            console.log(`✅ GPU retry profile '${profile.label}' completed:`, outputFile);
-                            console.log(`FINAL RENDER MODE: GPU (${profile.label})`);
-                            resolve({ success: true, outputPath: outputFile });
-                            return;
-                        }
-
-                        console.log(
-                            `⚠️ GPU retry profile '${profile.label}' failed (code=${safeCode}), trying next profile...`
-                        );
-                        runProfile(idx + 1);
-                    });
-
-                    safeGpuProcess.on('error', () => {
-                        console.log(`⚠️ GPU retry profile '${profile.label}' process error, trying next profile...`);
-                        runProfile(idx + 1);
-                    });
-                };
-
-                runProfile(0);
-            };
-
-            renderProcess.stdout.on('data', (data) => {
-                const text = data.toString();
-                output += text;
-                console.log(text);
-                detectEncoderMode(text);
-                parseProgress(text);
-            });
-
-            let gpuConfirmed = false;
-            renderProcess.stderr.on('data', (data) => {
-                const text = data.toString();
-                errorOutput += text;
-                console.error(text);
-                detectEncoderMode(text);
-                parseProgress(text);
-
-                // Detect GPU encoder in use
-                if (!gpuConfirmed) {
-                    if (text.includes('h264_nvenc') || text.includes('hevc_nvenc')) {
-                        console.log('✅ GPU ENCODING ACTIVE: NVIDIA NVENC confirmed');
-                        gpuConfirmed = true;
-                    } else if (text.includes('libx264') || text.includes('libx265')) {
-                        console.log('⚠️ CPU ENCODING: Using libx264 (GPU not active)');
-                        gpuConfirmed = true;
-                    }
-                    if (text.includes('Encoder:')) {
-                        console.log(`🎬 ${text.trim()}`);
-                    }
-                }
-            });
-
-            renderProcess.on('close', (code) => {
-                const wasCancelled = processCancelled;
-                activeProcess = null;
-                activeProcessType = null;
-                processCancelled = false;
-                console.log('Render process exited with code:', code, 'cancelled:', wasCancelled);
-
-                if (wasCancelled) {
-                    console.log('⛔ Render was cancelled by user');
-                    resolve({ success: false, error: 'Cancelled' });
-                    return;
-                }
-
-                if (fs.existsSync(outputFile)) {
-                    console.log('✅ Render complete:', outputFile);
-                    if (didFallbackToCpu) {
-                        console.log('FINAL RENDER MODE: CPU (fallback)');
-                    } else if (encoderMode === 'gpu') {
-                        console.log('FINAL RENDER MODE: GPU');
-                    } else if (encoderMode === 'cpu') {
-                        console.log('FINAL RENDER MODE: CPU');
-                    } else {
-                        console.log('FINAL RENDER MODE: GPU path (encoder not explicitly reported)');
-                        if (!modeBannerPrinted) {
-                            console.log('RUNNING ON GPU: hardware-acceleration path stayed active (no CPU fallback)');
-                        }
-                    }
-                    resolve({
-                        success: true,
-                        outputPath: outputFile
-                    });
-                } else if (code === 0) {
-                    // Check if file exists in default location
-                    const defaultOutput = path.join(OUTPUT_PATH, 'video.mp4');
-                    if (fs.existsSync(defaultOutput)) {
-                        resolve({ success: true, outputPath: defaultOutput });
-                    } else {
-                        resolve({ success: false, error: 'Render completed but output file not found' });
-                    }
-                } else {
-                    // If GPU/compositor path failed, auto-retry with CPU
-                    const nvencFailed = errorOutput.includes('nvenc') ||
-                        errorOutput.includes('NVENC') ||
-                        errorOutput.includes('hardware acceleration') ||
-                        errorOutput.includes('No capable devices found');
-                    const compositorPipeFailed =
-                        /write EOF/i.test(errorOutput) ||
-                        /Could not extract frame from compositor/i.test(errorOutput) ||
-                        /Request closed/i.test(errorOutput) ||
-                        /syscall:\s*'write'/i.test(errorOutput) ||
-                        /compositor/i.test(errorOutput);
-                    const gpuPathEnabled = spawnArgs.some((a) =>
-                        a.startsWith('--hardware-acceleration=') && a !== '--hardware-acceleration=disable'
-                    );
-
-                    if ((nvencFailed || compositorPipeFailed) && gpuPathEnabled) {
-                        if (compositorPipeFailed) {
-                            console.log('⚠️ GPU compositor stream failed (write EOF / request closed). Trying GPU recovery profiles...');
-                        } else {
-                            console.log('⚠️ NVENC GPU render failed, trying GPU recovery profiles...');
-                        }
-                        const allowSafeGpuRetry = process.env.RENDER_GPU_SAFE_RETRY !== '0';
-                        if (allowSafeGpuRetry) {
-                            startSafeGpuRetry();
-                        } else {
-                            startCpuFallback();
-                        }
-                        return;
-                    }
-
-                    // Provide helpful error message
-                    let errorMsg = errorOutput || `Render failed with code ${code}`;
-                    if (errorMsg.includes('EPERM') || errorMsg.includes('ENOENT')) {
-                        errorMsg += '\n\nThis may be caused by Windows Defender blocking Remotion files. ' +
-                            'Add an exclusion in Windows Security for your node_modules folder.';
-                    }
-                    resolve({ success: false, error: errorMsg });
-                }
-            });
-
-            renderProcess.on('error', (err) => {
-                console.error('Render process error:', err);
-                resolve({ success: false, error: err.message });
-            });
-        });
-
-    } catch (error) {
-        console.error('❌ Render error:', error);
-        return { success: false, error: error.message };
-    }
-});
-
-// Render video with FFmpeg (GPU-accelerated)
-ipcMain.handle('run-render-ffmpeg', async () => {
-    try {
-        console.log('🎬 Starting FFmpeg GPU render...');
-
-        // Ensure output folder exists
-        if (!fs.existsSync(OUTPUT_PATH)) {
-            fs.mkdirSync(OUTPUT_PATH, { recursive: true });
-        }
-
-        // Load video plan
-        const publicPlanPath = path.join(PUBLIC_PATH, 'video-plan.json');
-        const tempPlanPath = path.join(TEMP_PATH, 'video-plan.json');
-        if (!fs.existsSync(publicPlanPath) && fs.existsSync(tempPlanPath)) {
-            fs.copyFileSync(tempPlanPath, publicPlanPath);
-        }
-        if (!fs.existsSync(publicPlanPath)) {
-            return {
-                success: false,
-                error: 'video-plan.json not found. Run Generate first, then try Render.'
-            };
-        }
-
-        const plan = JSON.parse(fs.readFileSync(publicPlanPath, 'utf-8'));
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-        const outputFile = path.join(OUTPUT_PATH, `video-${timestamp}.mp4`);
-
-        if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('render-progress', { percent: 2, message: 'Starting FFmpeg GPU render...' });
-        }
-
-        const { renderWithFFmpeg } = require('./src/legacy/ffmpeg-renderer');
-        const result = await renderWithFFmpeg(plan, {
-            publicDir: PUBLIC_PATH,
-            outputPath: outputFile,
-            progressCallback: (progress) => {
-                if (mainWindow && !mainWindow.isDestroyed()) {
-                    mainWindow.webContents.send('render-progress', progress);
-                }
-            }
-        });
-
-        if (result.success && mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('render-progress', { percent: 100, message: 'Render complete!' });
-        }
-
-        return result;
-
-    } catch (error) {
-        const errText = (() => {
-            if (!error) return 'Unknown FFmpeg error';
-            if (typeof error === 'string') return error;
-            if (error instanceof Error) return error.stack || error.message || String(error);
-            try { return JSON.stringify(error); } catch { return String(error); }
-        })();
-        if (errText.includes('Cancelled')) {
-            console.log('⛔ FFmpeg render cancelled by user');
-            return { success: false, error: 'Cancelled' };
-        }
-        console.error('❌ FFmpeg render error:', errText);
-        return { success: false, error: errText };
-    }
-});
 
 // ========================================
 // WebGL2 Compositor Engine - Export IPC
@@ -2082,20 +1398,68 @@ ipcMain.handle('cancel-webgl-export', async () => {
     return { success: true };
 });
 
+// ========================================
+// Direct-spawn export support (renderer-side FFmpeg)
+// ========================================
+
+ipcMain.handle('get-export-config', async (event, options) => {
+    try {
+        const { width, height, fps, totalFrames } = options;
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        const videoFile = path.join(TEMP_PATH, `webgl-video-${timestamp}.mp4`);
+        const outputFile = path.join(OUTPUT_PATH, `video-${timestamp}.mp4`);
+
+        // Ensure output dirs exist
+        if (!fs.existsSync(OUTPUT_PATH)) fs.mkdirSync(OUTPUT_PATH, { recursive: true });
+        if (!fs.existsSync(TEMP_PATH)) fs.mkdirSync(TEMP_PATH, { recursive: true });
+
+        // Probe NVENC
+        const useGpu = await probeNvencForWebGL();
+        const encArgs = useGpu
+            ? ['-c:v', 'h264_nvenc', '-preset', 'p4', '-b:v', '18M', '-maxrate:v', '24M', '-bufsize:v', '48M']
+            : ['-c:v', 'libx264', '-preset', 'medium', '-crf', '22'];
+
+        console.log(`[WebGL Export] Config: ${width}x${height} @ ${fps}fps, ${totalFrames} frames, encoder: ${useGpu ? 'NVENC' : 'libx264'}, direct-spawn mode`);
+
+        return {
+            success: true,
+            ffmpegPath: WEBGL_FFMPEG_PATH,
+            encArgs,
+            videoFile,
+            outputFile,
+            useGpu,
+        };
+    } catch (err) {
+        console.error('[WebGL Export] get-export-config error:', err.message);
+        return { success: false, error: err.message };
+    }
+});
+
+ipcMain.handle('mux-audio', async (event, videoFile, outputFile) => {
+    try {
+        const exp = { videoFile, outputFile };
+        const finalOutput = await _webglMuxAudio(exp);
+        return { success: true, outputPath: finalOutput };
+    } catch (err) {
+        console.error('[WebGL Export] mux-audio error:', err.message);
+        return { success: false, error: err.message };
+    }
+});
+
 /**
- * Mux the WebGL-rendered video with the project's audio track.
+ * Mux the WebGL-rendered video with the project's audio track + SFX clips.
  * Returns the final output file path.
  */
 async function _webglMuxAudio(exp) {
-    // Find the audio file
     const planPath = path.join(PUBLIC_PATH, 'video-plan.json');
     let audioFile = null;
+    let sfxClips = [];
+    let sfxEnabled = true;
 
     if (fs.existsSync(planPath)) {
         try {
             const plan = JSON.parse(fs.readFileSync(planPath, 'utf8'));
             if (plan.audio) {
-                // Check public, then temp, then input
                 for (const dir of [PUBLIC_PATH, TEMP_PATH, INPUT_PATH]) {
                     const candidate = path.join(dir, plan.audio);
                     if (fs.existsSync(candidate)) {
@@ -2104,568 +1468,147 @@ async function _webglMuxAudio(exp) {
                     }
                 }
             }
+            // Read SFX clips from plan
+            if (plan.sfxEnabled !== false && plan.sfxClips && plan.sfxClips.length > 0) {
+                const sfxDir = path.join(__dirname, 'assets', 'sfx');
+                for (const clip of plan.sfxClips) {
+                    const sfxPath = path.join(sfxDir, clip.file);
+                    if (fs.existsSync(sfxPath)) {
+                        sfxClips.push({
+                            path: sfxPath,
+                            startTime: clip.startTime || 0,
+                            duration: clip.duration || 0.5,
+                            volume: clip.volume !== undefined ? clip.volume : 0.35,
+                        });
+                    }
+                }
+            }
         } catch (_) { }
     }
 
-    if (!audioFile) {
-        // No audio — just rename video file to output
-        const dest = exp.outputFile;
-        fs.copyFileSync(exp.videoFile, dest);
-        console.log('[WebGL Export] No audio to mux, video only:', dest);
-        return dest;
+    const hasSfx = sfxClips.length > 0;
+
+    if (!audioFile && !hasSfx) {
+        // No audio at all — just copy video
+        fs.copyFileSync(exp.videoFile, exp.outputFile);
+        console.log('[WebGL Export] No audio to mux, video only:', exp.outputFile);
+        return exp.outputFile;
     }
 
-    // Mux video + audio using FFmpeg (with optional audio trim for in/out points)
-    const audioInputArgs = [];
-    if (exp.audioTrimStartSec != null && exp.audioTrimStartSec > 0) {
-        audioInputArgs.push('-ss', String(exp.audioTrimStartSec));
-    }
-    if (exp.audioTrimEndSec != null) {
-        audioInputArgs.push('-to', String(exp.audioTrimEndSec));
-    }
-    audioInputArgs.push('-i', audioFile);
+    console.log(`[WebGL Export] Muxing audio: VO=${audioFile ? 'yes' : 'no'}, SFX=${sfxClips.length} clips`);
 
-    const trimLog = (exp.audioTrimStartSec || exp.audioTrimEndSec) ?
-        ` (trim: ${exp.audioTrimStartSec || 0}s → ${exp.audioTrimEndSec || 'end'})` : '';
-    console.log('[WebGL Export] Muxing audio:', audioFile + trimLog);
+    // Build FFmpeg args with filter_complex for mixing VO + SFX
+    const inputArgs = ['-y', '-i', exp.videoFile]; // input 0 = video
+    let audioInputIndex = 1;
 
-    return new Promise((resolve, reject) => {
-        const muxProc = spawn(WEBGL_FFMPEG_PATH, [
-            '-y',
-            '-i', exp.videoFile,
-            ...audioInputArgs,
-            '-c:v', 'copy',        // No re-encode of video
+    // Add VO audio input
+    let voIndex = -1;
+    if (audioFile) {
+        if (exp.audioTrimStartSec != null && exp.audioTrimStartSec > 0) {
+            inputArgs.push('-ss', String(exp.audioTrimStartSec));
+        }
+        if (exp.audioTrimEndSec != null) {
+            inputArgs.push('-to', String(exp.audioTrimEndSec));
+        }
+        inputArgs.push('-i', audioFile);
+        voIndex = audioInputIndex++;
+    }
+
+    // Add each SFX clip as a separate input with offset
+    const sfxIndices = [];
+    for (const sfx of sfxClips) {
+        inputArgs.push('-i', sfx.path);
+        sfxIndices.push(audioInputIndex++);
+    }
+
+    let outputArgs;
+
+    if (!hasSfx) {
+        // Simple case: just VO, no filter needed
+        outputArgs = [
+            '-c:v', 'copy',
             '-c:a', 'aac', '-b:a', '192k',
             '-shortest',
             '-movflags', '+faststart',
             exp.outputFile
+        ];
+    } else {
+        // Build filter_complex to mix all audio streams
+        const filterParts = [];
+        const mixInputs = [];
+        let streamIdx = 0;
+
+        // VO stream (or silent placeholder if no VO)
+        if (voIndex >= 0) {
+            filterParts.push(`[${voIndex}:a]aformat=fltp:44100:stereo,volume=1.0[vo]`);
+            mixInputs.push('[vo]');
+            streamIdx++;
+        }
+
+        // SFX streams — each delayed to its startTime and volume-adjusted
+        for (let i = 0; i < sfxClips.length; i++) {
+            const sfx = sfxClips[i];
+            const idx = sfxIndices[i];
+            const label = `sfx${i}`;
+            const delayMs = Math.round(sfx.startTime * 1000);
+            const vol = sfx.volume.toFixed(2);
+            filterParts.push(
+                `[${idx}:a]aformat=fltp:44100:stereo,volume=${vol},adelay=${delayMs}|${delayMs}[${label}]`
+            );
+            mixInputs.push(`[${label}]`);
+            streamIdx++;
+        }
+
+        // Mix all streams together
+        const mixCount = mixInputs.length;
+        filterParts.push(
+            `${mixInputs.join('')}amix=inputs=${mixCount}:duration=longest:dropout_transition=0[aout]`
+        );
+
+        const filterComplex = filterParts.join(';');
+
+        outputArgs = [
+            '-filter_complex', filterComplex,
+            '-map', '0:v',
+            '-map', '[aout]',
+            '-c:v', 'copy',
+            '-c:a', 'aac', '-b:a', '192k',
+            '-shortest',
+            '-movflags', '+faststart',
+            exp.outputFile
+        ];
+    }
+
+    return new Promise((resolve, reject) => {
+        const muxProc = spawn(WEBGL_FFMPEG_PATH, [
+            ...inputArgs,
+            ...outputArgs
         ], { stdio: ['ignore', 'pipe', 'pipe'] });
 
+        let stderr = '';
+        muxProc.stderr.on('data', (d) => { stderr += d.toString(); });
+
         muxProc.on('close', (code) => {
-            // Clean up temp video file
             try { fs.unlinkSync(exp.videoFile); } catch (_) { }
 
             if (code === 0) {
                 console.log('[WebGL Export] Final output:', exp.outputFile);
                 resolve(exp.outputFile);
             } else {
+                console.error('[WebGL Export] Mux failed:', stderr.slice(-500));
                 // Fallback: use video-only file
-                fs.copyFileSync(exp.videoFile, exp.outputFile);
+                try { fs.copyFileSync(exp.videoFile, exp.outputFile); } catch (_) { }
                 resolve(exp.outputFile);
             }
         });
 
         muxProc.on('error', (err) => {
-            // Fallback: use video-only
             try { fs.copyFileSync(exp.videoFile, exp.outputFile); } catch (_) { }
             resolve(exp.outputFile);
         });
     });
 }
 
-// ========================================
-// V2 GPU-Native Export — IPC Handlers
-// ========================================
-// Reason codes for V2 fallback
-const V2_REASONS = {
-    DISABLED_FLAG: 'V2_DISABLED_FLAG',
-    NOT_IMPLEMENTED: 'V2_NOT_IMPLEMENTED',
-    ANGLE_NOT_D3D11: 'ANGLE_NOT_D3D11',
-    EGL_EXT_MISSING: 'EGL_EXT_MISSING',
-    PBUFFER_CREATE_FAIL: 'PBUFFER_CREATE_FAIL',
-    NVENC_INIT_FAIL: 'NVENC_INIT_FAIL',
-    ENCODE_RUNTIME_FAIL: 'ENCODE_RUNTIME_FAIL',
-};
-
-// Try to load native addon (Phase 1+ builds it)
-let _gpuExportAddon = null;
-try {
-    _gpuExportAddon = require('./src/native/gpu-export/build/Release/gpu_export.node');
-    console.log('[V2] Native addon loaded');
-} catch (_) {
-    // Expected until Phase 1 is built — silent fallback
-}
-
-ipcMain.handle('v2-probe', async () => {
-    if (process.env.EXPORT_V2 === '0') {
-        console.log('[V2] Probe: DISABLED by EXPORT_V2=0');
-        return { ok: false, reason: V2_REASONS.DISABLED_FLAG };
-    }
-    if (!_gpuExportAddon) {
-        console.log('[V2] Probe: addon not loaded (V2_NOT_IMPLEMENTED)');
-        return { ok: false, reason: V2_REASONS.NOT_IMPLEMENTED };
-    }
-    try {
-        const result = _gpuExportAddon.probeAngleD3D11();
-        if (result.ok) {
-            console.log('[V2] Probe SUCCESS:', JSON.stringify(result.details, null, 2));
-        } else {
-            console.log(`[V2] Probe FAILED: ${result.reason} — ${result.error || 'no details'}`);
-        }
-        return result;
-    } catch (err) {
-        console.error('[V2] Probe EXCEPTION:', err.message);
-        return { ok: false, reason: V2_REASONS.ANGLE_NOT_D3D11, error: err.message };
-    }
-});
-
-// V2 Target management — D3D11 shared textures + EGL pbuffer surfaces
-ipcMain.handle('v2-create-targets', async (event, opts) => {
-    if (!_gpuExportAddon) return { ok: false, reason: 'addon not loaded' };
-    try {
-        const { width, height, count } = opts;
-        const n = count || 3;
-        const texResult = _gpuExportAddon.createSharedTextures(width, height, n);
-        if (!texResult.ok) {
-            console.error('[V2] createSharedTextures failed');
-            return { ok: false, reason: 'createSharedTextures failed' };
-        }
-        const pbufResult = _gpuExportAddon.createPbufferSurfaces(n);
-        if (!pbufResult.ok) {
-            console.error('[V2] createPbufferSurfaces failed');
-            _gpuExportAddon.destroySharedTextures();
-            return { ok: false, reason: 'createPbufferSurfaces failed' };
-        }
-        console.log(`[V2] Created ${n} targets (${width}x${height})`);
-        return { ok: true, count: n, width, height };
-    } catch (err) {
-        console.error('[V2] createTargets error:', err.message);
-        return { ok: false, reason: err.message };
-    }
-});
-
-ipcMain.handle('v2-begin-frame', async (event, targetIndex) => {
-    if (!_gpuExportAddon) return false;
-    return _gpuExportAddon.makePbufferCurrent(targetIndex);
-});
-
-ipcMain.handle('v2-end-frame', async (event, targetIndex) => {
-    if (!_gpuExportAddon) return false;
-    return _gpuExportAddon.restoreDefaultSurface();
-});
-
-ipcMain.handle('v2-destroy-targets', async () => {
-    if (!_gpuExportAddon) return;
-    try {
-        _gpuExportAddon.destroyPbufferSurfaces();
-        _gpuExportAddon.destroySharedTextures();
-        console.log('[V2] Destroyed all targets');
-    } catch (err) {
-        console.error('[V2] destroyTargets error:', err.message);
-    }
-});
-
-// V2 Encoder — FFmpeg rawvideo input (RGBA from readPixels or BGRA from D3D readback)
-ipcMain.handle('v2-init-encoder', async (event, opts) => {
-    try {
-        const { width, height, fps, totalFrames, pixelFormat } = opts;
-        const fmt = pixelFormat || 'rgba';
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-        const videoFile = path.join(TEMP_PATH, `v2-video-${timestamp}.mp4`);
-        const outputFile = path.join(OUTPUT_PATH, `video-${timestamp}.mp4`);
-
-        if (!fs.existsSync(OUTPUT_PATH)) fs.mkdirSync(OUTPUT_PATH, { recursive: true });
-        if (!fs.existsSync(TEMP_PATH)) fs.mkdirSync(TEMP_PATH, { recursive: true });
-
-        const useGpu = await probeNvencForWebGL();
-        const encArgs = useGpu
-            ? ['-c:v', 'h264_nvenc', '-preset', 'p4', '-b:v', '18M', '-maxrate:v', '24M', '-bufsize:v', '48M']
-            : ['-c:v', 'libx264', '-preset', 'medium', '-crf', '22'];
-
-        console.log(`[V2 Export] Starting: ${width}x${height} @ ${fps}fps, ${totalFrames} frames, format: ${fmt}, encoder: ${useGpu ? 'NVENC' : 'libx264'}`);
-
-        const ffmpegProc = spawn(WEBGL_FFMPEG_PATH, [
-            '-y',
-            '-f', 'rawvideo',
-            '-pixel_format', fmt,
-            '-video_size', `${width}x${height}`,
-            '-framerate', String(fps),
-            '-i', 'pipe:0',
-            ...encArgs,
-            '-pix_fmt', 'yuv420p',
-            '-an',
-            videoFile
-        ], { stdio: ['pipe', 'pipe', 'pipe'] });
-
-        let ffmpegStderr = '';
-        ffmpegProc.stderr.on('data', (data) => {
-            ffmpegStderr += data.toString();
-        });
-
-        _webglExport = {
-            proc: ffmpegProc,
-            videoFile,
-            outputFile,
-            totalFrames,
-            width, height, fps,
-            stderr: ffmpegStderr,
-            framesWritten: 0,
-            bytesWritten: 0,
-            lastLogTime: Date.now(),
-            lastLogFrames: 0,
-            expectedFrameSize: width * height * 4,
-            isV2: true,
-        };
-
-        return { ok: true, videoFile, outputFile };
-    } catch (err) {
-        console.error('[V2 Export] init error:', err.message);
-        return { ok: false, reason: err.message };
-    }
-});
-
-// V2 Encode frame — accepts raw pixel buffer from renderer OR D3D11 readback
-// opts.frameBuffer: ArrayBuffer from readPixels (RGBA) — used when shared texture redirect not available
-// opts.targetIndex: D3D11 readback from shared texture — used when renderer→shared texture works
-ipcMain.handle('v2-encode-frame', async (event, opts) => {
-    const exp = _webglExport;
-    if (!exp || !exp.proc || exp.proc.killed) {
-        return { ok: false, error: 'No active export process' };
-    }
-
-    try {
-        let buf;
-        if (opts.frameBuffer) {
-            // Raw pixel data from renderer readPixels
-            buf = Buffer.from(opts.frameBuffer);
-        } else if (opts.targetIndex !== undefined && _gpuExportAddon) {
-            // D3D11 readback from shared texture
-            buf = _gpuExportAddon.readTextureToBuffer(opts.targetIndex);
-            if (!buf) {
-                return { ok: false, error: `readTextureToBuffer(${opts.targetIndex}) returned null` };
-            }
-        } else {
-            return { ok: false, error: 'No frame data: provide frameBuffer or targetIndex' };
-        }
-
-        // Debug: log center pixel of first few frames
-        if (exp.framesWritten < 3) {
-            const cx = Math.floor(exp.width / 2), cy = Math.floor(exp.height / 2);
-            const off = (cy * exp.width + cx) * 4;
-            console.log(`[V2 Export] Frame ${opts.frameIndex || exp.framesWritten} center RGBA=(${buf[off]},${buf[off + 1]},${buf[off + 2]},${buf[off + 3]})`);
-        }
-
-        const canWrite = exp.proc.stdin.write(buf);
-        exp.framesWritten++;
-        exp.bytesWritten += buf.length;
-
-        if (!canWrite) {
-            await new Promise(resolve => exp.proc.stdin.once('drain', resolve));
-        }
-
-        // Periodic logging
-        const now = Date.now();
-        if (now - exp.lastLogTime >= 1000) {
-            const elapsed = (now - exp.lastLogTime) / 1000;
-            const recentFrames = exp.framesWritten - exp.lastLogFrames;
-            const currentFps = (recentFrames / elapsed).toFixed(1);
-            const totalMB = (exp.bytesWritten / (1024 * 1024)).toFixed(0);
-            console.log(`[V2 Export] ${exp.framesWritten}/${exp.totalFrames} frames | ${currentFps} fps | ${totalMB} MB`);
-            exp.lastLogTime = now;
-            exp.lastLogFrames = exp.framesWritten;
-        }
-
-        return { ok: true };
-    } catch (err) {
-        return { ok: false, error: err.message };
-    }
-});
-
-// V2 Flush — close FFmpeg stdin, wait for exit, mux audio
-ipcMain.handle('v2-flush-encoder', async () => {
-    const exp = _webglExport;
-    if (!exp || !exp.proc) {
-        return { ok: false, error: 'No active export process' };
-    }
-
-    try {
-        exp.proc.stdin.end();
-
-        const exitCode = await new Promise((resolve, reject) => {
-            const timeout = setTimeout(() => {
-                try { exp.proc.kill('SIGTERM'); } catch (_) { }
-                reject(new Error('FFmpeg timeout'));
-            }, 120000);
-
-            exp.proc.on('close', (code) => {
-                clearTimeout(timeout);
-                resolve(code);
-            });
-            exp.proc.on('error', (err) => {
-                clearTimeout(timeout);
-                reject(err);
-            });
-        });
-
-        if (exitCode !== 0) {
-            throw new Error(`FFmpeg exited with code ${exitCode}`);
-        }
-
-        console.log(`[V2 Export] Video encoded: ${exp.videoFile} (${exp.framesWritten} frames)`);
-
-        const finalOutput = await _webglMuxAudio(exp);
-
-        _webglExport = null;
-        return { ok: true, outputPath: finalOutput };
-    } catch (err) {
-        console.error('[V2 Export] flush error:', err.message);
-        _webglExport = null;
-        return { ok: false, error: err.message };
-    }
-});
-
-// V2 Close — destroy targets + cleanup
-ipcMain.handle('v2-close-encoder', async () => {
-    if (_gpuExportAddon) {
-        try {
-            _gpuExportAddon.destroyPbufferSurfaces();
-            _gpuExportAddon.destroySharedTextures();
-            console.log('[V2] Encoder closed, targets destroyed');
-        } catch (err) {
-            console.error('[V2] close error:', err.message);
-        }
-    }
-    return { ok: true };
-});
-
-// ========================================
-// Native D3D11 + NVENC Export Engine
-// ========================================
-let _nativeExporterAddon = null;
-try {
-    _nativeExporterAddon = require('./src/native/native-exporter/build/Release/native_exporter.node');
-    console.log('[NativeExport] Addon loaded');
-} catch (_) {
-    // Expected until addon is built
-}
-
-ipcMain.handle('native-export-probe', async () => {
-    if (!_nativeExporterAddon) {
-        return { ok: false, reason: 'Native exporter addon not loaded' };
-    }
-    try {
-        return _nativeExporterAddon.probe();
-    } catch (err) {
-        console.error('[NativeExport] probe error:', err.message);
-        return { ok: false, reason: err.message };
-    }
-});
-
-ipcMain.handle('native-export-start', async (event, opts) => {
-    if (!_nativeExporterAddon) {
-        return { ok: false, reason: 'Native exporter addon not loaded' };
-    }
-
-    try {
-        const { width, height, fps, totalFrames } = opts;
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-        const h264File = path.join(TEMP_PATH, `native-${timestamp}.h264`);
-        const videoFile = path.join(TEMP_PATH, `native-${timestamp}.mp4`);
-        const outputFile = path.join(OUTPUT_PATH, `video-${timestamp}.mp4`);
-
-        if (!fs.existsSync(OUTPUT_PATH)) fs.mkdirSync(OUTPUT_PATH, { recursive: true });
-        if (!fs.existsSync(TEMP_PATH)) fs.mkdirSync(TEMP_PATH, { recursive: true });
-
-        console.log(`[NativeExport] Starting: ${width}x${height} @ ${fps}fps, ${totalFrames} frames`);
-
-        // 1. Encode synthetic frames → .h264
-        const encResult = _nativeExporterAddon.encode({
-            width, height, fps, totalFrames,
-            bitrate: opts.bitrate || 18000000,
-            maxBitrate: opts.maxBitrate || 24000000,
-            gop: opts.gop || (fps * 2),
-            bframes: opts.bframes !== undefined ? opts.bframes : 2,
-            preset: opts.preset || 5,
-            rc: opts.rc || 'vbr_hq',
-            outputPath: h264File,
-        });
-
-        if (!encResult.ok) {
-            console.error('[NativeExport] Encode failed:', encResult.reason);
-            return encResult;
-        }
-
-        console.log(`[NativeExport] Encoded ${encResult.frames} frames in ${encResult.elapsed.toFixed(2)}s (${encResult.fps.toFixed(1)} fps)`);
-
-        // 2. Wrap .h264 → .mp4 via FFmpeg (-c:v copy)
-        await new Promise((resolve, reject) => {
-            const wrapProc = spawn(WEBGL_FFMPEG_PATH, [
-                '-y', '-r', String(fps),
-                '-i', h264File,
-                '-c:v', 'copy',
-                '-movflags', '+faststart',
-                videoFile
-            ], { stdio: ['ignore', 'pipe', 'pipe'] });
-
-            let wrapErr = '';
-            wrapProc.stderr.on('data', d => { wrapErr += d.toString(); });
-            wrapProc.on('close', code => {
-                if (code === 0) resolve();
-                else reject(new Error(`FFmpeg wrap exit ${code}: ${wrapErr.slice(-200)}`));
-            });
-            wrapProc.on('error', reject);
-        });
-
-        // 3. Mux audio (reuse existing _webglMuxAudio pattern)
-        const exp = { videoFile, outputFile, audioTrimStartSec: opts.audioTrimStartSec, audioTrimEndSec: opts.audioTrimEndSec };
-        const finalOutput = await _webglMuxAudio(exp);
-
-        // Clean up .h264 temp file
-        try { fs.unlinkSync(h264File); } catch (_) { }
-
-        console.log(`[NativeExport] Output: ${finalOutput}`);
-        return { ok: true, outputPath: finalOutput, frames: encResult.frames, elapsed: encResult.elapsed, fps: encResult.fps };
-    } catch (err) {
-        console.error('[NativeExport] start error:', err.message);
-        return { ok: false, reason: err.message };
-    }
-});
-
-ipcMain.handle('native-compose-export', async (event, opts) => {
-    if (!_nativeExporterAddon || !_nativeExporterAddon.composeAndEncode) {
-        return { ok: false, reason: 'Native exporter addon not loaded or missing composeAndEncode' };
-    }
-
-    try {
-        const { width, height, fps, totalFrames, layers } = opts;
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-        const h264File = path.join(TEMP_PATH, `compose-${timestamp}.h264`);
-        const videoFile = path.join(TEMP_PATH, `compose-${timestamp}.mp4`);
-        const outputFile = path.join(OUTPUT_PATH, `compose-${timestamp}.mp4`);
-
-        if (!fs.existsSync(OUTPUT_PATH)) fs.mkdirSync(OUTPUT_PATH, { recursive: true });
-        if (!fs.existsSync(TEMP_PATH)) fs.mkdirSync(TEMP_PATH, { recursive: true });
-
-        console.log(`[NativeCompose] Starting: ${width}x${height} @ ${fps}fps, ${totalFrames} frames, ${layers.length} layers`);
-        // Log layer summary for debugging
-        for (let i = 0; i < layers.length; i++) {
-            const l = layers[i];
-            console.log(`[NativeCompose]   layer[${i}] type=${l.type} frames=${l.startFrame}-${l.endFrame} track=${l.trackNum}${l.mediaPath ? ' path=' + l.mediaPath : ''}${l.seqDir ? ' seqDir=' + l.seqDir : ''}`);
-        }
-
-        const encResult = _nativeExporterAddon.composeAndEncode({
-            width, height, fps, totalFrames, layers,
-            outputPath: h264File,
-            bitrate: opts.bitrate || 18000000,
-            maxBitrate: opts.maxBitrate || 24000000,
-            gop: opts.gop || (fps * 2),
-            bframes: opts.bframes !== undefined ? opts.bframes : 2,
-            preset: opts.preset || 5,
-            rc: opts.rc || 'vbr_hq',
-        });
-
-        if (!encResult.ok) {
-            console.error('[NativeCompose] Failed:', encResult.reason);
-            return encResult;
-        }
-
-        console.log(`[NativeCompose] Encoded ${encResult.frames} frames in ${encResult.elapsed.toFixed(2)}s (${encResult.fps.toFixed(1)} fps)`);
-
-        // Wrap .h264 → .mp4
-        await new Promise((resolve, reject) => {
-            const wrapProc = spawn(WEBGL_FFMPEG_PATH, [
-                '-y', '-r', String(fps),
-                '-i', h264File,
-                '-c:v', 'copy',
-                '-movflags', '+faststart',
-                videoFile
-            ], { stdio: ['ignore', 'pipe', 'pipe'] });
-            let wrapErr = '';
-            wrapProc.stderr.on('data', d => { wrapErr += d.toString(); });
-            wrapProc.on('close', code => code === 0 ? resolve() : reject(new Error(`FFmpeg wrap exit ${code}: ${wrapErr.slice(-200)}`)));
-            wrapProc.on('error', reject);
-        });
-
-        // Mux audio (with in/out trim if specified)
-        const finalOutput = await _webglMuxAudio({
-            videoFile, outputFile,
-            audioTrimStartSec: opts.audioTrimStartSec,
-            audioTrimEndSec: opts.audioTrimEndSec,
-        });
-
-        try { fs.unlinkSync(h264File); } catch (_) { }
-
-        console.log(`[NativeCompose] Output: ${finalOutput}`);
-        return { ok: true, outputPath: finalOutput, frames: encResult.frames, elapsed: encResult.elapsed, fps: encResult.fps };
-    } catch (err) {
-        console.error('[NativeCompose] Error:', err.message);
-        return { ok: false, reason: err.message };
-    }
-});
-
-ipcMain.handle('native-export-cancel', async () => {
-    if (_nativeExporterAddon) {
-        try { _nativeExporterAddon.cancel(); } catch (_) { }
-    }
-    return { ok: true };
-});
-
-ipcMain.handle('pre-render-mgs-png', async (event, opts) => {
-    try {
-        const { renderMGsToPNG } = require('./src/legacy/mg-png-renderer');
-        const cacheDir = path.join(TEMP_PATH, 'mg-png-cache');
-        const result = await renderMGsToPNG(opts, cacheDir, (pct, msg) => {
-            console.log(`[PreRenderMG] ${pct}% ${msg}`);
-            if (mainWindow && !mainWindow.isDestroyed()) {
-                mainWindow.webContents.send('export-progress', { percent: pct, message: msg });
-            }
-        });
-        return { ok: true, layers: result.layers };
-    } catch (err) {
-        console.error('[PreRenderMG] Error:', err.message);
-        // Salvage any individually cached MGs even if the batch failed
-        const cacheDir = path.join(TEMP_PATH, 'mg-png-cache');
-        const salvaged = [];
-        try {
-            if (fs.existsSync(cacheDir)) {
-                for (const dir of fs.readdirSync(cacheDir)) {
-                    const mPath = path.join(cacheDir, dir, 'manifest.json');
-                    if (fs.existsSync(mPath)) {
-                        const m = JSON.parse(fs.readFileSync(mPath, 'utf8'));
-                        if (m.complete) {
-                            salvaged.push({
-                                seqDir: path.join(cacheDir, dir),
-                                seqPattern: 'frame_%06d.png',
-                                seqFrameCount: m.frameCount,
-                                seqLocalStart: 0,
-                                tileW: m.width, tileH: m.height,
-                                isFullScreen: m.isFullScreen || false,
-                                mgIndex: m.mgIndex != null ? m.mgIndex : -1,
-                                category: m.category || 'overlay',
-                                mgType: m.type,
-                            });
-                        }
-                    }
-                }
-            }
-        } catch (_) {}
-        console.log(`[PreRenderMG] Salvaged ${salvaged.length} cached MGs after error`);
-        return { ok: false, reason: err.message, layers: salvaged };
-    }
-});
-
-// Get file:// URL for an MG bake cache frame PNG
-ipcMain.handle('get-mg-cache-url', async (event, hash, frameName) => {
-    const framePath = path.join(TEMP_PATH, 'mg-png-cache', hash, frameName);
-    if (!fs.existsSync(framePath)) return null;
-    return 'asset:///' + framePath.replace(/\\/g, '/');
-});
-
-// Get the mg-png-cache directory path
-ipcMain.handle('get-mg-cache-dir', async () => {
-    return path.join(TEMP_PATH, 'mg-png-cache');
-});
-
-// Check if an MG cache manifest exists and is complete
-ipcMain.handle('check-mg-cache', async (event, hash) => {
-    const manifestPath = path.join(TEMP_PATH, 'mg-png-cache', hash, 'manifest.json');
-    if (!fs.existsSync(manifestPath)) return null;
-    try {
-        const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-        if (manifest.complete) return manifest;
-    } catch (_) { }
-    return null;
-});
 
 // Open output folder
 ipcMain.handle('open-output-folder', async () => {
@@ -2982,7 +1925,7 @@ ipcMain.handle('create-desktop-shortcut', async () => {
     if (process.platform !== 'win32') return { success: false, error: 'Windows only' };
     try {
         const desktopDir = path.join(require('os').homedir(), 'Desktop');
-        const shortcutPath = path.join(desktopDir, 'YTA Empire 2.lnk');
+        const shortcutPath = path.join(desktopDir, 'YTA Empire WEBGL.lnk');
         const electronExe = process.execPath;
         const icon = getShortcutIconPath();
 
@@ -2994,7 +1937,7 @@ $sc.TargetPath = '${electronExe.replace(/'/g, "''")}';
 $sc.Arguments = '"${APP_ROOT.replace(/'/g, "''")}"';
 $sc.WorkingDirectory = '${APP_ROOT.replace(/'/g, "''")}';
 $sc.IconLocation = '${icon.replace(/'/g, "''")}';
-$sc.Description = 'YTA Empire 2 - AI Video Generator';
+$sc.Description = 'YTA Empire WEBGL - AI Video Generator';
 $sc.Save();
         `.trim();
 
@@ -3032,7 +1975,7 @@ function registerFvpFileAssociation() {
             '@="FacelessVideoProject"',
             '',
             '[HKEY_CURRENT_USER\\Software\\Classes\\FacelessVideoProject]',
-            '@="YTA Empire 2 Project"',
+            '@="YTA Empire WEBGL Project"',
             '',
             '[HKEY_CURRENT_USER\\Software\\Classes\\FacelessVideoProject\\DefaultIcon]',
             `@="${regEsc(iconValue)}"`,
@@ -3070,11 +2013,11 @@ if (process.platform === 'win32' && !fs.existsSync(fvpRegisteredFlag)) {
         registerFvpFileAssociation();
         // Auto-create desktop shortcut
         const desktopDir = path.join(require('os').homedir(), 'Desktop');
-        const shortcutPath = path.join(desktopDir, 'YTA Empire 2.lnk');
+        const shortcutPath = path.join(desktopDir, 'YTA Empire WEBGL.lnk');
         if (!fs.existsSync(shortcutPath)) {
             const electronExe = process.execPath;
             const icon = getShortcutIconPath();
-            const ps = `$ws = New-Object -ComObject WScript.Shell; $sc = $ws.CreateShortcut('${shortcutPath.replace(/'/g, "''")}'); $sc.TargetPath = '${electronExe.replace(/'/g, "''")}'; $sc.Arguments = '""${APP_ROOT.replace(/'/g, "''")}""'; $sc.WorkingDirectory = '${APP_ROOT.replace(/'/g, "''")}'; $sc.IconLocation = '${icon.replace(/'/g, "''")}'; $sc.Description = 'YTA Empire 2'; $sc.Save();`;
+            const ps = `$ws = New-Object -ComObject WScript.Shell; $sc = $ws.CreateShortcut('${shortcutPath.replace(/'/g, "''")}'); $sc.TargetPath = '${electronExe.replace(/'/g, "''")}'; $sc.Arguments = '""${APP_ROOT.replace(/'/g, "''")}""'; $sc.WorkingDirectory = '${APP_ROOT.replace(/'/g, "''")}'; $sc.IconLocation = '${icon.replace(/'/g, "''")}'; $sc.Description = 'YTA Empire WEBGL'; $sc.Save();`;
             execSync(`powershell -Command "${ps.replace(/"/g, '\\"')}"`, { stdio: 'ignore' });
             console.log('✅ Desktop shortcut created');
         }
@@ -3110,189 +2053,7 @@ function updateEnvFile(key, value) {
     }
 }
 
-function ensureWindowsRemotionBinariesDir() {
-    const sourceDir = path.join(APP_ROOT, 'node_modules', '@remotion', 'compositor-win32-x64-msvc');
-    const sourceCompositorBin = path.join(sourceDir, 'compositor.bin');
-    const sourceRemotionExe = path.join(sourceDir, 'remotion.exe');
 
-    if (!fs.existsSync(sourceCompositorBin) && !fs.existsSync(sourceRemotionExe)) {
-        throw new Error('Remotion compositor files are missing. Try: npm install @remotion/compositor-win32-x64-msvc --force');
-    }
-
-    // Keep binaries under app-owned temp (not inside project folders like Downloads)
-    // to avoid Windows EPERM / Controlled Folder Access issues.
-    // Use per-project subfolders to avoid cross-instance file contention.
-    const projectKey = crypto.createHash('sha1').update(PROJECT_DIR).digest('hex').slice(0, 12);
-    const binariesDir = path.join(APP_ROOT, 'temp', 'remotion-binaries', projectKey);
-    if (!fs.existsSync(binariesDir)) {
-        fs.mkdirSync(binariesDir, { recursive: true });
-    }
-
-    for (const dirent of fs.readdirSync(sourceDir, { withFileTypes: true })) {
-        if (!dirent.isFile()) {
-            continue;
-        }
-
-        const sourceFile = path.join(sourceDir, dirent.name);
-        const destFile = path.join(binariesDir, dirent.name);
-        // Only copy if dest doesn't exist or has wrong size
-        // Skip mtime check — if another instance has the file locked, we don't need to re-copy
-        const needsCopy = !fs.existsSync(destFile) ||
-            fs.statSync(sourceFile).size !== fs.statSync(destFile).size;
-
-        if (needsCopy) {
-            try {
-                fs.copyFileSync(sourceFile, destFile);
-            } catch (e) {
-                // EPERM/EBUSY = another instance is using this file — that's fine, it exists
-                if (fs.existsSync(destFile)) {
-                    console.log(`⚠️ Could not overwrite ${dirent.name} (in use by another instance), using existing copy`);
-                } else {
-                    throw e; // File doesn't exist and we can't create it — real error
-                }
-            }
-        }
-    }
-
-    const targetCompositorBin = path.join(binariesDir, 'compositor.bin');
-    const targetRemotionExe = path.join(binariesDir, 'remotion.exe');
-    if (!fs.existsSync(targetRemotionExe) && fs.existsSync(targetCompositorBin)) {
-        try {
-            fs.copyFileSync(targetCompositorBin, targetRemotionExe);
-        } catch (e) {
-            if (!fs.existsSync(targetRemotionExe)) throw e;
-            console.log('⚠️ Could not copy compositor.bin → remotion.exe (in use), using existing copy');
-        }
-    }
-
-    if (!fs.existsSync(targetRemotionExe)) {
-        throw new Error('Remotion executable could not be prepared. Add a Windows Security exclusion for this project and retry.');
-    }
-
-    return binariesDir;
-}
-
-// ========================================
-// MLT Render Engine (Kdenlive architecture)
-// ========================================
-const { getRenderServer } = require('./src/render/render-server');
-const { RenderPresetRepository } = require('./src/render/render-presets');
-const { DEFAULT_MELT_PATH } = require('./src/render/render-job');
-
-// Initialize render server when app is ready
-app.whenReady().then(() => {
-    const server = getRenderServer();
-    if (mainWindow) server.setMainWindow(mainWindow);
-
-    // Initialize presets
-    const repo = RenderPresetRepository.get();
-    repo.setCustomProfilesPath(path.join(PROJECT_DIR, 'temp'));
-});
-
-// Get available render presets
-ipcMain.handle('mlt-get-presets', async () => {
-    const repo = RenderPresetRepository.get();
-    const categories = repo.getAllCategories();
-    const presets = repo.getAllPresets().map(p => ({
-        name: p.name,
-        extension: p.extension,
-        groupId: p.groupId,
-        supportsTwoPass: p.supportsTwoPass(),
-        vQualities: p.vQualities,
-        defaultVQuality: p.defaultVQuality,
-        vBitrates: p.vBitrates,
-        defaultVBitrate: p.defaultVBitrate,
-        aBitrates: p.aBitrates,
-        defaultABitrate: p.defaultABitrate,
-        speeds: p.speeds,
-        defaultSpeedIndex: p.defaultSpeedIndex
-    }));
-    return { categories, presets };
-});
-
-// Start MLT render
-ipcMain.handle('mlt-render', async (event, opts) => {
-    try {
-        const server = getRenderServer();
-        server.setMainWindow(mainWindow);
-
-        // Load video plan
-        const planPath = opts.planPath || path.join(TEMP_PATH, 'video-plan.json');
-        if (!fs.existsSync(planPath)) {
-            return { error: 'video-plan.json not found. Run build first.' };
-        }
-        const plan = JSON.parse(fs.readFileSync(planPath, 'utf8'));
-
-        // Determine output path
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-        const preset = RenderPresetRepository.get().getPreset(opts.presetName || 'MP4 - H264/AAC');
-        const ext = preset ? preset.extension : 'mp4';
-        const outputPath = opts.outputPath || path.join(OUTPUT_PATH, `video-${timestamp}.${ext}`);
-
-        // Ensure output directory exists
-        const outputDir = path.dirname(outputPath);
-        if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
-
-        // Find melt
-        const meltPath = opts.meltPath || DEFAULT_MELT_PATH;
-        if (!fs.existsSync(meltPath)) {
-            return { error: `melt not found at ${meltPath}. Install Kdenlive or set melt path.` };
-        }
-
-        const result = server.createJob({
-            plan,
-            outputPath,
-            presetName: opts.presetName || 'MP4 - H264/AAC',
-            presetOverrides: opts.presetOverrides || {},
-            publicDir: PUBLIC_PATH,
-            tempDir: TEMP_PATH,
-            meltPath,
-            twoPass: opts.twoPass || false,
-            debugMode: opts.debugMode || false
-        });
-
-        return result;
-    } catch (err) {
-        console.error('[MLT Render] Error:', err);
-        return { error: err.message };
-    }
-});
-
-// Cancel MLT render
-ipcMain.handle('mlt-cancel-render', async (event, opts) => {
-    const server = getRenderServer();
-    if (opts && opts.jobId) {
-        server.abortJob(opts.jobId);
-    } else {
-        server.abortAllJobs();
-    }
-    return { ok: true };
-});
-
-// Get render job status
-ipcMain.handle('mlt-get-jobs', async () => {
-    return getRenderServer().getJobs();
-});
-
-// Clean up finished jobs
-ipcMain.handle('mlt-cleanup-jobs', async () => {
-    getRenderServer().cleanUpJobs();
-    return { ok: true };
-});
-
-// Get melt path / check availability
-ipcMain.handle('mlt-check', async () => {
-    const meltPath = DEFAULT_MELT_PATH;
-    const exists = fs.existsSync(meltPath);
-    let version = null;
-    if (exists) {
-        try {
-            version = execSync(`"${meltPath}" --version 2>&1`, { encoding: 'utf8', timeout: 5000 })
-                .split('\n')[0].trim();
-        } catch (e) {}
-    }
-    return { meltPath, available: exists, version };
-});
 
 // ========================================
 // Error Handling

@@ -5,11 +5,11 @@
  */
 
 // ============================================================================
-// SPRING PHYSICS (exact Remotion port)
+// SPRING PHYSICS
 // ============================================================================
 
 /**
- * Core spring physics calculation — exact port of Remotion's springCalculation().
+ * Core spring physics calculation.
  */
 function springCalc(frame, fps, config) {
     const c = config.damping || 10;
@@ -60,7 +60,7 @@ function springCalc(frame, fps, config) {
 
 /**
  * Measure how many frames it takes for a spring to settle (within threshold).
- * Exact port of Remotion's measureSpring().
+ * Measure how many frames it takes for a spring to settle.
  */
 function measureSpring(fps, config, threshold) {
     if (threshold === undefined) threshold = 0.005;
@@ -90,7 +90,7 @@ function measureSpring(fps, config, threshold) {
 }
 
 /**
- * Main spring function — supports durationInFrames like Remotion's spring().
+ * Main spring function — supports durationInFrames for time-stretched springs.
  * When durationInFrames is set, the spring is time-stretched to fit exactly.
  */
 function springValue(frame, fps, config) {
@@ -166,7 +166,9 @@ function clamp01(v) {
  */
 function computeAnimationState(frame, fps, mg) {
     const speed = mg._animationSpeed || 1.0;
-    const totalFrames = Math.max(1, Math.round((mg.duration || 3) * fps));
+    // Prefer pre-computed _totalFrames (accurate for both overlay and fullscreen MGs)
+    // Fallback to duration*fps only for MGs without frame data
+    const totalFrames = mg._totalFrames || Math.max(1, Math.round((mg.duration || 3) * fps));
     const enterFrames = Math.max(1, Math.min(Math.round((0.5 / speed) * fps), Math.round(totalFrames * 0.35)));
     const exitFrames = Math.max(1, Math.min(Math.round((0.3 / speed) * fps), Math.round(totalFrames * 0.2)));
 

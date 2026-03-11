@@ -1,5 +1,5 @@
 /**
- * YTA Empire 2 - UI Application
+ * YTA Empire WEBGL - UI Application
  * FIXED: Playhead - freely draggable, can go to 0, doesn't disappear when panning
  */
 
@@ -203,12 +203,12 @@ const state = {
     previewZoom: 'fit',
     // Transition system - disabled (hard cut only)
     transition: {
-        style: 'cut',
-        duration: 0,
+        style: 'crossfade',
+        duration: 0.5,
         isTransitioning: false,
         activeVideoIndex: 0,
-        types: [],
-        metadata: { cut: { name: 'Cut', icon: '✂', description: 'Instant cut' } }
+        types: ['crossfade', 'fade', 'wipe', 'slide', 'dissolve'],
+        metadata: { cut: { name: 'Cut', icon: '✂', description: 'Instant cut' }, crossfade: { name: 'Crossfade', icon: '🔀' }, fade: { name: 'Fade', icon: '🔀' }, wipe: { name: 'Wipe', icon: '🔀' } }
     },
     volume: 1,
     isMuted: false,
@@ -225,7 +225,6 @@ const state = {
     // Motion Graphics system - AI-placed text overlays
     motionGraphics: [],
     mgEnabled: true,
-    fastNativeMGs: true,
     subtitlesEnabled: false,
     mgStyle: 'clean',
     aiInstructions: '',
@@ -273,7 +272,7 @@ const TRACK_HEADER_WIDTH = 100;
 // ========================================
 // Built-in gradient backgrounds (mirrors BACKGROUND_LIBRARY from themes.js)
 // ========================================
-const GRADIENT_BACKGROUNDS = {
+const GRADIENT_BACKGROUNDS = window.GRADIENT_BACKGROUNDS = {
     'dark-gradient': 'radial-gradient(ellipse at 50% 40%, #1a1a2e 0%, #0a0a14 60%, #000000 100%)',
     'blue-minimal': 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
     'dark-blue': 'radial-gradient(ellipse at 50% 50%, #0f2027 0%, #203a43 40%, #2c5364 100%)',
@@ -385,6 +384,9 @@ const elements = {
     propFitMode: document.getElementById('prop-fit-mode'),
     propAnimate: document.getElementById('prop-animate'),
     propAnimateRow: document.getElementById('prop-animate-row'),
+    propKbSpeed: document.getElementById('prop-kb-speed'),
+    propKbSpeedVal: document.getElementById('prop-kb-speed-val'),
+    propKbSpeedRow: document.getElementById('prop-kb-speed-row'),
     propReset: document.getElementById('prop-reset'),
     propCropTop: document.getElementById('prop-crop-top'),
     propCropBottom: document.getElementById('prop-crop-bottom'),
@@ -414,7 +416,6 @@ const elements = {
     sfxVolumeLabel: document.getElementById('sfx-volume-label'),
     // Motion Graphics controls
     mgEnabled: document.getElementById('mg-enabled'),
-    fastNativeMGs: document.getElementById('fast-native-mgs'),
     // Subtitles
     subtitlesEnabled: document.getElementById('subtitles-enabled'),
 };
@@ -637,7 +638,7 @@ async function init() {
     // Check if we're in capture mode (hidden window for Preview Capture renderer)
     if (_isCaptureMode) {
         initCaptureMode();
-        console.log('🎬 YTA Empire 2 Capture Window Ready');
+        console.log('🎬 YTA Empire WEBGL Capture Window Ready');
         return;
     }
 
@@ -708,7 +709,7 @@ async function init() {
     // Initialize WebGL2 Compositor Engine
     initCompositor();
 
-    console.log('🎬 YTA Empire 2 UI Ready');
+    console.log('🎬 YTA Empire WEBGL UI Ready');
 }
 
 function setupEventListeners() {
@@ -772,8 +773,27 @@ function setupEventListeners() {
     ['srcPexels', 'srcPixabay', 'srcYouTube', 'srcNewsVideo', 'srcUnsplash', 'srcGoogleCSE', 'srcBing', 'srcDuckDuckGo', 'srcGoogleScrape'].forEach(key => {
         if (elements[key]) elements[key].addEventListener('change', saveSettings);
     });
-    // Transition style listener (disabled - hard cut only)
-    // elements.transitionStyle is hidden, always 'cut'
+    // Transition style + duration listeners
+    if (elements.transitionStyle) {
+        elements.transitionStyle.addEventListener('change', () => {
+            state.transition.style = elements.transitionStyle.value;
+            state.transition.duration = state.transition.style === 'cut' ? 0 : parseFloat(document.getElementById('transition-duration')?.value || 0.5);
+            renderTimeline();
+            if (state.compositorActive) loadPlanIntoCompositor();
+            saveSettings();
+        });
+    }
+    const transDurEl = document.getElementById('transition-duration');
+    const transDurVal = document.getElementById('transition-duration-val');
+    if (transDurEl) {
+        transDurEl.addEventListener('input', () => {
+            const val = parseFloat(transDurEl.value);
+            state.transition.duration = val;
+            if (transDurVal) transDurVal.textContent = `${val.toFixed(1)}s`;
+            if (state.compositorActive) loadPlanIntoCompositor();
+            saveSettings();
+        });
+    }
     // SFX controls
     if (elements.sfxEnabled) {
         elements.sfxEnabled.addEventListener('change', () => {
@@ -800,13 +820,6 @@ function setupEventListeners() {
             saveSettings();
         });
     }
-    // Fast Native MGs toggle
-    if (elements.fastNativeMGs) {
-        elements.fastNativeMGs.addEventListener('change', () => {
-            state.fastNativeMGs = elements.fastNativeMGs.checked;
-            saveSettings();
-        });
-    }
     // Subtitles toggle
     if (elements.subtitlesEnabled) {
         elements.subtitlesEnabled.addEventListener('change', () => {
@@ -824,14 +837,16 @@ function setupEventListeners() {
 }
 
 function setupVideoControls() {
-    // Create SFX audio pool (2 elements for overlapping transitions)
-    for (let i = 0; i < 2; i++) {
+    // Create SFX audio pool (4 elements for overlapping transition + MG SFX)
+    for (let i = 0; i < 4; i++) {
         const audio = document.createElement('audio');
         audio.preload = 'auto';
         audio.className = 'hidden';
         document.body.appendChild(audio);
         state._sfxAudioPool.push({ element: audio, playing: false });
     }
+    // Preload all SFX URLs to avoid IPC latency during playback
+    preloadSfxUrls();
 
     // Play button
     if (elements.btnPlay) {
@@ -1406,6 +1421,11 @@ function updateClipProperties() {
     if (elements.propPosXVal) { elements.propPosXVal.value = `${posX}%`; }
     if (elements.propPosYVal) { elements.propPosYVal.value = `${posY}%`; }
 
+    // Hide volume for images (no audio)
+    const volumeRow = document.getElementById('prop-volume-row');
+    const isImage = scene.mediaType === 'image';
+    if (volumeRow) volumeRow.style.display = isImage ? 'none' : '';
+
     const volume = scene.volume !== undefined ? scene.volume : 1;
     if (elements.propVolume) { elements.propVolume.value = volume; }
     if (elements.propVolumeVal) { elements.propVolumeVal.value = `${Math.round(volume * 100)}%`; }
@@ -1442,7 +1462,20 @@ function updateClipProperties() {
         const isImage = scene.mediaType === 'image';
         elements.propAnimateRow.style.display = isImage ? '' : 'none';
         if (isImage && elements.propAnimate) {
-            elements.propAnimate.checked = scene.kenBurnsEnabled !== false; // default true
+            const kbEnabled = scene.kenBurnsEnabled !== false;
+            elements.propAnimate.checked = kbEnabled;
+            // Show/hide speed slider based on checkbox
+            if (elements.propKbSpeedRow) {
+                elements.propKbSpeedRow.style.display = kbEnabled ? '' : 'none';
+            }
+            if (elements.propKbSpeed) {
+                const speed = scene.kenBurnsSpeed !== undefined ? scene.kenBurnsSpeed : 1;
+                elements.propKbSpeed.value = speed;
+            }
+            if (elements.propKbSpeedVal) {
+                const speed = scene.kenBurnsSpeed !== undefined ? scene.kenBurnsSpeed : 1;
+                elements.propKbSpeedVal.textContent = speed.toFixed(1) + 'x';
+            }
         }
     }
 }
@@ -1504,6 +1537,10 @@ function updateMgProperties() {
     if (animSpeedEl) animSpeedEl.value = mg.animationSpeed || 1;
     if (animSpeedVal) animSpeedVal.textContent = `${(mg.animationSpeed || 1).toFixed(1)}x`;
 
+    // Hide background dropdown for overlay MGs (only for fullscreen MG scenes)
+    const mgBgRow = document.getElementById('mg-bg-row');
+    if (mgBgRow) mgBgRow.style.display = 'none';
+
     // Show map style row only for mapChart
     const mapStyleRow = document.getElementById('mg-map-style-row');
     const mapStyleEl = document.getElementById('mg-map-style');
@@ -1542,6 +1579,12 @@ function updateMgPropertiesForScene(scene) {
     if (animSpeedEl) animSpeedEl.value = animSpeed;
     if (animSpeedVal) animSpeedVal.textContent = `${animSpeed.toFixed(1)}x`;
 
+    // Show background dropdown for fullscreen MG scenes
+    const mgBgRow = document.getElementById('mg-bg-row');
+    const mgBgEl = document.getElementById('mg-background');
+    if (mgBgRow) mgBgRow.style.display = '';
+    if (mgBgEl) mgBgEl.value = mg.mgBackground || scene.mgBackground || 'none';
+
     // Show map style row only for mapChart
     const sceneType = mg.type || scene.type;
     const mapStyleRow = document.getElementById('mg-map-style-row');
@@ -1569,6 +1612,7 @@ function setupClipPropertyListeners() {
             state.scenes[state.selectedClipIndex].scale = val;
             if (elements.propScaleVal) elements.propScaleVal.value = val.toFixed(2);
             applySceneTransform(state.selectedClipIndex);
+            refreshCompositorScene(state.selectedClipIndex);
         });
     }
     if (elements.propPosX) {
@@ -1578,6 +1622,7 @@ function setupClipPropertyListeners() {
             state.scenes[state.selectedClipIndex].posX = val;
             if (elements.propPosXVal) elements.propPosXVal.value = `${val}%`;
             applySceneTransform(state.selectedClipIndex);
+            refreshCompositorScene(state.selectedClipIndex);
         });
     }
     if (elements.propPosY) {
@@ -1587,6 +1632,7 @@ function setupClipPropertyListeners() {
             state.scenes[state.selectedClipIndex].posY = val;
             if (elements.propPosYVal) elements.propPosYVal.value = `${val}%`;
             applySceneTransform(state.selectedClipIndex);
+            refreshCompositorScene(state.selectedClipIndex);
         });
     }
     if (elements.propVolume) {
@@ -1615,6 +1661,7 @@ function setupClipPropertyListeners() {
                 state.scenes[state.selectedClipIndex][prop] = val;
                 if (vl) vl.value = `${val}%`;
                 applySceneTransform(state.selectedClipIndex);
+                refreshCompositorScene(state.selectedClipIndex);
             });
         }
     });
@@ -1626,6 +1673,7 @@ function setupClipPropertyListeners() {
             state.scenes[state.selectedClipIndex].borderRadius = val;
             if (elements.propBorderRadiusVal) elements.propBorderRadiusVal.value = `${val}%`;
             applySceneTransform(state.selectedClipIndex);
+            refreshCompositorScene(state.selectedClipIndex);
         });
     }
 
@@ -1658,17 +1706,17 @@ function setupClipPropertyListeners() {
     setupValueInput(elements.propScaleVal, elements.propScale, {
         parse: parseFloat,
         format: v => v.toFixed(2),
-        apply: v => { state.scenes[state.selectedClipIndex].scale = v; applySceneTransform(state.selectedClipIndex); }
+        apply: v => { state.scenes[state.selectedClipIndex].scale = v; applySceneTransform(state.selectedClipIndex); refreshCompositorScene(state.selectedClipIndex); }
     });
     setupValueInput(elements.propPosXVal, elements.propPosX, {
         parse: parseInt,
         format: v => `${v}%`,
-        apply: v => { state.scenes[state.selectedClipIndex].posX = v; applySceneTransform(state.selectedClipIndex); }
+        apply: v => { state.scenes[state.selectedClipIndex].posX = v; applySceneTransform(state.selectedClipIndex); refreshCompositorScene(state.selectedClipIndex); }
     });
     setupValueInput(elements.propPosYVal, elements.propPosY, {
         parse: parseInt,
         format: v => `${v}%`,
-        apply: v => { state.scenes[state.selectedClipIndex].posY = v; applySceneTransform(state.selectedClipIndex); }
+        apply: v => { state.scenes[state.selectedClipIndex].posY = v; applySceneTransform(state.selectedClipIndex); refreshCompositorScene(state.selectedClipIndex); }
     });
     setupValueInput(elements.propVolumeVal, elements.propVolume, {
         parse: v => parseFloat(v) / 100,
@@ -1681,13 +1729,13 @@ function setupClipPropertyListeners() {
         setupValueInput(elements[valMap[prop]], elements[elMap[prop]], {
             parse: parseInt,
             format: v => `${v}%`,
-            apply: v => { state.scenes[state.selectedClipIndex][prop] = v; applySceneTransform(state.selectedClipIndex); }
+            apply: v => { state.scenes[state.selectedClipIndex][prop] = v; applySceneTransform(state.selectedClipIndex); refreshCompositorScene(state.selectedClipIndex); }
         });
     });
     setupValueInput(elements.propBorderRadiusVal, elements.propBorderRadius, {
         parse: parseInt,
         format: v => `${v}%`,
-        apply: v => { state.scenes[state.selectedClipIndex].borderRadius = v; applySceneTransform(state.selectedClipIndex); }
+        apply: v => { state.scenes[state.selectedClipIndex].borderRadius = v; applySceneTransform(state.selectedClipIndex); refreshCompositorScene(state.selectedClipIndex); }
     });
 
     if (elements.propReset) {
@@ -1709,6 +1757,7 @@ function setupClipPropertyListeners() {
             updateClipProperties();
             applySceneTransform(state.selectedClipIndex);
             applyTrackVolumes();
+            refreshCompositorScene(state.selectedClipIndex);
             loadActiveScenes();
         });
     }
@@ -1718,6 +1767,7 @@ function setupClipPropertyListeners() {
             if (state.selectedClipIndex < 0) return;
             pushUndoState();
             state.scenes[state.selectedClipIndex].background = e.target.value;
+            refreshCompositorScene(state.selectedClipIndex);
             loadActiveScenes();
         });
     }
@@ -1733,6 +1783,7 @@ function setupClipPropertyListeners() {
                 scene.background = 'blur';
                 if (elements.propBackground) elements.propBackground.value = 'blur';
             }
+            refreshCompositorScene(state.selectedClipIndex);
             loadActiveScenes();
         });
     }
@@ -1742,7 +1793,28 @@ function setupClipPropertyListeners() {
             if (state.selectedClipIndex < 0) return;
             pushUndoState();
             state.scenes[state.selectedClipIndex].kenBurnsEnabled = e.target.checked;
+            // Show/hide speed slider
+            if (elements.propKbSpeedRow) {
+                elements.propKbSpeedRow.style.display = e.target.checked ? '' : 'none';
+            }
+            refreshCompositorScene(state.selectedClipIndex);
             loadActiveScenes();
+        });
+    }
+    // Ken Burns speed slider
+    if (elements.propKbSpeed) {
+        elements.propKbSpeed.addEventListener('input', (e) => {
+            if (state.selectedClipIndex < 0) return;
+            const speed = parseFloat(e.target.value) || 1;
+            state.scenes[state.selectedClipIndex].kenBurnsSpeed = speed;
+            if (elements.propKbSpeedVal) {
+                elements.propKbSpeedVal.textContent = speed.toFixed(1) + 'x';
+            }
+            refreshCompositorScene(state.selectedClipIndex);
+            loadActiveScenes();
+        });
+        elements.propKbSpeed.addEventListener('change', (e) => {
+            pushUndoState();
         });
     }
 }
@@ -1808,6 +1880,7 @@ function setupMgPropertyListeners() {
             active.mg.text = e.target.value;
             if (active.mg.mgData) active.mg.mgData.text = e.target.value;
             renderTracks();
+            refreshCompositorMGs();
         });
     }
     if (subtextEl) {
@@ -1816,6 +1889,7 @@ function setupMgPropertyListeners() {
             if (!active) return;
             active.mg.subtext = e.target.value;
             if (active.mg.mgData) active.mg.mgData.subtext = e.target.value;
+            refreshCompositorMGs();
         });
     }
     if (posEl) {
@@ -1825,6 +1899,7 @@ function setupMgPropertyListeners() {
             active.mg.position = e.target.value;
             if (active.mg.mgData) active.mg.mgData.position = e.target.value;
             if (active.isScene) loadActiveScenes(); else updateMGOverlay();
+            refreshCompositorMGs();
         });
     }
     if (durEl) {
@@ -1839,6 +1914,7 @@ function setupMgPropertyListeners() {
             }
             document.getElementById('mg-duration-val').textContent = `${val.toFixed(1)}s`;
             renderTracks();
+            refreshCompositorMGs();
         });
     }
     if (typeEl) {
@@ -1849,6 +1925,7 @@ function setupMgPropertyListeners() {
             if (active.mg.mgData) active.mg.mgData.type = e.target.value;
             if (active.isScene) loadActiveScenes(); else updateMGOverlay();
             renderTracks();
+            refreshCompositorMGs();
         });
     }
     if (styleEl) {
@@ -1858,6 +1935,7 @@ function setupMgPropertyListeners() {
             active.mg.style = e.target.value;
             if (active.mg.mgData) active.mg.mgData.style = e.target.value;
             if (active.isScene) loadActiveScenes(); else updateMGOverlay();
+            refreshCompositorMGs();
         });
     }
 
@@ -1870,6 +1948,7 @@ function setupMgPropertyListeners() {
             active.mg.mapStyle = e.target.value;
             if (active.mg.mgData) active.mg.mgData.mapStyle = e.target.value;
             if (active.isScene) loadActiveScenes(); else updateMGOverlay();
+            refreshCompositorMGs();
         });
     }
 
@@ -1878,6 +1957,30 @@ function setupMgPropertyListeners() {
         typeEl.addEventListener('change', () => {
             const mapStyleRow = document.getElementById('mg-map-style-row');
             if (mapStyleRow) mapStyleRow.style.display = typeEl.value === 'mapChart' ? '' : 'none';
+        });
+    }
+
+    // MG Background dropdown — populate gradient options and listen for changes
+    const mgBgEl = document.getElementById('mg-background');
+    if (mgBgEl) {
+        // Add gradient options from the built-in library
+        if (Object.keys(GRADIENT_BACKGROUNDS).length > 0) {
+            const grp = document.createElement('optgroup');
+            grp.label = 'Gradients';
+            for (const [id] of Object.entries(GRADIENT_BACKGROUNDS)) {
+                const opt = document.createElement('option');
+                opt.value = `gradient:${id}`;
+                opt.textContent = GRADIENT_BACKGROUND_NAMES[id] || id;
+                grp.appendChild(opt);
+            }
+            mgBgEl.appendChild(grp);
+        }
+        mgBgEl.addEventListener('change', (e) => {
+            const active = getActiveMG();
+            if (!active) return;
+            active.mg.mgBackground = e.target.value;
+            if (active.mg.mgData) active.mg.mgData.mgBackground = e.target.value;
+            refreshCompositorMGs();
         });
     }
 
@@ -1891,6 +1994,7 @@ function setupMgPropertyListeners() {
             active.mg.animationSpeed = val;
             if (active.mg.mgData) active.mg.mgData.animationSpeed = val;
             document.getElementById('mg-anim-speed-val').textContent = `${val.toFixed(1)}x`;
+            refreshCompositorMGs();
         });
     }
 }
@@ -2231,7 +2335,7 @@ async function saveProject(silent = false) {
             mutedTracks: state.mutedTracks
         };
 
-        // Save as .fvp project file (includes settings + video plan + writes video-plan.json for Remotion)
+        // Save as .fvp project file (includes settings + video plan + writes video-plan.json)
         if (window.electronAPI.saveProjectFile) {
             const result = await window.electronAPI.saveProjectFile({ settings, videoPlan: state.videoPlan });
             state.hasProjectFile = true;
@@ -2437,6 +2541,20 @@ function startPlaybackLoop() {
                     audio.currentTime = Math.min(state.currentTime, audio.duration || state.totalDuration);
                 }
             }
+            // Trigger SFX clips at transition points
+            if (state.sfxEnabled && state.sfxClips.length > 0) {
+                const ct = state.currentTime;
+                state.sfxClips.forEach(sfx => {
+                    const sfxEnd = sfx.startTime + sfx.duration;
+                    if (ct >= sfx.startTime && ct < sfxEnd && !sfx._triggered) {
+                        sfx._triggered = true;
+                        playSfxClip(sfx);
+                    }
+                    if (ct < sfx.startTime || ct >= sfxEnd) {
+                        sfx._triggered = false;
+                    }
+                });
+            }
             // Update UI (playhead, time, scene highlight)
             updatePlayhead();
             updateTimeDisplay();
@@ -2592,22 +2710,59 @@ function startPlaybackLoop() {
     state.playbackAnimationFrame = requestAnimationFrame(loop);
 }
 
+// Cache of resolved SFX file URLs to avoid IPC latency on every play
+const _sfxUrlCache = {};
+
+async function preloadSfxUrls() {
+    // Preload all known SFX file URLs at startup
+    const allFiles = new Set();
+    for (const v of Object.values(SFX_MAP)) allFiles.add(v.file);
+    for (const v of Object.values(MG_SFX_MAP)) allFiles.add(v.file);
+    for (const file of allFiles) {
+        if (!_sfxUrlCache[file]) {
+            try {
+                const url = await window.electronAPI.getSfxPath(file);
+                if (url) _sfxUrlCache[file] = url;
+            } catch (_) { }
+        }
+    }
+}
+
 function playSfxClip(sfx) {
     if (!state.sfxEnabled || state.isMuted) return;
     const poolEntry = state._sfxAudioPool.find(p => !p.playing) || state._sfxAudioPool[0];
     if (!poolEntry) return;
     const audio = poolEntry.element;
-    poolEntry.playing = true;
 
-    window.electronAPI.getSfxPath(sfx.file).then(url => {
-        if (!url) { poolEntry.playing = false; return; }
-        audio.src = url;
-        audio.volume = sfx.volume * state.volume;
+    // Use cached URL for instant playback (no IPC delay)
+    const url = _sfxUrlCache[sfx.file];
+    if (!url) {
+        // Fallback: resolve via IPC (will be slow)
+        window.electronAPI.getSfxPath(sfx.file).then(resolvedUrl => {
+            if (!resolvedUrl) return;
+            _sfxUrlCache[sfx.file] = resolvedUrl;
+            audio.src = resolvedUrl;
+            audio.volume = sfx.volume * state.volume;
+            audio.currentTime = 0;
+            poolEntry.playing = true;
+            audio.play().catch(() => { });
+            audio.onended = () => { poolEntry.playing = false; };
+            setTimeout(() => { poolEntry.playing = false; }, (sfx.duration + 0.5) * 1000);
+        }).catch(() => { });
+        return;
+    }
+
+    poolEntry.playing = true;
+    // If src already matches, just seek to start (avoids reload latency)
+    if (audio.src === url) {
         audio.currentTime = 0;
-        audio.play().catch(() => { });
-        audio.onended = () => { poolEntry.playing = false; };
-        setTimeout(() => { poolEntry.playing = false; }, (sfx.duration + 0.5) * 1000);
-    }).catch(() => { poolEntry.playing = false; });
+    } else {
+        audio.src = url;
+    }
+    audio.volume = sfx.volume * state.volume;
+    audio.play().catch(() => { });
+    audio.onended = () => { poolEntry.playing = false; };
+    setTimeout(() => { poolEntry.playing = false; }, (sfx.duration + 0.5) * 1000);
 }
 
 function stopAllSfx() {
@@ -3713,6 +3868,87 @@ async function loadVideoPlan({ freshBuild = false } = {}) {
 }
 
 // ========================================
+// Test Plan Loader (DevTools: window._loadTestPlan or paste one-liner)
+// ========================================
+window._loadTestPlan = async function(plan) {
+    if (!plan) {
+        // Load from public/test-mg-plan.json via Node fs (preload globals)
+        try {
+            const _fs = window._nodeFs;
+            const _path = window._nodePath;
+            // Resolve public/ dir relative to the app root (ui/ is one level down)
+            const htmlDir = decodeURIComponent(location.pathname.replace(/^\/([A-Z]:)/, '$1')).replace(/\/[^/]*$/, '');
+            const publicDir = _path.join(htmlDir, '..', 'public');
+            const testPath = _path.join(publicDir, 'test-mg-plan.json');
+            const data = _fs.readFileSync(testPath, 'utf8');
+            plan = JSON.parse(data);
+        } catch (e) {
+            console.error('Failed to load test-mg-plan.json:', e.message);
+            return;
+        }
+    }
+    state.videoPlan = plan;
+    state._mediaUrlCache = {};
+    state.scenes = [];
+    state.motionGraphics = [];
+
+    const FULLSCREEN_MG_TYPES = new Set(['barChart', 'donutChart', 'rankingList', 'timeline', 'comparisonCard', 'bulletList', 'mapChart', 'articleHighlight']);
+    const allMGs = plan.motionGraphics || [];
+    state.motionGraphics = allMGs.filter(mg => !FULLSCREEN_MG_TYPES.has(mg.type));
+    state.mgStyle = plan.mgStyle || 'clean';
+
+    // Process regular scenes
+    let nextIndex = 0;
+    for (const s of (plan.scenes || [])) {
+        const scene = { ...s };
+        scene.index = scene.index !== undefined ? scene.index : nextIndex;
+        scene.trackId = scene.trackId || 'video-track-1';
+        if (!scene.mediaType) scene.mediaType = 'video';
+        state.scenes.push(scene);
+        nextIndex = Math.max(nextIndex, scene.index + 1);
+    }
+
+    // Process fullscreen MG scenes
+    const fullscreenMGs = [
+        ...(plan.mgScenes || []),
+        ...allMGs.filter(mg => FULLSCREEN_MG_TYPES.has(mg.type))
+    ];
+    for (const mg of fullscreenMGs) {
+        const scene = {
+            ...mg,
+            index: mg.index !== undefined ? mg.index : nextIndex++,
+            isMGScene: true,
+            mediaType: 'motion-graphic',
+            trackId: mg.trackId || 'video-track-3',
+        };
+        state.scenes.push(scene);
+    }
+
+    state.currentTime = 0;
+    _cachedPlayhead = null; _cachedTimelineScroll = null; _cachedTimelineTime = null;
+    renderTimeline();
+    updateClipProperties();
+    console.log(`✅ Test plan loaded: ${state.scenes.length} scenes, ${state.motionGraphics.length} overlay MGs`);
+
+    // Pre-cache media URLs for video scenes
+    for (const s of state.scenes) {
+        if (s.mediaType === 'video' && s.mediaExtension) {
+            await getCachedMediaUrl(s.index, s.mediaExtension).catch(() => null);
+        }
+    }
+
+    // Load into legacy preview
+    if (state.scenes.length > 0) {
+        await jumpToScene(0);
+    }
+
+    if (state.compositor) {
+        await loadPlanIntoCompositor();
+        console.log('✅ Compositor plan reloaded');
+    }
+};
+
+// ========================================
 // SFX Auto-Placement System
 // ========================================
 const SFX_MAP = {
@@ -3762,6 +3998,25 @@ const SFX_MAP = {
     static: { file: 'sfx-static.mp3', duration: 0.5 },
 };
 
+// MG type -> SFX mapping
+const MG_SFX_MAP = {
+    headline:       { file: 'sfx-mg-pop.mp3', duration: 0.25 },
+    lowerThird:     { file: 'sfx-mg-swoosh.mp3', duration: 0.35 },
+    callout:        { file: 'sfx-mg-swoosh.mp3', duration: 0.35 },
+    focusWord:      { file: 'sfx-mg-pop.mp3', duration: 0.25 },
+    statCounter:    { file: 'sfx-mg-tick.mp3', duration: 0.15 },
+    progressBar:    { file: 'sfx-mg-tick.mp3', duration: 0.15 },
+    bulletList:     { file: 'sfx-mg-pop.mp3', duration: 0.25 },
+    barChart:       { file: 'sfx-mg-ding.mp3', duration: 0.4 },
+    donutChart:     { file: 'sfx-mg-ding.mp3', duration: 0.4 },
+    comparisonCard: { file: 'sfx-mg-ding.mp3', duration: 0.4 },
+    timeline:       { file: 'sfx-mg-rise.mp3', duration: 0.5 },
+    rankingList:    { file: 'sfx-mg-rise.mp3', duration: 0.5 },
+    kineticText:    { file: 'sfx-mg-type.mp3', duration: 0.2 },
+    subscribeCTA:   { file: 'sfx-mg-chime.mp3', duration: 0.5 },
+    mapChart:       { file: 'sfx-mg-ding.mp3', duration: 0.4 },
+};
+
 function generateSfxClips() {
     if (!state.sfxEnabled) {
         state.sfxClips = [];
@@ -3804,8 +4059,8 @@ function generateSfxClips() {
 
             const sfxInfo = SFX_MAP[transType] || SFX_MAP['fade'];
 
-            // Start SFX slightly before the transition point (50ms pre-roll)
-            const preRoll = 0.05;
+            // Start SFX before the transition point (150ms pre-roll for better sync)
+            const preRoll = 0.15;
             const startTime = Math.max(0, curr.scene.startTime - preRoll);
 
             clips.push({
@@ -3820,6 +4075,40 @@ function generateSfxClips() {
         }
     }
 
+    // MG SFX — trigger on MG enter (overlay MGs)
+    if (state.motionGraphics && state.motionGraphics.length > 0) {
+        state.motionGraphics.forEach((mg, i) => {
+            if (mg.disabled) return;
+            const mgSfx = MG_SFX_MAP[mg.type];
+            if (!mgSfx) return;
+            clips.push({
+                id: `sfx-mg-${i}`,
+                transitionType: mg.type,
+                sceneIndex: -1,
+                startTime: mg.startTime || 0,
+                duration: mgSfx.duration,
+                volume: state.sfxVolume * 0.7, // MG SFX slightly quieter
+                file: mgSfx.file
+            });
+        });
+    }
+
+    // MG SFX — fullscreen MG scenes
+    state.scenes.forEach((scene, idx) => {
+        if (!scene.isMGScene || scene.disabled) return;
+        const mgSfx = MG_SFX_MAP[scene.type];
+        if (!mgSfx) return;
+        clips.push({
+            id: `sfx-mg-scene-${idx}`,
+            transitionType: scene.type,
+            sceneIndex: idx,
+            startTime: scene.startTime || 0,
+            duration: mgSfx.duration,
+            volume: state.sfxVolume * 0.7,
+            file: mgSfx.file
+        });
+    });
+
     state.sfxClips = clips;
 }
 
@@ -3829,9 +4118,9 @@ function renderScenes() {
     if (displayScenes.length === 0) { elements.sceneList.innerHTML = '<p class="empty-state">No scenes yet</p>'; return; }
     elements.sceneList.innerHTML = displayScenes.map((scene) => {
         const i = state.scenes.indexOf(scene);
-        const trType = scene.transition?.type || 'cut';
-        const trIcons = { cut: '✂️', crossfade: '🔀', flash: '⚡', fade_to_black: '⬛' };
-        const trLabels = { cut: 'Cut', crossfade: 'Crossfade', flash: 'Flash', fade_to_black: 'Fade to Black' };
+        const trType = scene.transitionType || scene.transition?.type || state.transition.style || 'cut';
+        const trIcons = { cut: '✂️', crossfade: '🔀', fade: '🔀', wipe: '↔️', slide: '↔️', flash: '⚡', dissolve: '🔀', blur: '🔀', zoom: '🔎', fade_to_black: '⬛' };
+        const trLabels = { cut: 'Cut', crossfade: 'Crossfade', fade: 'Fade', wipe: 'Wipe', slide: 'Slide', flash: 'Flash', dissolve: 'Dissolve', blur: 'Blur', zoom: 'Zoom', fade_to_black: 'Fade to Black' };
         const trBadge = i > 0 ? `<span class="scene-transition-badge" title="${trLabels[trType] || trType}">${trIcons[trType] || ''} ${trLabels[trType] || trType}</span>` : '';
         return `<div class="scene-card" data-index="${i}">
             <div class="scene-number">Scene ${i + 1}${trBadge}</div>
@@ -4014,8 +4303,8 @@ function renderTracks() {
                 const isDisabled = mg.disabled === true;
                 const isSelected = state.selectedMgIndex === i;
                 const eyeIcon = isDisabled ? '👁️‍🗨️' : '👁️';
-                // Compact marker style: max 60px wide to prevent oversized blocks
-                const clampedW = Math.min(Math.max(w, 20), 60);
+                // Ensure minimum visible width, scale with duration
+                const clampedW = Math.max(w, 20);
                 html += `<div class="timeline-clip mg-clip ${meta.colorClass} ${isDisabled ? 'clip-disabled' : ''} ${isSelected ? 'selected' : ''}" data-mg-index="${i}"
                     style="left:${left}px;width:${clampedW}px"
                     title="${mg.type}: ${mg.text} (${mg.duration.toFixed(1)}s)${isDisabled ? ' [OFF]' : ''}">
@@ -4077,11 +4366,11 @@ function renderTracks() {
             const mediaClass = scene.mediaType === 'image' ? 'clip-image' : 'clip-video';
             const isDisabled = scene.disabled === true;
             const eyeIcon = isDisabled ? '👁️‍🗨️' : '👁️';
-            // Transition icon between clips
-            const trType = scene.transition?.type || 'cut';
-            const trIcons = { cut: '✂️', crossfade: '🔀', flash: '⚡', fade_to_black: '⬛' };
-            const trIcon = trIcons[trType] || '';
-            const trLabel = { cut: 'Cut', crossfade: 'Crossfade', flash: 'Flash', fade_to_black: 'Fade to Black' }[trType] || trType;
+            // Transition icon between clips (per-scene override or global style)
+            const trType = scene.transitionType || scene.transition?.type || state.transition.style || 'cut';
+            const trIcons = { cut: '✂️', crossfade: '🔀', fade: '🔀', wipe: '↔️', slide: '↔️', flash: '⚡', dissolve: '🔀', blur: '🔀', zoom: '🔎', fade_to_black: '⬛' };
+            const trIcon = trIcons[trType] || '🔀';
+            const trLabel = { cut: 'Cut', crossfade: 'Crossfade', fade: 'Fade', wipe: 'Wipe', slide: 'Slide', flash: 'Flash', dissolve: 'Dissolve', blur: 'Blur', zoom: 'Zoom', fade_to_black: 'Fade to Black' }[trType] || trType;
             // Show transition marker between clips (skip first scene)
             if (i > 0 && trIcon) {
                 html += `<div class="transition-marker" style="left:${left - 8}px" title="${trLabel}">${trIcon}</div>`;
@@ -5061,8 +5350,9 @@ function computeKenBurnsForExport(scene, rtW, rtH) {
         return { scale, txPct, tyPct };
     }
 
+    const kbSpeed = scene.kenBurnsSpeed !== undefined ? scene.kenBurnsSpeed : 1;
     const start = evalKB(0);
-    const end = evalKB(1);
+    const end = evalKB(Math.min(1, kbSpeed));
     // Convert translate from % of RT to pixels
     return {
         sStart: start.scale,
@@ -5103,8 +5393,10 @@ function updateKenBurnsTransform(img, scene) {
     ];
     const kbType = kbTypes[(originalIndex * 13 + 7) % kbTypes.length];
     const sceneDur = scene.endTime - scene.startTime;
-    // Linear motion - constant speed, feels like an endless camera drift
-    const p = sceneDur > 0 ? Math.max(0, Math.min(1, (state.currentTime - scene.startTime) / sceneDur)) : 0;
+    const kbSpeed = scene.kenBurnsSpeed !== undefined ? scene.kenBurnsSpeed : 1;
+    // Linear motion scaled by speed — higher speed = faster animation
+    const rawP = sceneDur > 0 ? Math.max(0, Math.min(1, (state.currentTime - scene.startTime) / sceneDur)) : 0;
+    const p = Math.min(1, rawP * kbSpeed);
     // Gentle Ken Burns for contain mode (charts, infographics stay mostly visible)
     const gentle = scene.fitMode === 'contain';
     const s = gentle ? 0.4 : 1; // scale factor for gentle mode
@@ -5727,28 +6019,158 @@ function setCompositorMode(active) {
  * so the compositor sees the exact same data as the timeline preview.
  * Uses getCachedMediaUrl as the URL resolver.
  */
+
+/**
+ * Lightweight sync: push current MG overlay data into the compositor's
+ * scene graph and re-render the current frame.  Does NOT reload videos
+ * or rebuild the full plan — safe to call on every property edit.
+ */
+/**
+ * Sync a scene's visual properties (scale, pos, crop, etc.) to the compositor's SceneGraph copy
+ * so changes are reflected in the WebGL preview without toggling the engine.
+ */
+function refreshCompositorScene(sceneIndex) {
+    if (!state.compositorActive || !state.compositor || !state.compositor.isInitialized) return;
+    const sg = state.compositor.sceneGraph;
+    if (!sg) return;
+    const srcScene = state.scenes[sceneIndex];
+    if (!srcScene) return;
+
+    // Find the matching scene in the SceneGraph's internal copy
+    const target = sg._scenes.find(s => s.index === srcScene.index);
+    if (!target) return;
+
+    // Sync mutable visual properties
+    target.scale = srcScene.scale;
+    target.posX = srcScene.posX;
+    target.posY = srcScene.posY;
+    target.fitMode = srcScene.fitMode;
+    target.cropTop = srcScene.cropTop;
+    target.cropBottom = srcScene.cropBottom;
+    target.cropLeft = srcScene.cropLeft;
+    target.cropRight = srcScene.cropRight;
+    target.borderRadius = srcScene.borderRadius;
+    target.background = srcScene.background;
+    target.volume = srcScene.volume;
+    target.kenBurnsEnabled = srcScene.kenBurnsEnabled;
+    target.kenBurnsSpeed = srcScene.kenBurnsSpeed;
+
+    // Re-render current frame
+    const fps = state.compositor.fps;
+    const frame = Math.round((state.currentTime || 0) * fps);
+    state.compositor.renderFrame(frame);
+}
+
+function refreshCompositorMGs() {
+    if (!state.compositorActive || !state.compositor || !state.compositor.isInitialized) return;
+    const sg = state.compositor.sceneGraph;
+    if (!sg) return;
+
+    // Sync overlay MGs (the _mgs array inside SceneGraph)
+    const fps = state.compositor.fps;
+    const activeMGs = (state.motionGraphics || []).filter(mg => !mg.disabled);
+    sg._mgs = activeMGs.map(mg => {
+        const startFrame = Math.round((mg.startTime || 0) * fps);
+        const dur = mg.duration || 3;
+        const endFrame = Math.round((mg.startTime + dur) * fps);
+        return {
+            ...mg,
+            _startFrame: startFrame,
+            _endFrame: endFrame,
+            _totalFrames: endFrame - startFrame,
+            _animationSpeed: mg.animationSpeed || 1.0,
+        };
+    });
+
+    // Sync fullscreen MG scenes (_scenes that are isMGScene)
+    const mgScenes = state.scenes.filter(s => s.isMGScene);
+    for (const mgScene of mgScenes) {
+        const existing = sg._scenes.find(s => s.isMGScene && s.index === mgScene.index);
+        if (existing) {
+            // Recompute frame range from seconds
+            const startFrame = Math.round((mgScene.startTime || 0) * fps);
+            const endFrame = Math.round((mgScene.endTime || (mgScene.startTime + (mgScene.duration || 3))) * fps);
+            // Update all mutable fields including duration, frames, animation speed, and background
+            Object.assign(existing, {
+                type: mgScene.type, text: mgScene.text, subtext: mgScene.subtext,
+                style: mgScene.style, position: mgScene.position,
+                data: mgScene.data, mgData: mgScene.mgData,
+                mgBackground: mgScene.mgBackground,
+                duration: mgScene.duration,
+                startTime: mgScene.startTime, endTime: mgScene.endTime,
+                _startFrame: startFrame, _endFrame: endFrame,
+                _totalFrames: endFrame - startFrame,
+                _animationSpeed: mgScene.animationSpeed || 1.0,
+            });
+        }
+    }
+
+    // Re-render current frame
+    const frame = Math.round((state.currentTime || 0) * fps);
+    state.compositor.renderFrame(frame);
+}
+
 async function loadPlanIntoCompositor() {
     if (!state.compositor || !state.videoPlan) return;
 
     try {
         // Build a plan from the processed state so compositor matches the timeline exactly.
         // state.videoPlan has the RAW plan; state.scenes has the processed/carved/reordered scenes.
+        // Build scenes list for compositor
+        const compositorScenes = state.scenes.filter(s => !s.isMGScene).map((s, i) => ({
+            ...s,
+            index: s.index !== undefined ? s.index : i,
+        }));
+
+        // Build transitions array from adjacent scenes on the same track.
+        // The SceneGraph expects { fromSceneIndex, toSceneIndex, type, duration }.
+        // The UI stores transitions as per-scene `transitionType` or global `state.transition.style`.
+        const transitions = [];
+        const globalStyle = state.transition.style || 'cut';
+        const globalDuration = state.transition.duration || 0.5;
+        const trackGroups = {};
+        for (const s of compositorScenes) {
+            const tid = s.trackId || 'video-track-1';
+            if (!trackGroups[tid]) trackGroups[tid] = [];
+            trackGroups[tid].push(s);
+        }
+        for (const tid of Object.keys(trackGroups)) {
+            const sorted = trackGroups[tid].sort((a, b) => a.startTime - b.startTime);
+            for (let i = 1; i < sorted.length; i++) {
+                const prev = sorted[i - 1];
+                const curr = sorted[i];
+                // Only add transition if scenes are adjacent (gap < 0.1s)
+                if (Math.abs(curr.startTime - prev.endTime) > 0.1) continue;
+                let type = curr.transitionType || curr.transition?.type || globalStyle;
+                if (type === 'random' || type === 'auto') {
+                    const seed = curr.index * 7 + 3;
+                    const types = state.transition.types.length > 0 ? state.transition.types : ['crossfade'];
+                    type = types[seed % types.length];
+                }
+                if (type === 'cut') continue;
+                transitions.push({
+                    fromSceneIndex: prev.index,
+                    toSceneIndex: curr.index,
+                    type,
+                    duration: globalDuration,
+                });
+            }
+        }
+
+        console.log(`[Compositor] Built ${transitions.length} transitions (style: ${globalStyle}, duration: ${globalDuration}s)`);
+        if (transitions.length > 0) console.log('[Compositor] First transition:', JSON.stringify(transitions[0]));
+
         const compositorPlan = {
             fps: state.videoPlan.fps || 30,
             totalDuration: state.totalDuration || state.videoPlan.totalDuration,
             scriptContext: state.videoPlan.scriptContext || {},
-            // Use processed scenes (with corrected endTimes, trackIds, and indices)
-            scenes: state.scenes.filter(s => !s.isMGScene).map((s, i) => ({
-                ...s,
-                // Ensure index is set (use original scene index for media file lookup)
-                index: s.index !== undefined ? s.index : i,
-            })),
+            scenes: compositorScenes,
             // Fullscreen MG scenes
             mgScenes: state.scenes.filter(s => s.isMGScene).map(s => ({ ...s })),
             // Overlay motion graphics
             motionGraphics: (state.motionGraphics || []).filter(mg => !mg.disabled),
-            // Transitions
-            transitions: state.videoPlan.transitions || [],
+            // Transitions (built from adjacent scenes above)
+            transitions,
         };
 
         await state.compositor.loadPlan(compositorPlan, async (sceneIndex, ext) => {
@@ -5759,283 +6181,6 @@ async function loadPlanIntoCompositor() {
     }
 }
 
-/**
- * Run Native D3D11 + NVENC export — builds RenderPlan from video plan.
- * Milestone D1: eligibility gate + image-only RenderPlan builder.
- */
-async function renderVideoNative() {
-    try {
-        const plan = state.videoPlan;
-        if (!plan || !plan.scenes || plan.scenes.length === 0) {
-            showToast('No video plan loaded — cannot render', 'error');
-            return { success: false };
-        }
-
-        // ── Classify scenes ───────────────────────────────────────
-        const videoScenes = plan.scenes.filter(s => s.mediaType === 'video');
-        const imageScenes = plan.scenes.filter(s => s.mediaType === 'image');
-        const mgOverlays = plan.motionGraphics || [];
-        const mgScenes = plan.mgScenes || [];
-        const mgFromScenes = plan.scenes.filter(s => s.isMGScene);
-        const totalMGs = mgOverlays.length + mgScenes.length + mgFromScenes.length;
-
-        console.log(`[NativeExport] Native eligible: videos=${videoScenes.length} images=${imageScenes.length} mgOverlays=${mgOverlays.length} mgScenes=${mgScenes.length + mgFromScenes.length}`);
-
-        // ── Probe GPU ─────────────────────────────────────────────
-        updateProgress(5, 'Probing Native D3D11 + NVENC...');
-        const probe = await window.electronAPI.nativeExportProbe();
-        if (!probe.ok) {
-            showToast(`Native export unavailable: ${probe.reason}. Falling back to WebGL2.`, 'warning');
-            return await renderVideoWebGL2();
-        }
-
-        // ── Pre-render MGs as PNG sequences ──────────────────────
-        let mgLayers = [];
-        if (totalMGs > 0) {
-            updateProgress(10, `Pre-rendering ${totalMGs} motion graphics as PNG sequences...`);
-            const mgResult = await window.electronAPI.preRenderMGsPNG({
-                motionGraphics: mgOverlays,
-                mgScenes,
-                scenes: plan.scenes,
-                scriptContext: plan.scriptContext || {},
-                fps: plan.fps || 30,
-                fastNativeMGs: state.fastNativeMGs,
-            });
-
-            if (!mgResult.ok) {
-                console.warn(`[NativeExport] MG pre-render failed: ${mgResult.reason} — checking individually cached MGs`);
-                // Even if the batch failed, individual MGs may have been cached from previous runs
-                mgLayers = mgResult.layers || [];
-                if (mgLayers.length === 0) {
-                    showToast(`MG pre-render failed: ${mgResult.reason}`, 'warning');
-                } else {
-                    showToast(`MG pre-render partially failed — using ${mgLayers.length} cached MGs`, 'warning');
-                }
-            } else {
-                mgLayers = mgResult.layers || [];
-            }
-            console.log(`[NativeExport] Pre-rendered ${mgLayers.length} MG sequences`);
-        }
-
-        // ── Build native RenderPlan ───────────────────────────────
-        const fps = plan.fps || 30;
-        const width = plan.width || 1920;
-        const height = plan.height || 1080;
-        const allMediaScenes = [...imageScenes, ...videoScenes];
-        const fullDuration = plan.totalDuration || (allMediaScenes.length > 0 ? Math.max(...allMediaScenes.map(s => s.endTime)) : 10);
-
-        // In/Out points — partial render support
-        const { inSec, outSec } = getRenderRange();
-        const renderInSec = Math.min(inSec, fullDuration);
-        const renderOutSec = Math.min(outSec, fullDuration);
-        const renderDuration = renderOutSec - renderInSec;
-        const frameOffset = Math.round(renderInSec * fps); // shift all layers by this
-        const totalFrames = Math.round(renderDuration * fps);
-
-        const rangeLabel = (state.inPoint !== null || state.outPoint !== null)
-            ? ` [${formatTime(renderInSec)}→${formatTime(renderOutSec)}]` : '';
-        console.log(`[NativeExport] Native export starting (D3D11 + NVENC)${rangeLabel}`);
-        updateProgress(30, `Native D3D11 compositing (GPU: ${probe.gpu})${rangeLabel}...`);
-
-        if (state.inPoint !== null || state.outPoint !== null) {
-            console.log(`[NativeExport] In/Out range: ${formatTime(renderInSec)} → ${formatTime(renderOutSec)} (${totalFrames} frames, offset=${frameOffset})`);
-        }
-
-        // Background solid black layer spanning full render range
-        const layers = [
-            { type: 'solid', color: [0, 0, 0, 1], startFrame: 0, endFrame: totalFrames, trackNum: 1 }
-        ];
-
-        // Helper: shift layer frames by in-point offset, skip if entirely outside render range
-        function addLayer(layerObj) {
-            let sf = layerObj.startFrame - frameOffset;
-            let ef = layerObj.endFrame - frameOffset;
-            if (ef <= 0 || sf >= totalFrames) return; // entirely outside render range
-            sf = Math.max(0, sf);
-            ef = Math.min(totalFrames, ef);
-            layers.push({ ...layerObj, startFrame: sf, endFrame: ef });
-        }
-
-        // Image layers from plan scenes (with Ken Burns animation)
-        for (const scene of imageScenes) {
-            // Compute Ken Burns start/end transforms (mirrors updateKenBurnsTransform)
-            const kb = computeKenBurnsForExport(scene, width, height);
-            const userScale = scene.scale !== undefined ? scene.scale : 1;
-            const userTX = (scene.posX || 0) / 100 * width;
-            const userTY = (scene.posY || 0) / 100 * height;
-            const sf = Math.round(scene.startTime * fps);
-            const ef = Math.round(scene.endTime * fps);
-
-            // Blur (Duplicate) background: insert a scaled-up cover copy behind the main image
-            if (scene.background === 'blur') {
-                addLayer({
-                    type: 'image',
-                    mediaPath: scene.mediaFile,
-                    startFrame: sf, endFrame: ef,
-                    trackNum: 1,  // behind main content
-                    fitMode: 'cover',
-                    scaleX: 1.3, scaleY: 1.3,
-                    scaleXEnd: 1.3, scaleYEnd: 1.3,
-                    translateX: 0, translateY: 0,
-                    translateXEnd: 0, translateYEnd: 0,
-                    rotationRad: 0,
-                    opacity: 0.7,
-                    anchorX: 0.5, anchorY: 0.5,
-                });
-            }
-
-            addLayer({
-                type: 'image',
-                mediaPath: scene.mediaFile,
-                startFrame: sf, endFrame: ef,
-                trackNum: 2,
-                fitMode: scene.fitMode || 'cover',
-                translateX: userTX + kb.txStart,
-                translateY: userTY + kb.tyStart,
-                translateXEnd: userTX + kb.txEnd,
-                translateYEnd: userTY + kb.tyEnd,
-                scaleX: userScale * kb.sStart,
-                scaleY: userScale * kb.sStart,
-                scaleXEnd: userScale * kb.sEnd,
-                scaleYEnd: userScale * kb.sEnd,
-                rotationRad: 0,
-                opacity: 1.0,
-                anchorX: 0.5,
-                anchorY: 0.5,
-            });
-        }
-
-        // Video layers from plan scenes (MF decode + NV12/BGRA, with Ken Burns)
-        for (const scene of videoScenes) {
-            const absStart = Math.round(scene.startTime * fps);
-            const absEnd = Math.round(scene.endTime * fps);
-            // If in-point cuts into this clip, adjust trimStartSec so video starts at the right point
-            const clippedStart = Math.max(absStart, frameOffset);
-            const trimAdjust = (clippedStart - absStart) / fps;
-            const kb = computeKenBurnsForExport(scene, width, height);
-            const userScale = scene.scale !== undefined ? scene.scale : 1;
-            const userTX = (scene.posX || 0) / 100 * width;
-            const userTY = (scene.posY || 0) / 100 * height;
-
-            // Blur (Duplicate) background: insert a scaled-up cover copy behind the main video
-            if (scene.background === 'blur') {
-                addLayer({
-                    type: 'video',
-                    mediaPath: scene.mediaFile,
-                    startFrame: absStart, endFrame: absEnd,
-                    trackNum: 1,
-                    fitMode: 'cover',
-                    trimStartSec: (scene.trimStart || 0) + trimAdjust,
-                    scaleX: 1.3, scaleY: 1.3,
-                    scaleXEnd: 1.3, scaleYEnd: 1.3,
-                    translateX: 0, translateY: 0,
-                    translateXEnd: 0, translateYEnd: 0,
-                    rotationRad: 0,
-                    opacity: 0.7,
-                    anchorX: 0.5, anchorY: 0.5,
-                });
-            }
-
-            addLayer({
-                type: 'video',
-                mediaPath: scene.mediaFile,
-                startFrame: absStart,
-                endFrame: absEnd,
-                trackNum: 2,
-                fitMode: scene.fitMode || 'cover',
-                trimStartSec: (scene.trimStart || 0) + trimAdjust,
-                translateX: userTX + kb.txStart,
-                translateY: userTY + kb.tyStart,
-                translateXEnd: userTX + kb.txEnd,
-                translateYEnd: userTY + kb.tyEnd,
-                scaleX: userScale * kb.sStart,
-                scaleY: userScale * kb.sStart,
-                scaleXEnd: userScale * kb.sEnd,
-                scaleYEnd: userScale * kb.sEnd,
-                rotationRad: 0,
-                opacity: 1.0,
-                anchorX: 0.5,
-                anchorY: 0.5,
-            });
-        }
-
-        // MG imageSequence layers from pre-rendered PNGs
-        for (const mgLayer of mgLayers) {
-            if (mgLayer.isFullScreen) {
-                const matchScene = mgScenes[mgLayer.mgIndex] || mgFromScenes[mgLayer.mgIndex];
-                const absStart = matchScene ? Math.round((matchScene.startTime || 0) * fps) : 0;
-                const absEnd = matchScene ? Math.round((matchScene.endTime || 0) * fps) : absStart + mgLayer.seqFrameCount;
-                // Adjust seqLocalStart if in-point cuts into this MG
-                const clippedStart = Math.max(absStart, frameOffset);
-                const localAdj = clippedStart - absStart;
-
-                addLayer({
-                    type: 'imageSequence',
-                    startFrame: absStart,
-                    endFrame: absEnd,
-                    trackNum: 1,
-                    opacity: 1.0,
-                    fitMode: 'cover',
-                    seqDir: mgLayer.seqDir,
-                    seqPattern: mgLayer.seqPattern,
-                    seqFrameCount: mgLayer.seqFrameCount,
-                    seqLocalStart: mgLayer.seqLocalStart + localAdj,
-                    seqTileW: mgLayer.tileW,
-                    seqTileH: mgLayer.tileH,
-                });
-            } else {
-                const mg = mgOverlays[mgLayer.mgIndex];
-                if (!mg) continue;
-                const mgStartTime = mg.startTime || 0;
-                const mgDuration = mg.duration || 3;
-                const absStart = Math.round(mgStartTime * fps);
-                const absEnd = Math.round((mgStartTime + mgDuration) * fps);
-                const clippedStart = Math.max(absStart, frameOffset);
-                const localAdj = clippedStart - absStart;
-
-                addLayer({
-                    type: 'imageSequence',
-                    startFrame: absStart,
-                    endFrame: absEnd,
-                    trackNum: 3,
-                    opacity: 1.0,
-                    fitMode: 'cover',
-                    seqDir: mgLayer.seqDir,
-                    seqPattern: mgLayer.seqPattern,
-                    seqFrameCount: mgLayer.seqFrameCount,
-                    seqLocalStart: mgLayer.seqLocalStart + localAdj,
-                    seqTileW: mgLayer.tileW,
-                    seqTileH: mgLayer.tileH,
-                });
-            }
-        }
-
-        console.log(`[NativeExport] RenderPlan: ${width}x${height} @ ${fps}fps, ${totalFrames} frames, ${layers.length} layers (1 bg + ${imageScenes.length} images + ${videoScenes.length} videos + ${mgLayers.length} MGs)`);
-
-        // ── Call native compose IPC ───────────────────────────────
-        const result = await window.electronAPI.nativeComposeExport({
-            width, height, fps, totalFrames, layers,
-            audioTrimStartSec: renderInSec > 0 ? renderInSec : undefined,
-            audioTrimEndSec: renderOutSec < fullDuration ? renderOutSec : undefined,
-        });
-
-        if (!result.ok) {
-            console.error('[NativeExport] Failed:', result.reason);
-            showToast(`Native export failed: ${result.reason}`, 'error');
-            return { success: false, error: result.reason || 'Native compose failed' };
-        }
-
-        return {
-            success: true,
-            outputPath: result.outputPath,
-            stats: { frames: result.frames, elapsed: result.elapsed, fps: result.fps }
-        };
-    } catch (err) {
-        console.error('[NativeExport] Error:', err);
-        showToast(`Native export error: ${err.message}`, 'error');
-        return { success: false, error: err.message };
-    }
-}
 
 /**
  * Run WebGL2 export pipeline.
@@ -6141,30 +6286,8 @@ async function renderVideo() {
         state.videoPlan.scriptContext.mgAnimationSpeed = globalAnimSpeed;
         await window.electronAPI.saveVideoPlan(state.videoPlan);
 
-        const rendererSelect = document.getElementById('renderer-select');
-        const rendererValue = rendererSelect ? rendererSelect.value : 'ffmpeg';
-        const useFFmpeg = rendererValue === 'ffmpeg';
-        const useWebGL2 = rendererValue === 'webgl2';
-        const useNative = rendererValue === 'native';
-
-        if (useNative) {
-            updateProgress(5, 'Starting Native D3D11 + NVENC render...');
-        } else if (useWebGL2) {
-            updateProgress(5, 'Starting WebGL2 WYSIWYG render...');
-        } else {
-            updateProgress(5, useFFmpeg ? 'Starting FFmpeg GPU render...' : 'Starting Remotion render...');
-        }
-
-        let result;
-        if (useNative) {
-            result = await renderVideoNative();
-        } else if (useWebGL2) {
-            result = await renderVideoWebGL2();
-        } else if (useFFmpeg) {
-            result = await window.electronAPI.runRenderFFmpeg();
-        } else {
-            result = await window.electronAPI.runRender();
-        }
+        updateProgress(5, 'Starting WebGL2 WYSIWYG render...');
+        let result = await renderVideoWebGL2();
         if (result.success) {
             stopTimer();
             const renderTime = getElapsedString();
@@ -6482,7 +6605,6 @@ function saveSettings() {
         sfxEnabled: state.sfxEnabled,
         sfxVolume: state.sfxVolume,
         mgEnabled: state.mgEnabled,
-        fastNativeMGs: state.fastNativeMGs,
         subtitlesEnabled: state.subtitlesEnabled,
         aiInstructions: state.aiInstructions,
         mutedTracks: state.mutedTracks
@@ -6517,9 +6639,21 @@ function loadSettings() {
             if (elements.ollamaModelRow) {
                 elements.ollamaModelRow.style.display = (s.aiProvider || 'ollama') === 'ollama' ? 'block' : 'none';
             }
-            // Transitions disabled - always hard cut
-            state.transition.style = 'cut';
-            state.transition.duration = 0;
+            // Restore transition settings
+            // Ignore old saved 'cut' with duration 0 — that was the hardcoded default before transitions were enabled
+            const savedTransDur = s.transitionDuration !== undefined ? s.transitionDuration : -1;
+            if (s.transitionStyle && !(s.transitionStyle === 'cut' && savedTransDur <= 0)) {
+                state.transition.style = s.transitionStyle;
+                state.transition.duration = savedTransDur > 0 ? savedTransDur : 0.5;
+            } else {
+                state.transition.style = 'crossfade';
+                state.transition.duration = 0.5;
+            }
+            if (elements.transitionStyle) elements.transitionStyle.value = state.transition.style;
+            const _tdEl = document.getElementById('transition-duration');
+            const _tdVal = document.getElementById('transition-duration-val');
+            if (_tdEl) _tdEl.value = state.transition.duration;
+            if (_tdVal) _tdVal.textContent = `${state.transition.duration.toFixed(1)}s`;
             state.volume = s.volume !== undefined ? s.volume : 1;
             if (elements.volumeSlider) {
                 elements.volumeSlider.value = state.volume;
@@ -6533,8 +6667,6 @@ function loadSettings() {
             // Restore Motion Graphics settings
             state.mgEnabled = s.mgEnabled !== undefined ? s.mgEnabled : true;
             if (elements.mgEnabled) elements.mgEnabled.checked = state.mgEnabled;
-            state.fastNativeMGs = s.fastNativeMGs !== undefined ? s.fastNativeMGs : true;
-            if (elements.fastNativeMGs) elements.fastNativeMGs.checked = state.fastNativeMGs;
             // Restore Subtitles setting
             state.subtitlesEnabled = s.subtitlesEnabled !== undefined ? s.subtitlesEnabled : false;
             if (elements.subtitlesEnabled) elements.subtitlesEnabled.checked = state.subtitlesEnabled;
@@ -6569,9 +6701,20 @@ function applyProjectSettings(s) {
         if (elements.ollamaModelRow) {
             elements.ollamaModelRow.style.display = (s.aiProvider || 'ollama') === 'ollama' ? 'block' : 'none';
         }
-        // Transitions disabled - always hard cut
-        state.transition.style = 'cut';
-        state.transition.duration = 0;
+        // Restore transition settings (detect old 'cut' defaults and override)
+        const savedTransDur2 = s.transitionDuration !== undefined ? s.transitionDuration : -1;
+        if (s.transitionStyle && !(s.transitionStyle === 'cut' && savedTransDur2 <= 0)) {
+            state.transition.style = s.transitionStyle;
+            state.transition.duration = savedTransDur2 > 0 ? savedTransDur2 : 0.5;
+        } else {
+            state.transition.style = 'crossfade';
+            state.transition.duration = 0.5;
+        }
+        if (elements.transitionStyle) elements.transitionStyle.value = state.transition.style;
+        const _tdEl2 = document.getElementById('transition-duration');
+        const _tdVal2 = document.getElementById('transition-duration-val');
+        if (_tdEl2) _tdEl2.value = state.transition.duration;
+        if (_tdVal2) _tdVal2.textContent = `${state.transition.duration.toFixed(1)}s`;
         state.volume = s.volume !== undefined ? s.volume : 1;
         if (elements.volumeSlider) elements.volumeSlider.value = state.volume;
         // SFX
@@ -6583,8 +6726,6 @@ function applyProjectSettings(s) {
         // MG
         state.mgEnabled = s.mgEnabled !== undefined ? s.mgEnabled : true;
         if (elements.mgEnabled) elements.mgEnabled.checked = state.mgEnabled;
-        state.fastNativeMGs = s.fastNativeMGs !== undefined ? s.fastNativeMGs : true;
-        if (elements.fastNativeMGs) elements.fastNativeMGs.checked = state.fastNativeMGs;
         // Subtitles
         state.subtitlesEnabled = s.subtitlesEnabled !== undefined ? s.subtitlesEnabled : false;
         if (elements.subtitlesEnabled) elements.subtitlesEnabled.checked = state.subtitlesEnabled;

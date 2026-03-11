@@ -64,14 +64,6 @@ class Compositor {
         this._pboFrameBytes = 0;     // w * h * 4
         this._pboReady = false;
 
-        // Bake-and-Play: pre-rendered MG PNG cache
-        // _mgHashMap: Map<mgObject, { hash, manifest }> — precomputed in loadPlan
-        this._mgHashMap = new Map();
-        // _mgBakeCache: Map<hash, { images: Map<localFrame, HTMLImageElement>, pending: Set<localFrame>, failed: Set<localFrame> }>
-        this._mgBakeCache = new Map();
-        this._mgBakeReady = false;
-        // Bake lock: tracks which hashes are currently being baked (prevents re-trigger)
-        this._activeBakes = new Set();
     }
 
     // ========================================================================
@@ -100,9 +92,17 @@ class Compositor {
         }
         this.gl = gl;
 
-        // Compile blit shader
-        const { QUAD_VERT, BLIT_FRAG, ShaderProgram } = window.ShaderLib;
+        // Compile blit shaders
+        const { QUAD_VERT, BLIT_FRAG, BLUR_BLIT_FRAG, ShaderProgram } = window.ShaderLib;
         this._blitProgram = new ShaderProgram(gl, QUAD_VERT, BLIT_FRAG);
+        this._blurBlitProgram = new ShaderProgram(gl, QUAD_VERT, BLUR_BLIT_FRAG);
+
+        // Gradient background cache: gradientId → WebGL texture
+        this._gradientCache = {};
+        this._gradientCanvas = document.createElement('canvas');
+        this._gradientCanvas.width = this.width;
+        this._gradientCanvas.height = this.height;
+        this._gradientCtx = this._gradientCanvas.getContext('2d');
 
         // Create fullscreen quad VAO
         this._quadVAO = this._createQuadVAO(gl);
@@ -112,6 +112,12 @@ class Compositor {
         this.mgRenderer = new MGRenderer(this.textureManager, this.fps);
         this.transitionRenderer = new TransitionRenderer(gl);
         this.transitionRenderer.init();
+
+        // Transition FBOs — offscreen render targets for scene-A and scene-B
+        this._transitionFBOs = [
+            this._createFBO(gl, this.width, this.height),
+            this._createFBO(gl, this.width, this.height),
+        ];
 
         this._initialized = true;
         console.log('[Compositor] Initialized WebGL2 engine', this.width, 'x', this.height, '@', this.fps, 'fps');
@@ -124,8 +130,24 @@ class Compositor {
         if (this.textureManager) this.textureManager.releaseAll();
         if (this.transitionRenderer) this.transitionRenderer.destroy();
         if (this._blitProgram) this._blitProgram.destroy();
+        if (this._blurBlitProgram) this._blurBlitProgram.destroy();
+        // Clean up gradient textures
+        if (this._gradientCache && this.gl) {
+            for (const tex of Object.values(this._gradientCache)) {
+                this.gl.deleteTexture(tex);
+            }
+            this._gradientCache = {};
+        }
         if (this._quadVAO && this.gl) {
             this.gl.deleteVertexArray(this._quadVAO);
+        }
+        // Clean up transition FBOs
+        if (this._transitionFBOs && this.gl) {
+            for (const fbo of this._transitionFBOs) {
+                this.gl.deleteFramebuffer(fbo.fbo);
+                this.gl.deleteTexture(fbo.texture);
+            }
+            this._transitionFBOs = null;
         }
         if (this.mgRenderer) this.mgRenderer.destroy();
 
@@ -140,12 +162,6 @@ class Compositor {
         this._mediaUrls = {};
 
         this.destroyPBOs();
-
-        // Bake-and-Play cleanup
-        this._mgHashMap.clear();
-        this._mgBakeCache.clear();
-        this._mgBakeReady = false;
-        this._activeBakes.clear();
 
         this.gl = null;
         this._initialized = false;
@@ -177,13 +193,6 @@ class Compositor {
         // Preload video/image elements for all non-MG scenes
         const mediaScenes = this.sceneGraph.scenes.filter(s => !s.isMGScene && s.mediaType !== 'motion-graphic');
         await this._preloadMedia(mediaScenes);
-
-        // Bake-and-Play: precompute MG hashes (non-critical — don't break loadPlan on failure)
-        try {
-            await this._precomputeMGHashes(plan);
-        } catch (e) {
-            console.warn('[Compositor] Bake-and-Play hash init failed (falling back to live render):', e.message);
-        }
 
         console.log('[Compositor] Plan loaded:', this.sceneGraph.totalFrames, 'frames,',
             mediaScenes.length, 'media scenes,', this.sceneGraph.motionGraphics.length, 'MG overlays');
@@ -343,19 +352,22 @@ class Compositor {
 
         // 3. Render scenes
         if (transition && transition.sceneA && transition.sceneB) {
-            // Transition active: need textures from both scenes
-            const texA = this._getSceneTexture(transition.sceneA, frame);
-            const texB = this._getSceneTexture(transition.sceneB, frame);
+            // Transition active: render each scene with full transforms to FBOs,
+            // then transition between the composited FBO textures.
+            const fboTexA = this._renderSceneToFBO(this._transitionFBOs[0], transition.sceneA, frame);
+            const fboTexB = this._renderSceneToFBO(this._transitionFBOs[1], transition.sceneB, frame);
 
-            if (texA && texB) {
+            if (fboTexA && fboTexB) {
                 this.transitionRenderer.render(
-                    texA.texture, texB.texture,
+                    fboTexA, fboTexB,
                     transition.progress, transition.type,
                     () => this._drawQuad()
                 );
             } else {
                 // Fallback: render whichever is available
-                this._renderSceneTexture(texA || texB, 1.0);
+                const fallbackScene = fboTexA ? transition.sceneA : transition.sceneB;
+                const fallbackTex = this._getSceneTexture(fallbackScene, frame);
+                if (fallbackTex) this._renderSceneTexture(fallbackTex, 1.0, fallbackScene);
             }
 
             // Also render non-transitioning scenes on other tracks
@@ -452,10 +464,11 @@ class Compositor {
             if (!this._exporting && el.readyState >= 2) {
                 const localTime = (frame - scene._startFrame) / this.fps;
                 const mediaOffset = scene.mediaOffset || 0;
-                const targetTime = localTime + mediaOffset;
+                // Clamp to valid range (during transitions, frame may be outside scene bounds)
+                const targetTime = Math.max(0, localTime + mediaOffset);
                 // Only seek if drift is significant (avoid constant seeks)
                 if (Math.abs(el.currentTime - targetTime) > 0.1) {
-                    el.currentTime = targetTime;
+                    el.currentTime = Math.min(targetTime, el.duration || targetTime);
                 }
             }
             return this.textureManager.createOrUpdate(texId, el);
@@ -473,230 +486,13 @@ class Compositor {
     // ========================================================================
 
     /**
-     * Get MG texture — cache-first, live-render fallback. FULLY SYNCHRONOUS.
-     * Called from renderFrame() hot path. No awaits, no crypto — just map lookups.
+     * Get MG texture — live Canvas2D rendering. FULLY SYNCHRONOUS.
+     * Called from renderFrame() hot path.
      */
     _getMGTexture(mg, localFrame, scriptContext) {
-        const hashInfo = this._mgHashMap.get(mg);
-        if (hashInfo && hashInfo.manifest) {
-            const cacheEntry = this._mgBakeCache.get(hashInfo.hash);
-            if (cacheEntry) {
-                const clampedFrame = Math.min(localFrame, hashInfo.manifest.frameCount - 1);
-                const img = cacheEntry.images.get(clampedFrame);
-                if (img && img.complete && img.naturalWidth > 0) {
-                    // CACHE HIT — return texture + tile metadata from manifest
-                    const texId = `mg-bake-${hashInfo.hash}-${clampedFrame}`;
-                    const entry = this.textureManager.createOrUpdate(texId, img);
-                    // Prefetch nearby frames (pure Map lookups + Image loads, NO IPC bake calls)
-                    this._prefetchMGFrames(hashInfo.hash, clampedFrame, hashInfo.manifest.frameCount);
-                    const m = hashInfo.manifest;
-                    entry._tile = {
-                        x: m.tileX || 0,
-                        y: m.tileY || 0,
-                        w: m.tileW || m.width || this.width,
-                        h: m.tileH || m.height || this.height,
-                    };
-                    return entry;
-                }
-                // Image not yet loaded — prefetch but do NOT trigger bake
-                this._prefetchMGFrames(hashInfo.hash, clampedFrame, hashInfo.manifest.frameCount);
-            }
-        }
-        // CACHE MISS — silent fallback to live Canvas2D rendering. No IPC, no bake trigger.
         const result = this.mgRenderer.renderMG(mg, localFrame, scriptContext);
         if (result) result._tile = null;
         return result;
-    }
-
-    /**
-     * Precompute deterministic hashes for all MGs during loadPlan() (async OK here).
-     * Checks main process for existing bake cache manifests.
-     */
-    async _precomputeMGHashes(plan) {
-        this._mgHashMap.clear();
-        this._mgBakeCache.clear();
-        this._mgBakeReady = false;
-
-        const fps = this.fps;
-        const api = window.electronAPI;
-        if (!api || !api.checkMGCache) {
-            console.log('[Compositor] No electronAPI.checkMGCache — bake-and-play disabled');
-            return;
-        }
-
-        const mgObjects = [];
-        if (this.sceneGraph && this.sceneGraph.motionGraphics) {
-            for (const mg of this.sceneGraph.motionGraphics) {
-                mgObjects.push({ mg, isFullScreen: false });
-            }
-        }
-        if (this.sceneGraph && this.sceneGraph.scenes) {
-            for (const scene of this.sceneGraph.scenes) {
-                if (scene.isMGScene || scene.mediaType === 'motion-graphic') {
-                    mgObjects.push({ mg: scene, isFullScreen: true });
-                }
-            }
-        }
-        if (mgObjects.length === 0) return;
-
-        const checkPromises = mgObjects.map(async ({ mg, isFullScreen }) => {
-            // Must match mg-png-renderer.js:computeJobHash() EXACTLY
-            // Overlay MGs use 1024×256 tile, fullscreen use 1920×1080
-            const mgTileW = isFullScreen ? 1920 : 1024;
-            const mgTileH = isFullScreen ? 1080 : 256;
-            const data = JSON.stringify({
-                type: mg.type,
-                text: mg.text || '',
-                subtext: mg.subtext || '',
-                style: mg.style || 'clean',
-                position: mg.position || 'center',
-                duration: mg.duration || 3,
-                animationSpeed: mg.animationSpeed || 1.0,
-                data: mg.data || null,
-                fps, tileW: mgTileW, tileH: mgTileH, isFullScreen,
-                renderer: 'canvas',
-            });
-            const hash = await this._sha1(data);
-            const shortHash = hash.slice(0, 16);
-            const manifest = await api.checkMGCache(shortHash);
-
-            this._mgHashMap.set(mg, { hash: shortHash, manifest });
-
-            if (manifest) {
-                if (!this._mgBakeCache.has(shortHash)) {
-                    this._mgBakeCache.set(shortHash, { images: new Map(), pending: new Set(), failed: new Set() });
-                }
-                console.log(`[Compositor] MG bake HIT: ${mg.type} [${shortHash}] (${manifest.frameCount} frames)`);
-            } else {
-                console.log(`[Compositor] MG bake MISS: ${mg.type} [${shortHash}] (live render)`);
-            }
-        });
-
-        await Promise.all(checkPromises);
-        this._mgBakeReady = true;
-        console.log(`[Compositor] Bake-and-Play: ${mgObjects.length} MGs hashed, ${this._mgBakeCache.size} cached`);
-
-        // Trigger ONE background bake for all uncached MGs (guarded by _activeBakes lock)
-        this._triggerBackgroundBake();
-    }
-
-    /**
-     * Trigger a single background bake for uncached MGs. Guarded by _activeBakes.
-     * ONLY called from _precomputeMGHashes (loadPlan path). NEVER from render loop.
-     */
-    _triggerBackgroundBake() {
-        const api = window.electronAPI;
-        if (!api || !api.preRenderMGsPNG) return;
-
-        // Collect uncached hashes that aren't already being baked
-        const uncachedHashes = [];
-        for (const [mg, info] of this._mgHashMap) {
-            if (!info.manifest && !this._activeBakes.has(info.hash)) {
-                uncachedHashes.push(info.hash);
-            }
-        }
-        if (uncachedHashes.length === 0) return;
-
-        // Lock all hashes before starting
-        for (const h of uncachedHashes) this._activeBakes.add(h);
-        console.log(`[Compositor] Background bake starting for ${uncachedHashes.length} MGs`);
-
-        const bakeOpts = {
-            motionGraphics: (this.sceneGraph.motionGraphics || []),
-            mgScenes: this.sceneGraph.scenes.filter(s => s.isMGScene),
-            scenes: this.sceneGraph.scenes,
-            scriptContext: this._scriptContext,
-            fps: this.fps,
-            fastNativeMGs: document.getElementById('fast-native-mgs')?.checked ?? true,
-        };
-
-        api.preRenderMGsPNG(bakeOpts).then(async () => {
-            console.log('[Compositor] Background bake complete — refreshing manifests');
-            // Unlock and refresh manifests (but do NOT re-trigger bake)
-            for (const h of uncachedHashes) this._activeBakes.delete(h);
-            // Re-check manifests for newly baked MGs
-            for (const [mg, info] of this._mgHashMap) {
-                if (!info.manifest) {
-                    const manifest = await api.checkMGCache(info.hash);
-                    if (manifest) {
-                        info.manifest = manifest;
-                        if (!this._mgBakeCache.has(info.hash)) {
-                            this._mgBakeCache.set(info.hash, { images: new Map(), pending: new Set(), failed: new Set() });
-                        }
-                        console.log(`[Compositor] MG bake now available: ${mg.type} [${info.hash}] (${manifest.frameCount} frames)`);
-                    }
-                }
-            }
-        }).catch(err => {
-            // Unlock on failure — but do NOT retry automatically
-            console.warn('[Compositor] Background bake failed:', err.message || err);
-            for (const h of uncachedHashes) this._activeBakes.delete(h);
-        });
-    }
-
-    /**
-     * Preload MG frames N-2..N+4 via Image + img.decode(). Evicts outside window.
-     * Fire-and-forget (no blocking). Called from _getMGTexture hot path.
-     */
-    _prefetchMGFrames(hash, currentFrame, totalFrames) {
-        const entry = this._mgBakeCache.get(hash);
-        if (!entry) return;
-
-        const BEHIND = 2, AHEAD = 4;
-        const wStart = Math.max(0, currentFrame - BEHIND);
-        const wEnd = Math.min(totalFrames - 1, currentFrame + AHEAD);
-
-        // Evict outside window
-        for (const [f] of entry.images) {
-            if (f < wStart || f > wEnd) {
-                this.textureManager.release(`mg-bake-${hash}-${f}`);
-                entry.images.delete(f);
-            }
-        }
-
-        // Preload missing frames
-        const api = window.electronAPI;
-        if (!api || !api.getMGCacheUrl) return;
-
-        // Track failed frames to avoid infinite retry loops (memory leak)
-        if (!entry.failed) entry.failed = new Set();
-
-        for (let f = wStart; f <= wEnd; f++) {
-            if (entry.images.has(f) || entry.pending.has(f) || entry.failed.has(f)) continue;
-            entry.pending.add(f);
-
-            const frameName = `frame_${String(f).padStart(6, '0')}.png`;
-            api.getMGCacheUrl(hash, frameName).then(async (url) => {
-                entry.pending.delete(f);
-                if (!url) { entry.failed.add(f); return; }
-                const img = new Image();
-                img.src = url;
-                try {
-                    await img.decode();
-                    entry.images.set(f, img);
-                } catch (_) {
-                    // Mark as failed so we don't retry endlessly
-                    entry.failed.add(f);
-                    img.src = ''; // Release the failed image's network resources
-                }
-            }).catch(() => { entry.pending.delete(f); entry.failed.add(f); });
-        }
-    }
-
-    /**
-     * SHA-1 via SubtleCrypto (async, only called in loadPlan context).
-     * Returns hex string matching crypto.createHash('sha1') from Node.js.
-     */
-    async _sha1(str) {
-        if (typeof crypto !== 'undefined' && crypto.subtle) {
-            const buf = new TextEncoder().encode(str);
-            const hashBuf = await crypto.subtle.digest('SHA-1', buf);
-            return Array.from(new Uint8Array(hashBuf)).map(b => b.toString(16).padStart(2, '0')).join('');
-        }
-        // Fallback FNV-1a (won't match mg-png-renderer — bake cache misses, safe)
-        let h = 2166136261;
-        for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
-        return (h >>> 0).toString(16).padStart(8, '0');
     }
 
     /**
@@ -705,28 +501,24 @@ class Compositor {
     _renderSceneTexture(texEntry, opacity, scene) {
         if (!texEntry || !texEntry.texture) return;
 
+        const srcAspect = texEntry.width / texEntry.height;
+        const dstAspect = this.width / this.height;
+
         // Compute fit-mode transform
         let scaleX = 1, scaleY = 1, offsetX = 0, offsetY = 0;
+        const fitMode = scene ? (scene.fitMode || 'cover') : 'cover';
 
         if (scene) {
-            const srcAspect = texEntry.width / texEntry.height;
-            const dstAspect = this.width / this.height;
-            const fitMode = scene.fitMode || 'cover';
-
             if (fitMode === 'cover') {
                 if (srcAspect > dstAspect) {
-                    // Source wider than dest: zoom in on X so Y fills, crops sides
                     scaleX = srcAspect / dstAspect;
                 } else {
-                    // Source taller than dest: zoom in on Y so X fills, crops top/bottom
                     scaleY = dstAspect / srcAspect;
                 }
             } else if (fitMode === 'contain') {
                 if (srcAspect > dstAspect) {
-                    // Source wider: letterbox top/bottom
                     scaleY = dstAspect / srcAspect;
                 } else {
-                    // Source taller: pillarbox sides
                     scaleX = srcAspect / dstAspect;
                 }
             }
@@ -739,9 +531,238 @@ class Compositor {
             // Apply position offset (posX/posY are percentages)
             offsetX = (scene.posX || 0) / 100;
             offsetY = (scene.posY || 0) / 100;
+
+            // Ken Burns animation for images
+            if (scene.mediaType === 'image' && scene.kenBurnsEnabled !== false) {
+                const kb = this._computeKenBurns(scene);
+                scaleX *= kb.scale;
+                scaleY *= kb.scale;
+                offsetX += kb.translateX / 100;
+                offsetY += kb.translateY / 100;
+            }
         }
 
-        this._blitTexture(texEntry.texture, opacity, scaleX, scaleY, offsetX, offsetY);
+        // Background rendering
+        const bg = scene ? (scene.background || 'none') : 'none';
+        const needsBgLayer = bg !== 'none';
+
+        if (needsBgLayer) {
+            const gl = this.gl;
+            if (bg === 'blur') {
+                // Blur: render blurred cover-fill behind the video
+                let bgSx = 1, bgSy = 1;
+                if (srcAspect > dstAspect) {
+                    bgSx = srcAspect / dstAspect;
+                } else {
+                    bgSy = dstAspect / srcAspect;
+                }
+                this._blurBlitProgram.use();
+                this._blurBlitProgram.setTexture('u_texture', 0, texEntry.texture);
+                this._blurBlitProgram.set1f('u_opacity', opacity);
+                this._blurBlitProgram.set4f('u_transform', bgSx, bgSy, 0, 0);
+                this._blurBlitProgram.set2f('u_texelSize', 1.0 / texEntry.width, 1.0 / texEntry.height);
+                this._drawQuad();
+            } else if (bg.startsWith('gradient:')) {
+                // Gradient: render CSS gradient from cache
+                const gradTex = this._getGradientTexture(bg);
+                if (gradTex) {
+                    this._blitTexture(gradTex, opacity, 1, 1, 0, 0, null);
+                }
+            }
+            // Draw the video on top with blending
+            gl.enable(gl.BLEND);
+            gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+            this._blitTexture(texEntry.texture, opacity, scaleX, scaleY, offsetX, offsetY, scene);
+            gl.disable(gl.BLEND);
+        } else {
+            this._blitTexture(texEntry.texture, opacity, scaleX, scaleY, offsetX, offsetY, scene);
+        }
+    }
+
+    /**
+     * Get or create a WebGL texture for a CSS gradient background.
+     * Renders the gradient to an offscreen canvas and uploads once, cached by ID.
+     */
+    _getGradientTexture(bgValue) {
+        // bgValue is "gradient:<id>"
+        if (this._gradientCache[bgValue]) return this._gradientCache[bgValue];
+
+        const gradientId = bgValue.replace('gradient:', '');
+        // Access the global GRADIENT_BACKGROUNDS map (defined in app.js)
+        const cssGradient = window.GRADIENT_BACKGROUNDS?.[gradientId];
+        if (!cssGradient) return null;
+
+        const gl = this.gl;
+        const canvas = this._gradientCanvas;
+        const ctx = this._gradientCtx;
+
+        // Render CSS gradient via a temporary div measured by the browser
+        // Canvas2D doesn't support CSS gradients directly, so we use a workaround:
+        // draw a filled rect with the gradient applied via a temp element
+        const tmpDiv = document.createElement('div');
+        tmpDiv.style.cssText = `position:fixed;left:-9999px;top:-9999px;width:${canvas.width}px;height:${canvas.height}px;background:${cssGradient};`;
+        document.body.appendChild(tmpDiv);
+
+        // Use html2canvas-like approach: draw the div to canvas via foreignObject SVG
+        // Simpler: parse common gradient patterns and draw natively
+        document.body.removeChild(tmpDiv);
+
+        // Fallback: parse the gradient CSS and draw natively on canvas
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        this._drawCSSGradient(ctx, cssGradient, canvas.width, canvas.height);
+
+        // Upload to WebGL texture
+        const tex = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, canvas);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+
+        this._gradientCache[bgValue] = tex;
+        return tex;
+    }
+
+    /**
+     * Render a CSS gradient string onto a Canvas2D context.
+     * Parses linear-gradient and radial-gradient with angle/position + color stops.
+     */
+    _drawCSSGradient(ctx, css, w, h) {
+        // Handle layered gradients (comma-separated at top level outside parens)
+        const layers = this._splitGradientLayers(css);
+
+        // Draw layers back-to-front (last layer is the base)
+        for (let i = layers.length - 1; i >= 0; i--) {
+            this._drawSingleGradient(ctx, layers[i].trim(), w, h);
+        }
+    }
+
+    _splitGradientLayers(css) {
+        // Split on commas that are followed by a gradient function name
+        // e.g. "linear-gradient(...), radial-gradient(...)" → 2 layers
+        const layers = [];
+        let depth = 0, current = '', pos = 0;
+        for (let i = 0; i < css.length; i++) {
+            const ch = css[i];
+            if (ch === '(') depth++;
+            else if (ch === ')') depth--;
+            if (ch === ',' && depth === 0) {
+                const rest = css.substring(i + 1).trim();
+                if (rest.match(/^(linear|radial|repeating|conic)-gradient/)) {
+                    layers.push(current.trim());
+                    current = '';
+                    continue;
+                }
+            }
+            current += ch;
+        }
+        if (current.trim()) layers.push(current.trim());
+        return layers;
+    }
+
+    _drawSingleGradient(ctx, css, w, h) {
+        // Parse color stops from inside the gradient function
+        const innerMatch = css.match(/gradient\((.+)\)$/s);
+        if (!innerMatch) {
+            ctx.fillStyle = '#0a0a0a';
+            ctx.fillRect(0, 0, w, h);
+            return;
+        }
+
+        const inner = innerMatch[1];
+
+        if (css.startsWith('linear-gradient') || css.startsWith('repeating-linear-gradient')) {
+            const repeating = css.startsWith('repeating');
+            // Extract angle (default 180deg = top to bottom)
+            const angleMatch = inner.match(/^\s*(\d+)deg\s*,\s*/);
+            let angle = 180;
+            let stopsStr = inner;
+            if (angleMatch) {
+                angle = parseFloat(angleMatch[1]);
+                stopsStr = inner.substring(angleMatch[0].length);
+            }
+            const stops = this._parseGradientStops(stopsStr);
+            if (stops.length === 0) return;
+
+            const rad = (angle - 90) * Math.PI / 180;
+            const dx = Math.cos(rad), dy = Math.sin(rad);
+            // Extend gradient line to cover the entire canvas
+            const extent = (Math.abs(dx) * w + Math.abs(dy) * h) / 2;
+            const cx = w / 2, cy = h / 2;
+            const grad = ctx.createLinearGradient(
+                cx - dx * extent, cy - dy * extent,
+                cx + dx * extent, cy + dy * extent
+            );
+            for (const s of stops) {
+                try { grad.addColorStop(Math.min(1, Math.max(0, s.pos)), s.color); } catch (e) { /* skip invalid color */ }
+            }
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, w, h);
+        } else if (css.startsWith('radial-gradient') || css.startsWith('repeating-radial-gradient')) {
+            // Extract center position
+            const posMatch = inner.match(/^\s*ellipse\s+at\s+([\d.]+)%\s+([\d.]+)%\s*,\s*/);
+            let cx = w / 2, cy = h / 2;
+            let stopsStr = inner;
+            if (posMatch) {
+                cx = (parseFloat(posMatch[1]) / 100) * w;
+                cy = (parseFloat(posMatch[2]) / 100) * h;
+                stopsStr = inner.substring(posMatch[0].length);
+            }
+            const stops = this._parseGradientStops(stopsStr);
+            if (stops.length === 0) return;
+
+            const radius = Math.sqrt(w * w + h * h) / 2 * 1.2;
+            const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius);
+            for (const s of stops) {
+                try { grad.addColorStop(Math.min(1, Math.max(0, s.pos)), s.color); } catch (e) { /* skip invalid color */ }
+            }
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, w, h);
+        } else {
+            ctx.fillStyle = '#0a0a0a';
+            ctx.fillRect(0, 0, w, h);
+        }
+    }
+
+    /**
+     * Parse CSS gradient color stops like "#color1 0%, #color2 50%, #color3 100%"
+     * Also handles pixel stops (e.g. "transparent 49px") by normalizing to fractions.
+     */
+    _parseGradientStops(stopsStr) {
+        const stops = [];
+        const parts = [];
+        let depth = 0, current = '';
+        for (const ch of stopsStr) {
+            if (ch === '(') depth++;
+            else if (ch === ')') depth--;
+            if (ch === ',' && depth === 0) {
+                parts.push(current.trim());
+                current = '';
+            } else {
+                current += ch;
+            }
+        }
+        if (current.trim()) parts.push(current.trim());
+
+        for (let i = 0; i < parts.length; i++) {
+            const part = parts[i].trim();
+            // Match color + percentage
+            const mPct = part.match(/^(.+?)\s+([\d.]+)%\s*$/);
+            if (mPct) {
+                stops.push({ color: mPct[1].trim(), pos: parseFloat(mPct[2]) / 100 });
+                continue;
+            }
+            // Match color + pixel value (normalize to 0-1 assuming 1920px width)
+            const mPx = part.match(/^(.+?)\s+([\d.]+)px\s*$/);
+            if (mPx) {
+                stops.push({ color: mPx[1].trim(), pos: parseFloat(mPx[2]) / 1920 });
+                continue;
+            }
+            // No position: distribute evenly
+            stops.push({ color: part, pos: i / Math.max(1, parts.length - 1) });
+        }
+        return stops;
     }
 
     /**
@@ -770,11 +791,23 @@ class Compositor {
     /**
      * Blit a texture to the current framebuffer with transform and opacity.
      */
-    _blitTexture(texture, opacity, scaleX, scaleY, offsetX, offsetY) {
+    _blitTexture(texture, opacity, scaleX, scaleY, offsetX, offsetY, scene) {
         this._blitProgram.use();
         this._blitProgram.setTexture('u_texture', 0, texture);
         this._blitProgram.set1f('u_opacity', opacity);
         this._blitProgram.set4f('u_transform', scaleX, scaleY, offsetX, offsetY);
+
+        // Crop: convert percentages (0-100) to fractions (0-1)
+        const cropT = scene ? (scene.cropTop || 0) / 100 : 0;
+        const cropR = scene ? (scene.cropRight || 0) / 100 : 0;
+        const cropB = scene ? (scene.cropBottom || 0) / 100 : 0;
+        const cropL = scene ? (scene.cropLeft || 0) / 100 : 0;
+        this._blitProgram.set4f('u_crop', cropT, cropR, cropB, cropL);
+
+        // Border radius: convert percentage (0-100) to fraction (0-1)
+        const radius = scene ? (scene.borderRadius || 0) / 100 : 0;
+        this._blitProgram.set1f('u_borderRadius', radius);
+
         this._drawQuad();
     }
 
@@ -813,6 +846,102 @@ class Compositor {
 
         gl.bindVertexArray(null);
         return vao;
+    }
+
+    /**
+     * Create a framebuffer object with an attached color texture.
+     */
+    _createFBO(gl, width, height) {
+        const texture = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, texture);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+        const fbo = gl.createFramebuffer();
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+        return { fbo, texture, width, height };
+    }
+
+    /**
+     * Compute Ken Burns scale and translate for a scene at the current frame.
+     * Returns { scale, translateX, translateY } where translate is in percentage.
+     */
+    _computeKenBurns(scene) {
+        const none = { scale: 1, translateX: 0, translateY: 0 };
+        if (!scene || scene.kenBurnsEnabled === false) return none;
+
+        const originalIndex = scene.index !== undefined ? scene.index : 0;
+        const kbTypes = [
+            'zoomIn', 'zoomOut',
+            'panLeft', 'panRight', 'panUp', 'panDown',
+            'zoomPanRight', 'zoomPanLeft',
+            'zoomOutPanRight', 'zoomOutPanLeft',
+            'driftTopLeftToBottomRight', 'driftBottomRightToTopLeft',
+            'driftTopRightToBottomLeft', 'driftBottomLeftToTopRight',
+        ];
+        const kbType = kbTypes[(originalIndex * 13 + 7) % kbTypes.length];
+
+        const startFrame = scene._startFrame || 0;
+        const endFrame = scene._endFrame || startFrame;
+        const totalFrames = endFrame - startFrame;
+        const kbSpeed = scene.kenBurnsSpeed !== undefined ? scene.kenBurnsSpeed : 1;
+        const rawP = totalFrames > 0
+            ? Math.max(0, Math.min(1, (this._currentFrame - startFrame) / totalFrames))
+            : 0;
+        const p = Math.min(1, rawP * kbSpeed);
+
+        const gentle = scene.fitMode === 'contain';
+        const s = gentle ? 0.4 : 1;
+
+        let scale = 1, tx = 0, ty = 0;
+        switch (kbType) {
+            case 'zoomIn':    scale = 1 + (0.03 + p * 0.12) * s; break;
+            case 'zoomOut':   scale = 1 + (0.15 - p * 0.12) * s; break;
+            case 'panLeft':   scale = 1 + 0.12 * s; tx = (3 - p * 6) * s; break;
+            case 'panRight':  scale = 1 + 0.12 * s; tx = (-3 + p * 6) * s; break;
+            case 'panUp':     scale = 1 + 0.12 * s; ty = (3 - p * 6) * s; break;
+            case 'panDown':   scale = 1 + 0.12 * s; ty = (-3 + p * 6) * s; break;
+            case 'zoomPanRight':     scale = 1 + (0.05 + p * 0.1) * s; tx = (-2 + p * 4) * s; break;
+            case 'zoomPanLeft':      scale = 1 + (0.05 + p * 0.1) * s; tx = (2 - p * 4) * s; break;
+            case 'zoomOutPanRight':  scale = 1 + (0.15 - p * 0.08) * s; tx = (-2 + p * 4) * s; break;
+            case 'zoomOutPanLeft':   scale = 1 + (0.15 - p * 0.08) * s; tx = (2 - p * 4) * s; break;
+            case 'driftTopLeftToBottomRight':  scale = 1 + 0.15 * s; tx = (-2 + p * 4) * s; ty = (-2 + p * 4) * s; break;
+            case 'driftBottomRightToTopLeft':  scale = 1 + 0.15 * s; tx = (2 - p * 4) * s; ty = (2 - p * 4) * s; break;
+            case 'driftTopRightToBottomLeft':  scale = 1 + 0.15 * s; tx = (2 - p * 4) * s; ty = (-2 + p * 4) * s; break;
+            case 'driftBottomLeftToTopRight':  scale = 1 + 0.15 * s; tx = (-2 + p * 4) * s; ty = (2 - p * 4) * s; break;
+        }
+        return { scale, translateX: tx, translateY: ty };
+    }
+
+    /**
+     * Render a scene (with full transform: background, scale, crop, border-radius)
+     * to an offscreen FBO, then return the FBO texture.
+     */
+    _renderSceneToFBO(fboEntry, scene, frame) {
+        const gl = this.gl;
+        const tex = this._getSceneTexture(scene, frame);
+        if (!tex) return null;
+
+        // Bind the FBO and render the scene into it
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fboEntry.fbo);
+        gl.viewport(0, 0, fboEntry.width, fboEntry.height);
+        gl.clearColor(0, 0, 0, 1);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+
+        // Use the full scene rendering pipeline (background, transform, crop, etc.)
+        this._renderSceneTexture(tex, 1.0, scene);
+
+        // Restore rendering to the screen framebuffer
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        gl.viewport(0, 0, this.width, this.height);
+
+        return fboEntry.texture;
     }
 
     // ========================================================================

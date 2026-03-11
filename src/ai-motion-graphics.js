@@ -329,7 +329,7 @@ function autoHighlight(text) {
     return result;
 }
 
-function buildPrompt(scene, sceneIndex, totalScenes, scriptContext, sceneVisual) {
+function buildPrompt(scene, sceneIndex, totalScenes, scriptContext, sceneVisual, allowedMGs) {
     const sceneDuration = (scene.endTime - scene.startTime).toFixed(1);
 
     let prompt = '';
@@ -338,6 +338,11 @@ function buildPrompt(scene, sceneIndex, totalScenes, scriptContext, sceneVisual)
     if (scriptContext && scriptContext.summary) {
         prompt += `VIDEO TOPIC: ${scriptContext.summary}\n`;
     }
+
+    // Theme/niche enforcement
+    const themeId = scriptContext?.themeId || 'neutral';
+    const theme = getTheme(themeId);
+    prompt += `NICHE: "${theme.name}" — You are STRICTLY limited to using ONLY the following Motion Graphic types: ${allowedMGs.join(', ')}. Do NOT use or invent any other types.\n`;
 
     // Visual context
     if (sceneVisual && sceneVisual.description !== 'No visual analysis available') {
@@ -357,37 +362,45 @@ function buildPrompt(scene, sceneIndex, totalScenes, scriptContext, sceneVisual)
         prompt += `\nWORD TIMESTAMPS: ${wordTimeline}`;
     }
 
+    // Build type descriptions dynamically based on allowed types
+    const TYPE_DESCRIPTIONS = {
+        statCounter: 'statCounter: A specific number/percentage is spoken. E.g. "grew by 340%", "5 million users"',
+        progressBar: 'progressBar: A percentage or completion stat. E.g. "78% of people", "nearly half"',
+        lowerThird: 'lowerThird: First mention of a person, place, or organization. E.g. "CEO John Smith", "at MIT"',
+        headline: 'headline: Key thesis or main topic (max 2-3 per video). E.g. opening statement, conclusion',
+        bulletList: 'bulletList: 2+ items enumerated. E.g. "first... second... third..."',
+        callout: 'callout: Important fact, quote, or insight. E.g. "the key takeaway is..."',
+        focusWord: 'focusWord: Single dramatic word for emphasis (max 1-2 per video). E.g. "Revolutionary."',
+        rankingList: 'rankingList: Items ranked by value (max 1 per video). E.g. "top 5 countries"',
+        comparisonCard: 'comparisonCard: Comparing two things (max 1 per video). E.g. "iPhone vs Android"',
+        barChart: 'barChart: 3-5 categories with numbers (max 1 per video). E.g. "sales by region"',
+        donutChart: 'donutChart: Percentage breakdown (max 1 per video). E.g. "market share"',
+        timeline: 'timeline: Historical progression (max 1 per video). E.g. "from 2010 to 2024"',
+        mapChart: 'mapChart: Geographic data with locations/regions (max 1 per video). E.g. "factories in USA, China, Germany"',
+        kineticText: 'kineticText: Powerful short statement, word-by-word reveal (max 1 per video). E.g. "The Future Is Now"',
+        articleHighlight: `articleHighlight: News article, study, or report reference (max 1 per video).
+  WHEN: narration mentions a study, report, article, research, or finding.
+  text: the headline (max 8 words)
+  subtext: MUST use pipe format: source|author|date|excerpt with **highlighted phrases**
+  Example: "Nature|Dr. Jane Smith|Feb 2024|The study found that **AI automation** could affect **47% of jobs** in manufacturing"`,
+        animatedIcons: `animatedIcons: Animated background icons for explanation/educational scenes (max 3 per video).
+  WHEN: narration explains a concept, process, or abstract idea with no specific data/stats.
+  text: 3-5 comma-separated SINGLE-WORD icon names. E.g. "brain,gear,lightbulb,rocket,target"
+  subtext: animation style — one of: float, drift, bounce, slideIn, popIn, spin`,
+    };
+
+    const typeDescriptions = allowedMGs
+        .map(t => TYPE_DESCRIPTIONS[t])
+        .filter(Boolean)
+        .map(d => `- ${d}`)
+        .join('\n');
+
     prompt += `\n
 === WHEN TO ADD A MOTION GRAPHIC ===
 Add a motion graphic when the narration has data, names, places, key statements, or visual concepts. Aim for about 40-60% of scenes to have one. Only use "none" for transitional or very short scenes with no meaningful content.
 
-TYPE SELECTION (pick the best match or none):
-- statCounter: A specific number/percentage is spoken. E.g. "grew by 340%", "5 million users"
-- progressBar: A percentage or completion stat. E.g. "78% of people", "nearly half"
-- lowerThird: First mention of a person, place, or organization. E.g. "CEO John Smith", "at MIT"
-- headline: Key thesis or main topic (max 2-3 per video). E.g. opening statement, conclusion
-- bulletList: 2+ items enumerated. E.g. "first... second... third..."
-- callout: Important fact, quote, or insight. E.g. "the key takeaway is..."
-- focusWord: Single dramatic word for emphasis (max 1-2 per video). E.g. "Revolutionary."
-- rankingList: Items ranked by value (max 1 per video). E.g. "top 5 countries"
-- comparisonCard: Comparing two things (max 1 per video). E.g. "iPhone vs Android"
-- barChart: 3-5 categories with numbers (max 1 per video). E.g. "sales by region"
-- donutChart: Percentage breakdown (max 1 per video). E.g. "market share"
-- timeline: Historical progression (max 1 per video). E.g. "from 2010 to 2024"
-- mapChart: Geographic data with locations/regions (max 1 per video). E.g. "factories in USA, China, Germany"
-- kineticText: Powerful short statement, word-by-word reveal (max 1 per video). E.g. "The Future Is Now"
-- articleHighlight: News article, study, or report reference (max 1 per video).
-  WHEN: narration mentions a study, report, article, research, or finding. E.g. "according to a Nature study", "a report by McKinsey found"
-  text: the headline (max 8 words)
-  subtext: MUST use pipe format: source|author|date|excerpt with **highlighted phrases**
-  Example: "Nature|Dr. Jane Smith|Feb 2024|The study found that **AI automation** could affect **47% of jobs** in manufacturing"
-  The **double asterisks** mark words that get highlighted with a marker sweep animation.
-- animatedIcons: Animated background icons for explanation/educational scenes (max 3 per video).
-  WHEN: narration explains a concept, process, or abstract idea with no specific data/stats.
-  NOT for: data/stats (use charts), news (use articleHighlight), intros, outros, person mentions (use lowerThird).
-  text: 3-5 comma-separated SINGLE-WORD icon names (must be real icon names, one word each). E.g. "brain,gear,lightbulb,rocket,target" or "laptop,shield,cloud,server,code". WRONG: "HP laptops" "strategic move" — these are phrases, not icon names!
-  subtext: animation style — one of: float, drift, bounce, slideIn, popIn, spin
-  Pick icons that visually represent the concepts being explained.
+ALLOWED TYPES for "${theme.name}" niche (pick the best match or none):
+${typeDescriptions}
 - none: Normal narration, nothing visually noteworthy
 
 POSITION GUIDE (choose where to place it):
@@ -425,8 +438,9 @@ TIMING — triggerWord:
         prompt += `\n\nUSER INSTRUCTIONS (follow these preferences):\n${aiInstructionsRef}`;
     }
 
+    const allowedTypesList = [...allowedMGs, 'none'].join('|');
     prompt += `\n\nReply ONLY with these 5 lines (nothing else):
-type: <headline|lowerThird|statCounter|callout|bulletList|focusWord|progressBar|barChart|donutChart|comparisonCard|timeline|rankingList|mapChart|kineticText|articleHighlight|animatedIcons|none>
+type: <${allowedTypesList}>
 text: <display text, max 8 words, extracted from narration>
 subtext: <secondary line OR "label1:value1,label2:value2" for charts, OR "source|author|date|excerpt with **highlights**" for articleHighlight, or "none">
 position: <center|bottom-left|bottom-right|center-left|top-right>
@@ -628,14 +642,18 @@ function parseResponse(text, scene, sceneIndex) {
 // NOTE: AI providers moved to shared ai-provider.js module
 // If per-scene analysis fails, try a single batch prompt
 
-async function batchFallback(scenes, scriptContext) {
+async function batchFallback(scenes, scriptContext, allowedMGs) {
     const sceneList = scenes.map((s, i) =>
         `${i}: "${s.text.substring(0, 80)}"`
     ).join('\n');
 
     const topic = scriptContext?.summary || 'unknown';
+    const themeId = scriptContext?.themeId || 'neutral';
+    const theme = getTheme(themeId);
+    const typesList = (allowedMGs || Object.keys(POSITION_MAP)).join(', ');
 
     let prompt = `Video about: ${topic}
+Niche: "${theme.name}" — ONLY use these MG types: ${typesList}
 
 Here are the scenes:
 ${sceneList}
@@ -643,7 +661,7 @@ ${sceneList}
 Pick 2-3 scenes that would benefit most from a text overlay. For each, reply with ONE line:
 <scene>|<type>|<display text max 8 words>|<position>|<triggerWord>
 
-Types: headline, lowerThird, statCounter, callout, bulletList, focusWord, progressBar, barChart, donutChart, comparisonCard, timeline, rankingList, mapChart, kineticText, articleHighlight
+Allowed types: ${typesList}
 For chart/ranking/timeline, add data after triggerWord: <scene>|<type>|<title>|<position>|<triggerWord>|<label1:val1,label2:val2>
 
 Position guide: center (headlines, charts, focus), bottom-left (lowerThird, callout), bottom-right (stats, progress), center-left (lists)
@@ -760,7 +778,13 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
     // Pick style for the entire video
     const mgStyle = pickStyle(scriptContext);
     const mapStyle = pickMapStyle(scriptContext, mgStyle);
-    console.log(`  MG Style: ${mgStyle} | Map Style: ${mapStyle}\n`);
+
+    // Resolve allowed MG types from theme (Niche Pack architecture)
+    const themeId = scriptContext?.themeId || 'neutral';
+    const theme = getTheme(themeId);
+    const allowedMGs = theme.allowedMGs || Object.keys(POSITION_MAP);
+    console.log(`  MG Style: ${mgStyle} | Map Style: ${mapStyle} | Niche: ${theme.name}`);
+    console.log(`  Allowed MGs: ${allowedMGs.join(', ')}\n`);
 
     const results = [];
 
@@ -770,10 +794,16 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
         console.log(`  Scene ${i}: "${scene.text.substring(0, 45)}..."`);
 
         try {
-            const prompt = buildPrompt(scene, i, scenes.length, scriptContext, sceneVisual);
+            const prompt = buildPrompt(scene, i, scenes.length, scriptContext, sceneVisual, allowedMGs);
             const rawText = await callAI(prompt);
             console.log(`    [AI raw]: ${rawText.substring(0, 80).replace(/\n/g, ' | ')}`);
             const mg = parseResponse(rawText, scene, i);
+
+            // Enforce niche pack: reject types not in the allowed list
+            if (mg && !allowedMGs.includes(mg.type)) {
+                console.log(`    -> Rejected "${mg.type}" (not in ${theme.name} niche), skipping`);
+                continue;
+            }
 
             if (mg) {
                 // Apply video-wide style
@@ -862,15 +892,17 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
     if (results.length === 0 && scenes.length > 0) {
         console.log('\n  No MGs from per-scene analysis. Trying batch fallback...');
         try {
-            const batchResults = await batchFallback(scenes, scriptContext);
-            batchResults.forEach(mg => {
+            const batchResults = await batchFallback(scenes, scriptContext, allowedMGs);
+            // Filter to allowed types and apply styles
+            const filteredBatch = batchResults.filter(mg => allowedMGs.includes(mg.type));
+            filteredBatch.forEach(mg => {
                 mg.style = mgStyle;
                 if (mg.type === 'mapChart') mg.mapStyle = mapStyle;
                 if (mg.startTime + mg.duration > totalDuration) {
                     mg.duration = Math.max(1, totalDuration - mg.startTime);
                 }
             });
-            results.push(...batchResults);
+            results.push(...filteredBatch);
             deconflictOverlayMGs(results);
         } catch (e) {
             console.log(`    Batch fallback failed: ${e.message}`);

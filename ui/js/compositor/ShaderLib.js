@@ -26,9 +26,18 @@ uniform sampler2D u_texture;
 uniform float u_opacity;
 // u_transform: x=scaleX, y=scaleY, z=offsetX, w=offsetY (in UV space)
 uniform vec4 u_transform;
+// u_crop: x=top, y=right, z=bottom, w=left (0-1 fractions of texture)
+uniform vec4 u_crop;
+// u_borderRadius: 0.0 = sharp, 0.5 = fully rounded (fraction of half-size)
+uniform float u_borderRadius;
 
 in vec2 v_texCoord;
 out vec4 fragColor;
+
+float roundedBoxSDF(vec2 p, vec2 halfSize, float radius) {
+    vec2 d = abs(p) - halfSize + radius;
+    return length(max(d, 0.0)) - radius;
+}
 
 void main() {
     // Apply fit-mode transform: scale and offset UVs
@@ -40,8 +49,71 @@ void main() {
         return;
     }
 
+    // Border radius — applied in the image's UV space so it follows scale/position
+    float alpha = 1.0;
+    if (u_borderRadius > 0.001) {
+        vec2 pos = uv - 0.5; // center of image UV space
+        float r = u_borderRadius * 0.5;
+        float dist = roundedBoxSDF(pos, vec2(0.5), r);
+        // Scale smoothstep edge by transform to keep consistent anti-aliasing
+        float edgeWidth = 0.003 / min(u_transform.x, u_transform.y);
+        if (dist > edgeWidth) { fragColor = vec4(0.0); return; }
+        alpha = 1.0 - smoothstep(0.0, edgeWidth, dist);
+    }
+
+    // Apply crop: discard pixels in cropped regions of the texture
+    if (uv.y < u_crop.x || uv.x > 1.0 - u_crop.y ||
+        uv.y > 1.0 - u_crop.z || uv.x < u_crop.w) {
+        fragColor = vec4(0.0);
+        return;
+    }
+
     vec4 color = texture(u_texture, uv);
-    fragColor = vec4(color.rgb, color.a * u_opacity);
+    fragColor = vec4(color.rgb, color.a * u_opacity * alpha);
+}`;
+
+// ============================================================================
+// BLUR BLIT FRAGMENT — Blurred texture blit for background fill
+// ============================================================================
+const BLUR_BLIT_FRAG = `#version 300 es
+precision highp float;
+
+uniform sampler2D u_texture;
+uniform float u_opacity;
+uniform vec4 u_transform;
+uniform vec2 u_texelSize; // 1/width, 1/height in UV space
+
+in vec2 v_texCoord;
+out vec4 fragColor;
+
+void main() {
+    vec2 uv = (v_texCoord - 0.5) / u_transform.xy + 0.5 - u_transform.zw;
+    uv = clamp(uv, 0.0, 1.0);
+
+    // 13-tap blur: center + inner ring (r1) + outer ring (r2)
+    float r1 = 12.0, r2 = 30.0;
+    vec2 ts = u_texelSize;
+
+    vec4 c = texture(u_texture, uv) * 0.12;
+    // Inner ring — 4 axis-aligned samples
+    c += texture(u_texture, clamp(uv + vec2(r1, 0.0) * ts, 0.0, 1.0)) * 0.1;
+    c += texture(u_texture, clamp(uv - vec2(r1, 0.0) * ts, 0.0, 1.0)) * 0.1;
+    c += texture(u_texture, clamp(uv + vec2(0.0, r1) * ts, 0.0, 1.0)) * 0.1;
+    c += texture(u_texture, clamp(uv - vec2(0.0, r1) * ts, 0.0, 1.0)) * 0.1;
+    // Outer ring — 4 axis-aligned + 4 diagonal
+    c += texture(u_texture, clamp(uv + vec2(r2, 0.0) * ts, 0.0, 1.0)) * 0.07;
+    c += texture(u_texture, clamp(uv - vec2(r2, 0.0) * ts, 0.0, 1.0)) * 0.07;
+    c += texture(u_texture, clamp(uv + vec2(0.0, r2) * ts, 0.0, 1.0)) * 0.07;
+    c += texture(u_texture, clamp(uv - vec2(0.0, r2) * ts, 0.0, 1.0)) * 0.07;
+    c += texture(u_texture, clamp(uv + vec2(r2, r2) * 0.707 * ts, 0.0, 1.0)) * 0.03;
+    c += texture(u_texture, clamp(uv - vec2(r2, r2) * 0.707 * ts, 0.0, 1.0)) * 0.03;
+    c += texture(u_texture, clamp(uv + vec2(r2, -r2) * 0.707 * ts, 0.0, 1.0)) * 0.03;
+    c += texture(u_texture, clamp(uv - vec2(r2, -r2) * 0.707 * ts, 0.0, 1.0)) * 0.03;
+    // Total weights = 0.12 + 4*0.1 + 4*0.07 + 4*0.03 = 0.12 + 0.4 + 0.28 + 0.12 = 0.92
+    c /= 0.92;
+
+    // Slightly darken for background effect
+    fragColor = vec4(c.rgb * 0.7, u_opacity);
 }`;
 
 // ============================================================================
@@ -58,8 +130,10 @@ in vec2 v_texCoord;
 out vec4 fragColor;
 
 void main() {
-    vec4 colorA = texture(u_textureA, v_texCoord);
-    vec4 colorB = texture(u_textureB, v_texCoord);
+    // FBO textures are Y-flipped compared to default framebuffer
+    vec2 tc = vec2(v_texCoord.x, 1.0 - v_texCoord.y);
+    vec4 colorA = texture(u_textureA, tc);
+    vec4 colorB = texture(u_textureB, tc);
     fragColor = mix(colorA, colorB, u_progress);
 }`;
 
@@ -79,16 +153,18 @@ in vec2 v_texCoord;
 out vec4 fragColor;
 
 void main() {
+    // FBO textures are Y-flipped compared to default framebuffer
+    vec2 tc = vec2(v_texCoord.x, 1.0 - v_texCoord.y);
     float edge;
-    if (u_direction == 0)      edge = v_texCoord.x;
-    else if (u_direction == 1) edge = 1.0 - v_texCoord.x;
-    else if (u_direction == 2) edge = v_texCoord.y;
-    else                       edge = 1.0 - v_texCoord.y;
+    if (u_direction == 0)      edge = tc.x;
+    else if (u_direction == 1) edge = 1.0 - tc.x;
+    else if (u_direction == 2) edge = tc.y;
+    else                       edge = 1.0 - tc.y;
 
     float t = smoothstep(u_progress - u_softness, u_progress + u_softness, edge);
 
-    vec4 colorA = texture(u_textureA, v_texCoord);
-    vec4 colorB = texture(u_textureB, v_texCoord);
+    vec4 colorA = texture(u_textureA, tc);
+    vec4 colorB = texture(u_textureB, tc);
     fragColor = mix(colorB, colorA, t);
 }`;
 
@@ -153,6 +229,7 @@ class ShaderProgram {
 
     set1f(name, v) { this.gl.uniform1f(this._loc(name), v); }
     set1i(name, v) { this.gl.uniform1i(this._loc(name), v); }
+    set2f(name, x, y) { this.gl.uniform2f(this._loc(name), x, y); }
     set4f(name, x, y, z, w) { this.gl.uniform4f(this._loc(name), x, y, z, w); }
 
     /**
@@ -176,6 +253,7 @@ class ShaderProgram {
 window.ShaderLib = {
     QUAD_VERT,
     BLIT_FRAG,
+    BLUR_BLIT_FRAG,
     CROSSFADE_FRAG,
     WIPE_FRAG,
     ShaderProgram,

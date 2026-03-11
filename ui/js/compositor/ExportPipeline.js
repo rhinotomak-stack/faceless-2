@@ -2,26 +2,29 @@
  * ExportPipeline.js — Offline render loop for WebGL2 compositor export
  *
  * Drives the compositor frame-by-frame:
- *   renderFrame(f) -> readPixels() -> IPC to main process -> FFmpeg NVENC encode
+ *   renderFrame(f) -> readPixels() -> FFmpeg stdin (direct pipe, no IPC)
  *
- * The main process spawns FFmpeg with raw RGBA pipe input and handles encoding.
- * Audio is muxed separately after all video frames are written.
+ * FFmpeg is spawned directly in the renderer process via require('child_process').
+ * This bypasses Electron IPC entirely for frame data, eliminating the ~8MB
+ * structured clone per frame that caused GC pauses.
+ *
+ * Audio is muxed via a lightweight IPC call after all frames are written.
  *
  * Two export paths:
- *   - Legacy: per-frame HTMLVideoElement seeking + RAF yield + sync readPixels + per-frame IPC
- *   - Optimized: WebCodecs sequential decode + PBO async readback + batched IPC
+ *   - Legacy: per-frame HTMLVideoElement seeking + RAF yield + sync readPixels
+ *   - Optimized: WebCodecs sequential decode + PBO async readback
  */
 
-// Batch size for IPC frame sending — reduces round-trips to main process.
-// Each frame is ~8MB RGBA, so batch of 6 = ~50MB per IPC call.
-// Override via window.EXPORT_BATCH_SIZE or env var; clamped to 1–8.
-const EXPORT_BATCH_SIZE = Math.max(1, Math.min(8,
-    parseInt(window.EXPORT_BATCH_SIZE || '6', 10) || 6
-));
+// Node.js modules — exposed by preload.js (contextIsolation: false + sandbox: false)
+const _spawn = window._nodeSpawn;
+const _path  = window._nodePath;
+const _fs    = window._nodeFs;
+
+// FFmpeg executable — same path as main.js uses
+const FFMPEG_PATH = (typeof process !== 'undefined' && process.env && process.env.FFMPEG_PATH)
+    || 'C:\\ffmg\\bin\\ffmpeg.exe';
 
 // Max PBO frames in-flight before draining. Independent of pboCount.
-// pboCount (4) provides enough buffers to avoid wrap-around;
-// this controls how many frames overlap GPU DMA with CPU readback.
 const MAX_INFLIGHT_PBOS = 3;
 
 class ExportPipeline {
@@ -33,12 +36,18 @@ class ExportPipeline {
         this._cancelled = false;
         this._progressCallback = null;
         this._running = false;
-        // Ring buffer pool — initialized at export start
-        this._pool = null;       // Array of Uint8Array
+        // Ring buffer pool
+        this._pool = null;
         this._poolSize = 0;
-        this._poolIndex = 0;     // next slot to use (wraps around)
+        this._poolIndex = 0;
         // PBO async readback state
         this._pboEnabled = false;
+        // Direct FFmpeg process
+        this._ffmpegProc = null;
+        this._framesWritten = 0;
+        this._bytesWritten = 0;
+        this._lastLogTime = 0;
+        this._lastLogFrames = 0;
     }
 
     /**
@@ -73,42 +82,84 @@ class ExportPipeline {
             return { success: false, error: 'No frames to export (empty timeline)' };
         }
 
-        // V2 GPU-native export probe — if available, use zero-readback path
-        if (!(options && options._skipV2) && typeof window.electronAPI.v2Probe === 'function') {
-            try {
-                const v2 = await window.electronAPI.v2Probe();
-                if (v2 && v2.ok) {
-                    console.log('[ExportPipeline] V2 GPU-native export available — using V2 path');
-                    return this._runV2Export(options);
-                }
-                console.log(`[ExportPipeline] V2 unavailable (${v2 && v2.reason || 'unknown'}), using legacy`);
-            } catch (e) {
-                console.log(`[ExportPipeline] V2 probe failed: ${e.message}, using legacy`);
-            }
-        }
-
         const legacy = !!(options && options.legacy);
+        const expectedFrameSize = width * height * 4;
 
         this._running = true;
         this._cancelled = false;
+        this._framesWritten = 0;
+        this._bytesWritten = 0;
+        this._lastLogTime = Date.now();
+        this._lastLogFrames = 0;
         this.compositor._exporting = true;
 
-        console.log(`[ExportPipeline] Starting ${legacy ? 'LEGACY' : 'OPTIMIZED'} export: ${totalFrames} frames, ${width}x${height} @ ${fps}fps`);
+        // Verify Node.js require() is available (needs contextIsolation: false + sandbox: false)
+        if (typeof _spawn !== 'function') {
+            return { success: false, error: 'Direct-spawn not available. Check contextIsolation/sandbox settings.' };
+        }
+
+        console.log(`[ExportPipeline] Starting ${legacy ? 'LEGACY' : 'OPTIMIZED'} DIRECT-SPAWN export: ${totalFrames} frames, ${width}x${height} @ ${fps}fps`);
         const startTime = performance.now();
 
+        let videoFile = null;
+        let outputFile = null;
+
         try {
-            // 1. Tell main process to spawn FFmpeg
-            const startResult = await window.electronAPI.startWebGLExport({
+            // 1. Get export config from main process (encoder args, output paths)
+            const config = await window.electronAPI.getExportConfig({
                 width, height, fps, totalFrames,
             });
-            if (!startResult || !startResult.success) {
-                throw new Error(startResult?.error || 'Failed to start FFmpeg process');
+            if (!config || !config.success) {
+                throw new Error(config?.error || 'Failed to get export config');
             }
 
-            // 2. Allocate ring buffer pool for zero-copy frame transport
+            videoFile = config.videoFile;
+            outputFile = config.outputFile;
+
+            // 2. Spawn FFmpeg directly in renderer process (no IPC for frame data!)
+            const ffmpegPath = config.ffmpegPath || FFMPEG_PATH;
+            const ffmpegArgs = [
+                '-y',
+                '-f', 'rawvideo',
+                '-pixel_format', 'rgba',
+                '-video_size', `${width}x${height}`,
+                '-framerate', String(fps),
+                '-i', 'pipe:0',
+                ...config.encArgs,
+                '-pix_fmt', 'yuv420p',
+                '-an',
+                videoFile
+            ];
+
+            console.log(`[ExportPipeline] Spawning FFmpeg: ${ffmpegPath} ${ffmpegArgs.join(' ')}`);
+            const ffmpegProc = _spawn(ffmpegPath, ffmpegArgs, {
+                stdio: ['pipe', 'pipe', 'pipe'],
+                windowsHide: true,
+            });
+            this._ffmpegProc = ffmpegProc;
+
+            let ffmpegStderr = '';
+            ffmpegProc.stderr.on('data', (data) => {
+                ffmpegStderr += data.toString();
+            });
+
+            // Handle unexpected FFmpeg death
+            let ffmpegDead = false;
+            ffmpegProc.on('error', (err) => {
+                ffmpegDead = true;
+                console.error('[ExportPipeline] FFmpeg process error:', err.message);
+            });
+            ffmpegProc.on('close', (code) => {
+                if (code !== 0 && !this._cancelled) {
+                    ffmpegDead = true;
+                    console.error(`[ExportPipeline] FFmpeg exited unexpectedly with code ${code}`);
+                }
+            });
+
+            // 3. Allocate ring buffer pool
             this._initPool(width, height);
 
-            // 2b. Try to enable PBO async readback (WebGL2 only)
+            // 3b. Try to enable PBO async readback (WebGL2 only)
             this._pboEnabled = false;
             if (this.compositor.gl instanceof WebGL2RenderingContext) {
                 this._pboEnabled = this.compositor.initPBOs(width, height);
@@ -120,36 +171,97 @@ class ExportPipeline {
                 console.log(`[WebGL Export] ▶▶▶ PBO MODE: OFF (reason: ${reason}) ◀◀◀`);
             }
 
-            // 3. Pause all video playback, prepare for seeking
+            // 4. Pause all video playback, prepare for seeking
             this.compositor.pauseVideos();
 
-            // 4. Run frame loop (legacy or optimized)
+            // 5. Run frame loop (legacy or optimized) — writes directly to FFmpeg stdin
+            const writeFrame = async (buffer) => {
+                if (ffmpegDead) throw new Error('FFmpeg process died');
+                if (this._cancelled) throw new Error('Export cancelled');
+
+                // Write the raw RGBA buffer directly to FFmpeg stdin — zero IPC!
+                // stdin.write accepts Uint8Array directly — no Buffer.from needed
+                const canWrite = ffmpegProc.stdin.write(new Uint8Array(buffer));
+                this._framesWritten++;
+                this._bytesWritten += buffer.byteLength;
+
+                // Backpressure: wait for FFmpeg to drain before accepting more frames
+                if (!canWrite) {
+                    await new Promise((resolve, reject) => {
+                        ffmpegProc.stdin.once('drain', resolve);
+                        ffmpegProc.stdin.once('error', reject);
+                    });
+                }
+
+                // Periodic logging
+                const now = Date.now();
+                if (now - this._lastLogTime >= 1000) {
+                    const elapsed = (now - this._lastLogTime) / 1000;
+                    const recentFrames = this._framesWritten - this._lastLogFrames;
+                    const recentFps = (recentFrames / elapsed).toFixed(1);
+                    const totalMB = (this._bytesWritten / (1024 * 1024)).toFixed(0);
+                    console.log(`[ExportPipeline] ${this._framesWritten}/${totalFrames} frames | ${recentFps} fps | ${totalMB} MB written (direct)`);
+                    this._lastLogTime = now;
+                    this._lastLogFrames = this._framesWritten;
+                }
+            };
+
             if (legacy || !this._canUseOptimizedPath()) {
-                await this._runLegacyFrameLoop(fps, totalFrames, startTime);
+                await this._runLegacyFrameLoop(fps, totalFrames, startTime, writeFrame);
             } else {
-                await this._runOptimizedFrameLoop(fps, totalFrames, startTime);
+                await this._runOptimizedFrameLoop(fps, totalFrames, startTime, writeFrame);
             }
 
-            // 5. Finish: close FFmpeg stdin, mux audio
-            const finishResult = await window.electronAPI.finishWebGLExport();
-            if (!finishResult || !finishResult.success) {
-                throw new Error(finishResult?.error || 'FFmpeg failed to produce output');
+            // 6. Close FFmpeg stdin and wait for it to finish encoding
+            await new Promise((resolve, reject) => {
+                const timeout = setTimeout(() => {
+                    try { ffmpegProc.kill('SIGTERM'); } catch (_) { }
+                    reject(new Error('FFmpeg encoding timeout (120s)'));
+                }, 120000);
+
+                ffmpegProc.on('close', (code) => {
+                    clearTimeout(timeout);
+                    if (code === 0) {
+                        resolve();
+                    } else {
+                        reject(new Error(`FFmpeg exited with code ${code}\n${ffmpegStderr.slice(-500)}`));
+                    }
+                });
+                ffmpegProc.on('error', (err) => {
+                    clearTimeout(timeout);
+                    reject(err);
+                });
+
+                ffmpegProc.stdin.end();
+            });
+
+            console.log(`[ExportPipeline] Video encoded: ${videoFile} (${this._framesWritten} frames)`);
+
+            // 7. Mux audio via IPC (lightweight, one-time call)
+            const muxResult = await window.electronAPI.muxAudio(videoFile, outputFile);
+            if (!muxResult || !muxResult.success) {
+                throw new Error(muxResult?.error || 'Audio mux failed');
             }
 
             const totalElapsed = ((performance.now() - startTime) / 1000).toFixed(1);
-            console.log(`[ExportPipeline] Export complete in ${totalElapsed}s: ${finishResult.outputPath}`);
+            console.log(`[ExportPipeline] Export complete in ${totalElapsed}s: ${muxResult.outputPath}`);
 
-            return { success: true, outputPath: finishResult.outputPath };
+            return { success: true, outputPath: muxResult.outputPath };
 
         } catch (err) {
             console.error('[ExportPipeline] Export failed:', err.message);
-            try {
-                await window.electronAPI.cancelWebGLExport();
-            } catch (_) {}
+            // Kill FFmpeg if still running
+            if (this._ffmpegProc && !this._ffmpegProc.killed) {
+                try {
+                    this._ffmpegProc.stdin.destroy();
+                    this._ffmpegProc.kill('SIGTERM');
+                } catch (_) { }
+            }
             return { success: false, error: err.message };
 
         } finally {
             this._running = false;
+            this._ffmpegProc = null;
             this.compositor._exporting = false;
             this.compositor._resetVideosForPreview();
             if (this._pboEnabled) {
@@ -161,13 +273,12 @@ class ExportPipeline {
     }
 
     /**
-     * Allocate ring buffer pool for zero-copy readPixels → IPC.
-     * Pool size = EXPORT_BATCH_SIZE + 1 so we always have a free buffer
-     * while a full batch is being flushed via IPC.
+     * Allocate ring buffer pool for zero-copy readPixels.
+     * Pool size = 4 so we always have free buffers while writes complete.
      */
     _initPool(width, height) {
         const frameBytes = width * height * 4;
-        this._poolSize = Math.max(3, EXPORT_BATCH_SIZE + 1);
+        this._poolSize = 4;
         this._pool = new Array(this._poolSize);
         for (let i = 0; i < this._poolSize; i++) {
             this._pool[i] = new Uint8Array(frameBytes);
@@ -197,29 +308,26 @@ class ExportPipeline {
 
     /**
      * Check if the optimized export path is available.
-     * Phase 1: requires WebCodecs VideoDecoder + VideoFrameSource class.
      */
     _canUseOptimizedPath() {
-        // Phase 1: WebCodecs sequential decode (no per-frame seeking/RAF)
-        // Phase 2 (future): + PBO async readback + batched IPC
         return typeof VideoFrameSource !== 'undefined'
             && typeof VideoDecoder !== 'undefined';
     }
 
     // ========================================================================
-    // LEGACY FRAME LOOP (current working path)
+    // LEGACY FRAME LOOP
     // ========================================================================
 
     /**
-     * Legacy export: per-frame HTMLVideoElement seeking + RAF yield + sync readPixels + per-frame IPC.
+     * Legacy export: per-frame HTMLVideoElement seeking + RAF yield + sync readPixels.
+     * @param {function} writeFrame - async (ArrayBuffer) => void — writes to FFmpeg stdin
      */
-    async _runLegacyFrameLoop(fps, totalFrames, startTime) {
+    async _runLegacyFrameLoop(fps, totalFrames, startTime, writeFrame) {
         let usePBO = this._pboEnabled;
-        console.log(`[ExportPipeline] Legacy loop: batchSize=${EXPORT_BATCH_SIZE}, pbo=${usePBO}`);
+        console.log(`[ExportPipeline] Legacy loop: pbo=${usePBO}`);
         let lastProgressTime = 0;
-        const batch = [];
 
-        // PBO pipeline FIFO — drain when MAX_INFLIGHT_PBOS reached
+        // PBO pipeline FIFO
         const pending = [];
         let consecutiveTimeouts = 0;
 
@@ -237,16 +345,15 @@ class ExportPipeline {
                 didSeek = true;
             }
 
-            // Yield to browser so video frames are decoded for texImage2D
             if (didSeek) {
-                await new Promise(resolve => requestAnimationFrame(resolve));
+                // setTimeout(0) instead of RAF — avoids 16.6ms vsync cap per frame
+                await new Promise(resolve => setTimeout(resolve, 0));
             }
 
             // Render the frame
             this.compositor.renderFrame(frame);
 
             if (usePBO) {
-                // Flow control: drain oldest when in-flight count hits limit
                 while (pending.length >= MAX_INFLIGHT_PBOS) {
                     const old = pending.shift();
                     const fenceOk = await this.compositor.awaitFence(old.sync);
@@ -256,15 +363,14 @@ class ExportPipeline {
                         console.warn(`[ExportPipeline] PBO fence timeout #${consecutiveTimeouts} at frame ${old.frame}`);
 
                         if (consecutiveTimeouts >= 2) {
-                            // 2 consecutive timeouts — disable PBO, drain all pending via sync
-                            console.warn(`[ExportPipeline] ${consecutiveTimeouts} consecutive timeouts -> disabling PBO, falling back to sync`);
+                            console.warn(`[ExportPipeline] ${consecutiveTimeouts} consecutive timeouts -> disabling PBO`);
                             pending.unshift(old);
                             for (const p of pending) {
                                 this.compositor.renderFrame(p.frame);
                                 const target = this._nextPoolBuffer();
                                 this.compositor.readPixelsInto(target);
-                                await this._addToBatch(batch, p.frame, target.buffer);
-                                if (p.sync) try { this.compositor.gl.deleteSync(p.sync); } catch (_) {}
+                                await writeFrame(target.buffer);
+                                if (p.sync) try { this.compositor.gl.deleteSync(p.sync); } catch (_) { }
                             }
                             pending.length = 0;
                             usePBO = false;
@@ -272,68 +378,49 @@ class ExportPipeline {
                             this.compositor.destroyPBOs();
                             break;
                         }
-
-                        // First timeout — proceed with stall (getBufferSubData will block)
-                        console.warn(`[ExportPipeline] First timeout, proceeding with stall readback for frame ${old.frame}`);
                     } else {
                         consecutiveTimeouts = 0;
                     }
 
                     const target = this._nextPoolBuffer();
                     this.compositor.readBackPBO(old.pboIndex, target);
-
-                    if (old.frame < 3) {
-                        console.log(`[ExportPipeline] PBO readback frame ${old.frame}: PBO[${old.pboIndex}] -> pool slot ${(this._poolIndex + this._poolSize - 1) % this._poolSize}`);
-                    }
-
-                    await this._addToBatch(batch, old.frame, target.buffer);
+                    await writeFrame(target.buffer);
                 }
 
-                // After flow control: issue new PBO read (or skip if PBO was disabled above)
                 if (usePBO) {
                     const pboIndex = this.compositor.readPixelsIntoPBO();
                     const sync = this.compositor.createFence();
                     pending.push({ frame, pboIndex, sync });
                 } else {
-                    // PBO was just disabled by timeout — use sync for this frame
                     const target = this._nextPoolBuffer();
                     this.compositor.readPixelsInto(target);
-                    await this._addToBatch(batch, frame, target.buffer);
+                    await writeFrame(target.buffer);
                 }
             } else {
-                // SYNC PATH: direct readPixels into pool buffer
                 const target = this._nextPoolBuffer();
                 this.compositor.readPixelsInto(target);
-
-                if (frame < 3) {
-                    console.log(`[ExportPipeline] Frame ${frame}: pool slot ${(this._poolIndex + this._poolSize - 1) % this._poolSize}, ArrayBuffer @${target.byteOffset}`);
-                }
-
-                await this._addToBatch(batch, frame, target.buffer);
+                await writeFrame(target.buffer);
             }
 
-            // Progress reporting
             this._reportProgress(frame, totalFrames, startTime, lastProgressTime, (t) => { lastProgressTime = t; });
         }
 
-        // PBO DRAIN: read back all remaining pending frames in order
+        // PBO DRAIN
         while (pending.length > 0) {
             const old = pending.shift();
             const fenceOk = await this.compositor.awaitFence(old.sync);
             if (!fenceOk) {
-                // Fence timeout during drain — re-render remaining via sync
-                console.warn(`[ExportPipeline] PBO fence timeout during drain at frame ${old.frame} -> falling back to sync`);
+                console.warn(`[ExportPipeline] PBO fence timeout during drain at frame ${old.frame}`);
                 this.compositor.renderFrame(old.frame);
                 const target = this._nextPoolBuffer();
                 this.compositor.readPixelsInto(target);
-                await this._addToBatch(batch, old.frame, target.buffer);
-                // Clean up remaining fences
+                await writeFrame(target.buffer);
                 for (const p of pending) {
-                    if (p.sync) try { this.compositor.gl.deleteSync(p.sync); } catch (_) {}
+                    if (p.sync) try { this.compositor.gl.deleteSync(p.sync); } catch (_) { }
                     this.compositor.renderFrame(p.frame);
                     const t = this._nextPoolBuffer();
                     this.compositor.readPixelsInto(t);
-                    await this._addToBatch(batch, p.frame, t.buffer);
+                    await writeFrame(t.buffer);
                 }
                 pending.length = 0;
                 this.compositor.destroyPBOs();
@@ -341,33 +428,22 @@ class ExportPipeline {
             }
             const target = this._nextPoolBuffer();
             this.compositor.readBackPBO(old.pboIndex, target);
-            console.log(`[ExportPipeline] PBO drain: frame ${old.frame} from PBO[${old.pboIndex}]`);
-            await this._addToBatch(batch, old.frame, target.buffer);
+            await writeFrame(target.buffer);
         }
-
-        // Flush final partial batch
-        await this._flushBatch(batch);
     }
 
     // ========================================================================
-    // OPTIMIZED FRAME LOOP (WebCodecs + PBO + batch IPC)
+    // OPTIMIZED FRAME LOOP (WebCodecs + PBO)
     // ========================================================================
 
     /**
-     * Optimized export: WebCodecs sequential decode replaces per-frame HTMLVideoElement seeking.
-     * Eliminates the seek + seeked-event + requestAnimationFrame yield per frame.
-     * Falls back per-scene to legacy seeking if WebCodecs init fails (non-MP4, unsupported codec).
-     *
-     * Guarantees:
-     *  - Renders the exact same frameIndex sequence as legacy (0..totalFrames-1)
-     *  - compositor._exportFrameSources cleared in finally{} even on cancel/error
-     *  - All VideoFrames closed on exit to prevent GPU memory leaks
-     *  - Legacy path still available via options.legacy=true for hash comparison
+     * Optimized export: WebCodecs sequential decode — no per-frame seeking/RAF.
+     * @param {function} writeFrame - async (ArrayBuffer) => void — writes to FFmpeg stdin
      */
-    async _runOptimizedFrameLoop(fps, totalFrames, startTime) {
+    async _runOptimizedFrameLoop(fps, totalFrames, startTime, writeFrame) {
         const vfs = new VideoFrameSource();
-        const webcodecScenes = new Set();  // sceneIndex → uses WebCodecs
-        const legacyScenes = new Set();    // sceneIndex → falls back to HTMLVideoElement seek
+        const webcodecScenes = new Set();
+        const legacyScenes = new Set();
 
         // 1. Init WebCodecs decoders for all video scenes
         const allScenes = this.compositor.sceneGraph.scenes;
@@ -409,22 +485,19 @@ class ExportPipeline {
         await Promise.all(initPromises);
         console.log(`[ExportPipeline] Optimized: ${webcodecScenes.size} WebCodecs, ${legacyScenes.size} legacy scenes`);
 
-        // If no scenes could use WebCodecs, fall back entirely to legacy
         if (webcodecScenes.size === 0) {
             console.warn('[ExportPipeline] No WebCodecs decoders initialized, falling back to legacy');
             vfs.closeAll();
-            return this._runLegacyFrameLoop(fps, totalFrames, startTime);
+            return this._runLegacyFrameLoop(fps, totalFrames, startTime, writeFrame);
         }
 
-        // 2. Frame loop — same frame indices as legacy (0..totalFrames-1)
+        // 2. Frame loop
         let usePBO = this._pboEnabled;
-        console.log(`[ExportPipeline] Optimized loop: batchSize=${EXPORT_BATCH_SIZE}, pbo=${usePBO}`);
+        console.log(`[ExportPipeline] Optimized loop: pbo=${usePBO}`);
         let lastProgressTime = 0;
         const exportFrameSources = new Map();
         this.compositor._exportFrameSources = exportFrameSources;
-        const batch = [];
 
-        // PBO pipeline FIFO — drain when MAX_INFLIGHT_PBOS reached
         const pending = [];
         let consecutiveTimeouts = 0;
 
@@ -445,36 +518,31 @@ class ExportPipeline {
                     const timeSec = (localFrame + mediaOffsetFrames) / fps;
 
                     if (webcodecScenes.has(idx)) {
-                        // WebCodecs: sequential decode — no seek, no RAF yield needed
                         const videoFrame = await vfs.getFrameAtTime(idx, timeSec);
                         if (videoFrame) {
                             exportFrameSources.set(idx, videoFrame);
                         } else {
-                            // End of stream or closed frame — fall back to legacy seek for this frame
                             await this.compositor.seekVideoToFrame(idx, localFrame + mediaOffsetFrames);
                             didLegacySeek = true;
                         }
                     } else if (legacyScenes.has(idx)) {
-                        // Legacy: HTMLVideoElement seek (same as _runLegacyFrameLoop)
                         await this.compositor.seekVideoToFrame(idx, localFrame + mediaOffsetFrames);
                         didLegacySeek = true;
                     }
                 }
 
-                // Only yield for RAF if we did a legacy seek (WebCodecs frames are ready)
                 if (didLegacySeek) {
-                    await new Promise(resolve => requestAnimationFrame(resolve));
+                    // Use setTimeout(0) instead of RAF — RAF is capped at 16.6ms (60Hz)
+                    // which adds 16ms per frame to every scene with a legacy seek fallback.
+                    // setTimeout(0) yields to the event loop without the vsync cap.
+                    await new Promise(resolve => setTimeout(resolve, 0));
                 }
 
-                // Render — _getSceneTexture checks _exportFrameSources for WebCodecs scenes
                 this.compositor.renderFrame(frame);
 
-                // Close VideoFrames immediately after render — texImage2D already copied
-                // pixels to GPU, so the decoded frame backing memory can be released now.
-                // Also null out VideoFrameSource's currentFrame ref so getFrameAtTime
-                // won't return a closed frame on end-of-stream reuse (returns null instead).
+                // Close VideoFrames immediately after render
                 for (const [idx, vf] of exportFrameSources.entries()) {
-                    try { vf.close(); } catch (_) {}
+                    try { vf.close(); } catch (_) { }
                     const decState = vfs._decoders.get(idx);
                     if (decState && decState.currentFrame === vf) {
                         decState.currentFrame = null;
@@ -482,7 +550,6 @@ class ExportPipeline {
                 }
 
                 if (usePBO) {
-                    // Flow control: drain oldest when in-flight count hits limit
                     while (pending.length >= MAX_INFLIGHT_PBOS) {
                         const old = pending.shift();
                         const fenceOk = await this.compositor.awaitFence(old.sync);
@@ -492,20 +559,16 @@ class ExportPipeline {
                             console.warn(`[ExportPipeline] PBO fence timeout #${consecutiveTimeouts} at frame ${old.frame}`);
 
                             if (consecutiveTimeouts >= 2) {
-                                // 2 consecutive timeouts — disable PBO + WebCodecs, drain pending via full legacy
-                                console.warn(`[ExportPipeline] ${consecutiveTimeouts} consecutive timeouts -> disabling PBO + WebCodecs, falling back to full legacy`);
-
-                                // Kill WebCodecs decoders (prevents "codec reclaimed" cascade)
+                                console.warn(`[ExportPipeline] ${consecutiveTimeouts} consecutive timeouts -> disabling PBO + WebCodecs`);
                                 vfs.closeAll();
                                 for (const idx of webcodecScenes) legacyScenes.add(idx);
                                 webcodecScenes.clear();
                                 exportFrameSources.clear();
                                 this.compositor._exportFrameSources = null;
 
-                                // Drain pending frames via sync re-render
                                 pending.unshift(old);
                                 for (const p of pending) {
-                                    if (p.sync) try { this.compositor.gl.deleteSync(p.sync); } catch (_) {}
+                                    if (p.sync) try { this.compositor.gl.deleteSync(p.sync); } catch (_) { }
                                     const activeAtFrame = this.compositor.sceneGraph.getActiveScenesAtFrame(p.frame);
                                     for (const { scene } of activeAtFrame) {
                                         if (scene.isMGScene || scene.mediaType === 'motion-graphic' || scene.mediaType === 'image') continue;
@@ -513,11 +576,11 @@ class ExportPipeline {
                                         const mof = Math.round((scene.mediaOffset || 0) * fps);
                                         await this.compositor.seekVideoToFrame(scene.index, lf + mof);
                                     }
-                                    await new Promise(resolve => requestAnimationFrame(resolve));
+                                    await new Promise(resolve => setTimeout(resolve, 0));
                                     this.compositor.renderFrame(p.frame);
                                     const target = this._nextPoolBuffer();
                                     this.compositor.readPixelsInto(target);
-                                    await this._addToBatch(batch, p.frame, target.buffer);
+                                    await writeFrame(target.buffer);
                                 }
                                 pending.length = 0;
                                 usePBO = false;
@@ -525,30 +588,20 @@ class ExportPipeline {
                                 this.compositor.destroyPBOs();
                                 break;
                             }
-
-                            // First timeout — proceed with stall (getBufferSubData will block)
-                            console.warn(`[ExportPipeline] First timeout, proceeding with stall readback for frame ${old.frame}`);
                         } else {
                             consecutiveTimeouts = 0;
                         }
 
                         const target = this._nextPoolBuffer();
                         this.compositor.readBackPBO(old.pboIndex, target);
-
-                        if (old.frame < 3) {
-                            console.log(`[ExportPipeline] PBO readback frame ${old.frame}: PBO[${old.pboIndex}] -> pool slot ${(this._poolIndex + this._poolSize - 1) % this._poolSize}`);
-                        }
-
-                        await this._addToBatch(batch, old.frame, target.buffer);
+                        await writeFrame(target.buffer);
                     }
 
-                    // Issue new PBO read (or sync fallback if PBO was just disabled)
                     if (usePBO) {
                         const pboIndex = this.compositor.readPixelsIntoPBO();
                         const sync = this.compositor.createFence();
                         pending.push({ frame, pboIndex, sync });
                     } else {
-                        // PBO was just disabled — use legacy seek + sync for this frame
                         const activeAtFrame = this.compositor.sceneGraph.getActiveScenesAtFrame(frame);
                         for (const { scene } of activeAtFrame) {
                             if (scene.isMGScene || scene.mediaType === 'motion-graphic' || scene.mediaType === 'image') continue;
@@ -556,43 +609,35 @@ class ExportPipeline {
                             const mof = Math.round((scene.mediaOffset || 0) * fps);
                             await this.compositor.seekVideoToFrame(scene.index, lf + mof);
                         }
-                        await new Promise(resolve => requestAnimationFrame(resolve));
+                        await new Promise(resolve => setTimeout(resolve, 0));
                         this.compositor.renderFrame(frame);
                         const target = this._nextPoolBuffer();
                         this.compositor.readPixelsInto(target);
-                        await this._addToBatch(batch, frame, target.buffer);
+                        await writeFrame(target.buffer);
                     }
                 } else {
-                    // SYNC PATH: direct readPixels into pool buffer
                     const target = this._nextPoolBuffer();
                     this.compositor.readPixelsInto(target);
-
-                    if (frame < 3) {
-                        console.log(`[ExportPipeline] Frame ${frame}: pool slot ${(this._poolIndex + this._poolSize - 1) % this._poolSize}, ArrayBuffer @${target.byteOffset}`);
-                    }
-
-                    await this._addToBatch(batch, frame, target.buffer);
+                    await writeFrame(target.buffer);
                 }
 
                 this._reportProgress(frame, totalFrames, startTime, lastProgressTime, (t) => { lastProgressTime = t; });
             }
 
-            // PBO DRAIN: read back all remaining pending frames in order
+            // PBO DRAIN
             while (pending.length > 0) {
                 const old = pending.shift();
                 const fenceOk = await this.compositor.awaitFence(old.sync);
                 if (!fenceOk) {
-                    // Fence timeout during drain — kill WebCodecs, re-render remaining via legacy sync
-                    console.warn(`[ExportPipeline] PBO fence timeout during drain at frame ${old.frame} -> falling back to legacy sync`);
+                    console.warn(`[ExportPipeline] PBO fence timeout during drain at frame ${old.frame}`);
                     vfs.closeAll();
                     exportFrameSources.clear();
                     this.compositor._exportFrameSources = null;
 
-                    // Re-render timed-out frame + all remaining via legacy seek
                     const allRemaining = [old, ...pending];
                     pending.length = 0;
                     for (const p of allRemaining) {
-                        if (p.sync) try { this.compositor.gl.deleteSync(p.sync); } catch (_) {}
+                        if (p.sync) try { this.compositor.gl.deleteSync(p.sync); } catch (_) { }
                         const activeAtFrame = this.compositor.sceneGraph.getActiveScenesAtFrame(p.frame);
                         for (const { scene } of activeAtFrame) {
                             if (scene.isMGScene || scene.mediaType === 'motion-graphic' || scene.mediaType === 'image') continue;
@@ -600,25 +645,20 @@ class ExportPipeline {
                             const mof = Math.round((scene.mediaOffset || 0) * fps);
                             await this.compositor.seekVideoToFrame(scene.index, lf + mof);
                         }
-                        await new Promise(resolve => requestAnimationFrame(resolve));
+                        await new Promise(resolve => setTimeout(resolve, 0));
                         this.compositor.renderFrame(p.frame);
                         const t = this._nextPoolBuffer();
                         this.compositor.readPixelsInto(t);
-                        await this._addToBatch(batch, p.frame, t.buffer);
+                        await writeFrame(t.buffer);
                     }
                     this.compositor.destroyPBOs();
                     break;
                 }
                 const target = this._nextPoolBuffer();
                 this.compositor.readBackPBO(old.pboIndex, target);
-                console.log(`[ExportPipeline] PBO drain: frame ${old.frame} from PBO[${old.pboIndex}]`);
-                await this._addToBatch(batch, old.frame, target.buffer);
+                await writeFrame(target.buffer);
             }
-
-            // Flush final partial batch
-            await this._flushBatch(batch);
         } finally {
-            // Always clean up — even on cancel/error
             this.compositor._exportFrameSources = null;
             vfs.closeAll();
         }
@@ -630,9 +670,8 @@ class ExportPipeline {
 
     /**
      * Validate frame hashes: render specific frames and log their hashes.
-     * Use this to compare legacy vs optimized export output.
      *
-     * @param {number[]} testFrames - Frame indices to validate (e.g. [0, 100, 500, lastFrame-1])
+     * @param {number[]} testFrames - Frame indices to validate
      * @returns {Promise<Array<{frame: number, hash: string}>>}
      */
     async validate(testFrames) {
@@ -645,7 +684,6 @@ class ExportPipeline {
         const fps = this.compositor.fps;
         const results = [];
 
-        // Save exporting state and restore after
         const wasExporting = this.compositor._exporting;
         this.compositor._exporting = true;
         this.compositor.pauseVideos();
@@ -657,7 +695,6 @@ class ExportPipeline {
                     continue;
                 }
 
-                // Seek all active videos to this frame
                 const activeScenes = this.compositor.sceneGraph.getActiveScenesAtFrame(frame);
                 for (const { scene } of activeScenes) {
                     if (scene.isMGScene || scene.mediaType === 'motion-graphic') continue;
@@ -665,10 +702,8 @@ class ExportPipeline {
                     const mediaOffsetFrames = Math.round((scene.mediaOffset || 0) * fps);
                     await this.compositor.seekVideoToFrame(scene.index, localFrame + mediaOffsetFrames);
                 }
-                // Yield for video frame decode
-                await new Promise(resolve => requestAnimationFrame(resolve));
+                await new Promise(resolve => setTimeout(resolve, 0));
 
-                // Render and hash
                 this.compositor.renderFrame(frame);
                 const hash = this.compositor.computeFrameHash();
                 results.push({ frame, hash });
@@ -710,169 +745,16 @@ class ExportPipeline {
     }
 
     /**
-     * Add a rendered frame to the batch. Flushes when batch is full.
-     * Zero-copy: the ArrayBuffer comes from the ring pool and is NOT copied here.
-     * Safe because pool has BATCH_SIZE+1 slots, so flushed buffers are never
-     * reused until the IPC call completes.
-     *
-     * @param {Array} batch - Mutable batch array
-     * @param {number} frameIndex
-     * @param {ArrayBuffer} arrayBuffer - Pool buffer's .buffer (already contains pixel data)
-     */
-    async _addToBatch(batch, frameIndex, arrayBuffer) {
-        batch.push({ frameIndex, buffer: arrayBuffer });
-
-        if (batch.length >= EXPORT_BATCH_SIZE) {
-            await this._flushBatch(batch);
-        }
-    }
-
-    /**
-     * Flush all frames in the batch to the main process via IPC.
-     * Uses batched API if available, falls back to per-frame sends.
-     * Clears the batch array after sending.
-     */
-    async _flushBatch(batch) {
-        if (batch.length === 0) return;
-
-        if (typeof window.electronAPI.sendExportFramesBatch === 'function') {
-            const result = await window.electronAPI.sendExportFramesBatch({ frames: batch });
-            if (!result || !result.success) {
-                throw new Error('Failed to write frame batch to FFmpeg');
-            }
-        } else {
-            // Fallback: send one at a time
-            for (const entry of batch) {
-                const result = await window.electronAPI.sendExportFrame(entry.buffer);
-                if (!result || !result.success) {
-                    throw new Error('Failed to write frame to FFmpeg');
-                }
-            }
-        }
-
-        batch.length = 0;
-    }
-
-    /**
-     * V2 GPU-native export — readPixels + V2 FFmpeg encoder.
-     *
-     * NOTE: Shared D3D11 texture redirect does NOT work — renderer WebGL
-     * uses a GPU-thread EGL context that is inaccessible from main/renderer JS.
-     * eglMakeCurrent on either thread doesn't affect the GPU thread's context.
-     * (Proven by test-v2-compositor.js Phase B + Phase C)
-     *
-     * Current V2 path uses readPixels (same as legacy) but routes pixel data
-     * through the V2 encoder IPC (v2InitEncoder → v2EncodeFrame → v2FlushEncoder).
-     * V2 encoder writes raw RGBA to FFmpeg stdin with NVENC when available.
-     *
-     * TODO: Phase 3 NVENC — encode from D3D11 texture for true zero-readback.
-     *       Requires either ANGLE D3D11 device sharing or WebCodecs VideoEncoder.
-     */
-    async _runV2Export(options) {
-        const width = (options && options.width) || this.compositor.width;
-        const height = (options && options.height) || this.compositor.height;
-        const fps = (options && options.fps) || this.compositor.fps;
-        const totalFrames = this.compositor.totalFrames;
-
-        this._running = true;
-        this._cancelled = false;
-        this.compositor._exporting = true;
-
-        console.log(`[V2 Export] Starting: ${totalFrames} frames, ${width}x${height} @ ${fps}fps (readPixels path)`);
-        const startTime = performance.now();
-
-        try {
-            // 1. Spawn FFmpeg with RGBA rawvideo input
-            const encoder = await window.electronAPI.v2InitEncoder({
-                width, height, fps, totalFrames,
-                pixelFormat: 'rgba',
-            });
-            if (!encoder || !encoder.ok) {
-                console.warn(`[V2 Export] initEncoder failed: ${encoder && encoder.reason}, falling back to legacy`);
-                this._running = false;
-                this.compositor._exporting = false;
-                return this.start(Object.assign({}, options, { _skipV2: true }));
-            }
-            console.log(`[V2 Export] FFmpeg spawned → ${encoder.videoFile}`);
-
-            // 2. Pause videos, prepare for seeking
-            this.compositor.pauseVideos();
-
-            // 3. Allocate readPixels buffer
-            const frameBytes = width * height * 4;
-            const pixelBuf = new Uint8Array(frameBytes);
-
-            // 4. Frame loop
-            let lastProgressTime = 0;
-
-            for (let frame = 0; frame < totalFrames; frame++) {
-                if (this._cancelled) throw new Error('Export cancelled');
-
-                // Seek active videos to this frame
-                const activeScenes = this.compositor.sceneGraph.getActiveScenesAtFrame(frame);
-                let didSeek = false;
-                for (const { scene } of activeScenes) {
-                    if (scene.isMGScene || scene.mediaType === 'motion-graphic') continue;
-                    const localFrame = frame - scene._startFrame;
-                    const mediaOffsetFrames = Math.round((scene.mediaOffset || 0) * fps);
-                    await this.compositor.seekVideoToFrame(scene.index, localFrame + mediaOffsetFrames);
-                    didSeek = true;
-                }
-
-                // Yield for video frame decode
-                if (didSeek) {
-                    await new Promise(resolve => requestAnimationFrame(resolve));
-                }
-
-                // Render the frame
-                this.compositor.renderFrame(frame);
-
-                // readPixels → RGBA buffer
-                this.compositor.readPixelsInto(pixelBuf);
-
-                // Send to main process → FFmpeg stdin
-                const enc = await window.electronAPI.v2EncodeFrame({
-                    frameBuffer: pixelBuf.buffer,
-                    frameIndex: frame,
-                });
-
-                if (!enc || !enc.ok) {
-                    throw new Error(`v2EncodeFrame failed at frame ${frame}: ${enc && enc.error}`);
-                }
-
-                // Progress
-                this._reportProgress(frame, totalFrames, startTime, lastProgressTime, (t) => { lastProgressTime = t; });
-            }
-
-            // 5. Flush encoder — close FFmpeg, mux audio
-            const flushResult = await window.electronAPI.v2FlushEncoder();
-            if (!flushResult || !flushResult.ok) {
-                throw new Error(flushResult?.error || 'FFmpeg failed to produce output');
-            }
-
-            const totalElapsed = ((performance.now() - startTime) / 1000).toFixed(1);
-            const avgFps = (totalFrames / ((performance.now() - startTime) / 1000)).toFixed(1);
-            console.log(`[V2 Export] Complete in ${totalElapsed}s (${avgFps} fps): ${flushResult.outputPath}`);
-
-            return { success: true, outputPath: flushResult.outputPath };
-
-        } catch (err) {
-            console.error('[V2 Export] Failed:', err.message);
-            try { await window.electronAPI.v2FlushEncoder(); } catch (_) {}
-            return { success: false, error: err.message };
-
-        } finally {
-            this._running = false;
-            this.compositor._exporting = false;
-            this.compositor._resetVideosForPreview();
-        }
-    }
-
-    /**
      * Cancel an in-progress export.
      */
     cancel() {
         this._cancelled = true;
+        if (this._ffmpegProc && !this._ffmpegProc.killed) {
+            try {
+                this._ffmpegProc.stdin.destroy();
+                this._ffmpegProc.kill('SIGTERM');
+            } catch (_) { }
+        }
     }
 }
 

@@ -126,6 +126,49 @@ const sfx = [
         desc: 'Crystal prism shimmer (prismShift)',
         // High-frequency shimmering tones
         cmd: `-f lavfi -i "sine=f=2400:d=0.5" -f lavfi -i "sine=f=3200:d=0.5" -filter_complex "[0][1]amix=inputs=2:duration=first,tremolo=f=6:d=0.3,afade=t=in:ss=0:d=0.1,afade=t=out:st=0.25:d=0.25,volume=0.08" -ar 44100 -b:a 128k`
+    },
+    // ===== MG (Motion Graphics) SFX =====
+    {
+        name: 'sfx-mg-pop.mp3',
+        desc: 'Quick pop-in for text/headline appear',
+        // Short bright pop with slight reverb feel
+        cmd: `-f lavfi -i "sine=f=1000:d=0.25" -f lavfi -i "anoisesrc=d=0.25:c=pink:a=0.08" -filter_complex "[0][1]amix=inputs=2:duration=first,afade=t=in:ss=0:d=0.01,afade=t=out:st=0.06:d=0.19,volume=0.25" -ar 44100 -b:a 128k`
+    },
+    {
+        name: 'sfx-mg-tick.mp3',
+        desc: 'Counter tick for statCounter/progressBar',
+        // Soft mechanical tick
+        cmd: `-f lavfi -i "sine=f=3000:d=0.15" -af "afade=t=in:ss=0:d=0.002,afade=t=out:st=0.01:d=0.14,volume=0.2" -ar 44100 -b:a 128k`
+    },
+    {
+        name: 'sfx-mg-swoosh.mp3',
+        desc: 'Smooth swoosh for lowerThird/callout slide-in',
+        // Soft directional swoosh
+        cmd: `-f lavfi -i "anoisesrc=d=0.35:c=pink:a=0.1" -af "bandpass=f=1500:w=1000,afade=t=in:ss=0:d=0.03,afade=t=out:st=0.1:d=0.25,volume=0.3" -ar 44100 -b:a 128k`
+    },
+    {
+        name: 'sfx-mg-ding.mp3',
+        desc: 'Bright ding for chart/data reveal',
+        // Clean bell-like tone
+        cmd: `-f lavfi -i "sine=f=1400:d=0.4" -f lavfi -i "sine=f=2100:d=0.4" -filter_complex "[0][1]amix=inputs=2:duration=first,afade=t=in:ss=0:d=0.005,afade=t=out:st=0.1:d=0.3,volume=0.12" -ar 44100 -b:a 128k`
+    },
+    {
+        name: 'sfx-mg-type.mp3',
+        desc: 'Typewriter click for kineticText',
+        // Quick mechanical keystroke
+        cmd: `-f lavfi -i "anoisesrc=d=0.2:c=white:a=0.2" -af "bandpass=f=4000:w=2000,afade=t=in:ss=0:d=0.002,afade=t=out:st=0.015:d=0.185,volume=0.35" -ar 44100 -b:a 128k`
+    },
+    {
+        name: 'sfx-mg-rise.mp3',
+        desc: 'Rising tone for timeline/rankingList progression',
+        // Ascending tone sweep
+        cmd: `-f lavfi -i "sine=f=400:d=0.5" -f lavfi -i "sine=f=1200:d=0.5" -filter_complex "[0][1]amix=inputs=2:duration=first,afade=t=in:ss=0:d=0.05,afade=t=out:st=0.25:d=0.25,volume=0.12" -ar 44100 -b:a 128k`
+    },
+    {
+        name: 'sfx-mg-chime.mp3',
+        desc: 'Notification chime for subscribeCTA',
+        // Two-tone notification bell
+        cmd: `-f lavfi -i "sine=f=1200:d=0.5" -f lavfi -i "sine=f=1600:d=0.5" -filter_complex "[0]adelay=0|0[a];[1]adelay=150|150[b];[a][b]amix=inputs=2:duration=first,afade=t=in:ss=0:d=0.01,afade=t=out:st=0.2:d=0.3,volume=0.15" -ar 44100 -b:a 128k`
     }
 ];
 

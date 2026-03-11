@@ -5,7 +5,8 @@
     <meta charset="UTF-8">
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>YTA Empire 2</title>
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob: asset: file:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; media-src 'self' data: blob: asset: file:; img-src 'self' data: blob: asset: file: https:; connect-src 'self' data: blob: asset: file: https:; font-src 'self' data: asset: file:;">
+    <title>YTA Empire WEBGL</title>
     <link rel="stylesheet" href="css/style.css?v=15">
 </head>
 
@@ -13,7 +14,7 @@
     <div class="app-container">
         <!-- Header -->
         <header class="header">
-            <h1><img src="../assets/icon.png" alt="" class="app-logo" onerror="this.src='../assets/icon.ico'">YTA Empire 2 <span id="project-name-label" class="project-name-label"></span></h1>
+            <h1><img src="../assets/icon.png" alt="" class="app-logo" onerror="this.src='../assets/icon.ico'">YTA Empire WEBGL <span id="project-name-label" class="project-name-label"></span></h1>
             <div class="header-actions">
                 <div class="notif-center" id="notif-center">
                     <button class="notif-bell" id="notif-bell" title="Notifications">
@@ -34,10 +35,7 @@
                 <button id="btn-open-project" class="btn btn-secondary" title="Open existing project">Open Project</button>
                 <button id="btn-new" class="btn btn-secondary">New Project</button>
                 <select id="renderer-select" title="Render engine" style="padding:6px 8px;border-radius:6px;background:#2a2a3e;color:#fff;border:1px solid #444;font-size:12px;cursor:pointer;">
-                    <option value="ffmpeg">FFmpeg (Fast + Close Quality)</option>
-                    <option value="remotion">Remotion (Full)</option>
-                    <option value="webgl2">WebGL2 Engine (WYSIWYG)</option>
-                    <option value="native">Native D3D11 (GPU)</option>
+                    <option value="webgl2" selected>WebGL2 Engine (WYSIWYG)</option>
                 </select>
                 <button id="btn-compositor-toggle" class="btn btn-secondary" title="Toggle WebGL2 preview engine" style="font-size:11px;padding:4px 8px;display:none;">Engine: OFF</button>
                 <label id="legacy-export-label" style="display:none;align-items:center;gap:4px;font-size:11px;color:#aaa;cursor:pointer;" title="Use legacy per-frame seeking export (slower, for A/B hash comparison)"><input type="checkbox" id="legacy-export-toggle" style="cursor:pointer;">Legacy</label>
@@ -152,8 +150,26 @@
                     </div>
                 </div>
 
-                <!-- Transitions disabled - hard cut only -->
-                <select id="transition-style" style="display:none"><option value="cut" selected>Cut</option></select>
+                <div class="panel-section">
+                    <h3>🔀 Transitions</h3>
+                    <label>Style:</label>
+                    <select id="transition-style">
+                        <option value="cut">Cut (None)</option>
+                        <option value="crossfade" selected>Crossfade</option>
+                        <option value="fade">Fade</option>
+                        <option value="wipe">Wipe</option>
+                        <option value="slide">Slide</option>
+                        <option value="flash">Flash</option>
+                        <option value="dissolve">Dissolve</option>
+                        <option value="blur">Blur</option>
+                        <option value="zoom">Zoom</option>
+                    </select>
+                    <div class="setting-row" style="margin-top:8px">
+                        <label>Duration:</label>
+                        <input type="range" id="transition-duration" min="0.2" max="2.0" step="0.1" value="0.5">
+                        <span id="transition-duration-val">0.5s</span>
+                    </div>
+                </div>
 
                 <div class="panel-section">
                     <h3>🔊 Sound Effects</h3>
@@ -174,12 +190,6 @@
                     </label>
                     <p style="margin:4px 0 0;color:var(--text-secondary, #888);font-size:11px">
                         Auto-places titles, stats, callouts at key moments
-                    </p>
-                    <label class="source-toggle" style="margin-top:6px">
-                        <input type="checkbox" id="fast-native-mgs" checked> Fast Native MGs (Faster Render)
-                    </label>
-                    <p style="margin:4px 0 0;color:var(--text-secondary, #888);font-size:11px">
-                        Uses canvas renderer. Uncheck for Remotion (slower, higher fidelity)
                     </p>
                 </div>
 
@@ -326,7 +336,7 @@
                                 <input type="range" id="prop-pos-y" class="property-slider" min="-50" max="50" step="1" value="0">
                                 <input type="text" id="prop-pos-y-val" class="property-value property-value-input" value="0%">
                             </div>
-                            <div class="property-row">
+                            <div class="property-row" id="prop-volume-row">
                                 <label>Volume</label>
                                 <input type="range" id="prop-volume" class="property-slider" min="0" max="1" step="0.05" value="1">
                                 <input type="text" id="prop-volume-val" class="property-value property-value-input" value="100%">
@@ -349,6 +359,13 @@
                                 <label class="source-toggle">
                                     <input type="checkbox" id="prop-animate" checked> Animate (Ken Burns)
                                 </label>
+                                <div id="prop-kb-speed-row" style="display:none; margin-top:4px;">
+                                    <div style="display:flex; align-items:center; gap:6px;">
+                                        <span style="font-size:11px; color:#999; min-width:38px;">Speed</span>
+                                        <input type="range" id="prop-kb-speed" min="0.1" max="3" step="0.1" value="1" style="flex:1; accent-color:#00d4aa;">
+                                        <span id="prop-kb-speed-val" style="font-size:11px; color:#ccc; min-width:30px; text-align:right;">1.0x</span>
+                                    </div>
+                                </div>
                             </div>
                             <!-- Crop -->
                             <div class="property-section-label">Crop</div>
@@ -444,6 +461,17 @@
                                     <option value="neon">Neon</option>
                                     <option value="cinematic">Cinematic</option>
                                     <option value="elegant">Elegant</option>
+                                </select>
+                            </div>
+                            <div class="property-row" id="mg-bg-row">
+                                <label>Background</label>
+                                <select id="mg-background" class="property-select">
+                                    <option value="none">None (Transparent)</option>
+                                    <option value="scrim-light">Scrim Light (20%)</option>
+                                    <option value="scrim">Scrim (40%)</option>
+                                    <option value="scrim-dark">Scrim Dark (60%)</option>
+                                    <option value="solid-black">Solid Black</option>
+                                    <option value="solid-dark">Solid Dark (#111)</option>
                                 </select>
                             </div>
                             <div class="property-row" id="mg-map-style-row" style="display:none">
@@ -556,7 +584,7 @@
         </footer>
     </div>
 
-    <!-- MP4 demuxer for WebCodecs export optimization -->
+    <!-- MP4 demuxer for WebCodecs export optimization (local copy, no CDN needed) -->
     <script src="js/lib/mp4box.all.min.js"></script>
 
     <!-- WebGL2 Compositor Engine modules (loaded before app.js) -->

@@ -1,13 +1,13 @@
 {
-  "name": "yta-empire-2",
+  "name": "yta-empire-webgl",
   "version": "1.0.0",
   "description": "",
   "main": "main.js",
   "scripts": {
     "build": "node src/build-video.js",
-    "preview": "npx remotion preview src/legacy/remotion/Root.jsx",
-    "render": "npx remotion render src/legacy/remotion/Root.jsx FacelessVideo output/video.mp4",
-    "all": "node src/build-video.js && npx remotion render src/legacy/remotion/Root.jsx FacelessVideo output/video.mp4",
+    "preview": "electron . --dev",
+    "render": "echo Use the in-app WebGL2 renderer",
+    "all": "node src/build-video.js",
     "start": "electron .",
     "start:v2": "set EXPORT_V2=1&& electron .",
     "dev": "electron . --dev",
@@ -24,10 +24,6 @@
   },
   "dependencies": {
     "@napi-rs/canvas": "^0.1.95",
-    "@remotion/bundler": "^4.0.419",
-    "@remotion/cli": "^4.0.419",
-    "@remotion/compositor-win32-x64-msvc": "^4.0.419",
-    "@remotion/renderer": "^4.0.419",
     "axios": "^1.13.4",
     "d3-geo": "^3.1.1",
     "dotenv": "^17.2.3",
@@ -35,7 +31,6 @@
     "ffmpeg-static": "^5.3.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
-    "remotion": "^4.0.419",
     "topojson-client": "^3.1.0"
   }
 }

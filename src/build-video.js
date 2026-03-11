@@ -314,7 +314,8 @@ async function buildVideo() {
     console.log('═'.repeat(60));
     console.log('🎥 Step 5: Downloading Media');
     console.log('═'.repeat(60));
-    const skipVisionAI = directorsBrief.tier.skipVisionAI;
+    // TEMPORARY: Force skip vision AI to save API credits while testing themes
+    const skipVisionAI = true; // was: directorsBrief.tier.skipVisionAI
     const downloadResult = await downloadAllMedia(scenesWithKeywords, scriptContext, {
         inlineVision: true,
         skipVisionAI
@@ -832,8 +833,7 @@ async function buildVideo() {
     });
 
     console.log('\n🚀 Next steps:');
-    console.log('   Preview: npx remotion preview');
-    console.log('   Render:  npx remotion render FacelessVideo output/video.mp4');
+    console.log('   Open the app and use the WebGL2 renderer to render your video.');
     console.log('');
 }
 

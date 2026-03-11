@@ -105,6 +105,7 @@ class VideoFrameSource {
 
         // Decode forward until we have a frame at or past the target time
         const MAX_DECODE_ATTEMPTS = 500; // Safety limit
+        const BATCH_SIZE = 8; // Feed multiple samples per iteration for GPU decoder pipelining
         let attempts = 0;
 
         while (attempts < MAX_DECODE_ATTEMPTS) {
@@ -116,7 +117,7 @@ class VideoFrameSource {
                 return frame;
             }
 
-            // Need to decode more — feed the next sample
+            // Need to decode more — feed samples in batches for decoder pipelining
             if (state.nextSampleIdx >= state.samples.length) {
                 // No more samples — return whatever we have
                 if (state.pendingFrames.length > 0) {
@@ -130,19 +131,20 @@ class VideoFrameSource {
                 return state.currentFrame;
             }
 
-            // Feed next chunk to decoder
-            const sample = state.samples[state.nextSampleIdx];
-            state.nextSampleIdx++;
-
-            const chunk = new EncodedVideoChunk({
-                type: sample.isKey ? 'key' : 'delta',
-                timestamp: sample.timestamp,
-                duration: sample.duration,
-                data: sample.data,
-            });
-
-            state.decoder.decode(chunk);
-            attempts++;
+            // Feed a batch of samples to the decoder (pipelining reduces per-frame latency)
+            const batchEnd = Math.min(state.nextSampleIdx + BATCH_SIZE, state.samples.length);
+            for (let i = state.nextSampleIdx; i < batchEnd; i++) {
+                const sample = state.samples[i];
+                const chunk = new EncodedVideoChunk({
+                    type: sample.isKey ? 'key' : 'delta',
+                    timestamp: sample.timestamp,
+                    duration: sample.duration,
+                    data: sample.data,
+                });
+                state.decoder.decode(chunk);
+            }
+            attempts += (batchEnd - state.nextSampleIdx);
+            state.nextSampleIdx = batchEnd;
 
             // Wait for decoder output if queue is empty
             if (state.pendingFrames.length === 0) {
@@ -508,8 +510,9 @@ class VideoFrameSource {
         if (state.pendingFrames.length > 0) return Promise.resolve();
         return new Promise((resolve) => {
             state.decodeResolve = resolve;
-            // Safety timeout
-            setTimeout(resolve, 1000);
+            // Short timeout — decoder should produce frames in <50ms
+            // Long timeouts (1s) were the #1 source of FPS drops
+            setTimeout(resolve, 50);
         });
     }
 

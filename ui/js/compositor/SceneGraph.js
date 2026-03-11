@@ -71,20 +71,26 @@ class SceneGraph {
             for (const t of plan.transitions) {
                 if (!t.type || t.type === 'cut') continue; // Skip hard cuts
                 const dur = t.duration || 0.5; // seconds
-                // Transition happens at the boundary between fromScene's end and toScene's start
-                const toScene = allScenes.find(s => s.index === t.toSceneIndex);
-                if (!toScene) continue;
-                const startFrame = toScene._startFrame;
                 const durationFrames = Math.round(dur * fps);
+                const halfDur = Math.round(durationFrames / 2);
+                // Transition straddles the cut point: half in sceneA, half in sceneB
+                const fromScene = allScenes.find(s => s.index === t.fromSceneIndex);
+                const toScene = allScenes.find(s => s.index === t.toSceneIndex);
+                if (!fromScene || !toScene) continue;
+                const cutFrame = toScene._startFrame; // = fromScene._endFrame for adjacent scenes
+                const transStart = Math.max(fromScene._startFrame, cutFrame - halfDur);
+                const transEnd = Math.min(toScene._endFrame, cutFrame + halfDur);
+                if (transEnd <= transStart) continue;
                 this._transitions.push({
                     fromIndex: t.fromSceneIndex,
                     toIndex: t.toSceneIndex,
                     type: t.type,
-                    _startFrame: startFrame - durationFrames,
-                    _endFrame: startFrame,
-                    _durationFrames: durationFrames,
+                    _startFrame: transStart,
+                    _endFrame: transEnd,
+                    _durationFrames: transEnd - transStart,
                 });
             }
+            console.log(`[SceneGraph] Parsed ${this._transitions.length} transitions`);
         }
 
         // Compute total frames
@@ -112,11 +118,15 @@ class SceneGraph {
         const trackId = scene.trackId || 'video-track-1';
         const trackNum = parseInt(trackId.match(/\d+/)?.[0] || '1', 10);
 
+        const startFrame = Math.round(start * fps);
+        const endFrame = Math.round(end * fps);
         return {
             ...scene,
-            _startFrame: Math.round(start * fps),
-            _endFrame: Math.round(end * fps),
+            _startFrame: startFrame,
+            _endFrame: endFrame,
+            _totalFrames: endFrame - startFrame,
             _trackNum: trackNum,
+            _animationSpeed: scene.animationSpeed || 1.0,
         };
     }
 

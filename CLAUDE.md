@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-Electron desktop app that generates faceless YouTube videos from audio narration. Uses AI to analyze scripts, download footage, create motion graphics, plan transitions, and render final video via Remotion.
+Electron desktop app that generates faceless YouTube videos from audio narration. Uses AI to analyze scripts, download footage, create motion graphics, plan transitions, and render final video via WebGL2.
 
 ## Commands
 
@@ -12,9 +12,9 @@ Electron desktop app that generates faceless YouTube videos from audio narration
 npm start          # Launch Electron app
 npm run dev        # Launch with DevTools
 npm run build      # Run AI build pipeline (src/build-video.js)
-npm run render     # Render video via Remotion CLI
-npm run all        # Build + render
-npm run preview    # Open Remotion preview in browser
+npm run render     # Use in-app WebGL2 renderer
+npm run all        # Build pipeline
+npm run preview    # Launch with DevTools
 ```
 
 ## Architecture
@@ -35,7 +35,7 @@ npm run preview    # Open Remotion preview in browser
 
 **AI Provider layer** (`src/ai-provider.js`): Unified `callAI()` and `callVisionAI()` supporting 8 providers (Ollama, Claude, OpenAI, DeepSeek, Qwen, Gemini, NVIDIA, Groq). Config in `src/config.js`.
 
-**Rendering** (`src/remotion/`): `Root.jsx` → `Composition.jsx` (multi-track scene compositing, transitions, MGs, overlays, audio, subtitles). `MotionGraphics.jsx` renders 15+ MG component types. `VisualEffects.jsx` handles code-generated VFX fallbacks.
+**Rendering** (`ui/js/compositor/`): WebGL2 compositor with Canvas2D MG renderer. `MGRenderer.js` renders 15+ MG component types. Multi-track scene compositing, transitions, MGs, overlays, audio, subtitles.
 
 **UI** (`ui/js/app.js`): Timeline editor with 3 video tracks, preview player with zoom/pan, clip properties panel, build settings. All state managed in a single file.
 
@@ -48,13 +48,12 @@ npm run preview    # Open Remotion preview in browser
 
 ## Key Data Flow
 
-All steps produce data that feeds into `public/video-plan.json`, which is the contract between the build pipeline and Remotion renderer. Key fields: `scenes[]`, `mgScenes[]`, `transitions[]`, `visualEffects[]`, `overlayScenes[]`, `scriptContext`, `sfxClips[]`.
+All steps produce data that feeds into `public/video-plan.json`, which is the contract between the build pipeline and WebGL2 renderer. Key fields: `scenes[]`, `mgScenes[]`, `transitions[]`, `visualEffects[]`, `overlayScenes[]`, `scriptContext`, `sfxClips[]`.
 
 ## Critical Patterns
 
 - **`renderTimeline()` uses innerHTML** — must reset `_cachedPlayhead/_cachedTimelineScroll/_cachedTimelineTime = null` before innerHTML or playhead freezes from stale DOM refs
 - **Undo/redo must call `loadActiveScenes()`** after restoring scenes or preview desyncs
-- **Remotion `startFrom` must be >= 0** — use `<Sequence from={startFrame}>` to localize, then `startFrom={mediaOffsetFrames}`
 - **Font names with double quotes break HTML `style=""`** — must `.replace(/"/g, "'")`
 - **Gemini vision uses native `box_2d` format** (0-1000 scale), NOT the OpenAI-compat endpoint for bounding boxes
 - **All build steps have try/catch** with graceful degradation — missing API keys skip steps, don't crash
@@ -65,15 +64,13 @@ All steps produce data that feeds into `public/video-plan.json`, which is the co
 
 ## FFmpeg GPU Renderer (`src/ffmpeg-renderer.js`)
 
-Alternative to Remotion — reads same `video-plan.json`, uses pure FFmpeg compositing + NVENC GPU encoding. Selected via UI dropdown (`#renderer-select`).
+Reads `video-plan.json`, uses pure FFmpeg compositing + NVENC GPU encoding.
 
 **Pipeline**: Pass 1 (prep clips, parallel, limit=2) → Pass 1.5 (MG pre-render) → Pass 2 (filter_complex_script compose + encode)
 
-**MG Rendering** — Hybrid canvas + Remotion:
+**MG Rendering** — Canvas-based:
 - `src/canvas-mg-renderer.js`: @napi-rs/canvas (Rust/Skia) renders 14 MG types at ~200fps. Raw RGBA piped to FFmpeg → **FFV1 lossless in MKV** (`-c:v ffv1 -pix_fmt yuva444p`) for guaranteed alpha transparency. Outputs `mg-overlay-N.mkv` / `mg-fullscreen-N.mkv`.
-- `src/mg-style-utils.js`: Shared styles/colors between canvas renderer and MotionGraphics.jsx
-- Remotion fallback for 3 complex types: mapChart, articleHighlight, animatedIcons (VP8 WebM)
-- Compose step tries `.mkv` first (canvas FFV1), falls back to `.webm` (Remotion VP8)
+- `src/mg-style-utils.js`: Shared styles/colors between canvas renderer and MG components
 
 **Critical bugs found and fixed**:
 - `scene.duration` is in FRAMES not seconds — `getSceneDurationSec()` uses `endTime - startTime`
@@ -82,15 +79,11 @@ Alternative to Remotion — reads same `video-plan.json`, uses pure FFmpeg compo
 - CUDA `-hwaccel cuda` caused empty output files — removed entirely
 - Single `_activeProcess` couldn't cancel parallel preps — changed to `_activeProcesses = new Set()`
 
-**FFmpeg path**: `C:\ffmg\bin\ffmpeg.exe` (system FFmpeg with NVENC, NOT Remotion's bundled one). NVENC probed once at startup, falls back to libx264.
-
-## Remotion GPU Rendering
-
-Remotion's bundled FFmpeg lacks NVENC. Patched `node_modules/@remotion/renderer/dist/get-codec-name.js` to return `h264_nvenc` on win32. Replaced Remotion's bundled `ffmpeg.exe` with system FFmpeg that has NVENC. Both patches are lost on `npm install`.
+**FFmpeg path**: `C:\ffmg\bin\ffmpeg.exe` (system FFmpeg with NVENC). NVENC probed once at startup, falls back to libx264.
 
 ## Theme System
 
-7 themes in `src/themes.js` (tech, nature, crime, corporate, luxury, sport, neutral). Each defines colors, fonts, transition preferences, overlay preferences, MG style. Theme flows: AI Director selects → `directors-brief.js` allows override → stored in `scriptContext.themeId` → used by Remotion + preview.
+7 themes in `src/themes.js` (tech, nature, crime, corporate, luxury, sport, neutral). Each defines colors, fonts, transition preferences, overlay preferences, MG style. Theme flows: AI Director selects → `directors-brief.js` allows override → stored in `scriptContext.themeId` → used by WebGL2 renderer + preview.
 
 ## Footage Providers
 

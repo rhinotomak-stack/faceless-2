@@ -3430,7 +3430,7 @@ select:focus {
     display: flex;
     flex-direction: column;
     transition: opacity 0.15s ease;
-    /* Scale correction: CSS cqw sizes are ~33% larger than Remotion's fixed px values.
+    /* Scale correction: CSS cqw sizes are ~33% larger than the renderer's fixed px values.
        0.75 factor aligns preview with final render (e.g. 5cqw * 0.75 ≈ 72px at 1920px) */
     transform: scale(0.75);
     transform-origin: center center;
