@@ -16,6 +16,81 @@ class MGRenderer {
         this._ctx = this._canvas.getContext('2d', { willReadFrequently: false });
         // Preview scale (1.0 = full, 0.5 = half-res for faster Canvas2D)
         this._previewScale = 1.0;
+        // Cache for loaded map images (mapImageFile → HTMLImageElement)
+        this._mapImages = {};
+        this._mapImageLoading = {};
+
+        // ── Registry-driven rendering ──
+        // Category renderers: 'mgType' → function(ctx, frame, fps, mg, s, anim, scriptContext)
+        // Each category's main dispatcher (handles setup + variant resolution)
+        this._categoryRenderers = {
+            headline:       (ctx, f, fps, mg, s, a, sc) => this._renderHeadline(ctx, f, fps, mg, s, a),
+            lowerThird:     (ctx, f, fps, mg, s, a, sc) => this._renderLowerThird(ctx, f, fps, mg, s, a),
+            callout:        (ctx, f, fps, mg, s, a, sc) => this._renderCallout(ctx, f, fps, mg, s, a),
+            focusWord:      (ctx, f, fps, mg, s, a, sc) => this._renderFocusWord(ctx, f, fps, mg, s, a),
+            statCounter:    (ctx, f, fps, mg, s, a, sc) => this._renderStatCounter(ctx, f, fps, mg, s, a),
+            bulletList:     (ctx, f, fps, mg, s, a, sc) => this._renderBulletList(ctx, f, fps, mg, s, a),
+            progressBar:    (ctx, f, fps, mg, s, a, sc) => this._renderProgressBar(ctx, f, fps, mg, s, a),
+            barChart:       (ctx, f, fps, mg, s, a, sc) => this._renderBarChart(ctx, f, fps, mg, s, a),
+            donutChart:     (ctx, f, fps, mg, s, a, sc) => this._renderDonutChart(ctx, f, fps, mg, s, a),
+            comparisonCard: (ctx, f, fps, mg, s, a, sc) => this._renderComparisonCard(ctx, f, fps, mg, s, a),
+            timeline:       (ctx, f, fps, mg, s, a, sc) => this._renderTimeline(ctx, f, fps, mg, s, a),
+            rankingList:    (ctx, f, fps, mg, s, a, sc) => this._renderRankingList(ctx, f, fps, mg, s, a),
+            kineticText:    (ctx, f, fps, mg, s, a, sc) => this._renderKineticText(ctx, f, fps, mg, s, a),
+            subscribeCTA:   (ctx, f, fps, mg, s, a, sc) => this._renderSubscribeCTA(ctx, f, fps, mg, s, a),
+            mapChart:       (ctx, f, fps, mg, s, a, sc) => { this._ensureMapImage(mg); this._renderMapChart(ctx, f, fps, mg, s, a, sc); },
+        };
+
+        // Variant renderers: 'category:variant' → function(ctx, mg, s, anim, a, setup)
+        // 'setup' is a category-specific context object (e.g. {bx, by, bw, bh, colors} for lowerThird)
+        this._variantRenderers = {
+            'lowerThird:bar':       (ctx, mg, s, anim, a, p) => this._renderLT_Bar(ctx, mg, s, anim, a, p.bx, p.by, p.bw, p.bh, p.colors),
+            'lowerThird:box':       (ctx, mg, s, anim, a, p) => this._renderLT_Box(ctx, mg, s, anim, a, p.bx, p.by, p.bw, p.bh, p.colors),
+            'lowerThird:underline': (ctx, mg, s, anim, a, p) => this._renderLT_Underline(ctx, mg, s, anim, a, p.bx, p.by, p.bw, p.bh, p.colors),
+            'lowerThird:banner':    (ctx, mg, s, anim, a, p) => this._renderLT_Banner(ctx, mg, s, anim, a, p.by, p.colors),
+            'lowerThird:glass':     (ctx, mg, s, anim, a, p) => this._renderLT_Glass(ctx, mg, s, anim, a, p.bx, p.by, p.bw, p.bh, p.colors),
+            'lowerThird:split':     (ctx, mg, s, anim, a, p) => this._renderLT_Split(ctx, mg, s, anim, a, p.bx, p.by, p.bw, p.bh, p.colors),
+        };
+
+        // Animation computers: 'animType' → function(frame, fps, anim, mg) → state object
+        this._animComputers = {
+            slideLeft:  (f, fps, anim, mg) => this._computeAnim_slideLeft(f, fps, anim, mg),
+            wipeRight:  (f, fps, anim, mg) => this._computeAnim_wipeRight(f, fps, anim, mg),
+            popUp:      (f, fps, anim, mg) => this._computeAnim_popUp(f, fps, anim, mg),
+            fadeSlide:  (f, fps, anim, mg) => this._computeAnim_fadeSlide(f, fps, anim, mg),
+        };
+    }
+
+    // ── Public registration API ──
+    // Call these to extend the renderer with new categories, variants, or animations
+    // without editing any existing code.
+
+    /**
+     * Register a new MG category renderer.
+     * @param {string} type - MG type key (e.g. 'myNewType')
+     * @param {Function} fn - (ctx, frame, fps, mg, s, anim, scriptContext) => void
+     */
+    registerCategory(type, fn) {
+        this._categoryRenderers[type] = fn;
+    }
+
+    /**
+     * Register a variant renderer for a category.
+     * @param {string} category - MG type key (e.g. 'lowerThird')
+     * @param {string} variant - Variant key (e.g. 'military')
+     * @param {Function} fn - (ctx, mg, s, anim, animState, setup) => void
+     */
+    registerVariant(category, variant, fn) {
+        this._variantRenderers[`${category}:${variant}`] = fn;
+    }
+
+    /**
+     * Register an animation computer.
+     * @param {string} animType - Animation key (e.g. 'glitchIn')
+     * @param {Function} fn - (frame, fps, anim, mg) => state object
+     */
+    registerAnimation(animType, fn) {
+        this._animComputers[animType] = fn;
     }
 
     /**
@@ -31,6 +106,29 @@ class MGRenderer {
             this._canvas.height = h;
             console.log(`[MGRenderer] Canvas resized to ${w}x${h} (scale: ${this._previewScale})`);
         }
+    }
+
+    /**
+     * Lazily load a map image for mapChart MGs. Non-blocking.
+     * Once loaded, subsequent renders will draw it as background.
+     */
+    _ensureMapImage(mg) {
+        const file = mg.mapImageFile;
+        const url = mg._mapImageUrl;
+        if (!file || this._mapImages[file] || this._mapImageLoading[file]) return;
+        if (!url) return; // URL not yet resolved by app.js
+        this._mapImageLoading[file] = true;
+        const img = new Image();
+        img.onload = () => {
+            this._mapImages[file] = img;
+            delete this._mapImageLoading[file];
+            console.log(`[MGRenderer] Map image loaded: ${file}`);
+        };
+        img.onerror = () => {
+            delete this._mapImageLoading[file];
+            console.warn(`[MGRenderer] Failed to load map image: ${file}`);
+        };
+        img.src = url;
     }
 
     /**
@@ -53,75 +151,16 @@ class MGRenderer {
         // Draw MG background if set
         this._renderMGBackground(ctx, mg, anim);
 
+        // Registry-driven dispatch — no switch needed
+        const renderer = this._categoryRenderers[mg.type];
         let rendered = false;
-        switch (mg.type) {
-            case 'headline':
-                this._renderHeadline(ctx, localFrame, this.fps, mg, s, anim);
-                rendered = true;
-                break;
-            case 'lowerThird':
-                this._renderLowerThird(ctx, localFrame, this.fps, mg, s, anim);
-                rendered = true;
-                break;
-            case 'callout':
-                this._renderCallout(ctx, localFrame, this.fps, mg, s, anim);
-                rendered = true;
-                break;
-            case 'focusWord':
-                this._renderFocusWord(ctx, localFrame, this.fps, mg, s, anim);
-                rendered = true;
-                break;
-            case 'statCounter':
-                this._renderStatCounter(ctx, localFrame, this.fps, mg, s, anim);
-                rendered = true;
-                break;
-            case 'bulletList':
-                this._renderBulletList(ctx, localFrame, this.fps, mg, s, anim);
-                rendered = true;
-                break;
-            case 'progressBar':
-                this._renderProgressBar(ctx, localFrame, this.fps, mg, s, anim);
-                rendered = true;
-                break;
-            case 'barChart':
-                this._renderBarChart(ctx, localFrame, this.fps, mg, s, anim);
-                rendered = true;
-                break;
-            case 'donutChart':
-                this._renderDonutChart(ctx, localFrame, this.fps, mg, s, anim);
-                rendered = true;
-                break;
-            case 'comparisonCard':
-                this._renderComparisonCard(ctx, localFrame, this.fps, mg, s, anim);
-                rendered = true;
-                break;
-            case 'timeline':
-                this._renderTimeline(ctx, localFrame, this.fps, mg, s, anim);
-                rendered = true;
-                break;
-            case 'rankingList':
-                this._renderRankingList(ctx, localFrame, this.fps, mg, s, anim);
-                rendered = true;
-                break;
-            case 'kineticText':
-                this._renderKineticText(ctx, localFrame, this.fps, mg, s, anim);
-                rendered = true;
-                break;
-            case 'subscribeCTA':
-                this._renderSubscribeCTA(ctx, localFrame, this.fps, mg, s, anim);
-                rendered = true;
-                break;
-            case 'mapChart':
-                this._renderMapChart(ctx, localFrame, this.fps, mg, s, anim);
-                rendered = true;
-                break;
-            default:
-                // Fallback: render any unknown MG type as a headline so text is visible
-                if (mg.text) {
-                    this._renderHeadline(ctx, localFrame, this.fps, mg, s, anim);
-                    rendered = true;
-                }
-                break;
+        if (renderer) {
+            renderer(ctx, localFrame, this.fps, mg, s, anim, scriptContext);
+            rendered = true;
+        } else if (mg.text) {
+            // Fallback: render unknown MG types as a headline so text is visible
+            this._renderHeadline(ctx, localFrame, this.fps, mg, s, anim);
+            rendered = true;
         }
 
         if (!rendered) return null;
@@ -157,6 +196,24 @@ class MGRenderer {
         }
         if (!s.fontHeading) s.fontHeading = 'Arial, sans-serif';
         if (!s.fontBody) s.fontBody = 'Arial, sans-serif';
+
+        // Attach per-theme MG overrides (per-category)
+        // Use the UI's active theme (dropdown) first, fall back to scriptContext
+        const activeTheme = (typeof _resolveActiveTheme === 'function' && _resolveActiveTheme())
+            || scriptContext?.themeId || null;
+        if (window._themeTokens && activeTheme) {
+            try {
+                const tokens = window._themeTokens.getTokens(activeTheme);
+                // Full per-category override map
+                if (tokens?.chrome?.mgOverrides) {
+                    s._mgOverrides = tokens.chrome.mgOverrides;
+                }
+                // _ltOverride kept for any external code that may read it
+                if (tokens?.chrome?.lowerThirdOverride) {
+                    s._ltOverride = tokens.chrome.lowerThirdOverride;
+                }
+            } catch (e) { /* ignore — fallback to style preset */ }
+        }
 
         return s;
     }
@@ -514,66 +571,427 @@ class MGRenderer {
     // 2. LOWER THIRD
     // ========================================================================
 
+    // ========================================================================
+    // 2. LOWER THIRD — Multi-variant dispatcher
+    // Variants: bar, box, underline, banner, glass, split
+    // Animations: slideLeft, wipeRight, popUp, fadeSlide
+    // ========================================================================
+
+    // ── Generic variant dispatcher ──
+    // Works for ANY category that has registered variants.
+    // Categories without variants simply don't call this.
+    //
+    // To add variants to a new category (e.g. headline):
+    //   1. Add types to MG_REGISTRY['headline'] in mg-registry.js
+    //   2. Register variants: this.registerVariant('headline', 'stamp', fn)
+    //   3. Define a setup function that returns category-specific context
+    //   4. Call _dispatchVariant() from your category's main render method
+    //
+    _dispatchVariant(ctx, category, variant, mg, s, anim, animState, setup) {
+        const key = `${category}:${variant}`;
+        const fn = this._variantRenderers[key]
+                || this._variantRenderers[`${category}:standard`]
+                || this._variantRenderers[`${category}:bar`]; // lowerThird compat
+        if (fn) {
+            fn(ctx, mg, s, anim, animState, setup);
+        }
+    }
+
+    // ── Compute animation from registry ──
+    _computeAnimation(animType, frame, fps, anim, mg) {
+        const computer = this._animComputers[animType] || this._animComputers['slideLeft'];
+        return computer ? computer(frame, fps, anim, mg) : {};
+    }
+
+    // ── Resolve variant for any category ──
+    // Priority: mg.subType (user) > theme override > style preset > registry default
+    _resolveVariant(mg, s, category) {
+        if (mg.subType) return mg.subType;
+        const ov = s._mgOverrides?.[category];
+        if (ov?.style) return ov.style;
+        // Category-specific style preset fallback (lowerThird has lowerThirdStyle)
+        if (category === 'lowerThird' && s.lowerThirdStyle) return s.lowerThirdStyle;
+        // Registry default
+        const reg = window._mgRegistry?.registry?.[category];
+        return reg?.defaultType || 'standard';
+    }
+
+    // ── Resolve animation for any category ──
+    _resolveAnimation(mg, s, category) {
+        if (mg.animation) return mg.animation;
+        const ov = s._mgOverrides?.[category];
+        if (ov?.anim) return ov.anim;
+        if (category === 'lowerThird' && s.lowerThirdAnimation) return s.lowerThirdAnimation;
+        const reg = window._mgRegistry?.registry?.[category];
+        const subType = this._resolveVariant(mg, s, category);
+        return reg?.types?.[subType]?.animation || reg?.animations?.[0] || 'slideLeft';
+    }
+
+    // ── Resolve colors for any category ──
+    _resolveColors(s, category) {
+        return s._mgOverrides?.[category]?.colors || null;
+    }
+
+    // ── LowerThird setup + dispatch ──
     _renderLowerThird(ctx, frame, fps, mg, s, anim) {
-        const { springValue, interpolate } = AnimationUtils;
-        const { enterSpring, enterLinear, isExiting, exitProgress, opacity, idleScale, speed } = anim;
+        const variant = this._resolveVariant(mg, s, 'lowerThird');
+        const animType = this._resolveAnimation(mg, s, 'lowerThird');
+        const colors = this._resolveColors(s, 'lowerThird');
 
-        const clipAmount = interpolate(enterSpring, [0, 1], [0, 100]);
-        const barScaleY = springValue(Math.max(0, frame - Math.round((0.15 / speed) * fps)), fps, {
-            damping: 20, stiffness: 120, durationInFrames: Math.round((0.35 / speed) * fps),
-        });
+        // Measure text to compute dynamic box width
+        const padding = 48;
+        const minW = 250, maxW = 900;
+        MGRenderer._setFont(ctx, '700', 36, s.fontHeading);
+        const titleW = ctx.measureText(mg.text || '').width;
+        MGRenderer._setFont(ctx, '500', 22, s.fontBody);
+        const subW = mg.subtext ? ctx.measureText(mg.subtext).width : 0;
+        const contentW = Math.max(titleW, subW);
+        const boxW = Math.max(minW, Math.min(maxW, contentW + padding));
+        const boxH = mg.subtext ? 100 : 70;
+        const margin = 60;
 
-        const textDelay = Math.round((0.2 / speed) * fps);
-        const textSpring = springValue(Math.max(0, frame - textDelay), fps, {
-            damping: 18, stiffness: 100, durationInFrames: Math.round((0.3 / speed) * fps),
-        });
-        const textSlideX = interpolate(textSpring, [0, 1], [-15, 0]);
+        const pos = (mg.position || 'bottom-left').toLowerCase().replace(/\s+/g, '-');
+        let baseX, baseY;
+        if (pos.includes('top')) { baseY = margin + 20; }
+        else { baseY = 1080 - boxH - margin; }
+        if (pos.includes('right')) { baseX = 1920 - boxW - margin; }
+        else if (pos === 'center' || pos === 'top' || pos === 'bottom') { baseX = (1920 - boxW) / 2; }
+        else { baseX = margin; }
 
-        const subDelay = Math.round((0.35 / speed) * fps);
-        const subSpring = springValue(Math.max(0, frame - subDelay), fps, { damping: 18, stiffness: 100 });
+        const a = this._computeAnimation(animType, frame, fps, anim, mg);
 
         ctx.save();
-        ctx.globalAlpha = Math.min(1, isExiting ? exitProgress : opacity);
+        ctx.globalAlpha = Math.min(1, anim.isExiting ? anim.exitProgress : anim.opacity);
 
-        // Compute position based on mg.position
-        const pos = (mg.position || 'bottom-left').toLowerCase().replace(/\s+/g, '-');
-        const boxW = 700, boxH = 200, margin = 60;
-        let baseX, baseY;
-        if (pos.includes('top')) {
-            baseY = margin + 20;
-        } else {
-            baseY = 1080 - boxH - margin;
-        }
-        if (pos.includes('right')) {
-            baseX = 1920 - boxW - margin;
-        } else if (pos === 'center' || pos === 'top' || pos === 'bottom') {
-            baseX = (1920 - boxW) / 2;
-        } else {
-            baseX = margin;
-        }
-
-        ctx.beginPath();
-        ctx.rect(baseX, baseY - 20, boxW * (clipAmount / 100), boxH);
-        ctx.clip();
-
-        const accentH = 120 * barScaleY;
-        MGRenderer._drawGradientRect(ctx, baseX, baseY + 60 - accentH / 2, 4, accentH, s.primary, s.accent, 'vertical');
-
-        MGRenderer._setFont(ctx, '700', 36, s.fontHeading);
-        ctx.fillStyle = s.text;
-        ctx.textAlign = 'left';
-        ctx.textBaseline = 'top';
-        ctx.globalAlpha = Math.min(1, opacity) * textSpring;
-        MGRenderer._drawTextShadowed(ctx, mg.text || '', baseX + 20 + textSlideX, baseY + 20, s, true);
-
-        if (mg.subtext) {
-            ctx.globalAlpha = Math.min(1, opacity) * (isExiting ? exitProgress : subSpring);
-            MGRenderer._setFont(ctx, '500', 22, s.fontBody);
-            ctx.fillStyle = s.accent;
-            MGRenderer._drawTextShadowed(ctx, mg.subtext, baseX + 20, baseY + 65, s, false);
-        }
+        this._dispatchVariant(ctx, 'lowerThird', variant, mg, s, anim, a,
+            { bx: baseX, by: baseY, bw: boxW, bh: boxH, colors });
 
         ctx.restore();
+    }
+
+    // ── Individual animation computers (registered in constructor) ──
+    // Each returns an animation state object used by variant renderers.
+    // To add a new animation: add a method + register in constructor's _animComputers.
+
+    _computeAnim_slideLeft(frame, fps, anim, mg) {
+        const { springValue, interpolate } = AnimationUtils;
+        const speed = anim.speed;
+        const r = {};
+        r.clipAmount = interpolate(anim.enterSpring, [0, 1], [0, 100]);
+        r.barScaleY = springValue(Math.max(0, frame - Math.round((0.15 / speed) * fps)), fps, { damping: 20, stiffness: 120, durationInFrames: Math.round((0.35 / speed) * fps) });
+        const td = Math.round((0.2 / speed) * fps);
+        r.textSpring = springValue(Math.max(0, frame - td), fps, { damping: 18, stiffness: 100, durationInFrames: Math.round((0.3 / speed) * fps) });
+        r.textSlideX = interpolate(r.textSpring, [0, 1], [-15, 0]);
+        r.subSpring = springValue(Math.max(0, frame - Math.round((0.35 / speed) * fps)), fps, { damping: 18, stiffness: 100 });
+        return r;
+    }
+
+    _computeAnim_wipeRight(frame, fps, anim, mg) {
+        const { springValue, interpolate } = AnimationUtils;
+        const speed = anim.speed;
+        const r = {};
+        r.wipeProgress = interpolate(anim.enterSpring, [0, 1], [0, 1]);
+        const td = Math.round((0.25 / speed) * fps);
+        r.textSpring = springValue(Math.max(0, frame - td), fps, { damping: 16, stiffness: 90, durationInFrames: Math.round((0.3 / speed) * fps) });
+        r.textSlideX = interpolate(r.textSpring, [0, 1], [-20, 0]);
+        r.subSpring = springValue(Math.max(0, frame - Math.round((0.4 / speed) * fps)), fps, { damping: 18, stiffness: 100 });
+        return r;
+    }
+
+    _computeAnim_popUp(frame, fps, anim, mg) {
+        const { springValue, interpolate } = AnimationUtils;
+        const speed = anim.speed;
+        const r = {};
+        r.scaleY = springValue(frame, fps, { damping: 12, stiffness: 150, durationInFrames: Math.round((0.4 / speed) * fps) });
+        r.slideY = interpolate(r.scaleY, [0, 1], [40, 0]);
+        const td = Math.round((0.15 / speed) * fps);
+        r.textSpring = springValue(Math.max(0, frame - td), fps, { damping: 18, stiffness: 100, durationInFrames: Math.round((0.3 / speed) * fps) });
+        r.textSlideX = 0;
+        r.subSpring = springValue(Math.max(0, frame - Math.round((0.3 / speed) * fps)), fps, { damping: 18, stiffness: 100 });
+        return r;
+    }
+
+    _computeAnim_fadeSlide(frame, fps, anim, mg) {
+        const { interpolate } = AnimationUtils;
+        const r = {};
+        r.fadeIn = interpolate(anim.enterLinear, [0, 0.6], [0, 1], { extrapolateRight: 'clamp' });
+        r.slideY = interpolate(anim.enterSpring, [0, 1], [20, 0]);
+        r.textSpring = r.fadeIn;
+        r.textSlideX = 0;
+        r.subSpring = interpolate(anim.enterLinear, [0.2, 0.8], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' });
+        return r;
+    }
+
+    // ── Variant: BAR (thin vertical gradient bar + text) ──
+    // Used by: tech, neutral
+    _renderLT_Bar(ctx, mg, s, anim, a, bx, by, bw, bh, colors) {
+        const { opacity, isExiting, exitProgress } = anim;
+
+        ctx.beginPath();
+        ctx.rect(bx, by - 20, bw * ((a.clipAmount || 100) / 100), bh + 40);
+        ctx.clip();
+
+        // Accent bar
+        const accentH = 120 * (a.barScaleY || 1);
+        const barColor1 = colors?.accentFill || s.primary;
+        const barColor2 = colors?.accentFill || s.accent;
+        MGRenderer._drawGradientRect(ctx, bx, by + bh / 2 - accentH / 2, 4, accentH, barColor1, barColor2, 'vertical');
+
+        // Main text
+        MGRenderer._setFont(ctx, '700', 36, s.fontHeading);
+        ctx.fillStyle = colors?.textFill || s.text;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+        ctx.globalAlpha = Math.min(1, opacity) * (a.textSpring || 1);
+        MGRenderer._drawTextShadowed(ctx, mg.text || '', bx + 20 + (a.textSlideX || 0), by + 10, s, true);
+
+        // Subtext
+        if (mg.subtext) {
+            ctx.globalAlpha = Math.min(1, opacity) * (isExiting ? exitProgress : (a.subSpring || 0));
+            MGRenderer._setFont(ctx, '500', 22, s.fontBody);
+            ctx.fillStyle = colors?.accentFill || s.accent;
+            MGRenderer._drawTextShadowed(ctx, mg.subtext, bx + 20, by + 55, s, false);
+        }
+    }
+
+    // ── Variant: BOX (solid colored background rectangle) ──
+    // Used by: corporate
+    _renderLT_Box(ctx, mg, s, anim, a, bx, by, bw, bh, colors) {
+        const { opacity, isExiting, exitProgress } = anim;
+        const hasSub = !!mg.subtext;
+        const totalH = hasSub ? bh + 15 : bh - 10;
+
+        // Clip for slideLeft entrance
+        if (a.clipAmount !== undefined) {
+            ctx.beginPath();
+            ctx.rect(bx - 5, by - 5, (bw + 10) * (a.clipAmount / 100), totalH + 10);
+            ctx.clip();
+        }
+
+        // Background box
+        const bgColor = colors?.bgFill || s.primary;
+        const radius = s.borderRadius || 8;
+        MGRenderer._roundRect(ctx, bx, by, bw, totalH, radius);
+        ctx.fillStyle = bgColor;
+        ctx.shadowColor = 'rgba(0,0,0,0.5)';
+        ctx.shadowBlur = 16;
+        ctx.shadowOffsetY = 4;
+        ctx.fill();
+        ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+
+        // Main text
+        MGRenderer._setFont(ctx, '700', 36, s.fontHeading);
+        ctx.fillStyle = colors?.textFill || '#ffffff';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+        ctx.globalAlpha = Math.min(1, opacity) * (a.textSpring || 1);
+        ctx.fillText(mg.text || '', bx + 24 + (a.textSlideX || 0), by + 18);
+
+        // Subtext
+        if (mg.subtext) {
+            ctx.globalAlpha = Math.min(1, opacity) * (isExiting ? exitProgress : (a.subSpring || 0));
+            MGRenderer._setFont(ctx, '500', 20, s.fontBody);
+            ctx.fillStyle = (colors?.accentFill || s.accent);
+            ctx.fillText(mg.subtext, bx + 24, by + 62);
+        }
+    }
+
+    // ── Variant: UNDERLINE (text with animated gradient underline) ──
+    // Used by: nature
+    _renderLT_Underline(ctx, mg, s, anim, a, bx, by, bw, bh, colors) {
+        const { opacity, isExiting, exitProgress } = anim;
+        const slideY = a.slideY || 0;
+        const fadeIn = a.fadeIn !== undefined ? a.fadeIn : 1;
+
+        ctx.globalAlpha = Math.min(1, opacity) * fadeIn;
+
+        // Main text
+        MGRenderer._setFont(ctx, '700', 36, s.fontHeading);
+        ctx.fillStyle = colors?.textFill || s.text;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+        const textY = by + 10 + slideY;
+        MGRenderer._drawTextShadowed(ctx, mg.text || '', bx, textY, s, true);
+
+        // Measure text for underline width
+        const textW = ctx.measureText(mg.text || '').width;
+        const underlineW = Math.min(textW + 10, bw) * (a.textSpring || 0);
+        if (underlineW > 1) {
+            const c1 = colors?.accentFill || s.primary;
+            const c2 = colors?.accentFill || s.accent;
+            MGRenderer._drawGradientRect(ctx, bx, textY + 44, underlineW, 3, c1, c2);
+        }
+
+        // Subtext
+        if (mg.subtext) {
+            ctx.globalAlpha = Math.min(1, opacity) * (isExiting ? exitProgress : (a.subSpring || 0));
+            MGRenderer._setFont(ctx, '500', 22, s.fontBody);
+            ctx.fillStyle = colors?.accentFill || s.accent;
+            MGRenderer._drawTextShadowed(ctx, mg.subtext, bx, textY + 54, s, false);
+        }
+    }
+
+    // ── Variant: BANNER (full-width broadcast bar with accent stripe) ──
+    // Used by: crime (red bg, white text)
+    _renderLT_Banner(ctx, mg, s, anim, a, baseY, colors) {
+        const { opacity, isExiting, exitProgress } = anim;
+        const hasSub = !!mg.subtext;
+        const bannerH = hasSub ? 80 : 60;
+        const stripeH = 4;
+
+        // Wipe entrance: clip from left
+        const wipe = a.wipeProgress !== undefined ? a.wipeProgress : 1;
+        if (wipe < 1) {
+            ctx.beginPath();
+            ctx.rect(0, baseY - stripeH, 1920 * wipe, bannerH + stripeH + 2);
+            ctx.clip();
+        }
+
+        // Main banner fill
+        const bgColor = colors?.bgFill || s.primary;
+        ctx.fillStyle = bgColor;
+        ctx.fillRect(0, baseY, 1920, bannerH);
+
+        // Top accent stripe
+        const stripeColor = colors?.accentFill || s.accent;
+        ctx.fillStyle = stripeColor;
+        ctx.fillRect(0, baseY - stripeH, 1920, stripeH);
+
+        // Main text (left-aligned)
+        ctx.globalAlpha = Math.min(1, opacity) * (a.textSpring || 1);
+        MGRenderer._setFont(ctx, '700', hasSub ? 30 : 34, s.fontHeading);
+        ctx.fillStyle = colors?.textFill || '#ffffff';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+        ctx.fillText(mg.text || '', 50 + (a.textSlideX || 0), baseY + (hasSub ? 8 : 14));
+
+        // Subtext (below main text or right-aligned)
+        if (mg.subtext) {
+            ctx.globalAlpha = Math.min(1, opacity) * (isExiting ? exitProgress : (a.subSpring || 0));
+            MGRenderer._setFont(ctx, '500', 20, s.fontBody);
+            ctx.fillStyle = (colors?.textFill || '#ffffff') + 'cc';
+            ctx.fillText(mg.subtext, 50, baseY + 44);
+        }
+    }
+
+    // ── Variant: GLASS (frosted semi-transparent box with border) ──
+    // Used by: luxury
+    _renderLT_Glass(ctx, mg, s, anim, a, bx, by, bw, bh, colors) {
+        const { opacity, isExiting, exitProgress } = anim;
+        const slideY = a.slideY || 0;
+        const fadeIn = a.fadeIn !== undefined ? a.fadeIn : 1;
+        const hasSub = !!mg.subtext;
+        const totalH = hasSub ? bh + 15 : bh - 10;
+        const radius = s.borderRadius || 14;
+
+        ctx.globalAlpha = Math.min(1, opacity) * fadeIn;
+
+        // Glass background
+        MGRenderer._roundRect(ctx, bx, by + slideY, bw, totalH, radius);
+        ctx.fillStyle = colors?.bgFill || 'rgba(10,10,20,0.6)';
+        ctx.shadowColor = (colors?.accentFill || s.primary) + '30';
+        ctx.shadowBlur = 20;
+        ctx.fill();
+        ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+
+        // Border
+        MGRenderer._roundRect(ctx, bx, by + slideY, bw, totalH, radius);
+        ctx.strokeStyle = (colors?.accentFill || s.primary) + '50';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+
+        // Inner highlight line at top
+        ctx.beginPath();
+        ctx.moveTo(bx + radius, by + slideY + 1);
+        ctx.lineTo(bx + bw - radius, by + slideY + 1);
+        ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        // Main text
+        MGRenderer._setFont(ctx, '600', 34, s.fontHeading);
+        ctx.fillStyle = colors?.textFill || s.text;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+        ctx.globalAlpha = Math.min(1, opacity) * (a.textSpring || fadeIn);
+        MGRenderer._drawTextShadowed(ctx, mg.text || '', bx + 24, by + slideY + 16, s, true);
+
+        // Subtext
+        if (mg.subtext) {
+            ctx.globalAlpha = Math.min(1, opacity) * (isExiting ? exitProgress : (a.subSpring || 0));
+            MGRenderer._setFont(ctx, '400', 20, s.fontBody);
+            ctx.fillStyle = colors?.accentFill || s.accent;
+            ctx.fillText(mg.subtext, bx + 24, by + slideY + 58);
+        }
+    }
+
+    // ── Variant: SPLIT (two-tone: colored left label + dark right name) ──
+    // Used by: sport
+    _renderLT_Split(ctx, mg, s, anim, a, bx, by, bw, bh, colors) {
+        const { opacity, isExiting, exitProgress } = anim;
+        const slideY = a.slideY || 0;
+        const scaleY = a.scaleY !== undefined ? a.scaleY : 1;
+        // Measure left label to size it dynamically
+        MGRenderer._setFont(ctx, '800', 16, s.fontHeading);
+        const labelText = (mg.subtext || 'INFO').toUpperCase();
+        const labelW = ctx.measureText(labelText).width;
+        const leftW = Math.max(80, labelW + 40);
+        // Measure right name text
+        MGRenderer._setFont(ctx, '700', 32, s.fontHeading);
+        const nameW = ctx.measureText(mg.text || '').width;
+        const rightW = Math.max(120, nameW + 44);
+        const totalH = bh - 15;
+        const radius = s.borderRadius || 8;
+        const drawY = by + slideY;
+
+        ctx.globalAlpha = Math.min(1, opacity) * scaleY;
+
+        // Shadow
+        ctx.shadowColor = 'rgba(0,0,0,0.5)';
+        ctx.shadowBlur = 16;
+        ctx.shadowOffsetY = 4;
+
+        // Left colored section (rounded left corners)
+        ctx.beginPath();
+        ctx.moveTo(bx + radius, drawY);
+        ctx.lineTo(bx + leftW, drawY);
+        ctx.lineTo(bx + leftW, drawY + totalH);
+        ctx.lineTo(bx + radius, drawY + totalH);
+        ctx.arcTo(bx, drawY + totalH, bx, drawY + totalH - radius, radius);
+        ctx.lineTo(bx, drawY + radius);
+        ctx.arcTo(bx, drawY, bx + radius, drawY, radius);
+        ctx.closePath();
+        ctx.fillStyle = colors?.bgFill || s.primary;
+        ctx.fill();
+
+        ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+
+        // Right dark section (rounded right corners)
+        ctx.beginPath();
+        ctx.moveTo(bx + leftW, drawY);
+        ctx.lineTo(bx + leftW + rightW - radius, drawY);
+        ctx.arcTo(bx + leftW + rightW, drawY, bx + leftW + rightW, drawY + radius, radius);
+        ctx.lineTo(bx + leftW + rightW, drawY + totalH - radius);
+        ctx.arcTo(bx + leftW + rightW, drawY + totalH, bx + leftW + rightW - radius, drawY + totalH, radius);
+        ctx.lineTo(bx + leftW, drawY + totalH);
+        ctx.closePath();
+        ctx.fillStyle = 'rgba(0,0,0,0.85)';
+        ctx.fill();
+
+        // Left label text (subtext or category, uppercase) — labelText already measured above
+        ctx.globalAlpha = Math.min(1, opacity) * (a.textSpring || scaleY);
+        MGRenderer._setFont(ctx, '800', 16, s.fontHeading);
+        ctx.fillStyle = colors?.textFill || '#ffffff';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(labelText, bx + leftW / 2, drawY + totalH / 2);
+
+        // Right name text
+        MGRenderer._setFont(ctx, '700', 32, s.fontHeading);
+        ctx.fillStyle = s.text;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(mg.text || '', bx + leftW + 20 + (a.textSlideX || 0), drawY + totalH / 2);
     }
 
     // ========================================================================
@@ -1469,24 +1887,60 @@ class MGRenderer {
     // 15. MAP CHART
     // ========================================================================
 
-    _renderMapChart(ctx, frame, fps, mg, s, anim) {
-        const { interpolate } = AnimationUtils;
-        const { totalFrames, opacity, enterProgress } = anim;
+    _renderMapChart(ctx, frame, fps, mg, s, anim, scriptContext) {
+        const { opacity, enterProgress } = anim;
         const W = 1920, H = 1080;
+        const elapsed = frame / fps;
+        const speed = mg._animationSpeed || 1;
 
-        // Map visual styles
-        const MAP_STYLES = {
-            dark:      { ocean: '#0a1628', land: '#1a2744', border: 'rgba(30,58,95,0.4)', pin: '#00d4ff', label: '#ffffff', labelBg: 'rgba(10,22,40,0.88)' },
-            natural:   { ocean: '#1a4a6e', land: '#3a6b4a', border: 'rgba(42,80,56,0.4)', pin: '#ffffff', label: '#ffffff', labelBg: 'rgba(15,30,20,0.88)' },
-            satellite: { ocean: '#050d1a', land: '#141e14', border: 'rgba(26,48,32,0.3)', pin: '#00ffcc', label: '#ffffff', labelBg: 'rgba(5,10,15,0.9)' },
-            light:     { ocean: '#d4e6f1', land: '#ecf0f1', border: 'rgba(189,195,199,0.6)', pin: '#e74c3c', label: '#2c3e50', labelBg: 'rgba(255,255,255,0.92)' },
-            political: { ocean: '#b8d4e8', land: '#f0e6d3', border: 'rgba(138,122,106,0.5)', pin: '#c0392b', label: '#2c1810', labelBg: 'rgba(240,230,211,0.92)' },
+        // ── Overlay color palettes per map style ──
+        const OVERLAY_STYLES = {
+            dark: {
+                pin: '#00d4ff', pinGlow: 'rgba(0,212,255,0.35)', pinRing: 'rgba(0,212,255,0.5)',
+                label: '#ffffff', labelBg: 'rgba(8,18,35,0.92)',
+                route: 'rgba(0,212,255,0.6)', routeGlow: 'rgba(0,212,255,0.18)',
+                titleBg: 'rgba(8,18,35,0.88)', titleBorder: '#00d4ff', titleText: '#ffffff',
+                vignette: 'rgba(0,0,0,0.35)', dataCard: 'rgba(10,22,45,0.9)',
+                rankBadge: '#00d4ff', rankText: '#0b1426',
+            },
+            natural: {
+                pin: '#f0c040', pinGlow: 'rgba(240,192,64,0.35)', pinRing: 'rgba(240,192,64,0.5)',
+                label: '#ffffff', labelBg: 'rgba(12,28,18,0.9)',
+                route: 'rgba(240,192,64,0.6)', routeGlow: 'rgba(240,192,64,0.18)',
+                titleBg: 'rgba(12,28,18,0.88)', titleBorder: '#90d070', titleText: '#ffffff',
+                vignette: 'rgba(0,15,5,0.3)', dataCard: 'rgba(15,35,22,0.9)',
+                rankBadge: '#f0c040', rankText: '#12301a',
+            },
+            satellite: {
+                pin: '#00ffaa', pinGlow: 'rgba(0,255,170,0.35)', pinRing: 'rgba(0,255,170,0.5)',
+                label: '#e0f0e8', labelBg: 'rgba(3,8,12,0.92)',
+                route: 'rgba(0,255,170,0.55)', routeGlow: 'rgba(0,255,170,0.15)',
+                titleBg: 'rgba(3,8,12,0.9)', titleBorder: '#00ffaa', titleText: '#e0f0e8',
+                vignette: 'rgba(0,0,0,0.45)', dataCard: 'rgba(5,12,18,0.9)',
+                rankBadge: '#00ffaa', rankText: '#030a14',
+            },
+            light: {
+                pin: '#d04030', pinGlow: 'rgba(208,64,48,0.3)', pinRing: 'rgba(208,64,48,0.45)',
+                label: '#1a2a3a', labelBg: 'rgba(255,255,255,0.95)',
+                route: 'rgba(208,64,48,0.5)', routeGlow: 'rgba(208,64,48,0.15)',
+                titleBg: 'rgba(255,255,255,0.92)', titleBorder: '#2060a0', titleText: '#1a2a3a',
+                vignette: 'rgba(100,120,140,0.12)', dataCard: 'rgba(255,255,255,0.94)',
+                rankBadge: '#2060a0', rankText: '#ffffff',
+            },
+            political: {
+                pin: '#b83020', pinGlow: 'rgba(184,48,32,0.35)', pinRing: 'rgba(184,48,32,0.5)',
+                label: '#1c1008', labelBg: 'rgba(240,228,208,0.94)',
+                route: 'rgba(184,48,32,0.55)', routeGlow: 'rgba(184,48,32,0.15)',
+                titleBg: 'rgba(240,228,208,0.92)', titleBorder: '#8b4513', titleText: '#1c1008',
+                vignette: 'rgba(60,40,20,0.18)', dataCard: 'rgba(240,228,208,0.92)',
+                rankBadge: '#8b4513', rankText: '#f0e8d0',
+            },
         };
-        const mps = MAP_STYLES[mg.mapStyle || 'dark'] || MAP_STYLES.dark;
+        const pal = OVERLAY_STYLES[mg.mapStyle || 'dark'] || OVERLAY_STYLES.dark;
 
-        // Country coordinates for geographic positioning
+        // ── Country coordinates (lon, lat) for pin placement ──
         const MAP_COORDS = {
-            'China': [104, 35], 'United States': [-98, 39], 'USA': [-98, 39],
+            'China': [104, 35], 'United States': [-98, 39], 'USA': [-98, 39], 'US': [-98, 39],
             'India': [78, 22], 'Japan': [138, 36], 'Germany': [10.5, 51.2],
             'United Kingdom': [-2, 54], 'UK': [-2, 54], 'France': [2.2, 46.2],
             'Brazil': [-51, -10], 'Italy': [12.5, 42.5], 'Canada': [-106, 56],
@@ -1496,60 +1950,86 @@ class MGRenderer {
             'South Africa': [25, -29], 'Argentina': [-64, -34], 'Nigeria': [8, 10],
             'Egypt': [30, 27], 'Thailand': [101, 15], 'Vietnam': [108, 16],
             'Taiwan': [121, 24], 'Pakistan': [70, 30], 'Philippines': [122, 13],
+            'Iran': [53, 32], 'Iraq': [44, 33], 'Israel': [35, 31.5],
+            'Ukraine': [32, 49], 'Poland': [20, 52], 'Sweden': [16, 62],
+            'Singapore': [104, 1.3], 'Malaysia': [102, 4], 'Colombia': [-74, 4],
+            'Chile': [-71, -33], 'Peru': [-76, -10], 'Venezuela': [-66, 8],
+            'Algeria': [3, 28], 'Libya': [18, 27], 'Morocco': [-6, 32],
+            'Kenya': [38, 0], 'Ethiopia': [39, 9], 'Tanzania': [35, -6],
+            'Congo': [25, -3], 'Angola': [18, -12], 'Ghana': [-1.5, 8],
+            'Afghanistan': [66, 34], 'Bangladesh': [90, 24],
+            'North Korea': [127, 40], 'Myanmar': [96, 20],
+            'New Zealand': [174, -41], 'Finland': [26, 64],
+            'Greece': [22, 39], 'Portugal': [-8, 39.5],
+            'Netherlands': [5, 52], 'Belgium': [4.4, 50.8],
+            'Switzerland': [8.2, 46.8], 'Austria': [14.5, 47.5],
+            'Czech Republic': [15.5, 49.8], 'Romania': [25, 46],
+            'Hungary': [19, 47], 'Denmark': [10, 56],
+            'Cuba': [-79, 22], 'Jamaica': [-77, 18],
+            'Qatar': [51, 25.3], 'UAE': [54, 24], 'Kuwait': [48, 29.5],
+            'Oman': [57, 21], 'Yemen': [48, 15.5], 'Jordan': [36, 31],
+            'Lebanon': [35.8, 33.9], 'Syria': [38, 35],
+            'Windsor': [-83, 42.3], 'Detroit': [-83.05, 42.3], 'Michigan': [-84.5, 44.3],
+            'Ontario': [-85, 50], 'Alberta': [-114, 52],
         };
 
-        // 1. Fill ocean background
-        ctx.fillStyle = mps.ocean;
-        ctx.fillRect(0, 0, W, H);
+        // ── Determine map view (center + zoom) ──
+        const mapView = mg._mapView || null;
 
-        // 2. Draw land mass (simplified ellipse continents)
-        ctx.fillStyle = mps.land;
-        const continents = [
-            // [cx%, cy%, rx%, ry%] — rough continent shapes
-            [25, 35, 12, 18],   // North America
-            [30, 62, 7, 14],    // South America
-            [52, 35, 10, 20],   // Europe/Africa
-            [55, 62, 7, 12],    // Southern Africa
-            [72, 35, 15, 18],   // Asia
-            [78, 68, 8, 8],     // Australia
-        ];
-        for (const [cx, cy, rx, ry] of continents) {
-            ctx.beginPath();
-            ctx.ellipse(cx / 100 * W, cy / 100 * H, rx / 100 * W, ry / 100 * H, 0, 0, Math.PI * 2);
-            ctx.fill();
+        // ── Helper: lon/lat → pixel position on the map image ──
+        // When we have _mapView (from MapTiler), use Mercator projection matching the tile
+        // Otherwise fall back to simple equirectangular for the polygon fallback
+        let toX, toY;
+        if (mapView) {
+            // Mercator projection: lon/lat → pixel, matching MapTiler's static map
+            const centerLon = mapView.lon;
+            const centerLat = mapView.lat;
+            const zoom = mapView.zoom;
+            const scale = Math.pow(2, zoom) * 256; // pixels per world at this zoom
+            const cx = W / 2;
+            const cy = H / 2;
+            const mercY = (lat) => Math.log(Math.tan(Math.PI / 4 + (lat * Math.PI / 180) / 2));
+            const centerMercY = mercY(centerLat);
+            toX = (lon) => cx + (lon - centerLon) / 360 * scale;
+            toY = (lat) => cy - (mercY(lat) - centerMercY) / (2 * Math.PI) * scale;
+        } else {
+            toX = (lon) => ((lon + 180) / 360) * W * 0.88 + W * 0.06;
+            toY = (lat) => ((90 - lat) / 180) * H * 0.82 + H * 0.06;
         }
 
-        // 3. Draw grid lines
-        ctx.strokeStyle = mps.border;
-        ctx.lineWidth = 1;
-        for (let x = 0; x < W; x += W / 8) {
-            ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
-        }
-        for (let y = 0; y < H; y += H / 6) {
-            ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
-        }
-
-        // 4. Title
-        const title = mg.text || '';
-        if (title) {
-            ctx.font = `bold 42px ${s.fontFamily || 'Arial'}`;
-            ctx.fillStyle = mps.label;
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'top';
-            ctx.shadowColor = 'rgba(0,0,0,0.5)';
-            ctx.shadowBlur = 8;
-            ctx.fillText(title, W / 2, 40);
-            ctx.shadowBlur = 0;
+        // ── 1. BACKGROUND: API map image or polygon fallback ──
+        const hasMapImage = mg.mapImageFile && this._mapImages && this._mapImages[mg.mapImageFile];
+        if (hasMapImage) {
+            // Draw the pre-loaded MapTiler image as background
+            const mapImg = this._mapImages[mg.mapImageFile];
+            ctx.globalAlpha = opacity * Math.min(1, enterProgress * 2);
+            ctx.drawImage(mapImg, 0, 0, W, H);
+            ctx.globalAlpha = opacity;
+        } else {
+            // Polygon fallback (no API key or image not loaded)
+            this._renderMapChartFallbackBg(ctx, mg, W, H, opacity, enterProgress, pal);
         }
 
-        // 5. Parse items and place pins
-        const items = MGRenderer._parseKeyValuePairs(mg.subtext || '');
-        const pinPositions = items.slice(0, 8).map((item, i) => {
+        // ── 2. Gather pin entities ──
+        let items = MGRenderer._parseKeyValuePairs(mg.subtext || '');
+        if (items.length === 0 && scriptContext?.entities) {
+            items = scriptContext.entities
+                .filter(e => MAP_COORDS[e])
+                .map(e => ({ label: e, value: '' }));
+        }
+        if (items.length === 0 && mg.text) {
+            const textEntities = Object.keys(MAP_COORDS).filter(name =>
+                name.length > 2 && mg.text.toLowerCase().includes(name.toLowerCase())
+            );
+            items = textEntities.map(e => ({ label: e, value: '' }));
+        }
+
+        const pinPositions = items.slice(0, 10).map((item, i) => {
             const coords = MAP_COORDS[item.label];
             let x, y;
             if (coords) {
-                x = ((coords[0] + 180) / 360) * W * 0.85 + W * 0.07;
-                y = ((90 - coords[1]) / 180) * H * 0.80 + H * 0.05;
+                x = toX(coords[0]);
+                y = toY(coords[1]);
             } else {
                 const hash = (item.label || '').split('').reduce((a, c) => a + c.charCodeAt(0), 0);
                 x = W * 0.12 + ((hash * 7 + i * 137) % 76) / 100 * W;
@@ -1558,67 +2038,327 @@ class MGRenderer {
             return { ...item, x, y, i };
         });
 
-        const elapsed = frame / fps;
-        const enterDur = 0.5 / (mg._animationSpeed || 1);
+        // ── 3. Animated route lines between pins ──
+        if (pinPositions.length >= 2) {
+            const routeReveal = Math.min(1, Math.max(0, (enterProgress - 0.3) * 2.5));
+            if (routeReveal > 0) {
+                ctx.globalAlpha = opacity * routeReveal * 0.7;
 
+                // Route glow
+                ctx.strokeStyle = pal.routeGlow;
+                ctx.lineWidth = 8;
+                for (let i = 0; i < pinPositions.length - 1; i++) {
+                    const a = pinPositions[i], b = pinPositions[i + 1];
+                    const cpY = Math.min(a.y, b.y) - 40 - Math.abs(a.x - b.x) * 0.1;
+                    ctx.beginPath();
+                    ctx.moveTo(a.x, a.y);
+                    ctx.quadraticCurveTo((a.x + b.x) / 2, cpY, b.x, b.y);
+                    ctx.stroke();
+                }
+
+                // Dashed animated route line
+                ctx.strokeStyle = pal.route;
+                ctx.lineWidth = 2.5;
+                ctx.setLineDash([8, 6]);
+                ctx.lineDashOffset = -elapsed * 40 * speed;
+                for (let i = 0; i < pinPositions.length - 1; i++) {
+                    const a = pinPositions[i], b = pinPositions[i + 1];
+                    const cpY = Math.min(a.y, b.y) - 40 - Math.abs(a.x - b.x) * 0.1;
+                    ctx.beginPath();
+                    ctx.moveTo(a.x, a.y);
+                    ctx.quadraticCurveTo((a.x + b.x) / 2, cpY, b.x, b.y);
+                    ctx.stroke();
+                }
+                ctx.setLineDash([]);
+                ctx.lineDashOffset = 0;
+
+                // Traveling dot along each route segment
+                for (let i = 0; i < pinPositions.length - 1; i++) {
+                    const dotT = ((elapsed * 0.4 * speed) + i * 0.3) % 1;
+                    const a = pinPositions[i], b = pinPositions[i + 1];
+                    const cpY = Math.min(a.y, b.y) - 40 - Math.abs(a.x - b.x) * 0.1;
+                    const t = dotT;
+                    const dotX = (1 - t) * (1 - t) * a.x + 2 * (1 - t) * t * ((a.x + b.x) / 2) + t * t * b.x;
+                    const dotY = (1 - t) * (1 - t) * a.y + 2 * (1 - t) * t * cpY + t * t * b.y;
+
+                    // Trail glow
+                    const trailGrad = ctx.createRadialGradient(dotX, dotY, 0, dotX, dotY, 12);
+                    trailGrad.addColorStop(0, pal.pin);
+                    trailGrad.addColorStop(1, 'transparent');
+                    ctx.fillStyle = trailGrad;
+                    ctx.beginPath();
+                    ctx.arc(dotX, dotY, 12, 0, Math.PI * 2);
+                    ctx.fill();
+
+                    // Dot
+                    ctx.fillStyle = pal.pin;
+                    ctx.shadowColor = pal.pin;
+                    ctx.shadowBlur = 10;
+                    ctx.beginPath();
+                    ctx.arc(dotX, dotY, 4, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.shadowBlur = 0;
+                }
+
+                ctx.globalAlpha = opacity;
+            }
+        }
+
+        // ── 4. Pin markers with labels ──
+        const pinEnterDur = 0.4 / speed;
         for (const pin of pinPositions) {
-            const pinProgress = Math.min(1, Math.max(0, (elapsed - enterDur * 0.3 - pin.i * 0.15) / 0.3));
+            const pinDelay = 0.4 + pin.i * 0.18;
+            const pinProgress = Math.min(1, Math.max(0, (elapsed - pinDelay) / pinEnterDur));
             if (pinProgress <= 0) continue;
 
-            const bounce = pinProgress < 1 ? (1 - pinProgress) * 10 : 0;
+            const eased = 1 - Math.pow(1 - pinProgress, 3);
+            const bounce = pinProgress < 1 ? (1 - pinProgress) * 12 : 0;
             const py = pin.y - bounce;
-            const pinAlpha = pinProgress * opacity;
-
+            const pinAlpha = eased * opacity;
             ctx.globalAlpha = pinAlpha;
 
-            // Pin dot with glow
-            ctx.fillStyle = mps.pin;
-            ctx.shadowColor = mps.pin;
-            ctx.shadowBlur = 12;
+            // Expanding ripple ring (continuous pulse after enter)
+            if (pinProgress >= 1) {
+                const pulse = (Math.sin(elapsed * 3 * speed + pin.i * 1.5) + 1) / 2;
+                const pulseR = 18 + pulse * 14;
+                ctx.strokeStyle = pal.pinRing;
+                ctx.lineWidth = 1.5;
+                ctx.globalAlpha = pinAlpha * (0.12 + pulse * 0.22);
+                ctx.beginPath();
+                ctx.arc(pin.x, py, pulseR, 0, Math.PI * 2);
+                ctx.stroke();
+                // Second ripple (offset phase)
+                const pulse2 = (Math.sin(elapsed * 3 * speed + pin.i * 1.5 + Math.PI) + 1) / 2;
+                const pulseR2 = 24 + pulse2 * 10;
+                ctx.globalAlpha = pinAlpha * (0.06 + pulse2 * 0.12);
+                ctx.beginPath();
+                ctx.arc(pin.x, py, pulseR2, 0, Math.PI * 2);
+                ctx.stroke();
+                ctx.globalAlpha = pinAlpha;
+            }
+
+            // Glow halo
+            const glowGrad = ctx.createRadialGradient(pin.x, py, 0, pin.x, py, 28);
+            glowGrad.addColorStop(0, pal.pinGlow);
+            glowGrad.addColorStop(1, 'transparent');
+            ctx.fillStyle = glowGrad;
             ctx.beginPath();
-            ctx.arc(pin.x, py, 8, 0, Math.PI * 2);
+            ctx.arc(pin.x, py, 28, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Pin dot (filled circle)
+            ctx.fillStyle = pal.pin;
+            ctx.shadowColor = pal.pin;
+            ctx.shadowBlur = 16;
+            ctx.beginPath();
+            ctx.arc(pin.x, py, 7 * eased, 0, Math.PI * 2);
             ctx.fill();
             ctx.shadowBlur = 0;
 
-            // Pin ring
-            ctx.strokeStyle = mps.pin;
+            // Outer ring (enter animation)
+            ctx.strokeStyle = pal.pin;
             ctx.lineWidth = 2;
-            const ringRadius = 14 + (1 - pinProgress) * 10;
+            const ringRadius = 12 + (1 - eased) * 14;
+            ctx.globalAlpha = pinAlpha * eased;
             ctx.beginPath();
             ctx.arc(pin.x, py, ringRadius, 0, Math.PI * 2);
             ctx.stroke();
+            ctx.globalAlpha = pinAlpha;
 
-            // Label background
+            // ── Label card ──
             const labelText = pin.label || '';
             const valueText = pin.value && pin.value !== '0' ? pin.value : '';
-            ctx.font = `bold 20px ${s.fontFamily || 'Arial'}`;
+            const font = s.fontFamily || 'Arial';
+            ctx.font = `bold 22px ${font}`;
             const labelW = ctx.measureText(labelText).width;
             const valueW = valueText ? ctx.measureText(valueText).width : 0;
-            const boxW = Math.max(labelW, valueW) + 20;
-            const boxH = valueText ? 52 : 32;
+            const boxW = Math.max(labelW, valueW) + 32;
+            const boxH = valueText ? 62 : 40;
             const boxX = pin.x - boxW / 2;
-            const boxY = py - 28 - boxH;
+            const boxY = py - 34 - boxH;
 
-            ctx.fillStyle = mps.labelBg;
+            // Card shadow + background
+            ctx.shadowColor = 'rgba(0,0,0,0.35)';
+            ctx.shadowBlur = 12;
+            ctx.shadowOffsetY = 3;
+            ctx.fillStyle = pal.labelBg;
             ctx.beginPath();
-            MGRenderer._roundRect(ctx, boxX, boxY, boxW, boxH, 6);
+            MGRenderer._roundRect(ctx, boxX, boxY, boxW, boxH, 8);
+            ctx.fill();
+            ctx.shadowBlur = 0;
+            ctx.shadowOffsetY = 0;
+
+            // Rank badge (numbered circle on the left)
+            const badgeR = 14;
+            const badgeX = boxX + badgeR + 6;
+            const badgeY = boxY + boxH / 2;
+            ctx.fillStyle = pal.rankBadge;
+            ctx.beginPath();
+            ctx.arc(badgeX, badgeY, badgeR, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = pal.rankText;
+            ctx.font = `bold 14px ${font}`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(String(pin.i + 1), badgeX, badgeY);
+
+            // Pointer triangle
+            ctx.fillStyle = pal.labelBg;
+            ctx.beginPath();
+            ctx.moveTo(pin.x - 6, boxY + boxH);
+            ctx.lineTo(pin.x + 6, boxY + boxH);
+            ctx.lineTo(pin.x, boxY + boxH + 8);
+            ctx.closePath();
             ctx.fill();
 
             // Label text
-            ctx.fillStyle = mps.label;
+            ctx.fillStyle = pal.label;
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
-            ctx.fillText(labelText, pin.x, boxY + (valueText ? 16 : boxH / 2));
+            ctx.font = `bold 22px ${font}`;
+            ctx.fillText(labelText, pin.x + 8, boxY + (valueText ? 20 : boxH / 2));
 
             // Value text
             if (valueText) {
-                ctx.fillStyle = mps.pin;
-                ctx.font = `bold 18px ${s.fontFamily || 'Arial'}`;
-                ctx.fillText(valueText, pin.x, boxY + 38);
+                ctx.fillStyle = pal.pin;
+                ctx.font = `bold 18px ${font}`;
+                ctx.fillText(valueText, pin.x + 8, boxY + 44);
             }
 
             ctx.globalAlpha = 1;
         }
+
+        // ── 5. Title bar ──
+        const title = mg.text || '';
+        if (title) {
+            ctx.globalAlpha = opacity * Math.min(1, enterProgress * 3);
+            const font = s.fontFamily || 'Arial';
+            ctx.font = `bold 40px ${font}`;
+            const titleW = ctx.measureText(title).width;
+            const barW = titleW + 70;
+            const barH = 64;
+            const barX = (W - barW) / 2;
+            const barY = 28;
+
+            // Title card shadow + background
+            ctx.shadowColor = 'rgba(0,0,0,0.35)';
+            ctx.shadowBlur = 18;
+            ctx.shadowOffsetY = 4;
+            ctx.fillStyle = pal.titleBg;
+            ctx.beginPath();
+            MGRenderer._roundRect(ctx, barX, barY, barW, barH, 12);
+            ctx.fill();
+            ctx.shadowBlur = 0;
+            ctx.shadowOffsetY = 0;
+
+            // Accent border (bottom + left stripe)
+            ctx.fillStyle = pal.titleBorder;
+            ctx.fillRect(barX + 12, barY + barH - 3, barW - 24, 3);
+            ctx.beginPath();
+            MGRenderer._roundRect(ctx, barX, barY, 5, barH, 12);
+            ctx.fill();
+            ctx.fillRect(barX + 2, barY, 5, barH);
+
+            // Title text
+            ctx.fillStyle = pal.titleText;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(title, W / 2, barY + barH / 2);
+
+            ctx.globalAlpha = opacity;
+        }
+
+        // ── 6. Vignette overlay ──
+        const vignetteGrad = ctx.createRadialGradient(W / 2, H / 2, W * 0.25, W / 2, H / 2, W * 0.7);
+        vignetteGrad.addColorStop(0, 'transparent');
+        vignetteGrad.addColorStop(1, pal.vignette);
+        ctx.fillStyle = vignetteGrad;
+        ctx.fillRect(0, 0, W, H);
+
+        ctx.globalAlpha = 1;
+    }
+
+    /**
+     * Polygon fallback background for mapChart when no API map image is available.
+     */
+    _renderMapChartFallbackBg(ctx, mg, W, H, opacity, enterProgress, pal) {
+        // Fallback ocean/land colors per style
+        const FALLBACK_BG = {
+            dark:      { ocean: '#0b1426', oceanGrad: '#0f1d35', land: '#1c3050', stroke: '#2a4a6e', grid: 'rgba(30,70,120,0.15)', gridAccent: 'rgba(40,90,150,0.25)' },
+            natural:   { ocean: '#0e3350', oceanGrad: '#164468', land: '#2e6b3e', stroke: '#3a8050', grid: 'rgba(42,80,56,0.15)', gridAccent: 'rgba(50,100,70,0.25)' },
+            satellite: { ocean: '#030a14', oceanGrad: '#081420', land: '#1a2818', stroke: '#253a22', grid: 'rgba(20,45,30,0.12)', gridAccent: 'rgba(30,60,40,0.2)' },
+            light:     { ocean: '#c8dff0', oceanGrad: '#d8ecf8', land: '#e8ece8', stroke: '#b8c8b8', grid: 'rgba(150,170,190,0.2)', gridAccent: 'rgba(130,155,180,0.3)' },
+            political: { ocean: '#8cb8d8', oceanGrad: '#a0cce8', land: '#e8dcc8', stroke: '#c0a888', grid: 'rgba(140,130,115,0.18)', gridAccent: 'rgba(120,108,90,0.28)' },
+        };
+        const fb = FALLBACK_BG[mg.mapStyle || 'dark'] || FALLBACK_BG.dark;
+
+        // Ocean gradient
+        const oceanGrad = ctx.createLinearGradient(0, 0, 0, H);
+        oceanGrad.addColorStop(0, fb.oceanGrad);
+        oceanGrad.addColorStop(0.5, fb.ocean);
+        oceanGrad.addColorStop(1, fb.oceanGrad);
+        ctx.fillStyle = oceanGrad;
+        ctx.fillRect(0, 0, W, H);
+
+        // Simplified continent polygons
+        const CONTINENTS = [
+            [[12,14],[20,12],[28,14],[32,18],[30,22],[34,26],[32,32],[28,38],[26,42],[22,44],[18,42],[14,38],[10,34],[8,28],[10,22],[12,18]],
+            [[22,44],[24,46],[26,50],[24,52],[22,50],[20,48]],
+            [[24,52],[28,52],[32,54],[34,58],[34,64],[32,72],[30,78],[26,82],[22,78],[20,72],[20,66],[22,58]],
+            [[46,14],[50,12],[54,14],[56,18],[54,22],[52,26],[50,28],[48,30],[46,28],[44,24],[44,20],[44,16]],
+            [[46,30],[50,28],[54,30],[56,34],[58,40],[58,48],[56,56],[54,62],[50,66],[46,64],[44,58],[42,50],[42,42],[44,36]],
+            [[56,26],[60,24],[64,26],[62,30],[58,32],[56,30]],
+            [[56,14],[62,10],[68,8],[76,10],[82,14],[86,16],[88,22],[86,28],[82,32],[78,34],[74,36],[70,34],[66,30],[62,26],[58,22],[56,18]],
+            [[74,36],[78,38],[82,40],[84,44],[80,48],[76,46],[74,42]],
+            [[66,30],[70,34],[68,42],[64,40],[62,34]],
+            [[80,58],[86,56],[90,58],[92,62],[90,68],[86,70],[82,68],[80,64]],
+            [[82,48],[84,48],[86,50],[84,52],[82,50]],
+            [[86,50],[88,50],[90,52],[88,54],[86,52]],
+        ];
+
+        const landReveal = Math.min(1, enterProgress * 2.5);
+        ctx.globalAlpha = opacity * landReveal;
+        ctx.fillStyle = fb.land;
+        for (const pts of CONTINENTS) {
+            ctx.beginPath();
+            ctx.moveTo(pts[0][0] / 100 * W, pts[0][1] / 100 * H);
+            for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0] / 100 * W, pts[i][1] / 100 * H);
+            ctx.closePath();
+            ctx.fill();
+        }
+        ctx.strokeStyle = fb.stroke;
+        ctx.lineWidth = 1.5;
+        for (const pts of CONTINENTS) {
+            ctx.beginPath();
+            ctx.moveTo(pts[0][0] / 100 * W, pts[0][1] / 100 * H);
+            for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0] / 100 * W, pts[i][1] / 100 * H);
+            ctx.closePath();
+            ctx.stroke();
+        }
+
+        // Grid lines
+        const toXfb = (lon) => ((lon + 180) / 360) * W * 0.88 + W * 0.06;
+        const toYfb = (lat) => ((90 - lat) / 180) * H * 0.82 + H * 0.06;
+        const gridReveal = Math.min(1, Math.max(0, enterProgress * 3 - 0.5));
+        ctx.globalAlpha = opacity * gridReveal * 0.6;
+        ctx.strokeStyle = fb.grid;
+        ctx.lineWidth = 0.8;
+        for (let lat = -60; lat <= 80; lat += 30) {
+            const y = toYfb(lat);
+            ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+        }
+        for (let lon = -150; lon <= 180; lon += 30) {
+            const x = toXfb(lon);
+            ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+        }
+        ctx.strokeStyle = fb.gridAccent;
+        ctx.lineWidth = 1.2;
+        const eqY = toYfb(0);
+        ctx.beginPath(); ctx.moveTo(0, eqY); ctx.lineTo(W, eqY); ctx.stroke();
+        const pmX = toXfb(0);
+        ctx.beginPath(); ctx.moveTo(pmX, 0); ctx.lineTo(pmX, H); ctx.stroke();
+
+        ctx.globalAlpha = opacity;
     }
 
     /**

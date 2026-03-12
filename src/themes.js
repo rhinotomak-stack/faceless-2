@@ -936,11 +936,12 @@ const MG_STYLE_PRESETS = {
         glow: false,
         borderRadius: 12,
         strokeWidth: 2,
-        shadowStyle: 'soft',       // soft | hard | none
+        shadowStyle: 'soft',       // soft | hard | none | glow
         shadowBlur: 8,
         shadowOffsetY: 2,
         cardStyle: 'filled',       // filled | outline | glass
-        lowerThirdStyle: 'bar',    // bar | underline | box
+        lowerThirdStyle: 'bar',    // bar | box | underline | banner | glass | split
+        lowerThirdAnimation: 'slideLeft', // slideLeft | wipeRight | popUp | fadeSlide
         chartBarRadius: 4,
         modifier: { saturate: 1.0, brighten: 0, tintHue: null },
     },
@@ -953,7 +954,8 @@ const MG_STYLE_PRESETS = {
         shadowBlur: 12,
         shadowOffsetY: 4,
         cardStyle: 'filled',
-        lowerThirdStyle: 'box',
+        lowerThirdStyle: 'split',
+        lowerThirdAnimation: 'popUp',
         chartBarRadius: 2,
         modifier: { saturate: 1.3, brighten: 15, tintHue: null },
     },
@@ -967,6 +969,7 @@ const MG_STYLE_PRESETS = {
         shadowOffsetY: 1,
         cardStyle: 'outline',
         lowerThirdStyle: 'underline',
+        lowerThirdAnimation: 'fadeSlide',
         chartBarRadius: 6,
         modifier: { saturate: 0.4, brighten: 40, tintHue: null },
     },
@@ -980,6 +983,7 @@ const MG_STYLE_PRESETS = {
         shadowOffsetY: 0,
         cardStyle: 'outline',
         lowerThirdStyle: 'bar',
+        lowerThirdAnimation: 'slideLeft',
         chartBarRadius: 4,
         modifier: { saturate: 1.6, brighten: 50, tintHue: null },
     },
@@ -992,7 +996,8 @@ const MG_STYLE_PRESETS = {
         shadowBlur: 24,
         shadowOffsetY: 4,
         cardStyle: 'filled',
-        lowerThirdStyle: 'bar',
+        lowerThirdStyle: 'banner',
+        lowerThirdAnimation: 'wipeRight',
         chartBarRadius: 3,
         modifier: { saturate: 0.8, brighten: -10, tintHue: 40 },
     },
@@ -1005,11 +1010,46 @@ const MG_STYLE_PRESETS = {
         shadowBlur: 16,
         shadowOffsetY: 4,
         cardStyle: 'glass',
-        lowerThirdStyle: 'underline',
+        lowerThirdStyle: 'glass',
+        lowerThirdAnimation: 'fadeSlide',
         chartBarRadius: 6,
         modifier: { saturate: 1.1, brighten: 10, tintHue: 280 },
     },
 };
+
+// ── Per-theme MG overrides ──
+// Allows themes sharing the same mgStyle to have distinct MG looks per category.
+// E.g. crime + nature both use 'cinematic' mgStyle, but crime needs a red banner lowerThird.
+// Structure: MG_THEME_OVERRIDES[themeId][mgCategory] = { style, anim, colors }
+const MG_THEME_OVERRIDES = {
+    tech: {
+        lowerThird: { style: 'bar',       anim: 'slideLeft', colors: null },
+    },
+    nature: {
+        lowerThird: { style: 'underline', anim: 'fadeSlide', colors: null },
+    },
+    crime: {
+        lowerThird: { style: 'banner',    anim: 'wipeRight', colors: { bgFill: '#cc0000', textFill: '#ffffff', accentFill: '#ffffff' } },
+    },
+    corporate: {
+        lowerThird: { style: 'box',       anim: 'slideLeft', colors: { bgFill: '#0055aa', textFill: '#ffffff', accentFill: '#00cc66' } },
+    },
+    luxury: {
+        lowerThird: { style: 'glass',     anim: 'fadeSlide', colors: { bgFill: 'rgba(20,10,5,0.7)', textFill: '#ffffff', accentFill: '#d4af37' } },
+    },
+    sport: {
+        lowerThird: { style: 'split',     anim: 'popUp',     colors: { bgFill: '#ff4500', textFill: '#ffffff', accentFill: '#ffd700' } },
+    },
+    neutral: {
+        lowerThird: { style: 'bar',       anim: 'slideLeft', colors: null },
+    },
+};
+
+// Backward-compatible accessor for existing code
+const LOWER_THIRD_THEME_OVERRIDES = {};
+for (const [themeId, cats] of Object.entries(MG_THEME_OVERRIDES)) {
+    if (cats.lowerThird) LOWER_THIRD_THEME_OVERRIDES[themeId] = cats.lowerThird;
+}
 
 /**
  * Build a complete design token set for a theme.
@@ -1070,6 +1110,9 @@ function getThemeTokens(themeId) {
             shadowOffsetY: stylePreset.shadowOffsetY,
             cardStyle: stylePreset.cardStyle,
             lowerThirdStyle: stylePreset.lowerThirdStyle,
+            lowerThirdAnimation: stylePreset.lowerThirdAnimation || 'slideLeft',
+            lowerThirdOverride: LOWER_THIRD_THEME_OVERRIDES[theme.id] || null,
+            mgOverrides: MG_THEME_OVERRIDES[theme.id] || {},
             chartBarRadius: stylePreset.chartBarRadius,
         },
 
@@ -1223,6 +1266,8 @@ module.exports = {
     TRANSITION_LIBRARY,
     TRANSITION_SFX_SOURCES,
     MG_STYLE_PRESETS,
+    MG_THEME_OVERRIDES,
+    LOWER_THIRD_THEME_OVERRIDES,
     getTheme,
     getThemeIds,
     getAllThemes,

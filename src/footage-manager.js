@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const config = require('./config');
 const { getBackgroundSource } = require('./themes');
-const { getNiche, rewriteQuery, getFallbackKeywords } = require('./niches');
+const { getNiche, rewriteQuery, getFallbackKeywords, getSearchPolicy } = require('./niches');
 
 // Import all providers
 const PexelsVideoProvider = require('./providers/pexels-video');
@@ -586,10 +586,11 @@ async function downloadBackgroundCanvas(themeId) {
 
         try {
             for (const keyword of backgroundSource.keywords) {
-                const url = await pexels.search(keyword, 1);
-                if (url) {
-                    console.log(`   🎬 Found on Pexels: ${url}`);
-                    downloaded = await pexels.download(url, cacheFile, 1);
+                const results = await pexels.search(keyword);
+                if (results && results.length > 0) {
+                    const picked = results[0];
+                    console.log(`   🎬 Found on Pexels: ${picked.url}`);
+                    downloaded = await pexels.download(picked.url, cacheFile);
                     if (downloaded) break;
                 }
             }
@@ -608,10 +609,11 @@ async function downloadBackgroundCanvas(themeId) {
 
         try {
             for (const keyword of backgroundSource.keywords) {
-                const url = await pixabay.search(keyword, 1);
-                if (url) {
-                    console.log(`   🎬 Found on Pixabay: ${url}`);
-                    downloaded = await pixabay.download(url, cacheFile, 1);
+                const results = await pixabay.search(keyword);
+                if (results && results.length > 0) {
+                    const picked = results[0];
+                    console.log(`   🎬 Found on Pixabay: ${picked.url}`);
+                    downloaded = await pixabay.download(picked.url, cacheFile);
                     if (downloaded) break;
                 }
             }

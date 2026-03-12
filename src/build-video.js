@@ -614,7 +614,12 @@ async function buildVideo() {
     }
 
     console.log(`   ✅ Placed ${allMGs.length} motion graphics (style: ${mgStyle})`);
-    if (mgScenes.length > 0) console.log(`      → ${mgScenes.length} full-screen (V3), ${motionGraphics.length} overlay (MG track)`);
+    if (mgScenes.length > 0) {
+        console.log(`      → ${mgScenes.length} full-screen (V3), ${motionGraphics.length} overlay (MG track)`);
+        for (const mg of mgScenes) {
+            console.log(`      🎨 [${mg.type}] "${mg.text || ''}" @ ${mg.startTime.toFixed(1)}s-${mg.endTime.toFixed(1)}s (full-screen MG, replaces footage)`);
+        }
+    }
     console.log('');
 
     // Step 6.05: Download animated background icons (if any animatedIcons MGs exist)
@@ -631,6 +636,37 @@ async function buildVideo() {
             console.log(`   ⚠️ Icon download failed: ${e.message} (skipping)`);
         }
         console.log('');
+    }
+
+    // Step 6.06: Download static map images for mapChart MGs (via MapTiler API)
+    const mapMGs = allMGs.filter(mg => mg.type === 'mapChart');
+    if (mapMGs.length > 0) {
+        console.log('═'.repeat(60));
+        console.log('🗺️ Step 6.06: Map Images');
+        console.log('═'.repeat(60));
+        try {
+            const { downloadMapsForMGs } = require('./map-provider');
+            const mapCount = await downloadMapsForMGs(allMGs, scriptContext, config.paths.temp);
+            if (mapCount > 0) {
+                console.log(`   ✅ Downloaded ${mapCount} map image(s) for ${mapMGs.length} mapChart scene(s)`);
+            } else {
+                console.log(`   ℹ️ No map images downloaded (will use Canvas2D fallback)`);
+            }
+        } catch (e) {
+            console.log(`   ⚠️ Map download failed: ${e.message} (will use Canvas2D fallback)`);
+        }
+        console.log('');
+
+        // Propagate mapImageFile + _mapView from allMGs to mgScenes (mgScenes are copies)
+        for (const mg of fullscreenMGs) {
+            if (mg.mapImageFile) {
+                const target = mgScenes.find(s => s.type === mg.type && s.startTime === mg.startTime);
+                if (target) {
+                    target.mapImageFile = mg.mapImageFile;
+                    target._mapView = mg._mapView;
+                }
+            }
+        }
     }
 
     // Step 6.9: Search for article images (if articleHighlight MG exists)
@@ -743,6 +779,7 @@ async function buildVideo() {
         delete scene._fileIndex;
     }
     // Copy article image files (for articleHighlight image mode)
+    // Copy map image files (for mapChart API mode)
     for (const mg of mgScenes) {
         if (mg.articleImageFile) {
             const srcArticle = path.join(config.paths.temp, mg.articleImageFile);
@@ -750,6 +787,25 @@ async function buildVideo() {
             if (fs.existsSync(srcArticle)) {
                 fs.copyFileSync(srcArticle, destArticle);
                 console.log(`   📰 Copied article image: ${mg.articleImageFile}`);
+            }
+        }
+        if (mg.mapImageFile) {
+            const srcMap = path.join(config.paths.temp, mg.mapImageFile);
+            const destMap = path.join(publicDir, mg.mapImageFile);
+            if (fs.existsSync(srcMap)) {
+                fs.copyFileSync(srcMap, destMap);
+                console.log(`   🗺️ Copied map image: ${mg.mapImageFile}`);
+            }
+        }
+    }
+    // Also check overlay MGs for map images
+    for (const mg of motionGraphics) {
+        if (mg.mapImageFile) {
+            const srcMap = path.join(config.paths.temp, mg.mapImageFile);
+            const destMap = path.join(publicDir, mg.mapImageFile);
+            if (fs.existsSync(srcMap)) {
+                fs.copyFileSync(srcMap, destMap);
+                console.log(`   🗺️ Copied map image: ${mg.mapImageFile}`);
             }
         }
     }
@@ -827,12 +883,21 @@ async function buildVideo() {
     console.log(`⏱️  Total time: ${elapsed} seconds`);
     console.log(`🎵 Audio: ${audioFile}`);
     console.log(`⏱️  Duration: ${videoPlan.totalDuration.toFixed(2)} seconds`);
-    console.log(`🎬 Scenes: ${scenes.length}`);
-    console.log('\n📊 Keywords used:');
-    scenesWithMedia.forEach((scene, i) => {
-        const type = scene.mediaType === 'image' ? '🖼️' : '🎥';
-        const source = scene.sourceProvider || 'unknown';
-        console.log(`   Scene ${i}: "${scene.keyword}" ${type} [${source}]`);
+    console.log(`🎬 Scenes: ${scenesWithMedia.length} footage + ${mgScenes.length} full-screen MG`);
+    console.log('\n📊 All scenes (timeline order):');
+    // Merge footage + MG scenes and sort by startTime for unified log
+    const allScenesSorted = [
+        ...scenesWithMedia.map((s, i) => ({ ...s, _logIdx: i, _kind: 'footage' })),
+        ...mgScenes.map((s, i) => ({ ...s, _logIdx: i, _kind: 'mg' })),
+    ].sort((a, b) => a.startTime - b.startTime);
+    allScenesSorted.forEach((scene, i) => {
+        if (scene._kind === 'mg') {
+            console.log(`   Scene ${i}: 🎨 [${scene.type}] "${scene.text || ''}" (full-screen MG)`);
+        } else {
+            const type = scene.mediaType === 'image' ? '🖼️' : '🎥';
+            const source = scene.sourceProvider || 'unknown';
+            console.log(`   Scene ${i}: ${type} "${scene.keyword}" [${source}]`);
+        }
     });
 
     console.log('\n🚀 Next steps:');

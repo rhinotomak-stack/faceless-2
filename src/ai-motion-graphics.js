@@ -1,8 +1,9 @@
 const axios = require('axios');
 const config = require('./config');
 const { callAI } = require('./ai-provider');
-const { getTheme } = require('./themes');
+const { getTheme, MG_THEME_OVERRIDES } = require('./themes');
 const { getNiche } = require('./niches');
+const { MG_REGISTRY } = require('./mg-registry');
 
 // Track placed MG types to avoid repetition
 let placedTypes = [];
@@ -124,8 +125,12 @@ const CONTENT_PATTERNS = {
 
     // Ranked / listed items
     ranking: (text) => {
-        if (/\b(top\s+\d|ranked?\s+#?\d|number\s+(one|two|three|four|five|\d)|first\s+place|leading|biggest|largest|smallest|worst|best)\b/i.test(text))
+        // Strong ranking signals (number-adjacent)
+        if (/\b(top\s+\d+|ranked?\s+#?\d+|number\s+(one|two|three|four|five|\d+)|first\s+place)\b/i.test(text))
             return { score: 7, reason: 'ranking language' };
+        // Superlatives only count if near a number or list context (avoid bare "the best way to...")
+        if (/\b(biggest|largest|smallest|worst|best|leading)\s+\d/i.test(text))
+            return { score: 6, reason: 'superlative + number' };
         return { score: 0, reason: null };
     },
 
@@ -154,10 +159,11 @@ const CONTENT_PATTERNS = {
     // Person / organization introduction
     identity: (text) => {
         // Title + name pattern: "CEO John Smith", "Dr. Jane Doe", "President Biden"
-        if (/\b(CEO|CTO|CFO|founder|president|director|professor|Dr\.|chairman|minister|secretary|leader|coach|manager|senator|governor|mayor|chief|general)\s+[A-Z][a-z]+/i.test(text))
+        // NOTE: Title matched case-insensitive, but the NAME must start uppercase (no /i on whole regex)
+        if (/\b(?:CEO|CTO|CFO|founder|Founder|president|President|director|Director|professor|Professor|Dr\.|chairman|Chairman|minister|Minister|secretary|Secretary|leader|Leader|coach|Coach|manager|Manager|senator|Senator|governor|Governor|mayor|Mayor|chief|Chief|general|General)\s+[A-Z][a-z]+/.test(text))
             return { score: 8, reason: 'title + name' };
-        // Organization patterns
-        if (/\b(company|corporation|organization|agency|institute|university|foundation)\b/i.test(text) && /[A-Z][a-z]+/.test(text))
+        // Organization patterns — require a proper noun (capitalized, not sentence start)
+        if (/\b(company|corporation|organization|agency|institute|university|foundation)\b/i.test(text) && /\s[A-Z][a-z]{2,}/.test(text))
             return { score: 5, reason: 'organization mention' };
         return { score: 0, reason: null };
     },
@@ -622,15 +628,15 @@ function buildRuleMG(scene, sceneIndex, type) {
             break;
         }
         case 'lowerThird': {
-            // Find title + name pattern
-            const match = text.match(/\b(CEO|CTO|CFO|founder|president|director|professor|Dr\.|chairman|minister|coach|manager)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/i);
+            // Find title + name pattern (no /i — name must be uppercase)
+            const match = text.match(/\b(?:CEO|CTO|CFO|founder|Founder|president|President|director|Director|professor|Professor|Dr\.|chairman|Chairman|minister|Minister|coach|Coach|manager|Manager)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/);
             if (match) {
                 displayText = match[0].trim();
-                triggerWord = match[2].split(/\s/)[0]; // First name
+                triggerWord = match[1].split(/\s/)[0]; // First name
             } else {
-                // Find any capitalized name
-                const nameMatch = text.match(/\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+))\b/);
-                displayText = nameMatch ? nameMatch[0] : words.slice(0, 4).join(' ');
+                // Find any capitalized name (two consecutive capitalized words, not at sentence start)
+                const nameMatch = text.match(/\s([A-Z][a-z]+\s+[A-Z][a-z]+)/);
+                displayText = nameMatch ? nameMatch[1] : words.slice(0, 4).join(' ');
                 triggerWord = nameMatch ? nameMatch[1].split(/\s/)[0] : words[0];
             }
             break;
@@ -764,7 +770,11 @@ function buildPrompt(scene, sceneIndex, totalScenes, scriptContext, sceneVisual,
         barChart: 'barChart: 3-5 categories with numbers (max 1 per video). E.g. "sales by region"',
         donutChart: 'donutChart: Percentage breakdown (max 1 per video). E.g. "market share"',
         timeline: 'timeline: Historical progression (max 1 per video). E.g. "from 2010 to 2024"',
-        mapChart: 'mapChart: Geographic data with locations/regions (max 1 per video). E.g. "factories in USA, China, Germany"',
+        mapChart: `mapChart: Geographic data with locations/regions (max 1 per video).
+  text: Main topic as title (max 8 words). E.g. "Top oil producers worldwide"
+  subtext: MUST list locations with data as "Location: value" pairs, comma-separated.
+  Example: "Saudi Arabia: 12M bpd, United States: 11.3M bpd, Russia: 10.8M bpd, Canada: 5.3M bpd"
+  Use real or approximate data from the narration. If no numbers mentioned, use ranking: "Canada: #4, Saudi Arabia: #1"`,
         kineticText: 'kineticText: Powerful short statement, word-by-word reveal (max 1 per video). E.g. "The Future Is Now"',
         articleHighlight: `articleHighlight: News article, study, or report reference (max 1 per video).
   WHEN: narration mentions a study, report, article, research, or finding.
@@ -1234,6 +1244,17 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
                 mg.selectionMode = selectionMode; // track for debugging
                 if (mg.type === 'mapChart') mg.mapStyle = mapStyle;
 
+                // Resolve subType from theme override → registry default
+                const themeId = scriptContext?.themeId || 'neutral';
+                const themeOverrides = MG_THEME_OVERRIDES[themeId] || {};
+                const catOverride = themeOverrides[mg.type];
+                const reg = MG_REGISTRY[mg.type];
+                if (reg) {
+                    // Theme override takes priority, then registry default
+                    mg.subType = catOverride?.style || reg.defaultType;
+                    if (catOverride?.anim) mg.animation = catOverride.anim;
+                }
+
                 // Post-process animatedIcons: structure icons array from text keywords
                 if (mg.type === 'animatedIcons') {
                     const keywords = (mg.text || '').split(',').map(k => k.trim()).filter(Boolean).slice(0, 5);
@@ -1259,7 +1280,8 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
                 }
                 const wordAligned = findWordAlignedStart(mg.text, scene) !== null;
                 const modeTag = selectionMode === 'ai' ? 'AI' : selectionMode === 'rule' ? 'RULE' : 'RULE-FB';
-                console.log(`    -> [${modeTag}] ${mg.type}: "${mg.text}" @${mg.startTime.toFixed(2)}s pos:${mg.position} ${wordAligned ? '(word-synced)' : '(centered)'}`);
+                const subTag = mg.subType ? `:${mg.subType}` : '';
+                console.log(`    -> [${modeTag}] ${mg.type}${subTag}: "${mg.text}" @${mg.startTime.toFixed(2)}s pos:${mg.position} ${wordAligned ? '(word-synced)' : '(centered)'}`);
                 placedTypes.push(mg.type);
                 lastType = mg.type;
                 results.push(mg);
@@ -1319,9 +1341,18 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
             const batchResults = await batchFallback(scenes, scriptContext, allowedMGs);
             // Filter to allowed types and apply styles
             const filteredBatch = batchResults.filter(mg => allowedMGs.includes(mg.type));
+            const batchThemeId = scriptContext?.themeId || 'neutral';
+            const batchThemeOvr = MG_THEME_OVERRIDES[batchThemeId] || {};
             filteredBatch.forEach(mg => {
                 mg.style = mgStyle;
                 if (mg.type === 'mapChart') mg.mapStyle = mapStyle;
+                // Resolve subType from theme override → registry default
+                const catOvr = batchThemeOvr[mg.type];
+                const catReg = MG_REGISTRY[mg.type];
+                if (catReg) {
+                    mg.subType = catOvr?.style || catReg.defaultType;
+                    if (catOvr?.anim) mg.animation = catOvr.anim;
+                }
                 if (mg.startTime + mg.duration > totalDuration) {
                     mg.duration = Math.max(1, totalDuration - mg.startTime);
                 }

@@ -1,6 +1,11 @@
 /**
- * Map Provider — Downloads static map images from MapTiler API
- * Free tier: 100K requests/month. Provides styled map tiles as PNG images.
+ * Map Provider — Downloads static map images for mapChart MGs.
+ * Provider order:
+ *   1. MapTiler (primary) — tile-stitching from free tile API (100K tiles/month)
+ *   2. Geoapify (fallback) — static map API (free 3,000 req/day)
+ *
+ * MapTiler's static maps API requires a paid plan, so we download individual
+ * 512×512 tiles and stitch them into a 1920×1080 image using @napi-rs/canvas.
  *
  * Usage: downloadMapForMG(mg, scriptContext, tempDir) → saves PNG, sets mg.mapImageFile
  */
@@ -10,7 +15,7 @@ const path = require('path');
 const https = require('https');
 const config = require('./config');
 
-// MapTiler static map styles (match MAP_STYLE_NAMES in ai-motion-graphics.js)
+// ── MapTiler style mapping (primary) ──
 const MAPTILER_STYLE_MAP = {
     dark:      'dataviz-dark',
     natural:   'outdoor-v2',
@@ -19,7 +24,16 @@ const MAPTILER_STYLE_MAP = {
     political: 'streets-v2',
 };
 
-// Country/region center coordinates [lon, lat] + zoom level hints
+// ── Geoapify style mapping (fallback) ──
+const GEOAPIFY_STYLE_MAP = {
+    dark:      'dark-matter-brown',
+    natural:   'osm-liberty',
+    satellite: 'dark-matter',
+    light:     'positron',
+    political: 'osm-bright',
+};
+
+// Country/region center coordinates [lon, lat, zoom]
 const GEO_COORDS = {
     'China': [104, 35, 4], 'United States': [-98, 39, 3.5], 'USA': [-98, 39, 3.5], 'US': [-98, 39, 3.5],
     'India': [78, 22, 4], 'Japan': [138, 36, 5], 'Germany': [10.5, 51.2, 5.5],
@@ -81,67 +95,208 @@ function httpsDownload(url, timeout = 15000) {
 
 /**
  * Compute map center and zoom from a list of entity names.
- * If multiple entities, computes bounding box center + appropriate zoom.
- * @param {string[]} entities - Array of location/country names
- * @returns {{ lon: number, lat: number, zoom: number }}
+ * The first entity is treated as the primary subject — when entities span
+ * the globe, the view centers on the primary with a moderate zoom instead
+ * of zooming all the way out to fit everything.
  */
 function computeMapView(entities) {
-    const coords = entities
-        .map(e => GEO_COORDS[e])
-        .filter(Boolean);
+    const resolved = entities
+        .map(e => ({ name: e, coords: GEO_COORDS[e] }))
+        .filter(r => r.coords);
 
-    if (coords.length === 0) {
-        return { lon: 0, lat: 20, zoom: 1.5 }; // World view fallback
+    if (resolved.length === 0) {
+        return { lon: 0, lat: 20, zoom: 2 };
     }
 
-    if (coords.length === 1) {
-        return { lon: coords[0][0], lat: coords[0][1], zoom: coords[0][2] || 5 };
+    if (resolved.length === 1) {
+        const c = resolved[0].coords;
+        return { lon: c[0], lat: c[1], zoom: c[2] || 5 };
     }
 
-    // Bounding box of all entities
     let minLon = Infinity, maxLon = -Infinity;
     let minLat = Infinity, maxLat = -Infinity;
-    for (const [lon, lat] of coords) {
+    for (const { coords: [lon, lat] } of resolved) {
         minLon = Math.min(minLon, lon);
         maxLon = Math.max(maxLon, lon);
         minLat = Math.min(minLat, lat);
         maxLat = Math.max(maxLat, lat);
     }
 
-    const centerLon = (minLon + maxLon) / 2;
-    const centerLat = (minLat + maxLat) / 2;
-
-    // Estimate zoom from span (rough heuristic)
-    const lonSpan = maxLon - minLon;
-    const latSpan = maxLat - minLat;
-    const maxSpan = Math.max(lonSpan, latSpan);
+    const maxSpan = Math.max(maxLon - minLon, maxLat - minLat);
 
     let zoom;
-    if (maxSpan > 200) zoom = 1;
-    else if (maxSpan > 100) zoom = 1.5;
-    else if (maxSpan > 60) zoom = 2;
+    if (maxSpan > 200) zoom = 2;
+    else if (maxSpan > 100) zoom = 2;
+    else if (maxSpan > 60) zoom = 2.5;
     else if (maxSpan > 30) zoom = 3;
     else if (maxSpan > 15) zoom = 4;
     else if (maxSpan > 8) zoom = 5;
     else if (maxSpan > 4) zoom = 6;
     else zoom = 7;
 
+    // When entities span the whole globe (zoom <= 2), bias center toward
+    // the primary entity (first in list) so the main subject is prominent
+    const primary = resolved[0].coords;
+    let centerLon, centerLat;
+    if (zoom <= 2) {
+        // 60% weight to primary entity, 40% to geometric center
+        const geoLon = (minLon + maxLon) / 2;
+        const geoLat = (minLat + maxLat) / 2;
+        centerLon = primary[0] * 0.6 + geoLon * 0.4;
+        centerLat = primary[1] * 0.6 + geoLat * 0.4;
+    } else {
+        centerLon = (minLon + maxLon) / 2;
+        centerLat = (minLat + maxLat) / 2;
+    }
+
     return { lon: centerLon, lat: centerLat, zoom };
 }
 
+// ══════════════════════════════════════════════════════════════════
+// MapTiler Tile Stitcher — downloads 512px tiles and composites
+// into a single 1920×1080 image using @napi-rs/canvas
+// ══════════════════════════════════════════════════════════════════
+
+const TILE_SIZE = 512;   // MapTiler serves 512px tiles
+const OUT_W = 1920;
+const OUT_H = 1080;
+
+/** Convert lon/lat to fractional tile coordinates at a given zoom */
+function lonLatToTile(lon, lat, zoom) {
+    const z = Math.pow(2, zoom);
+    const x = ((lon + 180) / 360) * z;
+    const latRad = lat * Math.PI / 180;
+    const y = (1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2 * z;
+    return { x, y };
+}
+
 /**
- * Build MapTiler static map URL.
- * @param {{ lon, lat, zoom }} view - Map center and zoom
- * @param {string} mapStyle - One of: dark, natural, satellite, light, political
- * @param {string} apiKey - MapTiler API key
- * @returns {string} URL for 1920x1080 PNG
+ * Calculate which tiles we need and where to place them on the canvas.
+ * Returns { tiles: [{z, x, y, destX, destY}], ... }
  */
-function buildMapUrl(view, mapStyle, apiKey) {
+function computeTileGrid(view, width = OUT_W, height = OUT_H) {
+    // Use integer zoom for tiles (MapTiler tiles only exist at integer zooms)
+    // Minimum z=2 to avoid world-wrap duplication at very low zooms
+    const z = Math.max(2, Math.floor(view.zoom));
+    const maxTile = Math.pow(2, z);
+
+    // Center tile position (fractional)
+    const center = lonLatToTile(view.lon, view.lat, z);
+
+    // How many pixels from center to edge
+    const halfW = width / 2;
+    const halfH = height / 2;
+
+    // Pixel offset of center within its tile
+    const centerPixelX = center.x * TILE_SIZE;
+    const centerPixelY = center.y * TILE_SIZE;
+
+    // Top-left pixel in the global tile-pixel space
+    const originX = centerPixelX - halfW;
+    const originY = centerPixelY - halfH;
+
+    // Which tiles cover this region
+    const tileMinX = Math.floor(originX / TILE_SIZE);
+    const tileMinY = Math.floor(originY / TILE_SIZE);
+    const tileMaxX = Math.floor((originX + width - 1) / TILE_SIZE);
+    const tileMaxY = Math.floor((originY + height - 1) / TILE_SIZE);
+
+    const tiles = [];
+    for (let ty = tileMinY; ty <= tileMaxY; ty++) {
+        for (let tx = tileMinX; tx <= tileMaxX; tx++) {
+            // Wrap X for world maps, clamp Y
+            const wrappedX = ((tx % maxTile) + maxTile) % maxTile;
+            if (ty < 0 || ty >= maxTile) continue;
+
+            // Where to draw this tile on our canvas
+            const destX = tx * TILE_SIZE - originX;
+            const destY = ty * TILE_SIZE - originY;
+
+            tiles.push({ z, x: wrappedX, y: ty, destX: Math.round(destX), destY: Math.round(destY) });
+        }
+    }
+
+    return { tiles, z };
+}
+
+/**
+ * Download a single MapTiler tile. Returns Buffer (PNG).
+ * Uses @2x retina tiles (512px native) for crisp 1920×1080 output.
+ */
+function downloadTile(style, z, x, y, apiKey) {
+    // @2x suffix gives 512px retina tiles on the free tier
+    const url = `https://api.maptiler.com/maps/${style}/${z}/${x}/${y}@2x.png?key=${apiKey}`;
+    return httpsDownload(url, 10000);
+}
+
+/**
+ * Stitch MapTiler tiles into a 1920×1080 PNG. Returns Buffer.
+ * Uses @napi-rs/canvas for compositing.
+ */
+async function stitchMapTilerTiles(view, mapStyle, apiKey) {
+    const { createCanvas, loadImage } = require('@napi-rs/canvas');
     const style = MAPTILER_STYLE_MAP[mapStyle] || MAPTILER_STYLE_MAP.dark;
-    const w = 1920;
-    const h = 1080;
-    // MapTiler free tier: max 2048px per dimension, no @2x
-    return `https://api.maptiler.com/maps/${style}/static/${view.lon},${view.lat},${view.zoom}/${w}x${h}.png?key=${apiKey}`;
+
+    const { tiles, z } = computeTileGrid(view);
+    console.log(`      MapTiler: stitching ${tiles.length} tiles at z=${z} (${style})`);
+
+    // Download all tiles in parallel (batched to avoid hammering)
+    const BATCH_SIZE = 6;
+    const tileImages = new Map();
+
+    for (let i = 0; i < tiles.length; i += BATCH_SIZE) {
+        const batch = tiles.slice(i, i + BATCH_SIZE);
+        const results = await Promise.allSettled(
+            batch.map(async (t) => {
+                const key = `${t.z}/${t.x}/${t.y}`;
+                const buf = await downloadTile(style, t.z, t.x, t.y, apiKey);
+                const img = await loadImage(buf);
+                tileImages.set(key, { img, tile: t });
+            })
+        );
+        // Log failures
+        for (let j = 0; j < results.length; j++) {
+            if (results[j].status === 'rejected') {
+                const t = batch[j];
+                console.log(`      ⚠️ Tile ${t.z}/${t.x}/${t.y} failed: ${results[j].reason?.message}`);
+            }
+        }
+    }
+
+    if (tileImages.size === 0) {
+        throw new Error('No tiles downloaded');
+    }
+
+    console.log(`      Downloaded ${tileImages.size}/${tiles.length} tiles`);
+
+    // Stitch onto canvas
+    const canvas = createCanvas(OUT_W, OUT_H);
+    const ctx = canvas.getContext('2d');
+
+    // Fill background matching the map style (covers missing/OOB tiles)
+    const BG_COLORS = {
+        dark: '#1a1a2e', natural: '#b5d0d0', satellite: '#0b1026',
+        light: '#e8e8e8', political: '#aad3df',
+    };
+    ctx.fillStyle = BG_COLORS[mapStyle] || '#1a1a2e';
+    ctx.fillRect(0, 0, OUT_W, OUT_H);
+
+    // Draw tiles (512px native from MapTiler /512/ endpoint)
+    for (const tile of tiles) {
+        const key = `${tile.z}/${tile.x}/${tile.y}`;
+        const entry = tileImages.get(key);
+        if (!entry) continue;
+        ctx.drawImage(entry.img, tile.destX, tile.destY, TILE_SIZE, TILE_SIZE);
+    }
+
+    return canvas.toBuffer('image/png');
+}
+
+// ── Geoapify URL builder (fallback) ──
+
+function buildGeoapifyUrl(view, mapStyle, apiKey) {
+    const style = GEOAPIFY_STYLE_MAP[mapStyle] || GEOAPIFY_STYLE_MAP.dark;
+    return `https://maps.geoapify.com/v1/staticmap?style=${style}&width=1920&height=1080&center=lonlat:${view.lon},${view.lat}&zoom=${view.zoom}&apiKey=${apiKey}`;
 }
 
 /**
@@ -149,75 +304,88 @@ function buildMapUrl(view, mapStyle, apiKey) {
  */
 function extractEntities(mg, scriptContext) {
     let entities = [];
-
-    // From scriptContext.entities
     if (scriptContext?.entities) {
         entities = [...scriptContext.entities];
     }
-
-    // Also scan mg.text and mg.subtext for known location names
     const textToScan = `${mg.text || ''} ${mg.subtext || ''}`;
     for (const name of Object.keys(GEO_COORDS)) {
         if (name.length > 2 && textToScan.toLowerCase().includes(name.toLowerCase())) {
             if (!entities.includes(name)) entities.push(name);
         }
     }
-
     return entities;
 }
 
 /**
  * Download a static map image for a mapChart MG.
- * Saves to tempDir, sets mg.mapImageFile with the filename.
- *
- * @param {object} mg - The mapChart MG object
- * @param {object} scriptContext - Script context with entities
- * @param {string} tempDir - Directory to save the image
- * @returns {Promise<boolean>} true if downloaded successfully
+ * Tries MapTiler (tile stitching) first, then Geoapify (static API).
  */
 async function downloadMapForMG(mg, scriptContext, tempDir) {
-    const apiKey = config.maptiler?.apiKey;
-    if (!apiKey) {
-        console.log('   ⚠️ No MAPTILER_API_KEY configured — mapChart will use Canvas2D fallback');
+    const maptilerKey = config.maptiler?.apiKey;
+    const geoapifyKey = config.geoapify?.apiKey;
+
+    if (!maptilerKey && !geoapifyKey) {
+        console.log('   ⚠️ No map API key configured (set MAPTILER_API_KEY or GEOAPIFY_API_KEY)');
+        console.log('      mapChart will use Canvas2D fallback');
         return false;
     }
 
     const entities = extractEntities(mg, scriptContext);
     const view = computeMapView(entities);
     const mapStyle = mg.mapStyle || 'dark';
-    const url = buildMapUrl(view, mapStyle, apiKey);
-
     const filename = `map-${mapStyle}-${Date.now()}.png`;
     const filePath = path.join(tempDir, filename);
 
-    try {
-        console.log(`   🗺️ Downloading map: ${mapStyle} style, center=[${view.lon.toFixed(1)},${view.lat.toFixed(1)}], zoom=${view.zoom}`);
-        console.log(`      Entities: ${entities.length > 0 ? entities.join(', ') : '(none — world view)'}`);
-        const buffer = await httpsDownload(url);
+    console.log(`   🗺️ Downloading map: ${mapStyle} style, center=[${view.lon.toFixed(1)},${view.lat.toFixed(1)}], zoom=${view.zoom}`);
+    console.log(`      Entities: ${entities.length > 0 ? entities.join(', ') : '(none — world view)'}`);
 
-        if (buffer.length < 5000) {
-            console.log(`   ⚠️ Map image too small (${buffer.length} bytes) — possible API error`);
-            return false;
+    // Provider 1: MapTiler tile stitching
+    if (maptilerKey) {
+        try {
+            console.log(`      Trying MapTiler (tile stitching)...`);
+            const buffer = await stitchMapTilerTiles(view, mapStyle, maptilerKey);
+
+            if (buffer.length < 5000) {
+                console.log(`      ⚠️ MapTiler: stitched image too small (${buffer.length} bytes) — skipping`);
+            } else {
+                fs.writeFileSync(filePath, buffer);
+                mg.mapImageFile = filename;
+                mg._mapView = view;
+                console.log(`   ✅ Map saved via MapTiler: ${filename} (${(buffer.length / 1024).toFixed(0)} KB)`);
+                return true;
+            }
+        } catch (err) {
+            console.log(`      ⚠️ MapTiler failed: ${err.message}`);
         }
-
-        fs.writeFileSync(filePath, buffer);
-        mg.mapImageFile = filename;
-        // Store view info so renderer can convert lon/lat → pixel for overlays
-        mg._mapView = view;
-        console.log(`   ✅ Map saved: ${filename} (${(buffer.length / 1024).toFixed(0)} KB)`);
-        return true;
-    } catch (err) {
-        console.log(`   ⚠️ Map download failed: ${err.message}`);
-        return false;
     }
+
+    // Provider 2: Geoapify static API (fallback)
+    if (geoapifyKey) {
+        try {
+            console.log(`      Trying Geoapify (static API)...`);
+            const url = buildGeoapifyUrl(view, mapStyle, geoapifyKey);
+            const buffer = await httpsDownload(url);
+
+            if (buffer.length < 5000) {
+                console.log(`      ⚠️ Geoapify: image too small (${buffer.length} bytes) — skipping`);
+            } else {
+                fs.writeFileSync(filePath, buffer);
+                mg.mapImageFile = filename;
+                mg._mapView = view;
+                console.log(`   ✅ Map saved via Geoapify: ${filename} (${(buffer.length / 1024).toFixed(0)} KB)`);
+                return true;
+            }
+        } catch (err) {
+            console.log(`      ⚠️ Geoapify failed: ${err.message}`);
+        }
+    }
+
+    console.log('   ⚠️ All map providers failed — will use Canvas2D fallback');
+    return false;
 }
 
 /**
  * Download maps for all mapChart MGs in a list.
- * @param {object[]} allMGs - All MG objects (filters to mapChart internally)
- * @param {object} scriptContext - Script context
- * @param {string} tempDir - Temp directory
- * @returns {Promise<number>} Number of maps downloaded
  */
 async function downloadMapsForMGs(allMGs, scriptContext, tempDir) {
     const mapMGs = allMGs.filter(mg => mg.type === 'mapChart');
@@ -231,4 +399,7 @@ async function downloadMapsForMGs(allMGs, scriptContext, tempDir) {
     return downloaded;
 }
 
-module.exports = { downloadMapForMG, downloadMapsForMGs, computeMapView, GEO_COORDS };
+module.exports = {
+    downloadMapForMG, downloadMapsForMGs, computeMapView, GEO_COORDS,
+    stitchMapTilerTiles, MAPTILER_STYLE_MAP, GEOAPIFY_STYLE_MAP,
+};

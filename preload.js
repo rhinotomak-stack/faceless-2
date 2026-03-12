@@ -27,6 +27,20 @@ try {
     console.warn('Theme tokens not available:', e.message);
 }
 
+// Expose MG Registry to renderer (categories, types, animations)
+try {
+    const mgReg = require('./src/mg-registry');
+    window._mgRegistry = {
+        registry: mgReg.MG_REGISTRY,
+        getTypesForCategory: mgReg.getTypesForCategory,
+        getAnimationsForCategory: mgReg.getAnimationsForCategory,
+        resolveSubType: mgReg.resolveSubType,
+        resolveAnimation: mgReg.resolveAnimation,
+    };
+} catch (e) {
+    console.warn('MG Registry not available:', e.message);
+}
+
 // Expose Electron IPC methods to the renderer process
 window.electronAPI = {
     // Copy file to project folder

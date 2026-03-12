@@ -1108,6 +1108,9 @@ ipcMain.handle('get-scene-media-path', async (event, sceneIndex, extension, pref
         // Try with provided extension first, then try common extensions
         const extensions = extension ? [extension] : ['.mp4', '.jpg', '.jpeg', '.png', '.webp'];
         for (const ext of extensions) {
+            // Try both naming conventions: scene-{i}-asset{ext} (new) and scene-{i}{ext} (legacy)
+            const publicAssetPath = path.join(PUBLIC_PATH, `${filePrefix}-${sceneIndex}-asset${ext}`);
+            if (fs.existsSync(publicAssetPath)) return publicAssetPath;
             const publicPath = path.join(PUBLIC_PATH, `${filePrefix}-${sceneIndex}${ext}`);
             if (fs.existsSync(publicPath)) return publicPath;
             const tempPath = path.join(TEMP_PATH, `${filePrefix}-${sceneIndex}${ext}`);
@@ -1125,6 +1128,8 @@ ipcMain.handle('get-scene-video-path', async (event, sceneIndex) => {
     try {
         const extensions = ['.mp4', '.jpg', '.jpeg', '.png', '.webp'];
         for (const ext of extensions) {
+            const publicAssetPath = path.join(PUBLIC_PATH, `scene-${sceneIndex}-asset${ext}`);
+            if (fs.existsSync(publicAssetPath)) return publicAssetPath;
             const publicPath = path.join(PUBLIC_PATH, `scene-${sceneIndex}${ext}`);
             if (fs.existsSync(publicPath)) return publicPath;
             const tempPath = path.join(TEMP_PATH, `scene-${sceneIndex}${ext}`);

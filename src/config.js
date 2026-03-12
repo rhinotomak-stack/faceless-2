@@ -133,6 +133,16 @@ const config = {
         creativeCommonsOnly: false,
     },
 
+    // Map providers (for static map images in mapChart MGs)
+    // Geoapify: free 3,000 req/day — https://myprojects.geoapify.com/
+    geoapify: {
+        apiKey: process.env.GEOAPIFY_API_KEY || ''
+    },
+    // MapTiler: free 100K req/month — https://cloud.maptiler.com/
+    maptiler: {
+        apiKey: process.env.MAPTILER_API_KEY || ''
+    },
+
     // Paths (resolved from PROJECT_DIR for multi-instance isolation)
     paths: {
         input: path.join(PROJECT_DIR, 'input'),

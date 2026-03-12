@@ -34,9 +34,51 @@ if (window._themeTokens) {
             MG_STYLES[styleName].shadowOffsetY = preset.shadowOffsetY;
             MG_STYLES[styleName].cardStyle = preset.cardStyle;
             MG_STYLES[styleName].lowerThirdStyle = preset.lowerThirdStyle;
+            MG_STYLES[styleName].lowerThirdAnimation = preset.lowerThirdAnimation;
             MG_STYLES[styleName].chartBarRadius = preset.chartBarRadius;
         }
     }
+}
+
+// ========================================
+// MG Registry helpers — populate variant/animation dropdowns
+// ========================================
+function _populateMgVariantDropdown(mgType, currentSubType) {
+    const row = document.getElementById('mg-subtype-row');
+    const sel = document.getElementById('mg-subtype');
+    if (!row || !sel || !window._mgRegistry) { if (row) row.style.display = 'none'; return; }
+
+    const types = window._mgRegistry.getTypesForCategory(mgType);
+    if (types.length <= 1) { row.style.display = 'none'; return; }
+
+    sel.innerHTML = '';
+    for (const t of types) {
+        const opt = document.createElement('option');
+        opt.value = t.key;
+        opt.textContent = t.label;
+        sel.appendChild(opt);
+    }
+    sel.value = currentSubType || window._mgRegistry.registry[mgType]?.defaultType || types[0]?.key || '';
+    row.style.display = '';
+}
+
+function _populateMgAnimationDropdown(mgType, currentAnimation) {
+    const row = document.getElementById('mg-animation-row');
+    const sel = document.getElementById('mg-animation');
+    if (!row || !sel || !window._mgRegistry) { if (row) row.style.display = 'none'; return; }
+
+    const anims = window._mgRegistry.getAnimationsForCategory(mgType);
+    if (anims.length <= 1) { row.style.display = 'none'; return; }
+
+    sel.innerHTML = '';
+    for (const a of anims) {
+        const opt = document.createElement('option');
+        opt.value = a;
+        opt.textContent = a.replace(/([A-Z])/g, ' $1').replace(/^./, c => c.toUpperCase());
+        sel.appendChild(opt);
+    }
+    sel.value = currentAnimation || anims[0] || '';
+    row.style.display = '';
 }
 
 // ========================================
@@ -1553,6 +1595,10 @@ function updateMgProperties() {
     const mapStyleEl = document.getElementById('mg-map-style');
     if (mapStyleRow) mapStyleRow.style.display = mg.type === 'mapChart' ? '' : 'none';
     if (mapStyleEl && mg.type === 'mapChart') mapStyleEl.value = mg.mapStyle || 'dark';
+
+    // Populate variant and animation dropdowns from registry
+    _populateMgVariantDropdown(mg.type, mg.subType);
+    _populateMgAnimationDropdown(mg.type, mg.animation);
 }
 
 // Show MG properties panel for a V3 full-screen MG scene
@@ -1598,6 +1644,10 @@ function updateMgPropertiesForScene(scene) {
     const mapStyleEl = document.getElementById('mg-map-style');
     if (mapStyleRow) mapStyleRow.style.display = sceneType === 'mapChart' ? '' : 'none';
     if (mapStyleEl && sceneType === 'mapChart') mapStyleEl.value = mg.mapStyle || scene.mapStyle || 'dark';
+
+    // Populate variant and animation dropdowns from registry
+    _populateMgVariantDropdown(sceneType, mg.subType || scene.subType);
+    _populateMgAnimationDropdown(sceneType, mg.animation || scene.animation);
 }
 
 function setupClipPropertyListeners() {
@@ -1930,8 +1980,40 @@ function setupMgPropertyListeners() {
             if (!active) return;
             active.mg.type = e.target.value;
             if (active.mg.mgData) active.mg.mgData.type = e.target.value;
+            // Reset subType/animation when type changes
+            delete active.mg.subType;
+            delete active.mg.animation;
+            if (active.mg.mgData) { delete active.mg.mgData.subType; delete active.mg.mgData.animation; }
+            // Refresh variant/animation dropdowns for new type
+            _populateMgVariantDropdown(e.target.value, null);
+            _populateMgAnimationDropdown(e.target.value, null);
             if (active.isScene) loadActiveScenes(); else updateMGOverlay();
             renderTracks();
+            refreshCompositorMGs();
+        });
+    }
+
+    // Variant (subType) dropdown
+    const subTypeEl = document.getElementById('mg-subtype');
+    if (subTypeEl) {
+        subTypeEl.addEventListener('change', (e) => {
+            const active = getActiveMG();
+            if (!active) return;
+            active.mg.subType = e.target.value;
+            if (active.mg.mgData) active.mg.mgData.subType = e.target.value;
+            if (active.isScene) loadActiveScenes(); else updateMGOverlay();
+            refreshCompositorMGs();
+        });
+    }
+
+    // Animation profile dropdown
+    const animEl = document.getElementById('mg-animation');
+    if (animEl) {
+        animEl.addEventListener('change', (e) => {
+            const active = getActiveMG();
+            if (!active) return;
+            active.mg.animation = e.target.value;
+            if (active.mg.mgData) active.mg.mgData.animation = e.target.value;
             refreshCompositorMGs();
         });
     }
@@ -1964,6 +2046,7 @@ function setupMgPropertyListeners() {
         typeEl.addEventListener('change', () => {
             const mapStyleRow = document.getElementById('mg-map-style-row');
             if (mapStyleRow) mapStyleRow.style.display = typeEl.value === 'mapChart' ? '' : 'none';
+            // Variant/animation dropdowns already refreshed in the main type listener above
         });
     }
 
@@ -3788,6 +3871,26 @@ async function loadVideoPlan({ freshBuild = false } = {}) {
                     sceneObj.highlightBoxes = core.highlightBoxes;
                     if (sceneObj.mgData) sceneObj.mgData.highlightBoxes = core.highlightBoxes;
                 }
+                // Propagate map image properties
+                if (core.mapImageFile) {
+                    sceneObj.mapImageFile = core.mapImageFile;
+                    if (sceneObj.mgData) sceneObj.mgData.mapImageFile = core.mapImageFile;
+                }
+                if (core._mapView) {
+                    sceneObj._mapView = core._mapView;
+                    if (sceneObj.mgData) sceneObj.mgData._mapView = core._mapView;
+                }
+                // Pre-resolve map image URL for preview
+                if (core.mapImageFile && window.electronAPI?.getProjectInfo && window.electronAPI?.getFileUrl) {
+                    window.electronAPI.getProjectInfo().then(async (info) => {
+                        const mapPath = info.projectDir + '/public/' + core.mapImageFile;
+                        const url = await window.electronAPI.getFileUrl(mapPath);
+                        if (url) {
+                            sceneObj._mapImageUrl = url;
+                            if (sceneObj.mgData) sceneObj.mgData._mapImageUrl = url;
+                        }
+                    }).catch(() => { });
+                }
                 // Pre-resolve article image URL for preview
                 if (core.articleImageFile && window.electronAPI?.getSceneMediaPath) {
                     const ext = core.articleImageFile.match(/\.\w+$/)?.[0] || '.jpg';
@@ -4124,19 +4227,21 @@ function generateSfxClips() {
 }
 
 function renderScenes() {
-    // Filter out overlay and MG scenes from the scene list
-    const displayScenes = state.scenes.filter(s => !s.isMGScene);
+    // Show all scenes including full-screen MG scenes (they are real scenes on V3)
+    const displayScenes = state.scenes.filter(s => s.trackId !== undefined || !s.isMGScene || s.isMGScene);
     if (displayScenes.length === 0) { elements.sceneList.innerHTML = '<p class="empty-state">No scenes yet</p>'; return; }
     elements.sceneList.innerHTML = displayScenes.map((scene) => {
         const i = state.scenes.indexOf(scene);
         const trType = scene.transitionType || (state.transition.style !== 'auto' ? state.transition.style : null) || scene.transition?.type || 'cut';
         const trIcons = { cut: '✂️', crossfade: '🔀', fade: '🔀', wipe: '↔️', slide: '↔️', flash: '⚡', dissolve: '🔀', blur: '🔀', zoom: '🔎', fade_to_black: '⬛' };
         const trLabels = { cut: 'Cut', crossfade: 'Crossfade', fade: 'Fade', wipe: 'Wipe', slide: 'Slide', flash: 'Flash', dissolve: 'Dissolve', blur: 'Blur', zoom: 'Zoom', fade_to_black: 'Fade to Black' };
-        const trBadge = i > 0 ? `<span class="scene-transition-badge" title="${trLabels[trType] || trType}">${trIcons[trType] || ''} ${trLabels[trType] || trType}</span>` : '';
-        return `<div class="scene-card" data-index="${i}">
-            <div class="scene-number">Scene ${i + 1}${trBadge}</div>
-            <div class="scene-text">${scene.text}</div>
-            <div class="scene-keyword">🔍 ${scene.keyword}</div>
+        const trBadge = i > 0 && !scene.isMGScene ? `<span class="scene-transition-badge" title="${trLabels[trType] || trType}">${trIcons[trType] || ''} ${trLabels[trType] || trType}</span>` : '';
+        const mgBadge = scene.isMGScene ? `<span class="scene-mg-badge" title="Motion Graphic: ${scene.type || 'MG'}">🎨 ${scene.type || 'MG'}</span>` : '';
+        const keyword = scene.isMGScene ? `🎨 MG: ${scene.type || 'motion-graphic'}` : `🔍 ${scene.keyword}`;
+        return `<div class="scene-card ${scene.isMGScene ? 'scene-card-mg' : ''}" data-index="${i}">
+            <div class="scene-number">Scene ${i}${trBadge}${mgBadge}</div>
+            <div class="scene-text">${scene.text || ''}</div>
+            <div class="scene-keyword">${keyword}</div>
         </div>`;
     }).join('');
     document.querySelectorAll('.scene-card').forEach(card => {
@@ -5859,6 +5964,14 @@ async function loadActiveScenes(activeScenes) {
                     elements.bgVideo.classList.add('active');
                     if (state.isPlaying && elements.bgVideo.paused && elements.bgVideo.src) elements.bgVideo.play().catch(() => { });
                 }
+            } else {
+                // Fallback: blur source not yet loaded — show dark gradient instead of pure black
+                if (elements.bgImage) elements.bgImage.classList.remove('active');
+                if (elements.bgVideo) elements.bgVideo.classList.remove('active');
+                if (elements.bgGradient) {
+                    elements.bgGradient.style.background = 'linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%)';
+                    elements.bgGradient.classList.add('active');
+                }
             }
         } else if (bgType.startsWith('pattern:')) {
             // Pattern mode: show a background file from assets/backgrounds/
@@ -6312,6 +6425,9 @@ async function renderVideo() {
             // Preserve articleHighlight-specific fields
             if (mg.articleImageFile) base.articleImageFile = mg.articleImageFile;
             if (mg.highlightBoxes) base.highlightBoxes = mg.highlightBoxes;
+            // Preserve mapChart-specific fields
+            if (mg.mapImageFile) base.mapImageFile = mg.mapImageFile;
+            if (mg._mapView) base._mapView = mg._mapView;
             return base;
         });
         // Save muted tracks so Composition.jsx can mute audio accordingly
