@@ -2,6 +2,7 @@ const axios = require('axios');
 const config = require('./config');
 const { callAI } = require('./ai-provider');
 const { getTheme } = require('./themes');
+const { getNiche } = require('./niches');
 
 // Track placed MG types to avoid repetition
 let placedTypes = [];
@@ -96,6 +97,258 @@ function pickStyle(scriptContext) {
 
     // Fallback
     return 'clean';
+}
+
+// ============ HYBRID MG CANDIDATE GENERATION ============
+// Rule-based scoring that narrows the full MG type list to 2-5 best candidates
+// per scene. AI then picks from these candidates instead of the full menu.
+
+// Content pattern detectors — each returns a score (0-10) for how well a scene matches
+const CONTENT_PATTERNS = {
+    // Numbers, percentages, statistics
+    statistic: (text) => {
+        const numMatches = text.match(/\d[\d,.]*\s*(%|percent|million|billion|trillion|thousand|hundred|times|x\b|fold)/gi);
+        if (numMatches && numMatches.length >= 1) return { score: 8, reason: 'has numeric stat' };
+        const bareNumbers = text.match(/\b\d[\d,.]+\b/g);
+        if (bareNumbers && bareNumbers.length >= 2) return { score: 5, reason: 'multiple numbers' };
+        if (bareNumbers && bareNumbers.length === 1) return { score: 3, reason: 'single number' };
+        return { score: 0, reason: null };
+    },
+
+    // Percentage / completion patterns
+    percentage: (text) => {
+        if (/\d+\s*(%|percent)/i.test(text)) return { score: 8, reason: 'explicit percentage' };
+        if (/\b(nearly|almost|about|roughly|approximately)\s+(half|third|quarter|two.thirds)/i.test(text)) return { score: 5, reason: 'approximate fraction' };
+        return { score: 0, reason: null };
+    },
+
+    // Ranked / listed items
+    ranking: (text) => {
+        if (/\b(top\s+\d|ranked?\s+#?\d|number\s+(one|two|three|four|five|\d)|first\s+place|leading|biggest|largest|smallest|worst|best)\b/i.test(text))
+            return { score: 7, reason: 'ranking language' };
+        return { score: 0, reason: null };
+    },
+
+    // Enumerated list / multiple items
+    enumeration: (text) => {
+        if (/\b(first|second|third|fourth|fifth)\b.*\b(first|second|third|fourth|fifth)\b/i.test(text))
+            return { score: 8, reason: 'ordinal enumeration' };
+        if (/\b(one|two|three|four|five)\s+(things?|reasons?|ways?|factors?|steps?|points?|tips?)/i.test(text))
+            return { score: 7, reason: 'list introduction' };
+        // Semicolons or comma-separated items that look like a list
+        const semicolons = (text.match(/;/g) || []).length;
+        if (semicolons >= 2) return { score: 6, reason: 'semicolon list' };
+        return { score: 0, reason: null };
+    },
+
+    // Historical / timeline progression
+    timeline: (text) => {
+        const years = text.match(/\b(1[89]\d{2}|20[0-3]\d)\b/g);
+        if (years && new Set(years).size >= 2) return { score: 8, reason: 'multiple distinct years' };
+        if (/\b(from\s+\d{4}\s+to\s+\d{4}|over\s+the\s+(past|last|next)\s+\d+\s+(years?|decades?|centuries?))/i.test(text))
+            return { score: 7, reason: 'time span language' };
+        if (years && years.length === 1) return { score: 3, reason: 'single year reference' };
+        return { score: 0, reason: null };
+    },
+
+    // Person / organization introduction
+    identity: (text) => {
+        // Title + name pattern: "CEO John Smith", "Dr. Jane Doe", "President Biden"
+        if (/\b(CEO|CTO|CFO|founder|president|director|professor|Dr\.|chairman|minister|secretary|leader|coach|manager|senator|governor|mayor|chief|general)\s+[A-Z][a-z]+/i.test(text))
+            return { score: 8, reason: 'title + name' };
+        // Organization patterns
+        if (/\b(company|corporation|organization|agency|institute|university|foundation)\b/i.test(text) && /[A-Z][a-z]+/.test(text))
+            return { score: 5, reason: 'organization mention' };
+        return { score: 0, reason: null };
+    },
+
+    // Key thesis / headline moment
+    thesis: (text, sceneIndex, totalScenes) => {
+        // Opening or closing scene
+        if (sceneIndex === 0) return { score: 6, reason: 'opening scene' };
+        if (sceneIndex === totalScenes - 1) return { score: 5, reason: 'closing scene' };
+        // Strong assertion language
+        if (/\b(the (truth|reality|fact|key|secret|answer|problem|solution|question) is|here'?s (why|how|what)|this (is|was|means|changed|proves)|what (this|that|it) means)\b/i.test(text))
+            return { score: 7, reason: 'thesis language' };
+        return { score: 0, reason: null };
+    },
+
+    // Comparison / versus
+    comparison: (text) => {
+        if (/\b(vs\.?|versus|compared\s+to|unlike|while\s+.+\s+on\s+the\s+other\s+hand|in\s+contrast|difference\s+between)\b/i.test(text))
+            return { score: 8, reason: 'comparison language' };
+        if (/\b(better|worse|more|less|faster|slower|bigger|smaller|higher|lower)\s+than\b/i.test(text))
+            return { score: 5, reason: 'comparative adjective' };
+        return { score: 0, reason: null };
+    },
+
+    // Quote / testimony / emphasis
+    emphasis: (text) => {
+        // Direct quotes
+        if (/[""][^""]{10,}[""]/.test(text)) return { score: 7, reason: 'direct quote' };
+        if (/\b(said|stated|declared|proclaimed|warned|announced|argued|claimed)\b/i.test(text))
+            return { score: 5, reason: 'attribution verb' };
+        return { score: 0, reason: null };
+    },
+
+    // Geographic / location data
+    geographic: (text) => {
+        // Multiple country/location names
+        const locations = text.match(/\b(United States|USA|China|India|Russia|Japan|Germany|France|UK|Brazil|Canada|Australia|Mexico|Europe|Asia|Africa|America|Middle East|[A-Z][a-z]+(?:land|stan|ria|nia|lia|sia))\b/g);
+        if (locations && new Set(locations).size >= 2) return { score: 8, reason: 'multiple locations' };
+        if (locations && locations.length >= 1) return { score: 4, reason: 'single location' };
+        return { score: 0, reason: null };
+    },
+
+    // Study / article / research reference
+    research: (text) => {
+        if (/\b(study|research|report|survey|paper|journal|published|according\s+to|findings?\s+show|data\s+(shows?|suggests?|reveals?))\b/i.test(text))
+            return { score: 7, reason: 'research reference' };
+        return { score: 0, reason: null };
+    },
+
+    // Abstract / conceptual explanation (good for animated icons)
+    conceptual: (text) => {
+        if (/\b(concept|process|system|mechanism|framework|approach|method|technique|strategy|principle|theory|model)\b/i.test(text))
+            return { score: 5, reason: 'conceptual language' };
+        return { score: 0, reason: null };
+    },
+
+    // Dramatic / powerful single-word emphasis
+    dramatic: (text) => {
+        // Short scenes with strong words
+        const words = text.split(/\s+/).filter(Boolean);
+        if (words.length <= 8 && /\b(revolutionary|unprecedented|devastating|incredible|impossible|unstoppable|catastrophic|groundbreaking|extraordinary)\b/i.test(text))
+            return { score: 7, reason: 'dramatic short statement' };
+        return { score: 0, reason: null };
+    },
+};
+
+// Maps content patterns to best-fit MG types (priority ordered)
+const PATTERN_TO_MG_TYPES = {
+    statistic:   ['statCounter', 'barChart', 'donutChart', 'progressBar'],
+    percentage:  ['progressBar', 'donutChart', 'statCounter'],
+    ranking:     ['rankingList', 'barChart', 'statCounter'],
+    enumeration: ['bulletList', 'rankingList', 'timeline'],
+    timeline:    ['timeline', 'barChart'],
+    identity:    ['lowerThird', 'callout'],
+    thesis:      ['headline', 'kineticText', 'focusWord'],
+    comparison:  ['comparisonCard', 'barChart'],
+    emphasis:    ['callout', 'kineticText', 'focusWord'],
+    geographic:  ['mapChart', 'barChart', 'statCounter'],
+    research:    ['articleHighlight', 'callout', 'statCounter'],
+    conceptual:  ['animatedIcons', 'bulletList', 'callout'],
+    dramatic:    ['focusWord', 'kineticText', 'headline'],
+};
+
+// Per-video caps for certain MG types
+const TYPE_CAPS = {
+    focusWord: 2,
+    headline: 3,
+    animatedIcons: 3,
+    barChart: 1,
+    donutChart: 1,
+    comparisonCard: 1,
+    timeline: 1,
+    rankingList: 1,
+    mapChart: 1,
+    kineticText: 1,
+    articleHighlight: 1,
+};
+
+/**
+ * Generate ranked MG candidates for a scene based on content analysis.
+ *
+ * @param {Object} scene - Scene with text, startTime, endTime
+ * @param {number} sceneIndex - Scene position in video
+ * @param {number} totalScenes - Total scene count
+ * @param {string[]} allowedMGs - Niche-allowed MG types
+ * @param {string[]} alreadyPlaced - Types already placed in the video
+ * @returns {{ candidates: Array<{type: string, score: number, reason: string}>, patternHits: Array<{pattern: string, score: number, reason: string}>, skipped: Array<{type: string, reason: string}>, shouldSkip: boolean }}
+ */
+function generateCandidates(scene, sceneIndex, totalScenes, allowedMGs, alreadyPlaced) {
+    const text = scene.text || '';
+    const duration = (scene.endTime || 0) - (scene.startTime || 0);
+
+    // Very short scenes or empty text → skip
+    if (duration < 2.0 || text.trim().length < 15) {
+        return { candidates: [], patternHits: [], skipped: [], shouldSkip: true, skipReason: `too short (${duration.toFixed(1)}s / ${text.length} chars)` };
+    }
+
+    // Run all pattern detectors
+    const patternHits = [];
+    for (const [patternName, detector] of Object.entries(CONTENT_PATTERNS)) {
+        const result = detector(text, sceneIndex, totalScenes);
+        if (result.score > 0) {
+            patternHits.push({ pattern: patternName, score: result.score, reason: result.reason });
+        }
+    }
+
+    // If no patterns matched at all → likely transitional scene
+    if (patternHits.length === 0) {
+        return { candidates: [], patternHits: [], skipped: [], shouldSkip: true, skipReason: 'no content patterns detected' };
+    }
+
+    // Aggregate scores per MG type from all matching patterns
+    const typeScores = {};
+    const typeReasons = {};
+    for (const hit of patternHits) {
+        const mgTypes = PATTERN_TO_MG_TYPES[hit.pattern] || [];
+        for (let rank = 0; rank < mgTypes.length; rank++) {
+            const type = mgTypes[rank];
+            // Primary match gets full score, secondary gets reduced
+            const rankPenalty = rank * 1.5;
+            const adjustedScore = Math.max(1, hit.score - rankPenalty);
+            typeScores[type] = (typeScores[type] || 0) + adjustedScore;
+            if (!typeReasons[type]) typeReasons[type] = [];
+            typeReasons[type].push(hit.reason);
+        }
+    }
+
+    // Filter: only allowed by niche + not over cap
+    const candidates = [];
+    const skipped = [];
+
+    for (const [type, rawScore] of Object.entries(typeScores)) {
+        // Not in niche allowed list
+        if (!allowedMGs.includes(type)) {
+            skipped.push({ type, reason: 'not in niche' });
+            continue;
+        }
+
+        // Check per-video cap
+        if (TYPE_CAPS[type] !== undefined) {
+            const placed = alreadyPlaced.filter(t => t === type).length;
+            if (placed >= TYPE_CAPS[type]) {
+                skipped.push({ type, reason: `cap reached (${placed}/${TYPE_CAPS[type]})` });
+                continue;
+            }
+        }
+
+        // Penalize if same as last placed type (avoid repetition)
+        let score = rawScore;
+        if (alreadyPlaced.length > 0 && alreadyPlaced[alreadyPlaced.length - 1] === type) {
+            score *= 0.5; // halve score for consecutive same type
+        }
+
+        candidates.push({
+            type,
+            score: Math.round(score * 10) / 10,
+            reason: typeReasons[type].join(', ')
+        });
+    }
+
+    // Sort by score descending, keep top 5
+    candidates.sort((a, b) => b.score - a.score);
+    const topCandidates = candidates.slice(0, 5);
+
+    return {
+        candidates: topCandidates,
+        patternHits,
+        skipped,
+        shouldSkip: topCandidates.length === 0,
+        skipReason: topCandidates.length === 0 ? 'all candidates filtered out' : null
+    };
 }
 
 // ============ WORD-ALIGNED TIMING ============
@@ -329,7 +582,142 @@ function autoHighlight(text) {
     return result;
 }
 
-function buildPrompt(scene, sceneIndex, totalScenes, scriptContext, sceneVisual, allowedMGs) {
+// ============ RULE-BASED MG BUILDER ============
+// When a candidate type is dominant and AI is skipped, build MG from scene text.
+// Extracts display text, subtext, and trigger word deterministically.
+
+function buildRuleMG(scene, sceneIndex, type) {
+    const text = scene.text || '';
+    const words = text.split(/\s+/).filter(Boolean);
+    if (words.length === 0) return null;
+
+    let displayText = '';
+    let subtext = 'none';
+    let triggerWord = '';
+    const position = POSITION_MAP[type] || 'center';
+
+    switch (type) {
+        case 'statCounter': {
+            // Find the number and surrounding context
+            const match = text.match(/(\b\w+\s+){0,3}(\d[\d,.]*\s*(%|percent|million|billion|trillion|thousand|x\b|times|fold)?)/i);
+            if (match) {
+                displayText = match[0].trim().split(/\s+/).slice(0, 6).join(' ');
+                triggerWord = (match[2] || '').replace(/[^\w]/g, '') || words[Math.floor(words.length / 2)];
+            } else {
+                displayText = words.slice(0, 5).join(' ');
+                triggerWord = words[0];
+            }
+            break;
+        }
+        case 'progressBar': {
+            const match = text.match(/(\d+)\s*(%|percent)/i);
+            if (match) {
+                displayText = match[0].trim();
+                subtext = match[1]; // The percentage value
+                triggerWord = match[1];
+            } else {
+                displayText = words.slice(0, 5).join(' ');
+                triggerWord = words[0];
+            }
+            break;
+        }
+        case 'lowerThird': {
+            // Find title + name pattern
+            const match = text.match(/\b(CEO|CTO|CFO|founder|president|director|professor|Dr\.|chairman|minister|coach|manager)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/i);
+            if (match) {
+                displayText = match[0].trim();
+                triggerWord = match[2].split(/\s/)[0]; // First name
+            } else {
+                // Find any capitalized name
+                const nameMatch = text.match(/\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+))\b/);
+                displayText = nameMatch ? nameMatch[0] : words.slice(0, 4).join(' ');
+                triggerWord = nameMatch ? nameMatch[1].split(/\s/)[0] : words[0];
+            }
+            break;
+        }
+        case 'headline': {
+            // Use the strongest clause, max 8 words
+            displayText = words.slice(0, Math.min(8, words.length)).join(' ');
+            triggerWord = words[0];
+            break;
+        }
+        case 'focusWord': {
+            // Find the most dramatic word
+            const dramatic = words.filter(w => /^[a-z]{5,}$/i.test(w)).sort((a, b) => b.length - a.length);
+            displayText = dramatic[0] || words[0];
+            triggerWord = displayText;
+            break;
+        }
+        case 'callout': {
+            displayText = words.slice(0, Math.min(8, words.length)).join(' ');
+            triggerWord = words[Math.min(2, words.length - 1)];
+            break;
+        }
+        case 'kineticText': {
+            displayText = words.slice(0, Math.min(6, words.length)).join(' ');
+            triggerWord = words[0];
+            break;
+        }
+        case 'comparisonCard': {
+            const vsMatch = text.match(/(.{3,30})\s+(?:vs\.?|versus|compared\s+to)\s+(.{3,30})/i);
+            if (vsMatch) {
+                displayText = vsMatch[0].trim().split(/\s+/).slice(0, 8).join(' ');
+                subtext = `${vsMatch[1].trim().split(/\s+/).slice(0, 4).join(' ')}:left,${vsMatch[2].trim().split(/\s+/).slice(0, 4).join(' ')}:right`;
+                triggerWord = 'vs';
+            } else {
+                displayText = words.slice(0, 6).join(' ');
+                triggerWord = words[0];
+            }
+            break;
+        }
+        case 'articleHighlight': {
+            displayText = words.slice(0, Math.min(8, words.length)).join(' ');
+            subtext = fixArticleSubtext('', text, displayText);
+            triggerWord = words[Math.min(2, words.length - 1)];
+            break;
+        }
+        default: {
+            // Generic fallback for any type
+            displayText = words.slice(0, Math.min(8, words.length)).join(' ');
+            triggerWord = words[Math.min(2, words.length - 1)];
+            break;
+        }
+    }
+
+    // Find trigger word timestamp
+    let startTime = scene.startTime + 0.2;
+    if (scene.words && scene.words.length > 0 && triggerWord) {
+        const normalized = triggerWord.toLowerCase().replace(/[^a-z0-9]/g, '');
+        const wordMatch = scene.words.find(w => w.word.toLowerCase().replace(/[^a-z0-9]/g, '').includes(normalized));
+        if (wordMatch) {
+            startTime = Math.max(scene.startTime, wordMatch.start - 0.05);
+        }
+    }
+
+    const duration = computeSmartDuration(type, displayText, subtext);
+    const category = FULLSCREEN_MG_TYPES.has(type) ? 'fullscreen' : 'overlay';
+
+    // Cap overlay MG duration to scene length + small bleed
+    const sceneDur = scene.endTime - scene.startTime;
+    const cappedDuration = category === 'overlay'
+        ? Math.min(duration, sceneDur + 1.0)
+        : duration;
+
+    return {
+        id: `mg-${sceneIndex}`,
+        type,
+        category,
+        text: displayText,
+        subtext: subtext === 'none' ? '' : subtext,
+        startTime,
+        duration: cappedDuration,
+        position,
+        sceneIndex,
+        style: 'clean', // overridden later
+    };
+}
+
+function buildPrompt(scene, sceneIndex, totalScenes, scriptContext, sceneVisual, candidateTypes) {
     const sceneDuration = (scene.endTime - scene.startTime).toFixed(1);
 
     let prompt = '';
@@ -339,10 +727,10 @@ function buildPrompt(scene, sceneIndex, totalScenes, scriptContext, sceneVisual,
         prompt += `VIDEO TOPIC: ${scriptContext.summary}\n`;
     }
 
-    // Theme/niche enforcement
-    const themeId = scriptContext?.themeId || 'neutral';
-    const theme = getTheme(themeId);
-    prompt += `NICHE: "${theme.name}" — You are STRICTLY limited to using ONLY the following Motion Graphic types: ${allowedMGs.join(', ')}. Do NOT use or invent any other types.\n`;
+    // Niche enforcement — candidates already filtered by niche
+    const nicheId = scriptContext?.nicheId || 'general';
+    const niche = getNiche(nicheId);
+    prompt += `NICHE: "${niche.name}" — You MUST pick from the candidate types listed below. Do NOT use or invent any other types.\n`;
 
     // Visual context
     if (sceneVisual && sceneVisual.description !== 'No visual analysis available') {
@@ -351,7 +739,7 @@ function buildPrompt(scene, sceneIndex, totalScenes, scriptContext, sceneVisual,
         prompt += visualNote + '\n';
     }
 
-    prompt += `\nScene ${sceneIndex + 1}/${totalScenes}: decide if this narration needs a text overlay.\n`;
+    prompt += `\nScene ${sceneIndex + 1}/${totalScenes}: pick the best motion graphic type for this narration.\n`;
 
     prompt += `\nNARRATION: "${scene.text}"`;
     prompt += `\nSCENE: ${scene.startTime.toFixed(2)}s - ${scene.endTime.toFixed(2)}s (${sceneDuration}s)`;
@@ -362,7 +750,7 @@ function buildPrompt(scene, sceneIndex, totalScenes, scriptContext, sceneVisual,
         prompt += `\nWORD TIMESTAMPS: ${wordTimeline}`;
     }
 
-    // Build type descriptions dynamically based on allowed types
+    // Build type descriptions dynamically based on CANDIDATE types (pre-narrowed)
     const TYPE_DESCRIPTIONS = {
         statCounter: 'statCounter: A specific number/percentage is spoken. E.g. "grew by 340%", "5 million users"',
         progressBar: 'progressBar: A percentage or completion stat. E.g. "78% of people", "nearly half"',
@@ -389,48 +777,36 @@ function buildPrompt(scene, sceneIndex, totalScenes, scriptContext, sceneVisual,
   subtext: animation style — one of: float, drift, bounce, slideIn, popIn, spin`,
     };
 
-    const typeDescriptions = allowedMGs
+    const typeDescriptions = candidateTypes
         .map(t => TYPE_DESCRIPTIONS[t])
         .filter(Boolean)
         .map(d => `- ${d}`)
         .join('\n');
 
     prompt += `\n
-=== WHEN TO ADD A MOTION GRAPHIC ===
-Add a motion graphic when the narration has data, names, places, key statements, or visual concepts. Aim for about 40-60% of scenes to have one. Only use "none" for transitional or very short scenes with no meaningful content.
-
-ALLOWED TYPES for "${theme.name}" niche (pick the best match or none):
+=== CANDIDATE TYPES (pre-selected based on scene content analysis) ===
+Pick the BEST match from these candidates:
 ${typeDescriptions}
-- none: Normal narration, nothing visually noteworthy
+- none: If none of the candidates truly fit this narration
 
-POSITION GUIDE (choose where to place it):
-- bottom-left: lowerThird, callout — standard TV-style, doesn't block main content
-- bottom-right: statCounter, progressBar — data display corner
-- center: headline, focusWord, kineticText, comparisonCard, donutChart — big impact center stage
-- center-left: bulletList, rankingList — left-aligned vertical lists
-- center: barChart, timeline, mapChart — needs full width
+POSITION GUIDE:
+- bottom-left: lowerThird, callout
+- bottom-right: statCounter, progressBar
+- center: headline, focusWord, kineticText, comparisonCard, donutChart
+- center-left: bulletList, rankingList
+- center: barChart, timeline, mapChart — full width
 - If footage has on-screen text at center → prefer bottom-left or bottom-right
 
 TIMING — triggerWord:
-- Pick the EXACT word from the narration that should make the MG appear on screen
-- The MG will show the instant the narrator says this word — not before, not after
-- Pick the most meaningful word: the number being displayed, the name being introduced, the key term
-- Example: narration says "revenue grew by 340 percent" + type statCounter → triggerWord: 340
-- Example: narration says "CEO John Smith announced" + type lowerThird → triggerWord: John`;
+- Pick the EXACT word from the narration that triggers the MG appearance
+- Pick the most meaningful word: the number, the name, the key term
+- Example: "revenue grew by 340 percent" + statCounter → triggerWord: 340
+- Example: "CEO John Smith announced" + lowerThird → triggerWord: John`;
 
     if (placedTypes.length > 0) {
         prompt += `\n\nALREADY PLACED: ${placedTypes.join(', ')}`;
         if (lastType) {
             prompt += ` | LAST: ${lastType} (avoid repeating)`;
-        }
-        const focusCount = placedTypes.filter(t => t === 'focusWord').length;
-        if (focusCount >= 2) prompt += `\nfocusWord LIMIT REACHED`;
-        const headlineCount = placedTypes.filter(t => t === 'headline').length;
-        if (headlineCount >= 3) prompt += `\nheadline LIMIT REACHED`;
-        const iconCount = placedTypes.filter(t => t === 'animatedIcons').length;
-        if (iconCount >= 3) prompt += `\nanimatedIcons LIMIT REACHED`;
-        for (const limitType of ['barChart', 'donutChart', 'comparisonCard', 'timeline', 'rankingList', 'mapChart', 'kineticText', 'articleHighlight']) {
-            if (placedTypes.includes(limitType)) prompt += `\n${limitType} LIMIT REACHED`;
         }
     }
 
@@ -438,7 +814,7 @@ TIMING — triggerWord:
         prompt += `\n\nUSER INSTRUCTIONS (follow these preferences):\n${aiInstructionsRef}`;
     }
 
-    const allowedTypesList = [...allowedMGs, 'none'].join('|');
+    const allowedTypesList = [...candidateTypes, 'none'].join('|');
     prompt += `\n\nReply ONLY with these 5 lines (nothing else):
 type: <${allowedTypesList}>
 text: <display text, max 8 words, extracted from narration>
@@ -648,12 +1024,12 @@ async function batchFallback(scenes, scriptContext, allowedMGs) {
     ).join('\n');
 
     const topic = scriptContext?.summary || 'unknown';
-    const themeId = scriptContext?.themeId || 'neutral';
-    const theme = getTheme(themeId);
+    const nicheId = scriptContext?.nicheId || 'general';
+    const niche = getNiche(nicheId);
     const typesList = (allowedMGs || Object.keys(POSITION_MAP)).join(', ');
 
     let prompt = `Video about: ${topic}
-Niche: "${theme.name}" — ONLY use these MG types: ${typesList}
+Niche: "${niche.name}" — ONLY use these MG types: ${typesList}
 
 Here are the scenes:
 ${sceneList}
@@ -779,11 +1155,11 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
     const mgStyle = pickStyle(scriptContext);
     const mapStyle = pickMapStyle(scriptContext, mgStyle);
 
-    // Resolve allowed MG types from theme (Niche Pack architecture)
-    const themeId = scriptContext?.themeId || 'neutral';
-    const theme = getTheme(themeId);
-    const allowedMGs = theme.allowedMGs || Object.keys(POSITION_MAP);
-    console.log(`  MG Style: ${mgStyle} | Niche: ${theme.name}`);
+    // Resolve allowed MG types from niche (content strategy)
+    const nicheId = scriptContext?.nicheId || 'general';
+    const niche = getNiche(nicheId);
+    const allowedMGs = niche.allowedMGs || Object.keys(POSITION_MAP);
+    console.log(`  MG Style: ${mgStyle} | Niche: ${niche.name}`);
     console.log(`  Allowed MGs: ${allowedMGs.join(', ')}\n`);
 
     const results = [];
@@ -791,23 +1167,71 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
     for (let i = 0; i < scenes.length; i++) {
         const scene = scenes[i];
         const sceneVisual = visualAnalysis ? visualAnalysis.find(v => v.sceneIndex === i) : null;
-        console.log(`  Scene ${i}: "${scene.text.substring(0, 45)}..."`);
+        console.log(`  Scene ${i}: "${scene.text.substring(0, 50)}..."`);
+
+        // ---- HYBRID STEP 1: Rule-based candidate generation ----
+        const candidateResult = generateCandidates(scene, i, scenes.length, allowedMGs, placedTypes);
+
+        // Debug: log candidate analysis
+        if (candidateResult.patternHits.length > 0) {
+            const hitsSummary = candidateResult.patternHits.map(h => `${h.pattern}(${h.score})`).join(', ');
+            console.log(`    [Patterns]: ${hitsSummary}`);
+        }
+        if (candidateResult.skipped.length > 0) {
+            const skippedSummary = candidateResult.skipped.map(s => `${s.type}:${s.reason}`).join(', ');
+            console.log(`    [Filtered]: ${skippedSummary}`);
+        }
+
+        if (candidateResult.shouldSkip) {
+            console.log(`    -> Skip: ${candidateResult.skipReason}`);
+            lastType = '';
+            continue;
+        }
+
+        const candidateTypes = candidateResult.candidates.map(c => c.type);
+        const candidateSummary = candidateResult.candidates.map(c => `${c.type}(${c.score})`).join(', ');
+        console.log(`    [Candidates]: ${candidateSummary}`);
+
+        // ---- HYBRID STEP 2: Deterministic pick if top candidate is dominant ----
+        let mg = null;
+        let selectionMode = 'ai';
+        const topCandidate = candidateResult.candidates[0];
+        const secondCandidate = candidateResult.candidates[1];
+        const isDominant = topCandidate.score >= 7 && (!secondCandidate || topCandidate.score >= secondCandidate.score * 1.8);
+
+        if (isDominant && candidateTypes.length === 1) {
+            // Single strong candidate — skip AI, use deterministic pick
+            selectionMode = 'rule';
+            console.log(`    [Rule-pick]: ${topCandidate.type} (dominant score ${topCandidate.score}, reason: ${topCandidate.reason})`);
+        }
 
         try {
-            const prompt = buildPrompt(scene, i, scenes.length, scriptContext, sceneVisual, allowedMGs);
-            const rawText = await callAI(prompt);
-            console.log(`    [AI raw]: ${rawText.substring(0, 80).replace(/\n/g, ' | ')}`);
-            const mg = parseResponse(rawText, scene, i);
+            if (selectionMode === 'ai') {
+                // ---- HYBRID STEP 3: AI picks from narrowed candidates ----
+                const prompt = buildPrompt(scene, i, scenes.length, scriptContext, sceneVisual, candidateTypes);
+                const rawText = await callAI(prompt);
+                console.log(`    [AI raw]: ${rawText.substring(0, 80).replace(/\n/g, ' | ')}`);
+                mg = parseResponse(rawText, scene, i);
 
-            // Enforce niche pack: reject types not in the allowed list
-            if (mg && !allowedMGs.includes(mg.type)) {
-                console.log(`    -> Rejected "${mg.type}" (not in ${theme.name} niche), skipping`);
-                continue;
+                // Enforce candidate list: reject if AI picked outside candidates
+                if (mg && !candidateTypes.includes(mg.type)) {
+                    console.log(`    -> Rejected "${mg.type}" (not in candidates: ${candidateTypes.join(',')}), falling back to top candidate`);
+                    // Fall back to rule-based top candidate
+                    mg = null;
+                    selectionMode = 'rule-fallback';
+                }
+            }
+
+            if (selectionMode === 'rule' || selectionMode === 'rule-fallback') {
+                // Build MG from top candidate deterministically
+                // We still need text/subtext/triggerWord — extract from narration
+                mg = buildRuleMG(scene, i, topCandidate.type);
             }
 
             if (mg) {
                 // Apply video-wide style
                 mg.style = mgStyle;
+                mg.selectionMode = selectionMode; // track for debugging
                 if (mg.type === 'mapChart') mg.mapStyle = mapStyle;
 
                 // Post-process animatedIcons: structure icons array from text keywords
@@ -818,15 +1242,14 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
                         keyword: kw,
                         file: null, // populated by icon-provider.js
                         animation: animStyle,
-                        x: 10 + (idx * 18) + Math.floor((idx * 37 + 13) % 15), // spread across screen
+                        x: 10 + (idx * 18) + Math.floor((idx * 37 + 13) % 15),
                         y: 12 + Math.floor((idx * 53 + 7) % 65),
-                        size: 55 + Math.floor((idx * 29 + 11) % 40), // 55-95px
+                        size: 55 + Math.floor((idx * 29 + 11) % 40),
                         delay: idx * 0.35,
                     }));
                     mg.animationStyle = animStyle;
                     mg.iconOpacity = 0.15;
                     mg.sceneIndex = i;
-                    // Extend duration to fill scene
                     mg.duration = Math.max(mg.duration, scene.endTime - mg.startTime - 0.2);
                 }
 
@@ -835,7 +1258,8 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
                     mg.position = 'bottom-left';
                 }
                 const wordAligned = findWordAlignedStart(mg.text, scene) !== null;
-                console.log(`    -> ${mg.type}: "${mg.text}" @${mg.startTime.toFixed(2)}s pos:${mg.position} ${wordAligned ? '(word-synced)' : '(centered)'}`);
+                const modeTag = selectionMode === 'ai' ? 'AI' : selectionMode === 'rule' ? 'RULE' : 'RULE-FB';
+                console.log(`    -> [${modeTag}] ${mg.type}: "${mg.text}" @${mg.startTime.toFixed(2)}s pos:${mg.position} ${wordAligned ? '(word-synced)' : '(centered)'}`);
                 placedTypes.push(mg.type);
                 lastType = mg.type;
                 results.push(mg);
@@ -909,8 +1333,21 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
         }
     }
 
-    console.log(`\n  Motion graphics placed: ${results.length}/${scenes.length} scenes (style: ${mgStyle})\n`);
+    // Log selection summary
+    const modeCounts = { ai: 0, rule: 0, 'rule-fallback': 0 };
+    const typeCounts = {};
+    for (const mg of results) {
+        modeCounts[mg.selectionMode || 'ai']++;
+        typeCounts[mg.type] = (typeCounts[mg.type] || 0) + 1;
+    }
+    console.log(`\n  Motion graphics placed: ${results.length}/${scenes.length} scenes (style: ${mgStyle})`);
+    if (results.length > 0) {
+        console.log(`  📊 Selection: AI=${modeCounts.ai} | Rule=${modeCounts.rule} | Fallback=${modeCounts['rule-fallback']}`);
+        const typeBreakdown = Object.entries(typeCounts).sort((a, b) => b[1] - a[1]).map(([t, c]) => `${t}(${c})`).join(', ');
+        console.log(`  📊 Types: ${typeBreakdown}`);
+    }
+    console.log('');
     return { motionGraphics: results, mgStyle, mapStyle };
 }
 
-module.exports = { processMotionGraphics, STYLE_NAMES, MAP_STYLE_NAMES, pickStyle, pickMapStyle, FULLSCREEN_MG_TYPES };
+module.exports = { processMotionGraphics, STYLE_NAMES, MAP_STYLE_NAMES, pickStyle, pickMapStyle, FULLSCREEN_MG_TYPES, generateCandidates };

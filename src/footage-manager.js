@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const config = require('./config');
 const { getBackgroundSource } = require('./themes');
+const { getNiche, rewriteQuery, getFallbackKeywords } = require('./niches');
 
 // Import all providers
 const PexelsVideoProvider = require('./providers/pexels-video');
@@ -118,14 +119,23 @@ function getSmartPriority(sourceHint, mediaType, scriptContext) {
         if (order) return order;
     }
 
-    // Priority 2: Video theme from script context
+    // Priority 2: Niche-based provider priority
+    const nicheId = scriptContext?.nicheId;
+    if (nicheId) {
+        const niche = getNiche(nicheId);
+        if (niche.footagePriority && niche.footagePriority[mediaType]) {
+            return niche.footagePriority[mediaType];
+        }
+    }
+
+    // Priority 3: Legacy theme-based fallback
     const theme = (scriptContext?.theme || '').toLowerCase();
     if (theme && THEME_PRIORITY_MAP[theme]) {
         const order = THEME_PRIORITY_MAP[theme][mediaType];
         if (order) return order;
     }
 
-    // Priority 3: Default hardcoded order
+    // Priority 4: Default hardcoded order
     return mediaType === 'video' ? VIDEO_PRIORITY : IMAGE_PRIORITY;
 }
 
@@ -176,6 +186,27 @@ function initProviders(scriptContext) {
         const status = p.isAvailable() ? '✅' : '⚠️ (no API key)';
         console.log(`     ${status} ${p.name}`);
     });
+
+    // Log active search policy
+    const nicheId = scriptContext?.nicheId;
+    if (nicheId && nicheId !== 'general') {
+        const policy = getSearchPolicy(nicheId);
+        console.log(`  🔍 Search policy (${nicheId}):`);
+        if (policy.contextTerms?.length) console.log(`     context: +${policy.contextTerms.join(', +')}`);
+        if (policy.avoidTerms?.length) console.log(`     avoid: -${policy.avoidTerms.join(', -')}`);
+        console.log(`     stock max words: ${policy.stockMaxWords || 3} | entity boost: ${policy.entityBoost ? 'on' : 'off'}`);
+    }
+}
+
+// ============ PROVIDER KEY LOOKUP ============
+
+// Reverse map: provider class → key string (for search policy rewriting)
+const PROVIDER_CLASS_TO_KEY = new Map();
+for (const [key, cls] of Object.entries(VIDEO_SOURCE_MAP)) PROVIDER_CLASS_TO_KEY.set(cls, key);
+for (const [key, cls] of Object.entries(IMAGE_SOURCE_MAP)) PROVIDER_CLASS_TO_KEY.set(cls, key);
+
+function getProviderKey(provider) {
+    return PROVIDER_CLASS_TO_KEY.get(provider.constructor) || '';
 }
 
 // ============ KEYWORD VARIANTS ============
@@ -272,7 +303,7 @@ function reorderProviders(allProviders, priorityOrder, sourceMap) {
     return ordered;
 }
 
-async function downloadMedia(keyword, mediaType, filenameBase, sceneDuration = 10, sourceHint = '') {
+async function downloadMedia(keyword, mediaType, filenameBase, sceneDuration = 10, sourceHint = '', nicheId = '', scene = null) {
     // Get smart priority and reorder providers for this scene
     const priorityOrder = getSmartPriority(sourceHint, mediaType, scriptContextRef);
     const allProviders = mediaType === 'video' ? videoProviders : imageProviders;
@@ -284,8 +315,12 @@ async function downloadMedia(keyword, mediaType, filenameBase, sceneDuration = 1
         if (!provider.isAvailable()) continue;
 
         try {
-            console.log(`  🔍 [${provider.name}] Searching: "${keyword}"...`);
-            let results = await provider.search(keyword);
+            // Apply niche search policy to rewrite query per-provider
+            const providerKey = getProviderKey(provider);
+            const searchQuery = nicheId ? rewriteQuery(keyword, nicheId, providerKey, scene) : keyword;
+            const queryChanged = searchQuery !== keyword;
+            console.log(`  🔍 [${provider.name}] Searching: "${searchQuery}"${queryChanged ? ` (from: "${keyword}")` : ''}...`);
+            let results = await provider.search(searchQuery);
 
             // Apply quality filtering (watermark + size rejection)
             const beforeCount = results.length;
@@ -374,16 +409,22 @@ async function downloadAllMedia(scenes, scriptContext, options = {}) {
 
         const keyword = scene.researchKeyword || scene.keyword;
         const sceneDuration = (scene.endTime || 0) - (scene.startTime || 0) || 10;
-        console.log(`\nScene ${i} (${mediaType}): "${keyword}"${sourceHint ? ` [hint: ${sourceHint}]` : ''}`);
+        const nicheId = scriptContext?.nicheId || '';
+        console.log(`\nScene ${i} (${mediaType}): "${keyword}"${sourceHint ? ` [hint: ${sourceHint}]` : ''}${nicheId ? ` [niche: ${nicheId}]` : ''}`);
 
-        let result = await downloadMedia(keyword, mediaType, `scene-${i}`, sceneDuration, sourceHint);
+        // Log provider priority for first scene or when source hint changes per scene
+        const priorityOrder = getSmartPriority(sourceHint, mediaType, scriptContext);
+        const prioritySource = sourceHint && SOURCE_PRIORITY_MAP[sourceHint] ? 'hint' : nicheId ? 'niche' : 'default';
+        console.log(`  📦 Priority: ${priorityOrder.join(' → ')} (${prioritySource})`);
+
+        let result = await downloadMedia(keyword, mediaType, `scene-${i}`, sceneDuration, sourceHint, nicheId, scene);
 
         // If primary keyword failed, try simplified variants
         if (!result) {
             const variants = getKeywordVariants(keyword);
             for (const variant of variants) {
                 console.log(`  🔄 Retrying with simplified keyword: "${variant}"`);
-                result = await downloadMedia(variant, mediaType, `scene-${i}`, sceneDuration, sourceHint);
+                result = await downloadMedia(variant, mediaType, `scene-${i}`, sceneDuration, sourceHint, nicheId, scene);
                 if (result) break;
             }
         }
@@ -394,19 +435,32 @@ async function downloadAllMedia(scenes, scriptContext, options = {}) {
             const fallbackProviders = fallbackType === 'video' ? videoProviders : imageProviders;
             if (fallbackProviders.some(p => p.isAvailable())) {
                 console.log(`  🔄 Trying fallback type: ${fallbackType}...`);
-                result = await downloadMedia(keyword, fallbackType, `scene-${i}`, sceneDuration, sourceHint);
+                result = await downloadMedia(keyword, fallbackType, `scene-${i}`, sceneDuration, sourceHint, nicheId, scene);
 
                 if (!result) {
                     const variants = getKeywordVariants(keyword);
                     for (const variant of variants) {
                         console.log(`  🔄 Retrying ${fallbackType} with: "${variant}"`);
-                        result = await downloadMedia(variant, fallbackType, `scene-${i}`, sceneDuration, sourceHint);
+                        result = await downloadMedia(variant, fallbackType, `scene-${i}`, sceneDuration, sourceHint, nicheId, scene);
                         if (result) break;
                     }
                 }
 
                 if (result) {
                     scene.mediaType = fallbackType;
+                }
+            }
+        }
+
+        // Last resort: try niche-specific fallback keywords
+        if (!result && nicheId) {
+            const fallbacks = getFallbackKeywords(nicheId);
+            console.log(`  🔄 Trying niche fallback keywords (${nicheId})...`);
+            for (const fbKeyword of fallbacks) {
+                result = await downloadMedia(fbKeyword, mediaType, `scene-${i}`, sceneDuration, '', '', null);
+                if (result) {
+                    console.log(`  ✅ Niche fallback worked: "${fbKeyword}"`);
+                    break;
                 }
             }
         }
@@ -461,7 +515,19 @@ async function downloadAllMedia(scenes, scriptContext, options = {}) {
         console.log(`  🔍 Probed dimensions for ${probeCount} file(s)`);
     }
 
-    console.log('\n✅ All media downloaded!\n');
+    // Provider usage summary
+    const providerHits = {};
+    let failed = 0;
+    for (const scene of scenes) {
+        if (scene.sourceProvider) {
+            providerHits[scene.sourceProvider] = (providerHits[scene.sourceProvider] || 0) + 1;
+        } else if (!scene.mediaFile) {
+            failed++;
+        }
+    }
+    const hitsSummary = Object.entries(providerHits).sort((a, b) => b[1] - a[1]).map(([p, c]) => `${p}(${c})`).join(', ');
+    console.log(`\n✅ All media downloaded!`);
+    console.log(`  📊 Sources: ${hitsSummary}${failed ? ` | failed(${failed})` : ''}\n`);
     return { scenes, visualAnalysis };
 }
 

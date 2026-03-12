@@ -836,6 +836,9 @@ ipcMain.handle('run-build', async (event, options) => {
             if (options.buildFormat) {
                 buildEnv.BUILD_FORMAT = options.buildFormat;
             }
+            if (options.buildNiche) {
+                buildEnv.BUILD_NICHE = options.buildNiche;
+            }
             if (options.buildTheme) {
                 buildEnv.BUILD_THEME = options.buildTheme;
             }

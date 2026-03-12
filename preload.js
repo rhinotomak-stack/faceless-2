@@ -14,6 +14,19 @@ window._nodeSpawn = spawn;
 window._nodePath = _nodePath;
 window._nodeFs = _nodeFs;
 
+// Expose theme tokens to renderer (single source of truth from src/themes.js)
+try {
+    const themes = require('./src/themes');
+    window._themeTokens = {
+        getTokens: (themeId) => themes.getThemeTokens(themeId),
+        getStylePreset: (styleName) => themes.getMGStylePreset(styleName),
+        stylePresetNames: themes.getMGStylePresetNames(),
+        themeIds: themes.getThemeIds(),
+    };
+} catch (e) {
+    console.warn('Theme tokens not available:', e.message);
+}
+
 // Expose Electron IPC methods to the renderer process
 window.electronAPI = {
     // Copy file to project folder

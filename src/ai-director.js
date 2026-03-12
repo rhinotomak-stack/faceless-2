@@ -17,7 +17,7 @@
 const axios = require('axios');
 const config = require('./config');
 const { callAI } = require('./ai-provider');
-const { pickThemeFromContent } = require('./themes');
+const { pickNicheFromContent, getNiche } = require('./niches');
 const { searchWeb, hasAnyWebSearchCredentials } = require('./web-search-client');
 
 // ============================================================
@@ -186,7 +186,8 @@ function parseDirectorContext(contextText) {
         ctaStartTime: null,
         hookEndTime: null,
         densityTarget: 3,
-        themeId: 'neutral' // Unified theme system (replaces backgroundCanvas)
+        nicheId: 'general',  // Content strategy (MG types, footage priority, pacing)
+        themeId: 'neutral'   // Visual system (colors, fonts, transitions, overlays)
     };
 
     const lines = contextText.trim().split('\n');
@@ -754,8 +755,6 @@ async function analyzeAndCreateScenes(transcription, directorsBrief) {
 
         if (!rawText) throw new Error('Empty AI response');
 
-        console.log(`   [AI Response Preview]:\n${rawText.substring(0, 600)}${rawText.length > 600 ? '...' : ''}\n`);
-
         // Split on --- separator
         const parts = rawText.split('---');
         const contextPart = parts[0] || '';
@@ -772,14 +771,35 @@ async function analyzeAndCreateScenes(transcription, directorsBrief) {
         // Store density used
         scriptContext.densityTarget = directorsBrief.tier.sceneDensity;
 
-        // Pick unified theme (user override or AI decision)
-        if (directorsBrief.themeOverride && directorsBrief.themeOverride !== 'auto') {
-            // User manually selected a theme
+        // Pick niche (content strategy): user override > AI detection
+        const nicheSource = (directorsBrief.nicheOverride && directorsBrief.nicheOverride !== 'auto') ? 'preset' : 'auto-detect';
+        if (nicheSource === 'preset') {
+            scriptContext.nicheId = directorsBrief.nicheOverride;
+        } else {
+            scriptContext.nicheId = pickNicheFromContent(scriptContext);
+        }
+        const niche = getNiche(scriptContext.nicheId);
+
+        // Apply preset pacing hint if AI didn't detect one or user specified a preset
+        const aiPacing = scriptContext.pacing || 'moderate';
+        if (directorsBrief.presetPacing && (!scriptContext.pacing || scriptContext.pacing === 'moderate')) {
+            scriptContext.pacing = directorsBrief.presetPacing;
+        }
+        const pacingSource = directorsBrief.presetPacing && scriptContext.pacing === directorsBrief.presetPacing ? 'preset' : 'ai';
+
+        // Pick theme (visual system): user override > niche default
+        const themeSource = (directorsBrief.themeOverride && directorsBrief.themeOverride !== 'auto') ? 'user' : 'niche-default';
+        if (themeSource === 'user') {
             scriptContext.themeId = directorsBrief.themeOverride;
         } else {
-            // Let AI pick theme based on content analysis
-            scriptContext.themeId = pickThemeFromContent(scriptContext);
+            scriptContext.themeId = niche.defaultTheme;
         }
+
+        // Log resolution chain
+        console.log(`\n   🔗 Resolution chain:`);
+        console.log(`      Niche: ${scriptContext.nicheId} (${nicheSource}${nicheSource === 'auto-detect' ? `, AI theme="${scriptContext.theme || '?'}"` : ''})`);
+        console.log(`      Theme: ${scriptContext.themeId} (${themeSource}${themeSource === 'niche-default' ? `, niche.defaultTheme="${niche.defaultTheme}"` : ''})`);
+        console.log(`      Pacing: ${scriptContext.pacing} (${pacingSource}${pacingSource === 'preset' ? `, AI was="${aiPacing}"` : ''})`);
 
         // Parse scene anchors
         const sceneLines = scenesPart.trim().split('\n').filter(line => {
@@ -918,7 +938,7 @@ function _defaultContext(fullScript) {
         entities: [], keyStats: [], mainPoints: [], targetAudience: '', emotionalArc: '',
         format: 'documentary', sections: [],
         ctaDetected: false, ctaStartTime: null, hookEndTime: null,
-        densityTarget: 3, themeId: 'neutral' // Unified theme system
+        densityTarget: 3, nicheId: 'general', themeId: 'neutral'
     };
 }
 
@@ -955,7 +975,7 @@ function _logResults(ctx, scenes) {
     console.log(`      Summary: "${ctx.summary || 'unknown'}"`);
     console.log(`      Theme: ${ctx.theme || '?'} | Tone: ${ctx.tone || '?'} | Mood: ${ctx.mood || '?'}`);
     console.log(`      Pacing: ${ctx.pacing || '?'} | Style: ${ctx.visualStyle || '?'}`);
-    console.log(`      Format: ${ctx.format} | ThemeID: ${ctx.themeId || 'neutral'}`);
+    console.log(`      Format: ${ctx.format} | Niche: ${ctx.nicheId || 'general'} | Theme: ${ctx.themeId || 'neutral'}`);
     if (ctx.entities.length > 0) console.log(`      Entities: ${ctx.entities.join(', ')}`);
     if (ctx.hookEndTime) console.log(`      Hook ends: ~${ctx.hookEndTime}s`);
     if (ctx.ctaDetected) console.log(`      CTA detected: ~${ctx.ctaStartTime}s`);

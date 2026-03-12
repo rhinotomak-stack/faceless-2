@@ -4,8 +4,13 @@
  */
 
 // ========================================
-// MG Style Themes (must match MotionGraphics.jsx STYLES)
+// MG Style Themes — from src/themes.js design tokens
 // ========================================
+// MG_STYLES are the per-style visual presets (bg, glow, etc.)
+// THEME_FONTS and THEME_COLORS are populated from theme tokens at init
+// This eliminates duplication between app.js and src/themes.js
+
+// Populated from theme tokens (via preload _themeTokens), with inline fallbacks
 const MG_STYLES = {
     clean: { primary: '#3b82f6', accent: '#f59e0b', bg: 'rgba(0,0,0,0.7)', text: '#ffffff', textSub: 'rgba(255,255,255,0.75)', glow: false },
     bold: { primary: '#ef4444', accent: '#fbbf24', bg: 'rgba(10,10,10,0.92)', text: '#ffffff', textSub: 'rgba(255,255,255,0.85)', glow: false },
@@ -15,131 +20,126 @@ const MG_STYLES = {
     elegant: { primary: '#8b5cf6', accent: '#f472b6', bg: 'rgba(10,0,25,0.82)', text: '#ffffff', textSub: 'rgba(255,255,255,0.6)', glow: true },
 };
 
-// ========================================
-// Theme Fonts (must match src/themes.js)
-// Maps themeId → font families for MG preview
-// ========================================
-const THEME_FONTS = {
-    tech: { heading: 'Orbitron, Electrolize, "Courier New", monospace', body: '"Roboto Mono", "Source Code Pro", monospace' },
-    nature: { heading: '"Libre Baskerville", Merriweather, Georgia, serif', body: 'Lora, "Open Sans", Georgia, sans-serif' },
-    crime: { heading: 'Oswald, "Bebas Neue", Impact, sans-serif', body: '"Barlow Condensed", Lato, Arial, sans-serif' },
-    corporate: { heading: 'Montserrat, "Work Sans", Arial, sans-serif', body: '"Source Sans Pro", "Open Sans", "Segoe UI", sans-serif' },
-    luxury: { heading: '"Playfair Display", Cinzel, Georgia, serif', body: 'Lora, "Libre Baskerville", "Times New Roman", serif' },
-    sport: { heading: '"Bebas Neue", "Fjalla One", Impact, sans-serif', body: '"Roboto Condensed", "Barlow Condensed", Arial, sans-serif' },
-    neutral: { heading: 'Nunito, Raleway, Arial, sans-serif', body: '"Open Sans", Roboto, Arial, sans-serif' },
-};
-
-// Theme colors (base palette per theme)
-const THEME_COLORS = {
-    tech: { primary: '#00ffff', accent: '#00ff00', text: '#ffffff', textSub: 'rgba(255,255,255,0.7)' },
-    nature: { primary: '#8B4513', accent: '#87CEEB', text: '#ffffff', textSub: 'rgba(255,255,255,0.7)' },
-    crime: { primary: '#dc143c', accent: '#ffd700', text: '#ffffff', textSub: 'rgba(255,255,255,0.7)' },
-    corporate: { primary: '#0066cc', accent: '#00cc66', text: '#ffffff', textSub: 'rgba(255,255,255,0.7)' },
-    luxury: { primary: '#d4af37', accent: '#c0c0c0', text: '#ffffff', textSub: 'rgba(255,255,255,0.6)' },
-    sport: { primary: '#ff4500', accent: '#00ff00', text: '#ffffff', textSub: 'rgba(255,255,255,0.8)' },
-    neutral: { primary: '#4a90e2', accent: '#e74c3c', text: '#ffffff', textSub: 'rgba(255,255,255,0.7)' },
-};
-
-// Style modifiers — each MG style transforms colors so they stay visually distinct
-const MG_STYLE_MODIFIERS = {
-    clean: { saturate: 1.0, brighten: 0, tintHue: null },
-    bold: { saturate: 1.3, brighten: 15, tintHue: null },
-    minimal: { saturate: 0.4, brighten: 40, tintHue: null },
-    neon: { saturate: 1.6, brighten: 50, tintHue: null },
-    cinematic: { saturate: 0.8, brighten: -10, tintHue: 40 },
-    elegant: { saturate: 1.1, brighten: 10, tintHue: 280 },
-};
-
-function _hexToHSL(hex) {
-    hex = hex.replace('#', '');
-    if (hex.length === 3) hex = hex[0] + hex[0] + hex[1] + hex[1] + hex[2] + hex[2];
-    const r = parseInt(hex.substring(0, 2), 16) / 255;
-    const g = parseInt(hex.substring(2, 4), 16) / 255;
-    const b = parseInt(hex.substring(4, 6), 16) / 255;
-    const max = Math.max(r, g, b), min = Math.min(r, g, b);
-    let h = 0, s = 0, l = (max + min) / 2;
-    if (max !== min) {
-        const d = max - min;
-        s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
-        if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
-        else if (max === g) h = ((b - r) / d + 2) / 6;
-        else h = ((r - g) / d + 4) / 6;
+// Hydrate MG_STYLES from theme tokens (adds chrome properties)
+if (window._themeTokens) {
+    for (const styleName of window._themeTokens.stylePresetNames) {
+        const preset = window._themeTokens.getStylePreset(styleName);
+        if (MG_STYLES[styleName]) {
+            MG_STYLES[styleName].bg = preset.bg;
+            MG_STYLES[styleName].glow = preset.glow;
+            MG_STYLES[styleName].borderRadius = preset.borderRadius;
+            MG_STYLES[styleName].strokeWidth = preset.strokeWidth;
+            MG_STYLES[styleName].shadowStyle = preset.shadowStyle;
+            MG_STYLES[styleName].shadowBlur = preset.shadowBlur;
+            MG_STYLES[styleName].shadowOffsetY = preset.shadowOffsetY;
+            MG_STYLES[styleName].cardStyle = preset.cardStyle;
+            MG_STYLES[styleName].lowerThirdStyle = preset.lowerThirdStyle;
+            MG_STYLES[styleName].chartBarRadius = preset.chartBarRadius;
+        }
     }
-    return { h: h * 360, s: s * 100, l: l * 100 };
 }
 
-function _hslToHex(h, s, l) {
-    h = ((h % 360) + 360) % 360;
-    s = Math.max(0, Math.min(100, s)) / 100;
-    l = Math.max(0, Math.min(100, l)) / 100;
-    const a = s * Math.min(l, 1 - l);
-    const f = n => { const k = (n + h / 30) % 12; return l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1)); };
-    const toH = x => Math.round(x * 255).toString(16).padStart(2, '0');
-    return `#${toH(f(0))}${toH(f(8))}${toH(f(4))}`;
-}
+// ========================================
+// Theme Fonts & Colors — from design tokens
+// ========================================
+const THEME_FONTS = {};
+const THEME_COLORS = {};
 
-function applyMGStyleModifier(color, mod) {
-    try {
-        const hsl = _hexToHSL(color);
-        let { h, s, l } = hsl;
-        s = Math.min(100, s * mod.saturate);
-        l = Math.max(5, Math.min(95, l + mod.brighten));
-        if (mod.tintHue !== null) h = h * 0.5 + mod.tintHue * 0.5;
-        return _hslToHex(h, s, l);
-    } catch { return color; }
+if (window._themeTokens) {
+    for (const themeId of window._themeTokens.themeIds) {
+        const tokens = window._themeTokens.getTokens(themeId);
+        THEME_FONTS[themeId] = {
+            heading: tokens.typography.headingFont,
+            body: tokens.typography.bodyFont,
+        };
+        THEME_COLORS[themeId] = {
+            primary: tokens.colors.primary,
+            accent: tokens.colors.accent,
+            text: tokens.colors.textPrimary,
+            textSub: tokens.colors.textSecondary,
+        };
+    }
+} else {
+    // Fallback: hardcoded values if preload tokens unavailable
+    console.warn('Theme tokens not available — using hardcoded fallbacks');
+    Object.assign(THEME_FONTS, {
+        tech: { heading: 'Orbitron, Electrolize, "Courier New", monospace', body: '"Roboto Mono", "Source Code Pro", monospace' },
+        nature: { heading: '"Libre Baskerville", Merriweather, Georgia, serif', body: 'Lora, "Open Sans", Georgia, sans-serif' },
+        crime: { heading: 'Oswald, "Bebas Neue", Impact, sans-serif', body: '"Barlow Condensed", Lato, Arial, sans-serif' },
+        corporate: { heading: 'Montserrat, "Work Sans", Arial, sans-serif', body: '"Source Sans Pro", "Open Sans", "Segoe UI", sans-serif' },
+        luxury: { heading: '"Playfair Display", Cinzel, Georgia, serif', body: 'Lora, "Libre Baskerville", "Times New Roman", serif' },
+        sport: { heading: '"Bebas Neue", "Fjalla One", Impact, sans-serif', body: '"Roboto Condensed", "Barlow Condensed", Arial, sans-serif' },
+        neutral: { heading: 'Nunito, Raleway, Arial, sans-serif', body: '"Open Sans", Roboto, Arial, sans-serif' },
+    });
+    Object.assign(THEME_COLORS, {
+        tech: { primary: '#00ffff', accent: '#00ff00', text: '#ffffff', textSub: 'rgba(255,255,255,0.7)' },
+        nature: { primary: '#8B4513', accent: '#87CEEB', text: '#ffffff', textSub: 'rgba(255,255,255,0.7)' },
+        crime: { primary: '#dc143c', accent: '#ffd700', text: '#ffffff', textSub: 'rgba(255,255,255,0.7)' },
+        corporate: { primary: '#0066cc', accent: '#00cc66', text: '#ffffff', textSub: 'rgba(255,255,255,0.7)' },
+        luxury: { primary: '#d4af37', accent: '#c0c0c0', text: '#ffffff', textSub: 'rgba(255,255,255,0.6)' },
+        sport: { primary: '#ff4500', accent: '#00ff00', text: '#ffffff', textSub: 'rgba(255,255,255,0.8)' },
+        neutral: { primary: '#4a90e2', accent: '#e74c3c', text: '#ffffff', textSub: 'rgba(255,255,255,0.7)' },
+    });
 }
 
 /**
  * Get themed+styled colors for MG preview.
- * Applies style modifier to theme colors so each MG style looks distinct.
+ * Uses theme tokens to apply modifier-adjusted colors.
  */
 function getStyledThemeColors(styleName) {
-    const themeColors = getActiveThemeColors();
-    if (!themeColors) return null; // no theme, use MG_STYLES defaults
-    const mod = MG_STYLE_MODIFIERS[styleName] || MG_STYLE_MODIFIERS.clean;
-    return {
-        ...themeColors,
-        primary: applyMGStyleModifier(themeColors.primary, mod),
-        accent: applyMGStyleModifier(themeColors.accent, mod),
-    };
+    const activeTheme = _resolveActiveTheme();
+    if (!activeTheme) return null;
+
+    // Try token-based path first (pre-computed modifier-adjusted colors)
+    if (window._themeTokens) {
+        const tokens = window._themeTokens.getTokens(activeTheme);
+        return {
+            primary: tokens.colors.mgPrimary,
+            accent: tokens.colors.mgAccent,
+            text: tokens.colors.textPrimary,
+            textSub: tokens.colors.textSecondary,
+        };
+    }
+
+    // Fallback: return raw theme colors
+    return THEME_COLORS[activeTheme] || null;
+}
+
+function _resolveActiveTheme() {
+    const themeEl = document.getElementById('build-theme');
+    let themeId = themeEl ? themeEl.value : 'auto';
+    if (themeId === 'auto' && state.videoPlan && state.videoPlan.scriptContext) {
+        themeId = state.videoPlan.scriptContext.themeId || null;
+    }
+    if (!themeId || themeId === 'auto') return null;
+    return themeId;
 }
 
 /**
- * Get active theme fonts and colors for MG preview
- * Uses the theme dropdown selection OR the plan's scriptContext.themeId
+ * Get active theme fonts for MG preview
  */
 function getActiveThemeFonts() {
-    // Check theme dropdown
-    const themeEl = document.getElementById('build-theme');
-    const themeId = themeEl ? themeEl.value : 'auto';
-
-    // If 'auto', check if the loaded plan has a themeId
-    let activeTheme = themeId;
-    if (activeTheme === 'auto' && state.videoPlan && state.videoPlan.scriptContext) {
-        activeTheme = state.videoPlan.scriptContext.themeId || 'neutral';
-    }
-
-    if (activeTheme === 'auto' || !THEME_FONTS[activeTheme]) {
+    const activeTheme = _resolveActiveTheme();
+    if (!activeTheme || !THEME_FONTS[activeTheme]) {
         return { heading: 'Arial, sans-serif', body: 'Arial, sans-serif' };
     }
-
     return THEME_FONTS[activeTheme];
 }
 
 function getActiveThemeColors() {
-    const themeEl = document.getElementById('build-theme');
-    const themeId = themeEl ? themeEl.value : 'auto';
-
-    let activeTheme = themeId;
-    if (activeTheme === 'auto' && state.videoPlan && state.videoPlan.scriptContext) {
-        activeTheme = state.videoPlan.scriptContext.themeId || null;
-    }
-
-    if (!activeTheme || activeTheme === 'auto' || !THEME_COLORS[activeTheme]) {
-        return null; // Use MG_STYLES defaults
-    }
-
+    const activeTheme = _resolveActiveTheme();
+    if (!activeTheme || !THEME_COLORS[activeTheme]) return null;
     return THEME_COLORS[activeTheme];
+}
+
+/**
+ * Get full design tokens for the active theme.
+ * Returns null if no theme is active or tokens unavailable.
+ */
+function getActiveThemeTokens() {
+    const activeTheme = _resolveActiveTheme();
+    if (!activeTheme || !window._themeTokens) return null;
+    return window._themeTokens.getTokens(activeTheme);
 }
 
 function parseKeyValuePairs(subtext) {
@@ -319,6 +319,7 @@ const elements = {
     aiInstructions: document.getElementById('ai-instructions'),
     buildQuality: document.getElementById('build-quality'),
     buildFormat: document.getElementById('build-format'),
+    buildNiche: document.getElementById('build-niche'),
     buildTheme: document.getElementById('build-theme'),
     // Footage source toggles
     srcPexels: document.getElementById('src-pexels'),
@@ -824,6 +825,12 @@ function setupEventListeners() {
     if (elements.subtitlesEnabled) {
         elements.subtitlesEnabled.addEventListener('change', () => {
             state.subtitlesEnabled = elements.subtitlesEnabled.checked;
+            saveSettings();
+        });
+    }
+    // Niche preset dropdown — save settings on change
+    if (elements.buildNiche) {
+        elements.buildNiche.addEventListener('change', () => {
             saveSettings();
         });
     }
@@ -3600,6 +3607,7 @@ async function generateVideo() {
             aiInstructions: state.aiInstructions,
             buildQuality: elements.buildQuality.value,
             buildFormat: elements.buildFormat.value,
+            buildNiche: elements.buildNiche ? elements.buildNiche.value : 'auto',
             buildTheme: elements.buildTheme.value,
             smartAI: elements.smartAiToggle ? elements.smartAiToggle.checked : true
         });
@@ -6625,7 +6633,8 @@ function saveSettings() {
         mgEnabled: state.mgEnabled,
         subtitlesEnabled: state.subtitlesEnabled,
         aiInstructions: state.aiInstructions,
-        mutedTracks: state.mutedTracks
+        mutedTracks: state.mutedTracks,
+        buildNiche: elements.buildNiche ? elements.buildNiche.value : 'auto'
     }));
     // Also trigger .fvp auto-save so settings persist per-project
     triggerAutoSave();
@@ -6691,6 +6700,8 @@ function loadSettings() {
             // Restore AI Instructions
             state.aiInstructions = s.aiInstructions || '';
             if (elements.aiInstructions) elements.aiInstructions.value = state.aiInstructions;
+            // Restore Niche Preset
+            if (elements.buildNiche && s.buildNiche) elements.buildNiche.value = s.buildNiche;
             // Restore track mute state
             if (s.mutedTracks) state.mutedTracks = s.mutedTracks;
             // Restore footage source toggles
@@ -6750,6 +6761,8 @@ function applyProjectSettings(s) {
         // AI Instructions
         state.aiInstructions = s.aiInstructions || '';
         if (elements.aiInstructions) elements.aiInstructions.value = state.aiInstructions;
+        // Niche Preset
+        if (elements.buildNiche && s.buildNiche) elements.buildNiche.value = s.buildNiche;
         // Track mute
         if (s.mutedTracks) state.mutedTracks = s.mutedTracks;
         // Footage sources

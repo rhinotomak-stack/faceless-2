@@ -1,14 +1,19 @@
 /**
- * Unified Theme System
+ * Theme System — Visual layer only
  *
- * VidRush-inspired theming where ONE theme controls:
- * - Background canvas (subtle texture video behind all footage)
- * - Motion graphics style (clean, bold, neon, etc.)
+ * Themes control VISUAL presentation:
  * - Color palette (primary, secondary, accent, text)
  * - Font families (heading, body)
+ * - Motion graphics visual style (clean, bold, neon, etc.)
+ * - Transition visual preferences
+ * - Overlay visual preferences
+ * - Background canvas styling
  *
- * AI Director picks the best theme based on video content.
- * User can override via settings.
+ * Themes do NOT control content strategy (MG type selection, footage priority,
+ * pacing). That's handled by the Niche system (src/niches.js).
+ *
+ * The AI Director picks a niche, and each niche has a defaultTheme.
+ * User can override the theme independently.
  */
 
 // ============================================================
@@ -19,72 +24,56 @@ const THEMES = {
     tech: {
         id: 'tech',
         name: 'Tech/Cyberpunk',
-        description: 'Futuristic, digital, high-tech content',
+        description: 'Futuristic, digital, high-tech visuals',
 
-        // Background canvas (video texture behind all footage)
         background: 'tech-grid',
         canvasBackground: 'matrixDots',
-
-        // Motion graphics style
         mgStyle: 'neon',
 
-        // Allowed MG types for this niche
-        allowedMGs: ['kineticText', 'statCounter', 'barChart', 'focusWord', 'animatedIcons', 'progressBar', 'headline', 'comparisonCard'],
-
-        // Color palette
         colors: {
-            primary: '#00ffff',      // Neon cyan
-            secondary: '#ff00ff',    // Neon magenta
-            accent: '#00ff00',       // Neon green
-            text: '#ffffff',         // White text
-
-            background: '#0a0a0a',   // Near black
+            primary: '#00ffff',
+            secondary: '#ff00ff',
+            accent: '#00ff00',
+            text: '#ffffff',
+            background: '#0a0a0a',
             shadow: 'rgba(0, 255, 255, 0.5)'
         },
 
-        // Font families
         fonts: {
             heading: 'Orbitron, Electrolize, "Courier New", monospace',
             body: '"Roboto Mono", "Source Code Pro", monospace'
         },
 
-        // Preferred transitions for this theme
         transitions: {
             primary: ['glitch', 'pixelate', 'flash', 'rgbSplit', 'dataMosh', 'scanline'],
             secondary: ['wipe', 'slide', 'zoom', 'static', 'crossBlur'],
             avoid: ['ripple', 'dissolve', 'dreamFade', 'ink']
         },
 
-        // Preferred overlays for this theme (matched against filenames in assets/overlays/)
         overlays: {
             preferred: ['crt', 'vhs', 'scanline', 'digital', 'glitch', 'static', 'grain'],
             avoid: ['paper', 'film', 'vintage'],
             effects: ['grain', 'chromatic'],
             blendMode: 'screen',
             intensity: { min: 0.2, max: 0.5 }
-        },
-
-        // Keywords that match this theme
-        keywords: ['tech', 'ai', 'cyber', 'hack', 'digital', 'code', 'robot', 'future', 'virtual', 'computer', 'software', 'data']
+        }
     },
 
     nature: {
         id: 'nature',
         name: 'Nature Documentary',
-        description: 'Natural, organic, wildlife, environment',
+        description: 'Natural, organic, earthy visuals',
 
         background: 'nature',
         canvasBackground: 'organicNoise',
         mgStyle: 'cinematic',
 
-        allowedMGs: ['headline', 'lowerThird', 'callout', 'mapChart', 'timeline', 'focusWord', 'bulletList', 'statCounter'],
-
         colors: {
-            primary: '#8B4513',      // Earth brown
-            secondary: '#228B22',    // Forest green
-            accent: '#87CEEB',       // Sky blue
-            text: '#FFFFFF',         // White text
-            background: '#1a1a1a',   // Dark background
+            primary: '#8B4513',
+            secondary: '#228B22',
+            accent: '#87CEEB',
+            text: '#FFFFFF',
+            background: '#1a1a1a',
             shadow: 'rgba(0, 0, 0, 0.6)'
         },
 
@@ -93,7 +82,6 @@ const THEMES = {
             body: 'Lora, "Open Sans", Georgia, sans-serif'
         },
 
-        // Preferred transitions for this theme
         transitions: {
             primary: ['dissolve', 'crossBlur', 'fade', 'ripple', 'dreamFade', 'morph'],
             secondary: ['luma', 'blur', 'crossfade', 'lightLeak', 'ink'],
@@ -106,28 +94,24 @@ const THEMES = {
             effects: ['grain', 'lightLeak', 'blurVignette'],
             blendMode: 'screen',
             intensity: { min: 0.15, max: 0.4 }
-        },
-
-        keywords: ['nature', 'wildlife', 'animal', 'environment', 'climate', 'earth', 'ocean', 'forest', 'plant', 'bird', 'ecosystem', 'conservation']
+        }
     },
 
     crime: {
         id: 'crime',
         name: 'True Crime/Dark',
-        description: 'Crime, mystery, thriller, dark content',
+        description: 'Dark, moody, high-contrast visuals',
 
         background: 'dark',
         canvasBackground: 'vignette',
         mgStyle: 'cinematic',
 
-        allowedMGs: ['headline', 'lowerThird', 'callout', 'timeline', 'articleHighlight', 'focusWord', 'mapChart', 'kineticText'],
-
         colors: {
-            primary: '#dc143c',      // Crime red
-            secondary: '#1a1a1a',    // Dark gray
-            accent: '#ffd700',       // Gold (evidence tag)
-            text: '#FFFFFF',         // White text
-            background: '#000000',   // Pure black
+            primary: '#dc143c',
+            secondary: '#1a1a1a',
+            accent: '#ffd700',
+            text: '#FFFFFF',
+            background: '#000000',
             shadow: 'rgba(220, 20, 60, 0.4)'
         },
 
@@ -136,7 +120,6 @@ const THEMES = {
             body: '"Barlow Condensed", Lato, Arial, sans-serif'
         },
 
-        // Preferred transitions for this theme
         transitions: {
             primary: ['flash', 'wipe', 'luma', 'directionalBlur', 'shadowWipe', 'vignetteBlink'],
             secondary: ['fade', 'dissolve', 'colorFade', 'cameraFlash'],
@@ -149,28 +132,24 @@ const THEMES = {
             effects: ['grain', 'dust', 'vignette'],
             blendMode: 'screen',
             intensity: { min: 0.25, max: 0.55 }
-        },
-
-        keywords: ['crime', 'murder', 'investigation', 'detective', 'mystery', 'thriller', 'police', 'fbi', 'criminal', 'suspect', 'evidence', 'court']
+        }
     },
 
     corporate: {
         id: 'corporate',
         name: 'Corporate/Professional',
-        description: 'Business, professional, educational content',
+        description: 'Clean, professional, polished visuals',
 
         background: 'light',
         canvasBackground: 'gridLines',
         mgStyle: 'clean',
 
-        allowedMGs: ['barChart', 'donutChart', 'timeline', 'statCounter', 'bulletList', 'comparisonCard', 'lowerThird', 'progressBar', 'headline', 'articleHighlight'],
-
         colors: {
-            primary: '#0066cc',      // Corporate blue
-            secondary: '#333333',    // Dark gray
-            accent: '#00cc66',       // Success green
-            text: '#FFFFFF',         // White text
-            background: '#f5f5f5',   // Light gray
+            primary: '#0066cc',
+            secondary: '#333333',
+            accent: '#00cc66',
+            text: '#FFFFFF',
+            background: '#f5f5f5',
             shadow: 'rgba(0, 0, 0, 0.3)'
         },
 
@@ -179,7 +158,6 @@ const THEMES = {
             body: '"Source Sans Pro", "Open Sans", "Segoe UI", sans-serif'
         },
 
-        // Preferred transitions for this theme
         transitions: {
             primary: ['push', 'slide', 'fade', 'crossBlur', 'splitWipe'],
             secondary: ['dissolve', 'luma', 'blur', 'morph'],
@@ -192,28 +170,24 @@ const THEMES = {
             effects: ['blurVignette', 'lightLeak'],
             blendMode: 'soft-light',
             intensity: { min: 0.1, max: 0.3 }
-        },
-
-        keywords: ['business', 'corporate', 'professional', 'company', 'startup', 'market', 'finance', 'economy', 'education', 'study', 'academic', 'research']
+        }
     },
 
     luxury: {
         id: 'luxury',
         name: 'Luxury/Fashion',
-        description: 'High-end, elegant, fashion, lifestyle',
+        description: 'Elegant, golden, premium visuals',
 
         background: 'warm',
         canvasBackground: 'softGlow',
         mgStyle: 'elegant',
 
-        allowedMGs: ['headline', 'lowerThird', 'focusWord', 'kineticText', 'callout', 'statCounter', 'donutChart', 'rankingList'],
-
         colors: {
-            primary: '#d4af37',      // Gold
-            secondary: '#1a1a1a',    // Black
-            accent: '#c0c0c0',       // Silver
-            text: '#FFFFFF',         // White text
-            background: '#0a0a0a',   // Near black
+            primary: '#d4af37',
+            secondary: '#1a1a1a',
+            accent: '#c0c0c0',
+            text: '#FFFFFF',
+            background: '#0a0a0a',
             shadow: 'rgba(212, 175, 55, 0.4)'
         },
 
@@ -222,7 +196,6 @@ const THEMES = {
             body: 'Lora, "Libre Baskerville", "Times New Roman", serif'
         },
 
-        // Preferred transitions for this theme
         transitions: {
             primary: ['dissolve', 'crossBlur', 'colorFade', 'luma', 'flare', 'lightLeak'],
             secondary: ['fade', 'reveal', 'blur', 'dreamFade', 'prismShift'],
@@ -235,28 +208,24 @@ const THEMES = {
             effects: ['lightLeak', 'blurVignette'],
             blendMode: 'screen',
             intensity: { min: 0.15, max: 0.4 }
-        },
-
-        keywords: ['luxury', 'fashion', 'beauty', 'style', 'elegant', 'premium', 'designer', 'haute', 'couture', 'wedding', 'jewelry', 'art']
+        }
     },
 
     sport: {
         id: 'sport',
         name: 'Sports/Action',
-        description: 'Sports, action, high-energy content',
+        description: 'Bold, high-energy, dynamic visuals',
 
         background: 'dark',
         canvasBackground: 'energyBurst',
         mgStyle: 'bold',
 
-        allowedMGs: ['statCounter', 'rankingList', 'comparisonCard', 'headline', 'focusWord', 'kineticText', 'progressBar', 'barChart', 'lowerThird'],
-
         colors: {
-            primary: '#ff4500',      // Orange red
-            secondary: '#ffd700',    // Gold
-            accent: '#00ff00',       // Energy green
-            text: '#FFFFFF',         // White text
-            background: '#0a0a0a',   // Near black
+            primary: '#ff4500',
+            secondary: '#ffd700',
+            accent: '#00ff00',
+            text: '#FFFFFF',
+            background: '#0a0a0a',
             shadow: 'rgba(255, 69, 0, 0.5)'
         },
 
@@ -265,7 +234,6 @@ const THEMES = {
             body: '"Roboto Condensed", "Barlow Condensed", Arial, sans-serif'
         },
 
-        // Preferred transitions for this theme
         transitions: {
             primary: ['swipe', 'push', 'directionalBlur', 'zoom', 'whip', 'zoomBlur', 'shutterSlice'],
             secondary: ['wipe', 'flash', 'slide', 'bounce', 'splitWipe'],
@@ -278,28 +246,24 @@ const THEMES = {
             effects: ['grain', 'dust'],
             blendMode: 'screen',
             intensity: { min: 0.2, max: 0.45 }
-        },
-
-        keywords: ['sport', 'game', 'team', 'player', 'athlete', 'competition', 'championship', 'match', 'race', 'fight', 'extreme', 'action']
+        }
     },
 
     neutral: {
         id: 'neutral',
         name: 'Neutral/Balanced',
-        description: 'General-purpose, balanced, versatile',
+        description: 'Clean, versatile, balanced visuals',
 
         background: 'neutral',
         canvasBackground: 'subtleGrain',
         mgStyle: 'clean',
 
-        allowedMGs: ['headline', 'lowerThird', 'statCounter', 'callout', 'bulletList', 'focusWord', 'progressBar', 'barChart', 'donutChart', 'comparisonCard', 'timeline', 'rankingList', 'kineticText', 'mapChart', 'articleHighlight', 'animatedIcons'],
-
         colors: {
-            primary: '#4a90e2',      // Soft blue
-            secondary: '#2c3e50',    // Dark slate
-            accent: '#e74c3c',       // Soft red
-            text: '#FFFFFF',         // White text
-            background: '#1a1a1a',   // Dark background
+            primary: '#4a90e2',
+            secondary: '#2c3e50',
+            accent: '#e74c3c',
+            text: '#FFFFFF',
+            background: '#1a1a1a',
             shadow: 'rgba(0, 0, 0, 0.5)'
         },
 
@@ -308,7 +272,6 @@ const THEMES = {
             body: '"Open Sans", Roboto, Arial, sans-serif'
         },
 
-        // Preferred transitions for this theme
         transitions: {
             primary: ['fade', 'dissolve', 'slide', 'zoom', 'wipe', 'push'],
             secondary: ['blur', 'crossBlur', 'crossfade', 'lightLeak', 'reveal'],
@@ -321,9 +284,7 @@ const THEMES = {
             effects: ['grain', 'lightLeak', 'blurVignette', 'dust'],
             blendMode: 'screen',
             intensity: { min: 0.15, max: 0.4 }
-        },
-
-        keywords: [] // Fallback theme
+        }
     }
 };
 
@@ -953,52 +914,264 @@ const TRANSITION_SFX_SOURCES = {
 };
 
 // ============================================================
+// DESIGN TOKENS
+// ============================================================
+// Normalized, reusable design tokens per theme. These unify all
+// visual properties (colors, typography, MG chrome, overlays)
+// into a single structured object for consistent consumption.
+//
+// Consumers can use getThemeTokens(themeId) instead of manually
+// reading theme.colors.primary, theme.fonts.heading, etc.
+//
+// MG_STYLE_PRESETS replaces the duplicated MG_STYLES in app.js.
+
+/**
+ * MG style presets — visual chrome for each MG style.
+ * These are style-level (not theme-level) settings that control
+ * how MG chrome (backgrounds, borders, shadows, glow) is rendered.
+ */
+const MG_STYLE_PRESETS = {
+    clean: {
+        bg: 'rgba(0,0,0,0.7)',
+        glow: false,
+        borderRadius: 12,
+        strokeWidth: 2,
+        shadowStyle: 'soft',       // soft | hard | none
+        shadowBlur: 8,
+        shadowOffsetY: 2,
+        cardStyle: 'filled',       // filled | outline | glass
+        lowerThirdStyle: 'bar',    // bar | underline | box
+        chartBarRadius: 4,
+        modifier: { saturate: 1.0, brighten: 0, tintHue: null },
+    },
+    bold: {
+        bg: 'rgba(10,10,10,0.92)',
+        glow: false,
+        borderRadius: 8,
+        strokeWidth: 3,
+        shadowStyle: 'hard',
+        shadowBlur: 12,
+        shadowOffsetY: 4,
+        cardStyle: 'filled',
+        lowerThirdStyle: 'box',
+        chartBarRadius: 2,
+        modifier: { saturate: 1.3, brighten: 15, tintHue: null },
+    },
+    minimal: {
+        bg: 'rgba(0,0,0,0.35)',
+        glow: false,
+        borderRadius: 16,
+        strokeWidth: 1,
+        shadowStyle: 'none',
+        shadowBlur: 4,
+        shadowOffsetY: 1,
+        cardStyle: 'outline',
+        lowerThirdStyle: 'underline',
+        chartBarRadius: 6,
+        modifier: { saturate: 0.4, brighten: 40, tintHue: null },
+    },
+    neon: {
+        bg: 'rgba(0,0,15,0.85)',
+        glow: true,
+        borderRadius: 12,
+        strokeWidth: 2,
+        shadowStyle: 'glow',
+        shadowBlur: 30,
+        shadowOffsetY: 0,
+        cardStyle: 'outline',
+        lowerThirdStyle: 'bar',
+        chartBarRadius: 4,
+        modifier: { saturate: 1.6, brighten: 50, tintHue: null },
+    },
+    cinematic: {
+        bg: 'rgba(0,0,0,0.92)',
+        glow: false,
+        borderRadius: 10,
+        strokeWidth: 2,
+        shadowStyle: 'hard',
+        shadowBlur: 24,
+        shadowOffsetY: 4,
+        cardStyle: 'filled',
+        lowerThirdStyle: 'bar',
+        chartBarRadius: 3,
+        modifier: { saturate: 0.8, brighten: -10, tintHue: 40 },
+    },
+    elegant: {
+        bg: 'rgba(10,0,25,0.82)',
+        glow: true,
+        borderRadius: 14,
+        strokeWidth: 1,
+        shadowStyle: 'glow',
+        shadowBlur: 16,
+        shadowOffsetY: 4,
+        cardStyle: 'glass',
+        lowerThirdStyle: 'underline',
+        chartBarRadius: 6,
+        modifier: { saturate: 1.1, brighten: 10, tintHue: 280 },
+    },
+};
+
+/**
+ * Build a complete design token set for a theme.
+ * Merges theme colors/fonts with MG style preset chrome.
+ *
+ * @param {string} themeId
+ * @returns {Object} Full token set
+ */
+function getThemeTokens(themeId) {
+    const theme = THEMES[themeId] || THEMES.neutral;
+    const stylePreset = MG_STYLE_PRESETS[theme.mgStyle] || MG_STYLE_PRESETS.clean;
+    const mod = stylePreset.modifier;
+
+    return {
+        // ---- Identity ----
+        themeId: theme.id,
+        mgStyle: theme.mgStyle,
+
+        // ---- Colors ----
+        colors: {
+            // Core palette (from theme)
+            primary: theme.colors.primary,
+            secondary: theme.colors.secondary,
+            accent: theme.colors.accent,
+            textPrimary: theme.colors.text,
+            textSecondary: theme.colors.shadow ? _rgbaToTextSub(theme.colors.shadow) : 'rgba(255,255,255,0.7)',
+            background: theme.colors.background,
+            surface: stylePreset.bg,
+            stroke: theme.colors.primary,
+            shadow: theme.colors.shadow,
+
+            // Modifier-adjusted colors for MG rendering
+            mgPrimary: _applyModifier(theme.colors.primary, mod),
+            mgAccent: _applyModifier(theme.colors.accent, mod),
+        },
+
+        // ---- Typography ----
+        typography: {
+            headingFont: theme.fonts.heading,
+            bodyFont: theme.fonts.body,
+            captionFont: theme.fonts.body,       // caption uses body font stack
+            statFont: theme.fonts.heading,       // stats use heading font (bold/display)
+            headingWeight: '900',
+            bodyWeight: '500',
+            captionWeight: '400',
+            statWeight: '900',
+            emphasisWeight: '700',
+        },
+
+        // ---- MG Chrome ----
+        chrome: {
+            bg: stylePreset.bg,
+            glow: stylePreset.glow,
+            borderRadius: stylePreset.borderRadius,
+            strokeWidth: stylePreset.strokeWidth,
+            shadowStyle: stylePreset.shadowStyle,
+            shadowBlur: stylePreset.shadowBlur,
+            shadowOffsetY: stylePreset.shadowOffsetY,
+            cardStyle: stylePreset.cardStyle,
+            lowerThirdStyle: stylePreset.lowerThirdStyle,
+            chartBarRadius: stylePreset.chartBarRadius,
+        },
+
+        // ---- Transitions ----
+        transitions: {
+            primary: theme.transitions.primary,
+            secondary: theme.transitions.secondary,
+            avoid: theme.transitions.avoid,
+        },
+
+        // ---- Overlays ----
+        overlays: {
+            preferred: theme.overlays.preferred,
+            avoid: theme.overlays.avoid,
+            effects: theme.overlays.effects,
+            blendMode: theme.overlays.blendMode,
+            intensityMin: theme.overlays.intensity.min,
+            intensityMax: theme.overlays.intensity.max,
+        },
+
+        // ---- Background ----
+        background: {
+            type: theme.background,
+            canvasPattern: theme.canvasBackground,
+        },
+
+        // ---- Raw modifier (for consumers that apply their own) ----
+        modifier: mod,
+    };
+}
+
+// Color modifier utility (same logic as app.js applyMGStyleModifier)
+function _applyModifier(hexColor, mod) {
+    if (!hexColor || !mod) return hexColor;
+    try {
+        const hsl = _hexToHSL(hexColor);
+        let { h, s, l } = hsl;
+        s = Math.min(100, s * (mod.saturate || 1));
+        l = Math.max(5, Math.min(95, l + (mod.brighten || 0)));
+        if (mod.tintHue !== null && mod.tintHue !== undefined) h = h * 0.5 + mod.tintHue * 0.5;
+        return _hslToHex(h, s, l);
+    } catch (e) { return hexColor; }
+}
+
+function _hexToHSL(hex) {
+    hex = hex.replace('#', '');
+    if (hex.length === 3) hex = hex[0] + hex[0] + hex[1] + hex[1] + hex[2] + hex[2];
+    const r = parseInt(hex.substring(0, 2), 16) / 255;
+    const g = parseInt(hex.substring(2, 4), 16) / 255;
+    const b = parseInt(hex.substring(4, 6), 16) / 255;
+    const max = Math.max(r, g, b), min = Math.min(r, g, b);
+    let h = 0, s = 0, l = (max + min) / 2;
+    if (max !== min) {
+        const d = max - min;
+        s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+        if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
+        else if (max === g) h = ((b - r) / d + 2) / 6;
+        else h = ((r - g) / d + 4) / 6;
+    }
+    return { h: h * 360, s: s * 100, l: l * 100 };
+}
+
+function _hslToHex(h, s, l) {
+    h = ((h % 360) + 360) % 360;
+    s = Math.max(0, Math.min(100, s)) / 100;
+    l = Math.max(0, Math.min(100, l)) / 100;
+    const a = s * Math.min(l, 1 - l);
+    const f = n => { const k = (n + h / 30) % 12; return l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1)); };
+    const toH = x => Math.round(x * 255).toString(16).padStart(2, '0');
+    return `#${toH(f(0))}${toH(f(8))}${toH(f(4))}`;
+}
+
+// Convert shadow RGBA to a lighter textSub color
+function _rgbaToTextSub(rgba) {
+    // If shadow is themed (e.g. cyan glow), derive a matching textSub
+    // Otherwise use standard white semi-transparent
+    return 'rgba(255,255,255,0.7)';
+}
+
+/**
+ * Get all MG style preset names
+ * @returns {string[]}
+ */
+function getMGStylePresetNames() {
+    return Object.keys(MG_STYLE_PRESETS);
+}
+
+/**
+ * Get a single MG style preset
+ * @param {string} styleName
+ * @returns {Object}
+ */
+function getMGStylePreset(styleName) {
+    return MG_STYLE_PRESETS[styleName] || MG_STYLE_PRESETS.clean;
+}
+
+// ============================================================
 // HELPER FUNCTIONS
 // ============================================================
 
-/**
- * Pick the best theme based on video content analysis
- * @param {Object} scriptContext - AI Director's analysis (summary, tone, mood, entities)
- * @returns {string} Theme ID
- */
-function pickThemeFromContent(scriptContext) {
-    if (!scriptContext || !scriptContext.summary) {
-        return 'neutral'; // Fallback
-    }
-
-    const text = (
-        scriptContext.summary + ' ' +
-        (scriptContext.tone || '') + ' ' +
-        (scriptContext.mood || '') + ' ' +
-        (scriptContext.entities || []).join(' ')
-    ).toLowerCase();
-
-    // Score each theme based on keyword matches
-    const scores = {};
-    for (const [themeId, theme] of Object.entries(THEMES)) {
-        if (themeId === 'neutral') continue; // Skip neutral in scoring
-
-        let score = 0;
-        for (const keyword of theme.keywords) {
-            if (text.includes(keyword)) {
-                score += 1;
-            }
-        }
-        scores[themeId] = score;
-    }
-
-    // Find highest scoring theme
-    let bestTheme = 'neutral';
-    let bestScore = 0;
-    for (const [themeId, score] of Object.entries(scores)) {
-        if (score > bestScore) {
-            bestScore = score;
-            bestTheme = themeId;
-        }
-    }
-
-    return bestTheme;
-}
+// pickThemeFromContent removed — niche detection now lives in src/niches.js
+// Theme selection is driven by niche.defaultTheme or user override
 
 /**
  * Get theme object by ID
@@ -1049,10 +1222,13 @@ module.exports = {
     BACKGROUND_LIBRARY,
     TRANSITION_LIBRARY,
     TRANSITION_SFX_SOURCES,
-    pickThemeFromContent,
+    MG_STYLE_PRESETS,
     getTheme,
     getThemeIds,
     getAllThemes,
     getBackgroundSource,
-    getMatchingBackgrounds
+    getMatchingBackgrounds,
+    getThemeTokens,
+    getMGStylePreset,
+    getMGStylePresetNames,
 };

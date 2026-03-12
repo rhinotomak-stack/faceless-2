@@ -11,6 +11,7 @@
  */
 
 const { getThemeIds } = require('./themes');
+const { getNicheIds, resolvePreset, NICHE_PRESETS } = require('./niches');
 
 // ============================================================
 // QUALITY TIER DEFINITIONS
@@ -65,6 +66,7 @@ const QUALITY_TIERS = {
  *   BUILD_QUALITY_TIER — 'mini' | 'standard' | 'pro'
  *   BUILD_AUDIENCE     — Optional target audience description
  *   BUILD_THEME        — 'auto' | 'tech' | 'nature' | 'crime' | 'corporate' | 'luxury' | 'sport' | 'neutral'
+ *   BUILD_NICHE        — Preset key ('auto'|'trueCrime'|'documentary'|'finance'|...) or direct niche ID
  *   BUILD_RECIPE       — Optional genre recipe name (e.g., 'politics', 'tech', 'crime')
  *
  * @returns {DirectorsBrief}
@@ -76,10 +78,11 @@ function createDirectorsBrief() {
     const audienceHint = (process.env.BUILD_AUDIENCE || '').trim() || null;
     const rawTheme = (process.env.BUILD_THEME || 'auto').trim().toLowerCase();
     const recipeOverride = (process.env.BUILD_RECIPE || '').trim().toLowerCase() || null;
+    const rawNiche = (process.env.BUILD_NICHE || 'auto').trim();
 
     // Validate format
     const validFormats = ['auto', 'documentary', 'listicle'];
-    const format = validFormats.includes(rawFormat) ? rawFormat : 'auto';
+    let format = validFormats.includes(rawFormat) ? rawFormat : 'auto';
 
     // Validate quality tier
     const validTiers = ['mini', 'standard', 'pro'];
@@ -89,13 +92,36 @@ function createDirectorsBrief() {
     const validThemes = ['auto', ...getThemeIds()];
     const themeOverride = validThemes.includes(rawTheme) ? rawTheme : 'auto';
 
+    // Resolve niche preset → niche ID + hints
+    // BUILD_NICHE can be a preset key (e.g., "trueCrime", "finance") or a niche ID (e.g., "crime", "business")
+    let nicheOverride = 'auto';
+    let presetHints = { suggestedFormat: null, suggestedPacing: null };
+
+    if (NICHE_PRESETS[rawNiche]) {
+        // It's a preset key — resolve to niche ID + hints
+        const resolved = resolvePreset(rawNiche);
+        nicheOverride = resolved.nicheId || 'auto';
+        presetHints = { suggestedFormat: resolved.suggestedFormat, suggestedPacing: resolved.suggestedPacing };
+    } else {
+        // Try as direct niche ID (backward compat)
+        const validNiches = ['auto', ...getNicheIds()];
+        nicheOverride = validNiches.includes(rawNiche.toLowerCase()) ? rawNiche.toLowerCase() : 'auto';
+    }
+
+    // Apply preset's suggested format if user hasn't explicitly set one
+    if (format === 'auto' && presetHints.suggestedFormat) {
+        format = presetHints.suggestedFormat;
+    }
+
     const brief = {
         freeInstructions,
         format,
         qualityTier,
         audienceHint,
-        themeOverride, // 'auto' = AI decides, or specific theme ID
+        themeOverride,  // 'auto' = niche.defaultTheme, or specific theme ID
+        nicheOverride,  // 'auto' = AI detects from content, or specific niche ID
         recipeOverride, // explicit genre recipe name, or null for auto-detect
+        presetPacing: presetHints.suggestedPacing, // hint for scene density, or null
         // Resolved tier config for easy access
         tier: QUALITY_TIERS[qualityTier]
     };

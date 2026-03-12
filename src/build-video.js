@@ -139,7 +139,7 @@ async function buildDumbVideo(transcription, audioFile, directorsBrief) {
         entities: [], keyStats: [], mainPoints: [], targetAudience: '', emotionalArc: '',
         format: 'documentary', sections: [],
         ctaDetected: false, ctaStartTime: null, hookEndTime: null,
-        densityTarget: 3, themeId: 'neutral'
+        densityTarget: 3, nicheId: 'general', themeId: 'neutral'
     };
 
     const videoPlan = {
@@ -243,8 +243,11 @@ async function buildVideo() {
 
     // Create Director's Brief (reads env vars: AI_INSTRUCTIONS, BUILD_FORMAT, BUILD_QUALITY_TIER, BUILD_AUDIENCE)
     const directorsBrief = createDirectorsBrief();
+    const rawNiche = (process.env.BUILD_NICHE || 'auto').trim();
     console.log(`\n📋 Director's Brief:`);
     console.log(`   Format: ${directorsBrief.format} | Quality: ${directorsBrief.qualityTier} | Density: ${directorsBrief.tier.sceneDensity}/min`);
+    console.log(`   Niche: ${directorsBrief.nicheOverride}${rawNiche !== directorsBrief.nicheOverride ? ` (preset: ${rawNiche})` : ''} | Theme: ${directorsBrief.themeOverride}`);
+    if (directorsBrief.presetPacing) console.log(`   Preset pacing: ${directorsBrief.presetPacing}`);
     if (directorsBrief.freeInstructions) console.log(`   Instructions: "${directorsBrief.freeInstructions.substring(0, 80)}${directorsBrief.freeInstructions.length > 80 ? '...' : ''}"`);
     if (directorsBrief.audienceHint) console.log(`   Audience: "${directorsBrief.audienceHint}"`);
     console.log('');
