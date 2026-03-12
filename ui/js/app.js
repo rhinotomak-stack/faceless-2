@@ -4055,9 +4055,12 @@ function generateSfxClips() {
             const gap = curr.scene.startTime - prev.scene.endTime;
             if (Math.abs(gap) > 0.1) continue;
 
-            // Resolve transition type (per-scene or global, deterministic random)
-            let transType = curr.scene.transitionType || state.transition.style;
-            if (transType === 'random' || transType === 'auto') {
+            // Resolve transition type: per-scene override > global force > AI-assigned > fallback
+            let transType = curr.scene.transitionType
+                || (state.transition.style !== 'auto' ? state.transition.style : null)
+                || curr.scene.transition?.type
+                || 'crossfade';
+            if (transType === 'random') {
                 const seed = curr.idx * 7 + 3;
                 transType = state.transition.types[seed % state.transition.types.length];
             }
@@ -4126,7 +4129,7 @@ function renderScenes() {
     if (displayScenes.length === 0) { elements.sceneList.innerHTML = '<p class="empty-state">No scenes yet</p>'; return; }
     elements.sceneList.innerHTML = displayScenes.map((scene) => {
         const i = state.scenes.indexOf(scene);
-        const trType = scene.transitionType || scene.transition?.type || state.transition.style || 'cut';
+        const trType = scene.transitionType || (state.transition.style !== 'auto' ? state.transition.style : null) || scene.transition?.type || 'cut';
         const trIcons = { cut: '✂️', crossfade: '🔀', fade: '🔀', wipe: '↔️', slide: '↔️', flash: '⚡', dissolve: '🔀', blur: '🔀', zoom: '🔎', fade_to_black: '⬛' };
         const trLabels = { cut: 'Cut', crossfade: 'Crossfade', fade: 'Fade', wipe: 'Wipe', slide: 'Slide', flash: 'Flash', dissolve: 'Dissolve', blur: 'Blur', zoom: 'Zoom', fade_to_black: 'Fade to Black' };
         const trBadge = i > 0 ? `<span class="scene-transition-badge" title="${trLabels[trType] || trType}">${trIcons[trType] || ''} ${trLabels[trType] || trType}</span>` : '';
@@ -4374,8 +4377,8 @@ function renderTracks() {
             const mediaClass = scene.mediaType === 'image' ? 'clip-image' : 'clip-video';
             const isDisabled = scene.disabled === true;
             const eyeIcon = isDisabled ? '👁️‍🗨️' : '👁️';
-            // Transition icon between clips (per-scene override or global style)
-            const trType = scene.transitionType || scene.transition?.type || state.transition.style || 'cut';
+            // Transition icon between clips (per-scene override > global force > AI-assigned)
+            const trType = scene.transitionType || (state.transition.style !== 'auto' ? state.transition.style : null) || scene.transition?.type || 'cut';
             const trIcons = { cut: '✂️', crossfade: '🔀', fade: '🔀', wipe: '↔️', slide: '↔️', flash: '⚡', dissolve: '🔀', blur: '🔀', zoom: '🔎', fade_to_black: '⬛' };
             const trIcon = trIcons[trType] || '🔀';
             const trLabel = { cut: 'Cut', crossfade: 'Crossfade', fade: 'Fade', wipe: 'Wipe', slide: 'Slide', flash: 'Flash', dissolve: 'Dissolve', blur: 'Blur', zoom: 'Zoom', fade_to_black: 'Fade to Black' }[trType] || trType;
@@ -6167,18 +6170,25 @@ async function loadPlanIntoCompositor() {
                 const curr = sorted[i];
                 // Only add transition if scenes are adjacent (gap < 0.1s)
                 if (Math.abs(curr.startTime - prev.endTime) > 0.1) continue;
-                let type = curr.transitionType || curr.transition?.type || globalStyle;
-                if (type === 'random' || type === 'auto') {
+                let type = curr.transitionType
+                    || (globalStyle !== 'auto' ? globalStyle : null)
+                    || curr.transition?.type
+                    || 'crossfade';
+                if (type === 'random') {
                     const seed = curr.index * 7 + 3;
                     const types = state.transition.types.length > 0 ? state.transition.types : ['crossfade'];
                     type = types[seed % types.length];
                 }
                 if (type === 'cut') continue;
+                // Use AI-assigned duration when in auto mode, else global slider
+                const dur = (globalStyle === 'auto' && curr.transition?.duration)
+                    ? curr.transition.duration
+                    : globalDuration;
                 transitions.push({
                     fromSceneIndex: prev.index,
                     toSceneIndex: curr.index,
                     type,
-                    duration: globalDuration,
+                    duration: dur,
                 });
             }
         }
@@ -6668,12 +6678,13 @@ function loadSettings() {
             }
             // Restore transition settings
             // Ignore old saved 'cut' with duration 0 — that was the hardcoded default before transitions were enabled
+            // Also migrate old 'crossfade' defaults to 'auto' for AI-driven transitions
             const savedTransDur = s.transitionDuration !== undefined ? s.transitionDuration : -1;
             if (s.transitionStyle && !(s.transitionStyle === 'cut' && savedTransDur <= 0)) {
                 state.transition.style = s.transitionStyle;
                 state.transition.duration = savedTransDur > 0 ? savedTransDur : 0.5;
             } else {
-                state.transition.style = 'crossfade';
+                state.transition.style = 'auto';
                 state.transition.duration = 0.5;
             }
             if (elements.transitionStyle) elements.transitionStyle.value = state.transition.style;
@@ -6736,7 +6747,7 @@ function applyProjectSettings(s) {
             state.transition.style = s.transitionStyle;
             state.transition.duration = savedTransDur2 > 0 ? savedTransDur2 : 0.5;
         } else {
-            state.transition.style = 'crossfade';
+            state.transition.style = 'auto';
             state.transition.duration = 0.5;
         }
         if (elements.transitionStyle) elements.transitionStyle.value = state.transition.style;
