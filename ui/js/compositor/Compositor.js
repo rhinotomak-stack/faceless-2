@@ -36,6 +36,8 @@ class Compositor {
         this._mediaUrls = {};
         // URL resolver function (async: sceneIndex -> url)
         this._urlResolver = null;
+        // Media file resolver (async: absolutePath -> url) for overlay scenes with mediaFile
+        this._mediaFileResolver = null;
         // Script context from plan
         this._scriptContext = null;
 
@@ -186,10 +188,11 @@ class Compositor {
      * @param {object} plan - The video-plan.json object
      * @param {function} urlResolver - async (sceneIndex, extension) => url string
      */
-    async loadPlan(plan, urlResolver) {
+    async loadPlan(plan, urlResolver, mediaFileResolver) {
         if (!this._initialized) this.init();
 
         this._urlResolver = urlResolver;
+        this._mediaFileResolver = mediaFileResolver || null;
         this._scriptContext = plan.scriptContext || {};
         this.fps = plan.fps || this.fps;
 
@@ -223,13 +226,22 @@ class Compositor {
         this._mediaUrls = {};
 
         // First pass: resolve all URLs in parallel
+        // Use track-aware keys to avoid collisions when V1 and V2 scenes share the same index
         const urlMap = {};
         const urlPromises = scenes.map(async (scene) => {
             const idx = scene.index;
             if (idx == null) return;
+            const key = this._sceneKey(scene);
             const ext = scene.mediaExtension || '.mp4';
-            const url = await this._resolveUrl(idx, ext);
-            if (url) urlMap[idx] = { url, ext };
+            // Use mediaFile directly for compositor overlays (their filenames don't match index pattern)
+            let url = null;
+            if (scene.mediaFile && this._mediaFileResolver) {
+                url = await this._mediaFileResolver(scene.mediaFile);
+            }
+            if (!url) {
+                url = await this._resolveUrl(idx, ext);
+            }
+            if (url) urlMap[key] = { url, ext, idx };
         });
         await Promise.all(urlPromises);
 
@@ -241,29 +253,31 @@ class Compositor {
 
         for (const scene of scenes) {
             const idx = scene.index;
-            if (idx == null || !urlMap[idx]) continue;
-            const { url, ext } = urlMap[idx];
+            if (idx == null) continue;
+            const key = this._sceneKey(scene);
+            if (!urlMap[key]) continue;
+            const { url, ext } = urlMap[key];
             const isImage = scene.mediaType === 'image' || /\.(jpg|jpeg|png|webp|gif)$/i.test(ext);
 
-            this._mediaUrls[idx] = url;
+            this._mediaUrls[key] = url;
 
             if (isImage) {
                 const img = new Image();
                 img.crossOrigin = 'anonymous';
-                this._videoElements[idx] = img;
+                this._videoElements[key] = img;
                 imagePromises.push(new Promise(resolve => {
                     img.onload = resolve;
-                    img.onerror = () => { console.warn(`[Compositor] Failed to load image for scene ${idx}`); resolve(); };
+                    img.onerror = () => { console.warn(`[Compositor] Failed to load image for scene ${key}`); resolve(); };
                     img.src = url;
                     setTimeout(resolve, 5000);
                 }));
             } else {
-                videoScenes.push({ scene, url, idx });
+                videoScenes.push({ scene, url, key });
             }
         }
 
         // Create all video elements upfront so they start loading in parallel
-        for (const { scene, url, idx } of videoScenes) {
+        for (const { scene, url, key } of videoScenes) {
             const video = document.createElement('video');
             video.muted = true;
             video.preload = 'auto';
@@ -271,13 +285,13 @@ class Compositor {
             video.crossOrigin = 'anonymous';
             video.style.display = 'none';
             document.body.appendChild(video);
-            this._videoElements[idx] = video;
+            this._videoElements[key] = video;
             video.src = url;
         }
 
         // Wait for all videos to reach canplaythrough (fully buffered for local files)
-        const videoPromises = videoScenes.map(({ idx }) => {
-            const video = this._videoElements[idx];
+        const videoPromises = videoScenes.map(({ key }) => {
+            const video = this._videoElements[key];
             return new Promise(resolve => {
                 if (video.readyState >= 3) { resolve(); return; } // HAVE_FUTURE_DATA or better
                 let resolved = false;
@@ -296,14 +310,14 @@ class Compositor {
                     setTimeout(done, 500);
                 };
                 const onError = () => {
-                    console.warn(`[Compositor] Failed to load video for scene ${idx}`);
+                    console.warn(`[Compositor] Failed to load video for scene ${key}`);
                     done();
                 };
                 video.addEventListener('canplaythrough', onReady);
                 video.addEventListener('loadeddata', onFallback);
                 video.addEventListener('error', onError);
                 const timer = setTimeout(() => {
-                    console.warn(`[Compositor] Timeout loading video for scene ${idx} (readyState=${video.readyState})`);
+                    console.warn(`[Compositor] Timeout loading video for scene ${key} (readyState=${video.readyState})`);
                     done();
                 }, 20000);
             });
@@ -312,6 +326,15 @@ class Compositor {
         // Wait for all images and videos
         await Promise.all([...imagePromises, ...videoPromises]);
         console.log(`[Compositor] Preloaded ${imagePromises.length} images and ${videoScenes.length} videos`);
+    }
+
+    /**
+     * Generate a unique key for a scene across tracks.
+     * Prevents V1 and V2 scenes with the same index from colliding.
+     */
+    _sceneKey(scene) {
+        const track = scene.trackId || 'video-track-1';
+        return `${track}-${scene.index}`;
     }
 
     async _resolveUrl(sceneIndex, ext) {
@@ -324,6 +347,74 @@ class Compositor {
             }
         }
         return null;
+    }
+
+    // ========================================================================
+    // SLIDE ANIMATION FOR UPPER-TRACK OVERLAYS
+    // ========================================================================
+
+    /**
+     * Apply slide-in/out animation to an upper-track scene.
+     * Modifies posX/posY on the scene object (should be a shallow copy).
+     * Slides from off-screen to final position with ease-out, reverses on exit.
+     */
+    _applySlideAnimation(scene, frame) {
+        // Skip if animation explicitly disabled
+        if (scene.slideAnimation === false) return;
+
+        const slideDuration = scene.slideDuration || 0.4; // seconds
+        const slideFrames = Math.round(slideDuration * this.fps);
+        if (slideFrames < 1) return;
+
+        const localFrame = frame - scene._startFrame;
+        const totalFrames = scene._endFrame - scene._startFrame;
+        const outFrame = totalFrames - localFrame;
+
+        let t = 1; // 1 = fully visible at target position
+        if (localFrame < slideFrames) {
+            // Slide in
+            t = localFrame / slideFrames;
+            t = 1 - Math.pow(1 - t, 3); // ease-out cubic
+        } else if (outFrame < slideFrames) {
+            // Slide out
+            t = outFrame / slideFrames;
+            t = 1 - Math.pow(1 - t, 3); // ease-out cubic
+        }
+
+        if (t >= 0.999) return; // No animation needed, fully at target
+
+        // Determine slide direction
+        const posX = scene.posX || 0;
+        const posY = scene.posY || 0;
+        const scaleVal = Math.max(scene.scale || 1, 0.05);
+        // Off-screen offset: enough to push fully out regardless of scale
+        // For compositor overlays using viewport rendering, 100% is enough to push off-screen
+        const offAmount = scene._compositorDirective ? 120 : (120 / scaleVal);
+
+        // Use explicit direction if set, otherwise auto-detect from position
+        const dir = scene.slideDirection || 'auto';
+
+        if (dir === 'right') {
+            scene.posX = posX + (1 - t) * offAmount;
+        } else if (dir === 'left') {
+            scene.posX = posX - (1 - t) * offAmount;
+        } else if (dir === 'top') {
+            scene.posY = posY - (1 - t) * offAmount;
+        } else if (dir === 'bottom') {
+            scene.posY = posY + (1 - t) * offAmount;
+        } else {
+            // Auto: pick direction from nearest edge
+            if (Math.abs(posX) > 5) {
+                const autoDir = posX >= 0 ? 1 : -1;
+                scene.posX = posX + (1 - t) * offAmount * autoDir;
+            } else if (posY > 10) {
+                scene.posY = posY + (1 - t) * offAmount;
+            } else if (posY < -10) {
+                scene.posY = posY - (1 - t) * offAmount;
+            } else {
+                scene.posX = posX + (1 - t) * offAmount;
+            }
+        }
     }
 
     // ========================================================================
@@ -386,7 +477,13 @@ class Compositor {
                 if (tex) {
                     gl.enable(gl.BLEND);
                     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-                    this._renderSceneTexture(tex, 1.0, scene);
+                    if (scene._compositorDirective) {
+                        const overlayScene = Object.assign({}, scene, { background: 'none' });
+                        this._applySlideAnimation(overlayScene, frame);
+                        this._renderOverlayTexture(tex, 1.0, overlayScene);
+                    } else {
+                        this._renderSceneTexture(tex, 1.0, scene);
+                    }
                     gl.disable(gl.BLEND);
                 }
             }
@@ -397,7 +494,6 @@ class Compositor {
 
                 // Handle fullscreen MG scenes (isMGScene on track-3)
                 if (scene.isMGScene || scene.mediaType === 'motion-graphic') {
-                    // Render the MG as a fullscreen graphic
                     const localFrame = frame - scene._startFrame;
                     const mgTex = this._getMGTexture(scene, localFrame, this._scriptContext);
                     if (mgTex) {
@@ -417,12 +513,30 @@ class Compositor {
 
                 if (i === 0) {
                     // First track: opaque blit (base layer)
-                    this._renderSceneTexture(tex, 1.0, scene);
-                } else {
-                    // Upper tracks: alpha blend
+                    // Check if any upper-track scene has bgBlur → dim base layer
+                    const upperWithBlur = activeScenes.find(a => a.trackNum > 1 && a.scene.bgBlur && a.scene.bgBlur !== 'none');
+                    if (upperWithBlur) {
+                        const dimMap = { light: 0.85, medium: 0.7, heavy: 0.55 };
+                        const dimAlpha = dimMap[upperWithBlur.scene.bgBlur] || 1.0;
+                        this._renderSceneTexture(tex, dimAlpha, scene);
+                    } else {
+                        this._renderSceneTexture(tex, 1.0, scene);
+                    }
+                } else if (scene._compositorDirective) {
+                    // Compositor overlay: render as a floating image using viewport
                     gl.enable(gl.BLEND);
                     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-                    this._renderSceneTexture(tex, 1.0, scene);
+                    const overlayScene = Object.assign({}, scene, { background: 'none' });
+                    this._applySlideAnimation(overlayScene, frame);
+                    this._renderOverlayTexture(tex, 1.0, overlayScene);
+                    gl.disable(gl.BLEND);
+                } else {
+                    // Upper tracks (non-overlay): alpha blend, slide animation
+                    gl.enable(gl.BLEND);
+                    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+                    const upperScene = Object.assign({}, scene, { background: 'none' });
+                    this._applySlideAnimation(upperScene, frame);
+                    this._renderSceneTexture(tex, 1.0, upperScene);
                     gl.disable(gl.BLEND);
                 }
             }
@@ -457,7 +571,8 @@ class Compositor {
      */
     _getSceneTexture(scene, frame) {
         const idx = scene.index;
-        const texId = `scene-${idx}`;
+        const key = this._sceneKey(scene);
+        const texId = `scene-${key}`;
 
         // EXPORT-ONLY: use WebCodecs VideoFrame if provided by optimized export loop
         if (this._exporting && this._exportFrameSources && this._exportFrameSources.has(idx)) {
@@ -465,7 +580,7 @@ class Compositor {
             if (vf) return this.textureManager.createOrUpdate(texId, vf);
         }
 
-        const el = this._videoElements[idx];
+        const el = this._videoElements[key];
         if (!el) return null;
 
         if (el instanceof HTMLVideoElement) {
@@ -541,8 +656,8 @@ class Compositor {
             offsetX = (scene.posX || 0) / 100;
             offsetY = (scene.posY || 0) / 100;
 
-            // Ken Burns animation for images
-            if (scene.mediaType === 'image' && scene.kenBurnsEnabled !== false) {
+            // Ken Burns animation for images (skip compositor overlays — they have slide animation)
+            if (scene.mediaType === 'image' && scene.kenBurnsEnabled !== false && !scene._compositorDirective) {
                 const kb = this._computeKenBurns(scene);
                 scaleX *= kb.scale;
                 scaleY *= kb.scale;
@@ -586,6 +701,52 @@ class Compositor {
         } else {
             this._blitTexture(texEntry.texture, opacity, scaleX, scaleY, offsetX, offsetY, scene);
         }
+    }
+
+    /**
+     * Render a compositor overlay image using gl.viewport for true screen-space positioning.
+     * Unlike _renderSceneTexture (which uses UV manipulation for cover/contain),
+     * this renders the image at actual pixel size/position — like a floating panel.
+     */
+    _renderOverlayTexture(texEntry, opacity, scene) {
+        if (!texEntry || !texEntry.texture) return;
+        const gl = this.gl;
+        const rw = this._renderWidth();
+        const rh = this._renderHeight();
+
+        const overlayScale = scene.scale || 0.45;
+        const srcAspect = texEntry.width / texEntry.height;
+
+        // Compute overlay size in pixels (contain: fit within overlayScale portion of canvas)
+        let imgW, imgH;
+        const maxW = rw * overlayScale;
+        const maxH = rh * overlayScale;
+        if (srcAspect > maxW / maxH) {
+            imgW = maxW;
+            imgH = maxW / srcAspect;
+        } else {
+            imgH = maxH;
+            imgW = maxH * srcAspect;
+        }
+
+        // Position: posX/posY are percentages (-50 to 50), center = 0
+        // posY: negative = up (toward top), positive = down (toward bottom) in app space
+        const posXPct = (scene.posX || 0) / 100;
+        const posYPct = (scene.posY || 0) / 100;
+        const cx = rw / 2 + posXPct * rw;
+        const cy = rh / 2 + posYPct * rh;  // cy in top-down app space
+        const vpX = Math.round(cx - imgW / 2);
+        // GL viewport Y=0 is bottom of screen, so invert Y
+        const vpY = Math.round(rh - cy - imgH / 2);
+
+        // Set viewport to overlay region
+        gl.viewport(vpX, vpY, Math.round(imgW), Math.round(imgH));
+
+        // Render with identity transform (image fills the viewport exactly)
+        this._blitTexture(texEntry.texture, opacity, 1, 1, 0, 0, scene);
+
+        // Restore full viewport
+        gl.viewport(0, 0, rw, rh);
     }
 
     /**
@@ -1192,7 +1353,7 @@ class Compositor {
      */
     playVideos(currentTimeSeconds) {
         for (const scene of (this.sceneGraph ? this.sceneGraph.scenes : [])) {
-            const vid = this._videoElements[scene.index];
+            const vid = this._videoElements[this._sceneKey(scene)];
             if (!(vid instanceof HTMLVideoElement)) continue;
 
             const sceneStart = scene._startFrame / this.fps;
@@ -1222,8 +1383,10 @@ class Compositor {
      * Seek a video element to a specific frame (for export mode).
      * Returns a promise that resolves when the seek is complete and frame is decoded.
      */
-    async seekVideoToFrame(sceneIndex, frame) {
-        const vid = this._videoElements[sceneIndex];
+    async seekVideoToFrame(sceneOrIndex, frame) {
+        // Accept either a scene object (track-aware) or raw index (legacy/export compat)
+        const key = typeof sceneOrIndex === 'object' ? this._sceneKey(sceneOrIndex) : sceneOrIndex;
+        const vid = this._videoElements[key];
         if (!(vid instanceof HTMLVideoElement)) return;
 
         // If video hasn't loaded yet, wait for it (don't skip — causes black frames)
@@ -1298,7 +1461,7 @@ class Compositor {
         if (this.textureManager) {
             for (const scene of (this.sceneGraph ? this.sceneGraph.scenes : [])) {
                 if (!scene.isMGScene && scene.mediaType !== 'motion-graphic') {
-                    this.textureManager.release(`scene-${scene.index}`);
+                    this.textureManager.release(`scene-${this._sceneKey(scene)}`);
                 }
             }
         }

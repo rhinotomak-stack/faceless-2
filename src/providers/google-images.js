@@ -3,11 +3,11 @@ const BaseProvider = require('./base-provider');
 
 // Rotate User-Agents to reduce blocking
 const USER_AGENTS = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0',
-    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
 ];
 
 // Domains to skip (Google's own resources, not actual results)
@@ -53,13 +53,18 @@ class GoogleImagesProvider extends BaseProvider {
             const response = await axios.get(url, {
                 headers: {
                     'User-Agent': userAgent,
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
                     'Accept-Language': 'en-US,en;q=0.9',
-                    'Accept-Encoding': 'gzip, deflate',
+                    'Accept-Encoding': 'gzip, deflate, br',
                     'Cache-Control': 'no-cache',
                     'Referer': 'https://www.google.com/',
+                    'Cookie': 'CONSENT=PENDING+987; SOCS=CAESEwgDEgk2ODE5MjEyNTQaAmVuIAEaBgiA_LyaBg',
+                    'Sec-Fetch-Dest': 'document',
+                    'Sec-Fetch-Mode': 'navigate',
+                    'Sec-Fetch-Site': 'same-origin',
                 },
-                timeout: 15000
+                timeout: 15000,
+                maxRedirects: 5,
             });
 
             const html = response.data;
@@ -124,12 +129,40 @@ class GoogleImagesProvider extends BaseProvider {
                 }
             }
 
-            // Method 5: Broad URL extraction fallback
+            // Method 5: Extract from escaped URLs in script data (\\x22url\\x22:\\x22...\\x22)
+            if (imageUrls.length < 5) {
+                const escapedRegex = /\\x22(https?:\/\/[^\\]+?\.(?:jpg|jpeg|png|webp)[^\\]*)\\x22/gi;
+                while ((match = escapedRegex.exec(html)) !== null && imageUrls.length < 20) {
+                    const imgUrl = match[1].replace(/\\x([0-9a-f]{2})/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+                    if (!this._shouldSkip(imgUrl) && imgUrl.length < 500) {
+                        if (!imageUrls.some(existing => existing.url === imgUrl)) {
+                            imageUrls.push({ url: imgUrl, width: 0, height: 0 });
+                        }
+                    }
+                }
+            }
+
+            // Method 6: Extract from Google's newer data format ["IMAGE",null,["url",...]]
+            if (imageUrls.length < 5) {
+                const newFormatRegex = /\[\"IMAGE\"[^\]]*\][^\[]*\[\"(https?:\/\/[^"]+)\",(\d+),(\d+)\]/gi;
+                while ((match = newFormatRegex.exec(html)) !== null && imageUrls.length < 20) {
+                    const imgUrl = match[1];
+                    const width = parseInt(match[2]);
+                    const height = parseInt(match[3]);
+                    if (!this._shouldSkip(imgUrl) && width >= 200 && height >= 150) {
+                        if (!imageUrls.some(existing => existing.url === imgUrl)) {
+                            imageUrls.push({ url: imgUrl, width, height });
+                        }
+                    }
+                }
+            }
+
+            // Method 7: Broad URL extraction fallback — any image URL in the HTML
             if (imageUrls.length < 3) {
-                const broadRegex = /https?:\/\/[^\s"',\]>]+\.(?:jpg|jpeg|png|webp)(?:\?[^\s"',\]>]*)?/gi;
+                const broadRegex = /https?:\/\/[^\s"',\]\\>]+\.(?:jpg|jpeg|png|webp)(?:\?[^\s"',\]\\>]*)?/gi;
                 while ((match = broadRegex.exec(html)) !== null && imageUrls.length < 20) {
                     const imgUrl = match[0];
-                    if (!this._shouldSkip(imgUrl) && imgUrl.length < 500) {
+                    if (!this._shouldSkip(imgUrl) && imgUrl.length < 500 && imgUrl.length > 30) {
                         if (!imageUrls.some(existing => existing.url === imgUrl)) {
                             imageUrls.push({ url: imgUrl, width: 0, height: 0 });
                         }
@@ -139,6 +172,16 @@ class GoogleImagesProvider extends BaseProvider {
 
             if (imageUrls.length === 0) {
                 console.log(`  ⚠️ [Google Images] 0 URLs extracted from HTML (${html.length} bytes)`);
+                // Debug: check if consent/CAPTCHA page
+                if (html.includes('consent.google') || html.includes('CONSENT')) {
+                    console.log(`  ⚠️ [Google Images] Blocked by consent page`);
+                } else if (html.includes('captcha') || html.includes('unusual traffic')) {
+                    console.log(`  ⚠️ [Google Images] Blocked by CAPTCHA`);
+                } else {
+                    // Log a snippet to help debug the format
+                    const snippet = html.substring(0, 300).replace(/\s+/g, ' ');
+                    console.log(`  ⚠️ [Google Images] HTML preview: ${snippet}`);
+                }
             }
 
             // Deduplicate and limit

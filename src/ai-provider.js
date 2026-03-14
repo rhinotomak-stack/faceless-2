@@ -27,6 +27,19 @@ function _logModelsOnce() {
     } else if (p === 'ollama') {
         console.log(`  🤖 Text model: ${config.ollama.model}`);
         console.log(`  👁️ Vision model: ${config.ollama.visionModel}`);
+    } else if (p === 'qwen') {
+        console.log(`  🤖 Text model: ${config.qwen?.model || 'qwen-plus'}`);
+        console.log(`  👁️ Vision model: ${config.qwen?.visionModel || 'qwen-vl-plus'}`);
+    } else if (p === 'deepseek') {
+        console.log(`  🤖 Text model: ${config.deepseek?.model || 'deepseek-chat'}`);
+    } else if (p === 'claude') {
+        console.log(`  🤖 Text model: ${config.claude?.model || 'claude-sonnet-4-20250514'}`);
+    } else if (p === 'openai') {
+        console.log(`  🤖 Text model: ${config.openai?.model || 'gpt-4o'}`);
+    } else if (p === 'gemini') {
+        console.log(`  🤖 Text model: ${config.gemini?.model || 'gemini-pro'}`);
+    } else if (p === 'groq') {
+        console.log(`  🤖 Text model: ${config.groq?.model || 'llama-3.3-70b'}`);
     }
 }
 

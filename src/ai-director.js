@@ -94,41 +94,45 @@ ANALYSIS RULES:
 
 SCENE SPLITTING RULES (MANDATORY — DO NOT IGNORE):
 
-⚠️ CRITICAL: This is a FACELESS VIDEO. You MUST create frequent scene changes (every 3-7 seconds).
-   If scenes are too long (10+ seconds), viewers will lose interest and leave.
+⚠️ CRITICAL: This is a FACELESS VIDEO. Split based on IDEAS, not on sentences or time intervals.
 
-1. TARGET: YOU MUST CREATE ${targetScenes} SCENES (minimum).
-   - Audio duration: ${audioDuration.toFixed(1)}s
-   - Base density: ${baseDensity} scenes/min
-   - Adjust for pacing:
-     • Fast pacing → ${Math.round(targetScenes * 1.2)}-${Math.round(targetScenes * 1.4)} scenes (quick cuts, 3-5s each)
-     • Moderate pacing → ${targetScenes}-${Math.round(targetScenes * 1.2)} scenes (4-7s each)
-     • Slow pacing → ${Math.round(targetScenes * 0.9)}-${Math.round(targetScenes * 1.1)} scenes (5-8s each)
+1. WHAT IS A SCENE?
+   A scene = ONE complete visual idea or piece of information. Ask yourself:
+   "What would the viewer SEE on screen for this part?"
+   If the answer is the SAME visual → it's ONE scene, even if it spans multiple sentences.
+   If the answer CHANGES → that's a new scene.
 
-2. EXAMPLE: For a 40-second video at 4 scenes/min:
-   - Target: (40/60) × 4 = 2.67 → minimum 4 scenes
-   - Split like this:
-     SCENE 1: 0-7s   (hook, opening statement)
-     SCENE 2: 7-14s  (first key point)
-     SCENE 3: 14-24s (second key point)
-     SCENE 4: 24-30s (third detail)
-     SCENE 5: 30-37s (conclusion)
-     SCENE 6: 37-40s (final thought)
-   - Result: 6 scenes, average 6.7s each ✓
+   GOOD splitting (by idea):
+   - "The drone descended 5000 meters into total darkness. No sunlight. No life." → 1 scene (one visual: drone descending into dark water)
+   - "Then it found something. On the seafloor, oxygen was being produced." → 1 scene (one visual: discovery on seafloor)
 
-3. SPLITTING LOGIC:
-   - Cut when the topic shifts (new person, event, location, idea)
-   - Cut when a new sentence begins (after 4-5 seconds)
-   - Cut when transitioning from setup → detail → conclusion
-   - NEVER keep the same shot for 10+ seconds
+   BAD splitting (by sentence):
+   - "A joint research" → Scene 8 (0.7 seconds — meaningless fragment!)
+   - "effort involving institutions across continents" → Scene 9 (this is the SAME idea as Scene 8!)
+
+2. TARGET: approximately ${targetScenes} scenes for ${audioDuration.toFixed(1)}s of audio.
+   - Ideal scene length: 5-10 seconds (gives each visual time to land)
+   - Minimum scene length: 3 seconds (anything shorter is a jarring cut)
+   - Maximum scene length: 15 seconds (split if it gets longer)
+   - NEVER create scenes under 2 seconds — merge short fragments with adjacent scenes
+
+3. SPLITTING TRIGGERS (when to start a new scene):
+   - The TOPIC changes (new subject, new entity, new location)
+   - The VISUAL changes (what you'd show on screen is different)
+   - A new SECTION begins (listicle item, new chapter, new argument)
+   - The MOOD shifts (dramatic reveal, tone change, climax)
+
+   DO NOT split just because:
+   - A new sentence started (sentences within the same idea = same scene)
+   - You reached 5 seconds (time alone is not a reason to split)
+   - A comma or pause exists (natural speech pauses are not scene breaks)
 
 4. HARD RULES:
-   - MINIMUM ${targetScenes} scenes, NO EXCEPTIONS
-   - MAXIMUM 10 seconds per scene
-   - Each scene = ONE visual idea
+   - Each scene MUST be at least 3 seconds long
    - Boundaries at sentence/clause breaks only (never mid-word)
    - First scene starts at 0s, last scene ends at ${audioDuration.toFixed(1)}s
    - NO GAPS between scenes
+   - Group related sentences into ONE scene when they describe the same visual
 
 5. OUTPUT FORMAT:
    For each scene, write the EXACT first 5-6 words from the script (must match transcript exactly)
@@ -404,6 +408,60 @@ function buildScenesFromAnchors(sceneAnchors, allWords, audioDuration, fps) {
  * @param {number} maxDuration - Maximum scene duration in seconds
  * @returns {Array} New scene array with long scenes split
  */
+/**
+ * Merge scenes shorter than minDuration into their neighbors.
+ * Short scenes get merged into whichever neighbor is shorter (to balance lengths).
+ */
+function _mergeTinyScenes(scenes, minDuration = 3.0) {
+    if (scenes.length <= 1) return scenes;
+
+    let merged = [...scenes];
+    let mergeCount = 0;
+
+    // Keep merging until no tiny scenes remain
+    let changed = true;
+    while (changed) {
+        changed = false;
+        const next = [];
+        for (let i = 0; i < merged.length; i++) {
+            const scene = merged[i];
+            const duration = (scene.endTime || 0) - (scene.startTime || 0);
+
+            if (duration < minDuration && next.length > 0) {
+                // Merge into previous scene
+                const prev = next[next.length - 1];
+                prev.endTime = scene.endTime;
+                prev.endFrame = scene.endFrame;
+                prev.text = (prev.text || '') + ' ' + (scene.text || '');
+                if (scene.words) prev.words = [...(prev.words || []), ...scene.words];
+                mergeCount++;
+                changed = true;
+            } else if (duration < minDuration && i + 1 < merged.length) {
+                // First scene is tiny — merge into next
+                const nextScene = merged[i + 1];
+                nextScene.startTime = scene.startTime;
+                nextScene.startFrame = scene.startFrame;
+                nextScene.text = (scene.text || '') + ' ' + (nextScene.text || '');
+                if (scene.words) nextScene.words = [...(scene.words || []), ...(nextScene.words || [])];
+                mergeCount++;
+                changed = true;
+            } else {
+                next.push(scene);
+            }
+        }
+        merged = next;
+    }
+
+    // Re-index
+    merged.forEach((s, i) => { s.index = i; });
+
+    if (mergeCount > 0) {
+        console.log(`   🔀 Merged ${mergeCount} tiny scenes (< ${minDuration}s) → ${merged.length} scenes`);
+    }
+
+    return merged;
+}
+
 function autoSplitLongScenes(scenes, allWords, audioDuration, fps, maxDuration = 8.0) {
     const newScenes = [];
     let splitCount = 0;
@@ -423,37 +481,90 @@ function autoSplitLongScenes(scenes, allWords, audioDuration, fps, maxDuration =
         const targetChunkDuration = duration / targetChunks;
 
         // Find natural break points (sentence boundaries or pauses)
-        const sceneWords = scene.words;
+        const sceneWords = scene.words || [];
         const breakPoints = [0]; // Start index
 
-        for (let i = 1; i < sceneWords.length - 1; i++) {
-            const word = sceneWords[i];
-            const timeSinceStart = word.start - scene.startTime;
+        if (sceneWords.length > 0) {
+            for (let i = 1; i < sceneWords.length - 1; i++) {
+                const word = sceneWords[i];
+                const timeSinceStart = word.start - scene.startTime;
 
-            // Is this close to a target break point?
-            const nearestChunk = Math.round(timeSinceStart / targetChunkDuration);
-            const targetTime = nearestChunk * targetChunkDuration;
-            const timeError = Math.abs(timeSinceStart - targetTime);
+                // Is this close to a target break point?
+                const nearestChunk = Math.round(timeSinceStart / targetChunkDuration);
+                const targetTime = nearestChunk * targetChunkDuration;
+                const timeError = Math.abs(timeSinceStart - targetTime);
 
-            // If within 1.5s of target AND it's a sentence boundary, mark it
-            if (timeError < 1.5 && _isSentenceBoundary(word)) {
-                const lastBreak = breakPoints[breakPoints.length - 1];
-                const wordsSinceBreak = i - lastBreak;
+                // If within 1.5s of target AND it's a sentence boundary, mark it
+                if (timeError < 1.5 && _isSentenceBoundary(word)) {
+                    const lastBreak = breakPoints[breakPoints.length - 1];
+                    const wordsSinceBreak = i - lastBreak;
 
-                // Don't create tiny chunks (need at least 3 words)
-                if (wordsSinceBreak >= 3) {
-                    breakPoints.push(i);
+                    // Don't create tiny chunks (need at least 3 words)
+                    if (wordsSinceBreak >= 3) {
+                        breakPoints.push(i);
+                    }
+                }
+            }
+
+            // Fallback: if no natural breaks found, force split at nearest word to target times
+            if (breakPoints.length === 1 && targetChunks > 1) {
+                console.log(`      ⚠️ No sentence boundaries found — forcing split at nearest words`);
+                for (let chunk = 1; chunk < targetChunks; chunk++) {
+                    const targetTime = chunk * targetChunkDuration;
+                    let bestIdx = -1;
+                    let bestDist = Infinity;
+                    for (let i = 1; i < sceneWords.length - 1; i++) {
+                        const dist = Math.abs((sceneWords[i].start - scene.startTime) - targetTime);
+                        if (dist < bestDist) {
+                            bestDist = dist;
+                            bestIdx = i;
+                        }
+                    }
+                    if (bestIdx > 0) {
+                        const lastBreak = breakPoints[breakPoints.length - 1];
+                        if (bestIdx - lastBreak >= 3) {
+                            breakPoints.push(bestIdx);
+                        }
+                    }
                 }
             }
         }
 
         breakPoints.push(sceneWords.length); // End index
 
+        // If still only 1 chunk (no words or no valid splits), do time-based split
+        if (breakPoints.length <= 2 && targetChunks > 1) {
+            console.log(`      ⚠️ No word-based splits possible — splitting by time`);
+            const timeSplits = [];
+            for (let chunk = 0; chunk < targetChunks; chunk++) {
+                const chunkStart = scene.startTime + chunk * targetChunkDuration;
+                const chunkEnd = chunk < targetChunks - 1
+                    ? scene.startTime + (chunk + 1) * targetChunkDuration
+                    : scene.endTime;
+                timeSplits.push({
+                    index: newScenes.length + chunk,
+                    text: scene.text ? scene.text.substring(
+                        Math.floor(chunk * scene.text.length / targetChunks),
+                        Math.floor((chunk + 1) * scene.text.length / targetChunks)
+                    ).trim() : '',
+                    startTime: chunkStart,
+                    endTime: chunkEnd,
+                    duration: Math.round((chunkEnd - chunkStart) * fps),
+                    words: []
+                });
+                splitCount++;
+            }
+            newScenes.push(...timeSplits);
+            continue; // Skip normal sub-scene creation
+        }
+
         // Create sub-scenes
         for (let i = 0; i < breakPoints.length - 1; i++) {
             const startIdx = breakPoints[i];
             const endIdx = breakPoints[i + 1];
             const chunk = sceneWords.slice(startIdx, endIdx);
+
+            if (chunk.length === 0) continue; // Skip empty chunks
 
             const chunkStart = chunk[0].start;
             const chunkEnd = i < breakPoints.length - 2
@@ -545,19 +656,58 @@ function createScenesFromWhisper(transcription) {
  * @returns {Promise<string|null>} Search results summary or null
  */
 async function searchWebContext(fullScript) {
-    const preview = fullScript.substring(0, 300).trim();
+    // Feed AI a large window so it can skip intros and find the real topic
+    const preview = fullScript.substring(0, 1500).trim();
 
     try {
-        console.log('   🔍 Searching web for context...');
+        console.log('   🔍 Extracting search query from script...');
 
-        // Step 1: Search for context
-        // Clean query: keep only words, collapse whitespace, limit to ~80 chars for CSE
-        const queryText = preview.substring(0, 120)
-            .replace(/[^\w\s'-]/g, ' ')
-            .replace(/\s+/g, ' ')
-            .trim()
-            .substring(0, 80);
+        // Step 0: Use AI to extract a focused 3-5 word search query from the script
+        // This avoids the "generic intro" problem where first 100 chars are just "hey everyone welcome back"
+        let queryText = '';
+        try {
+            const aiQuery = await callAI(
+                `Extract the CORE FACTUAL SUBJECT from this video script into a web search query.
+
+Script excerpt:
+"${preview}"
+
+Rules:
+- IGNORE generic YouTube intros, greetings, hooks, subscribe requests, or filler phrases
+- Read deep enough to find the ACTUAL topic, noun, event, or subject
+- Output ONLY a 3-5 word search query — nothing else
+- Focus on proper nouns, specific events, or concrete subjects
+- Examples: "Gene Hackman disappearance 2024", "deep sea mining environmental impact", "Tesla Cybertruck recall"
+- If the script is about a person, include their full name
+- If it's about an event, include what happened and when`,
+                { maxTokens: 30, systemPrompt: 'You extract search queries. Output ONLY the query, no explanation.' }
+            );
+            if (aiQuery && aiQuery.trim().length > 3) {
+                queryText = aiQuery.trim()
+                    .replace(/^["']+|["']+$/g, '')  // strip quotes
+                    .replace(/[^\w\s'-]/g, ' ')
+                    .replace(/\s+/g, ' ')
+                    .trim()
+                    .substring(0, 80);
+                console.log(`   ✅ AI extracted query: "${queryText}"`);
+            }
+        } catch (err) {
+            console.log(`   ⚠️ AI query extraction failed: ${err.message} — falling back to raw text`);
+        }
+
+        // Fallback: raw substring if AI extraction failed
+        if (!queryText) {
+            queryText = preview.substring(0, 120)
+                .replace(/[^\w\s'-]/g, ' ')
+                .replace(/\s+/g, ' ')
+                .trim()
+                .substring(0, 80);
+        }
         let searchSnippets = '';
+
+        // Scale results by script length: base 10, up to 20 for long scripts
+        const scriptWords = fullScript.split(/\s+/).length;
+        const numResults = Math.min(20, Math.max(10, Math.round(10 + (scriptWords - 200) / 80)));
 
         // API-first web search (Tavily -> Google CSE fallback)
         if (hasAnyWebSearchCredentials()) {
@@ -566,7 +716,7 @@ async function searchWebContext(fullScript) {
                     throw new Error('query became empty after normalization');
                 }
                 const { items, provider, errors } = await searchWeb(queryText, {
-                    num: 5,
+                    num: numResults,
                     timeout: 10000,
                     providerOrder: ['tavily', 'googleCSE'],
                 });
@@ -595,31 +745,34 @@ async function searchWebContext(fullScript) {
             return null;
         }
 
-        // Step 2: Use the selected AI provider to summarize search results
+        // Step 2: Use the selected AI provider to analyze search results + script
         const summary = await callAI(
-            `Based on these web search results about a video narration, provide a brief factual summary (2-3 sentences max):
+            `You are analyzing a video narration and web search results to extract context that will help an AI plan visual scenes.
 
 Narration preview: "${preview}..."
 
 Web search results:
 ${searchSnippets}
 
-Answer these:
-1. Is this about a REAL event/person or fictional?
-2. If real, when did it happen? What year?
-3. Key context: What is the full story?
+Provide a brief analysis (3-5 sentences) covering:
+1. What is the main topic/subject? (real event, scientific topic, trending story, fictional scenario, etc.)
+2. Key entities: people, places, organizations, objects mentioned
+3. Visual context: what real-world imagery, locations, or scenes are associated with this topic?
+4. Time period and setting: when and where does this take place?
 
-Return ONLY a brief summary with the key facts. If nothing relevant was found, say "No real-world context found."`,
-            { maxTokens: 300, systemPrompt: 'You are a research assistant. Be concise and factual.' }
+Always provide useful context — even if the topic is speculative or fictional, describe the real-world elements it references (real locations, real technology, real phenomena, etc.) that would help find relevant footage.
+
+Return ONLY the analysis, no disclaimers.`,
+            { maxTokens: 400, systemPrompt: 'You are a media research assistant for video production. Extract actionable visual context from any topic.' }
         );
 
-        if (summary && summary.trim().length > 10 && !summary.toLowerCase().includes('no real-world context')) {
-            console.log(`   ✅ Web search found:\n`);
+        if (summary && summary.trim().length > 10) {
+            console.log(`   ✅ Web context analyzed:\n`);
             console.log(`   ${summary.trim()}\n`);
             return summary.trim();
         }
 
-        console.log('   ℹ️ No real-world context found (may be fictional)\n');
+        console.log('   ℹ️ Could not extract useful context\n');
         return null;
 
     } catch (error) {
@@ -763,6 +916,11 @@ async function analyzeAndCreateScenes(transcription, directorsBrief) {
         // Parse context (legacy + new fields)
         const scriptContext = parseDirectorContext(contextPart);
 
+        // Store web research context so Visual Planner can use it
+        if (webContext) {
+            scriptContext.webContext = webContext;
+        }
+
         // Override format if user specified
         if (directorsBrief.format !== 'auto') {
             scriptContext.format = directorsBrief.format;
@@ -821,8 +979,11 @@ async function analyzeAndCreateScenes(transcription, directorsBrief) {
 
         if (scenes.length === 0) throw new Error('No valid scenes after mapping');
 
-        // Post-processing: Auto-split scenes longer than 8 seconds
-        scenes = autoSplitLongScenes(scenes, allWords, audioDuration, fps, 8.0);
+        // Post-processing: Auto-split scenes longer than 12 seconds
+        scenes = autoSplitLongScenes(scenes, allWords, audioDuration, fps, 12.0);
+
+        // Post-processing: Merge scenes shorter than 3 seconds into neighbors
+        scenes = _mergeTinyScenes(scenes, 3.0);
 
         // Assign transitions between scenes
         assignTransitions(scenes, scriptContext);
@@ -871,6 +1032,22 @@ function assignTransitions(scenes, scriptContext) {
 
     const pacing = (scriptContext && scriptContext.pacing) || 'moderate';
     const isFast = pacing === 'fast' || pacing === 'rapid';
+    const isSlow = pacing === 'slow' || pacing === 'relaxed';
+
+    // Pacing-driven duration multiplier — fast = snappy, slow = smooth
+    const durScale = isFast ? 0.4 : isSlow ? 1.5 : 1.0;
+
+    // Base durations (moderate pacing) — scaled by durScale
+    const dur = {
+        crossfade:     +(0.5 * durScale).toFixed(2),   // fast: 0.2s, moderate: 0.5s, slow: 0.75s
+        flash:         +(0.15 * durScale).toFixed(2),   // fast: 0.06s, moderate: 0.15s, slow: 0.23s
+        fade_to_black: +(0.4 * durScale).toFixed(2),    // fast: 0.16s, moderate: 0.4s, slow: 0.6s
+        slide:         +(0.35 * durScale).toFixed(2),    // fast: 0.14s, moderate: 0.35s, slow: 0.53s
+        wipe:          +(0.4 * durScale).toFixed(2),     // fast: 0.16s, moderate: 0.4s, slow: 0.6s
+        zoom:          +(0.35 * durScale).toFixed(2),    // fast: 0.14s, moderate: 0.35s, slow: 0.53s
+        blur:          +(0.4 * durScale).toFixed(2),     // fast: 0.16s, moderate: 0.4s, slow: 0.6s
+        dissolve:      +(0.5 * durScale).toFixed(2),     // fast: 0.2s, moderate: 0.5s, slow: 0.75s
+    };
 
     for (let i = 0; i < scenes.length; i++) {
         const scene = scenes[i];
@@ -883,7 +1060,7 @@ function assignTransitions(scenes, scriptContext) {
 
         // Last scene — fade out
         if (i === scenes.length - 1) {
-            scene.transition = { type: 'fade_to_black', duration: 0.5 };
+            scene.transition = { type: 'fade_to_black', duration: dur.fade_to_black };
             continue;
         }
 
@@ -893,7 +1070,7 @@ function assignTransitions(scenes, scriptContext) {
 
         // Gap between scenes — natural pause = fade to black
         if (gap > 0.5) {
-            scene.transition = { type: 'fade_to_black', duration: 0.4 };
+            scene.transition = { type: 'fade_to_black', duration: dur.fade_to_black };
             continue;
         }
 
@@ -902,20 +1079,37 @@ function assignTransitions(scenes, scriptContext) {
             const r = Math.random();
             scene.transition = r < 0.7
                 ? { type: 'cut', duration: 0 }
-                : { type: 'flash', duration: 0.15 };
+                : { type: 'flash', duration: dur.flash };
             continue;
         }
 
-        // Default: weighted random
+        // Slow pacing — more crossfades and dissolves, fewer cuts
+        if (isSlow) {
+            const r = Math.random();
+            if (r < 0.15) {
+                scene.transition = { type: 'cut', duration: 0 };
+            } else if (r < 0.55) {
+                scene.transition = { type: 'crossfade', duration: dur.crossfade };
+            } else if (r < 0.75) {
+                scene.transition = { type: 'dissolve', duration: dur.dissolve };
+            } else if (r < 0.90) {
+                scene.transition = { type: 'blur', duration: dur.blur };
+            } else {
+                scene.transition = { type: 'fade_to_black', duration: dur.fade_to_black };
+            }
+            continue;
+        }
+
+        // Default (moderate): weighted random
         const r = Math.random();
         if (r < 0.45) {
             scene.transition = { type: 'cut', duration: 0 };
         } else if (r < 0.80) {
-            scene.transition = { type: 'crossfade', duration: 0.5 };
+            scene.transition = { type: 'crossfade', duration: dur.crossfade };
         } else if (r < 0.93) {
-            scene.transition = { type: 'flash', duration: 0.15 };
+            scene.transition = { type: 'flash', duration: dur.flash };
         } else {
-            scene.transition = { type: 'fade_to_black', duration: 0.4 };
+            scene.transition = { type: 'fade_to_black', duration: dur.fade_to_black };
         }
     }
 
@@ -924,7 +1118,7 @@ function assignTransitions(scenes, scriptContext) {
         const t = s.transition?.type || 'cut';
         counts[t] = (counts[t] || 0) + 1;
     });
-    console.log(`   🎬 Transitions: ${Object.entries(counts).map(([k,v]) => `${k}=${v}`).join(', ')}`);
+    console.log(`   🎬 Transitions (pacing: ${pacing}, speed: ${durScale}x): ${Object.entries(counts).map(([k,v]) => `${k}=${v}`).join(', ')}`);
 }
 
 // ============================================================

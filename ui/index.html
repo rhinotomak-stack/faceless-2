@@ -148,6 +148,13 @@
                     </select>
                     <small style="display:block; margin-top:4px; color:#888">Controls background, colors, MG style, fonts</small>
 
+                    <label style="margin-top:12px">Cinematic Scale:</label>
+                    <div style="display:flex;align-items:center;gap:8px">
+                        <input type="range" id="cinematic-scale" min="0.4" max="1" step="0.05" value="0.65" style="flex:1">
+                        <span id="cinematic-scale-val" style="color:#aaa;font-size:12px;min-width:30px">0.65</span>
+                    </div>
+                    <small style="display:block; margin-top:4px; color:#888">Scale for cinematic-framed scenes (0.4=small with big gradient, 1=fullscreen)</small>
+
                     <label style="margin-top:12px">MG Animation Speed:</label>
                     <div style="display:flex;align-items:center;gap:8px">
                         <input type="range" id="mg-global-anim-speed" min="0.3" max="2" step="0.1" value="0.7" style="flex:1">
@@ -377,6 +384,33 @@
                                     <option value="contain">Contain (Show All)</option>
                                 </select>
                             </div>
+                            <!-- V2 Overlay-specific controls -->
+                            <div class="property-row" id="prop-slide-dir-row" style="display:none">
+                                <label>Slide In</label>
+                                <select id="prop-slide-dir" class="property-select">
+                                    <option value="auto">Auto (from edge)</option>
+                                    <option value="right">From Right</option>
+                                    <option value="left">From Left</option>
+                                    <option value="top">From Top</option>
+                                    <option value="bottom">From Bottom</option>
+                                </select>
+                            </div>
+                            <div class="property-row" id="prop-slide-speed-row" style="display:none">
+                                <label>Slide Speed</label>
+                                <div style="display:flex;align-items:center;gap:6px">
+                                    <input type="range" id="prop-slide-speed" min="0.1" max="1.5" step="0.05" value="0.4" style="flex:1">
+                                    <span id="prop-slide-speed-val" style="color:#aaa;font-size:11px;min-width:32px">0.4s</span>
+                                </div>
+                            </div>
+                            <div class="property-row" id="prop-bg-blur-row" style="display:none">
+                                <label>Video Blur</label>
+                                <select id="prop-bg-blur" class="property-select">
+                                    <option value="none">None</option>
+                                    <option value="light">Light</option>
+                                    <option value="medium">Medium</option>
+                                    <option value="heavy">Heavy</option>
+                                </select>
+                            </div>
                             <div class="property-row" id="prop-animate-row" style="display:none">
                                 <label class="source-toggle">
                                     <input type="checkbox" id="prop-animate" checked> Animate (Ken Burns)
@@ -470,6 +504,7 @@
                                         <option value="comparisonCard">Comparison</option>
                                         <option value="bulletList">Bullet List</option>
                                         <option value="mapChart">Map</option>
+                                        <option value="explainer">Explainer</option>
                                         <option value="articleHighlight">Article Highlight</option>
                                     </optgroup>
                                 </select>
@@ -495,6 +530,22 @@
                                 <label>Animation</label>
                                 <select id="mg-animation" class="property-select">
                                     <!-- Populated dynamically from MG_REGISTRY -->
+                                </select>
+                            </div>
+                            <!-- Explainer-specific properties -->
+                            <div class="property-row" id="mg-explainer-img-scale-row" style="display:none">
+                                <label>Img Scale</label>
+                                <input type="range" id="mg-explainer-img-scale" min="20" max="200" value="100" step="5" style="flex:1">
+                                <span id="mg-explainer-img-scale-val" style="width:40px;text-align:right;font-size:11px">100%</span>
+                            </div>
+                            <div class="property-row" id="mg-explainer-shadow-row" style="display:none">
+                                <label>Shadow</label>
+                                <select id="mg-explainer-shadow" class="property-select">
+                                    <option value="medium">Medium</option>
+                                    <option value="none">None</option>
+                                    <option value="soft">Soft</option>
+                                    <option value="heavy">Heavy</option>
+                                    <option value="glow">Glow</option>
                                 </select>
                             </div>
                             <div class="property-row" id="mg-bg-row">

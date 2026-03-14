@@ -19,6 +19,9 @@ class MGRenderer {
         // Cache for loaded map images (mapImageFile → HTMLImageElement)
         this._mapImages = {};
         this._mapImageLoading = {};
+        // Cache for loaded explainer images (explainerImageFile → HTMLImageElement)
+        this._explainerImages = {};
+        this._explainerImageLoading = {};
 
         // ── Registry-driven rendering ──
         // Category renderers: 'mgType' → function(ctx, frame, fps, mg, s, anim, scriptContext)
@@ -39,11 +42,17 @@ class MGRenderer {
             kineticText:    (ctx, f, fps, mg, s, a, sc) => this._renderKineticText(ctx, f, fps, mg, s, a),
             subscribeCTA:   (ctx, f, fps, mg, s, a, sc) => this._renderSubscribeCTA(ctx, f, fps, mg, s, a),
             mapChart:       (ctx, f, fps, mg, s, a, sc) => { this._ensureMapImage(mg); this._renderMapChart(ctx, f, fps, mg, s, a, sc); },
+            explainer:      (ctx, f, fps, mg, s, a, sc) => { this._ensureExplainerImage(mg); this._renderExplainer(ctx, f, fps, mg, s, a, sc); },
         };
 
         // Variant renderers: 'category:variant' → function(ctx, mg, s, anim, a, setup)
         // 'setup' is a category-specific context object (e.g. {bx, by, bw, bh, colors} for lowerThird)
         this._variantRenderers = {
+            // Headline variants
+            'headline:standard':    (ctx, mg, s, anim, a, p) => this._renderHL_Standard(ctx, mg, s, anim, a, p),
+            'headline:stamp':       (ctx, mg, s, anim, a, p) => this._renderHL_Stamp(ctx, mg, s, anim, a, p),
+            'headline:typewriter':  (ctx, mg, s, anim, a, p) => this._renderHL_Typewriter(ctx, mg, s, anim, a, p),
+            // LowerThird variants
             'lowerThird:bar':       (ctx, mg, s, anim, a, p) => this._renderLT_Bar(ctx, mg, s, anim, a, p.bx, p.by, p.bw, p.bh, p.colors),
             'lowerThird:box':       (ctx, mg, s, anim, a, p) => this._renderLT_Box(ctx, mg, s, anim, a, p.bx, p.by, p.bw, p.bh, p.colors),
             'lowerThird:underline': (ctx, mg, s, anim, a, p) => this._renderLT_Underline(ctx, mg, s, anim, a, p.bx, p.by, p.bw, p.bh, p.colors),
@@ -54,10 +63,11 @@ class MGRenderer {
 
         // Animation computers: 'animType' → function(frame, fps, anim, mg) → state object
         this._animComputers = {
-            slideLeft:  (f, fps, anim, mg) => this._computeAnim_slideLeft(f, fps, anim, mg),
-            wipeRight:  (f, fps, anim, mg) => this._computeAnim_wipeRight(f, fps, anim, mg),
-            popUp:      (f, fps, anim, mg) => this._computeAnim_popUp(f, fps, anim, mg),
-            fadeSlide:  (f, fps, anim, mg) => this._computeAnim_fadeSlide(f, fps, anim, mg),
+            slideLeft:   (f, fps, anim, mg) => this._computeAnim_slideLeft(f, fps, anim, mg),
+            wipeRight:   (f, fps, anim, mg) => this._computeAnim_wipeRight(f, fps, anim, mg),
+            popUp:       (f, fps, anim, mg) => this._computeAnim_popUp(f, fps, anim, mg),
+            fadeSlide:   (f, fps, anim, mg) => this._computeAnim_fadeSlide(f, fps, anim, mg),
+            springScale: (f, fps, anim, mg) => this._computeAnim_springScale(f, fps, anim, mg),
         };
     }
 
@@ -127,6 +137,28 @@ class MGRenderer {
         img.onerror = () => {
             delete this._mapImageLoading[file];
             console.warn(`[MGRenderer] Failed to load map image: ${file}`);
+        };
+        img.src = url;
+    }
+
+    /**
+     * Lazily load an explainer transparent PNG. Non-blocking.
+     */
+    _ensureExplainerImage(mg) {
+        const file = mg.explainerImageFile;
+        const url = mg._explainerImageUrl;
+        if (!file || this._explainerImages[file] || this._explainerImageLoading[file]) return;
+        if (!url) return; // URL not yet resolved by app.js
+        this._explainerImageLoading[file] = true;
+        const img = new Image();
+        img.onload = () => {
+            this._explainerImages[file] = img;
+            delete this._explainerImageLoading[file];
+            console.log(`[MGRenderer] Explainer image loaded: ${file}`);
+        };
+        img.onerror = () => {
+            delete this._explainerImageLoading[file];
+            console.warn(`[MGRenderer] Failed to load explainer image: ${file}`);
         };
         img.src = url;
     }
@@ -488,30 +520,11 @@ class MGRenderer {
     // ========================================================================
 
     _renderHeadline(ctx, frame, fps, mg, s, anim) {
-        const { springValue, interpolate } = AnimationUtils;
-        const { enterSpring, enterLinear, isExiting, exitProgress, opacity, idleScale, speed } = anim;
+        const variant = this._resolveVariant(mg, s, 'headline');
+        const animType = this._resolveAnimation(mg, s, 'headline');
+        const colors = this._resolveColors(s, 'headline');
 
-        const scale = isExiting
-            ? interpolate(exitProgress, [0, 1], [0.97, 1])
-            : interpolate(enterSpring, [0, 1], [0.88, 1]);
-        const translateY = isExiting
-            ? interpolate(exitProgress, [0, 1], [-12, 0])
-            : interpolate(enterSpring, [0, 1], [30, 0]);
-        const blur = isExiting ? 0 : interpolate(enterLinear, [0, 0.6], [6, 0], { extrapolateRight: 'clamp' });
-
-        const barDelay = Math.round((0.25 / speed) * fps);
-        const barSpring = springValue(Math.max(0, frame - barDelay), fps, {
-            damping: 20, stiffness: 100, durationInFrames: Math.round((0.3 / speed) * fps),
-        });
-        const barWidth = barSpring * 300;
-
-        const subDelay = Math.round(0.2 * fps);
-        const subSpring = springValue(Math.max(0, frame - subDelay), fps, { damping: 18, stiffness: 100 });
-        const subOpacity = isExiting ? exitProgress : subSpring;
-
-        ctx.save();
-        ctx.globalAlpha = Math.min(1, opacity);
-
+        // Shared position computation
         const position = mg.position || 'center';
         const isLeft = position.includes('left');
         const isRight = position.includes('right');
@@ -521,50 +534,149 @@ class MGRenderer {
         const contentW = Math.max(800, textW + 40);
         const pos = MGRenderer._getPosXY(position, contentW, 200);
 
-        let cx, textAlign, textX, barX;
+        let cx, textAlign;
         if (isLeft) {
             cx = pos.x + 20;
             textAlign = 'left';
-            textX = 0;
-            barX = 0;
         } else if (isRight) {
             cx = pos.x + contentW - 20;
             textAlign = 'right';
-            textX = 0;
-            barX = -barWidth;
         } else {
             cx = pos.x + contentW / 2;
             textAlign = 'center';
-            textX = 0;
-            barX = -barWidth / 2;
         }
         const cy = pos.y + 100;
 
-        ctx.translate(cx, cy + translateY);
+        const a = this._computeAnimation(animType, frame, fps, anim, mg);
+
+        ctx.save();
+        ctx.globalAlpha = Math.min(1, anim.isExiting ? anim.exitProgress : anim.opacity);
+
+        this._dispatchVariant(ctx, 'headline', variant, mg, s, anim, a,
+            { cx, cy, textAlign, contentW, colors, frame, fps });
+
+        ctx.restore();
+    }
+
+    // ── Headline Variant: STANDARD (spring scale + gradient bar + subtext) ──
+    _renderHL_Standard(ctx, mg, s, anim, a, p) {
+        const { opacity, isExiting, exitProgress, idleScale } = anim;
+        const scale = a.scale || 1;
+        const translateY = a.slideY || 0;
+        const blur = a.blur || 0;
+        const barWidth = (a.barSpring || 0) * 300;
+        const subOpacity = isExiting ? exitProgress : (a.subSpring || 0);
+
+        ctx.translate(p.cx, p.cy + translateY);
         ctx.scale(scale * idleScale, scale * idleScale);
 
         if (blur > 0.5) ctx.filter = `blur(${blur.toFixed(1)}px)`;
 
-        ctx.fillStyle = s.text;
-        ctx.textAlign = textAlign;
+        ctx.fillStyle = p.colors?.textFill || s.text;
+        ctx.textAlign = p.textAlign;
         ctx.textBaseline = 'middle';
-        MGRenderer._drawTextShadowed(ctx, mg.text || '', textX, -30, s, true);
+        MGRenderer._setFont(ctx, '900', 72, s.fontHeading);
+        MGRenderer._drawTextShadowed(ctx, mg.text || '', 0, -30, s, true);
 
         ctx.filter = 'none';
 
         if (barWidth > 1) {
-            MGRenderer._drawGradientRect(ctx, barX, 15, barWidth, 4, s.primary, s.accent);
+            const barX = p.textAlign === 'right' ? -barWidth : p.textAlign === 'center' ? -barWidth / 2 : 0;
+            const barC1 = p.colors?.accentFill || s.primary;
+            const barC2 = p.colors?.accentFill || s.accent;
+            MGRenderer._drawGradientRect(ctx, barX, 15, barWidth, 4, barC1, barC2);
         }
 
         if (mg.subtext && subOpacity > 0.01) {
             ctx.globalAlpha = Math.min(1, opacity) * subOpacity;
             MGRenderer._setFont(ctx, '500', 26, s.fontBody);
-            ctx.fillStyle = s.accent;
-            ctx.textAlign = textAlign;
-            MGRenderer._drawTextShadowed(ctx, mg.subtext, textX, 50, s, false);
+            ctx.fillStyle = p.colors?.accentFill || s.accent;
+            ctx.textAlign = p.textAlign;
+            MGRenderer._drawTextShadowed(ctx, mg.subtext, 0, 50, s, false);
+        }
+    }
+
+    // ── Headline Variant: STAMP (bold impact stamp with scale-bounce) ──
+    _renderHL_Stamp(ctx, mg, s, anim, a, p) {
+        const { opacity, isExiting, exitProgress, idleScale } = anim;
+        // Stamp uses an aggressive bounce scale
+        const stampScale = a.stampScale || 1;
+        const stampAlpha = a.stampAlpha || 1;
+        const subOpacity = isExiting ? exitProgress : (a.subSpring || 0);
+
+        ctx.translate(p.cx, p.cy);
+        ctx.scale(stampScale * idleScale, stampScale * idleScale);
+        ctx.globalAlpha = Math.min(1, opacity) * stampAlpha;
+
+        // Bold outline/shadow for stamp effect
+        const accentColor = p.colors?.accentFill || s.primary;
+        MGRenderer._setFont(ctx, '900', 82, s.fontHeading);
+        ctx.textAlign = p.textAlign;
+        ctx.textBaseline = 'middle';
+
+        // Thick stroke outline
+        ctx.strokeStyle = accentColor;
+        ctx.lineWidth = 6;
+        ctx.lineJoin = 'round';
+        ctx.strokeText(mg.text || '', 0, -20);
+
+        // Fill
+        ctx.fillStyle = p.colors?.textFill || s.text;
+        ctx.fillText(mg.text || '', 0, -20);
+
+        // Accent line below
+        const lineW = ctx.measureText(mg.text || '').width * 0.8;
+        const lineX = p.textAlign === 'right' ? -lineW : p.textAlign === 'center' ? -lineW / 2 : 0;
+        ctx.fillStyle = accentColor;
+        ctx.fillRect(lineX, 25, lineW * Math.min(1, (a.textSpring || 1)), 5);
+
+        if (mg.subtext && subOpacity > 0.01) {
+            ctx.globalAlpha = Math.min(1, opacity) * subOpacity;
+            MGRenderer._setFont(ctx, '600', 28, s.fontBody);
+            ctx.fillStyle = p.colors?.accentFill || s.accent;
+            ctx.textAlign = p.textAlign;
+            ctx.fillText(mg.subtext, 0, 60);
+        }
+    }
+
+    // ── Headline Variant: TYPEWRITER (character-by-character reveal with cursor) ──
+    _renderHL_Typewriter(ctx, mg, s, anim, a, p) {
+        const { opacity, isExiting, exitProgress, idleScale } = anim;
+        const fullText = mg.text || '';
+        const revealPct = a.revealProgress || 0;
+        const charCount = Math.floor(fullText.length * Math.min(1, revealPct));
+        const visibleText = fullText.substring(0, charCount);
+        const subOpacity = isExiting ? exitProgress : (a.subSpring || 0);
+
+        ctx.translate(p.cx, p.cy);
+        ctx.scale(idleScale, idleScale);
+
+        MGRenderer._setFont(ctx, '700', 68, s.fontHeading);
+        ctx.fillStyle = p.colors?.textFill || s.text;
+        ctx.textAlign = p.textAlign;
+        ctx.textBaseline = 'middle';
+        MGRenderer._drawTextShadowed(ctx, visibleText, 0, -25, s, true);
+
+        // Blinking cursor
+        const cursorW = ctx.measureText(visibleText).width;
+        if (revealPct < 1.05) {
+            const blink = Math.sin(p.frame * 0.3) > 0;
+            if (blink) {
+                const cursorX = p.textAlign === 'left' ? cursorW + 4
+                    : p.textAlign === 'right' ? 4
+                    : cursorW / 2 + 4;
+                ctx.fillStyle = p.colors?.accentFill || s.primary;
+                ctx.fillRect(cursorX, -55, 3, 60);
+            }
         }
 
-        ctx.restore();
+        if (mg.subtext && subOpacity > 0.01) {
+            ctx.globalAlpha = Math.min(1, opacity) * subOpacity;
+            MGRenderer._setFont(ctx, '500', 26, s.fontBody);
+            ctx.fillStyle = p.colors?.accentFill || s.accent;
+            ctx.textAlign = p.textAlign;
+            MGRenderer._drawTextShadowed(ctx, mg.subtext, 0, 50, s, false);
+        }
     }
 
     // ========================================================================
@@ -683,6 +795,13 @@ class MGRenderer {
         r.textSpring = springValue(Math.max(0, frame - td), fps, { damping: 18, stiffness: 100, durationInFrames: Math.round((0.3 / speed) * fps) });
         r.textSlideX = interpolate(r.textSpring, [0, 1], [-15, 0]);
         r.subSpring = springValue(Math.max(0, frame - Math.round((0.35 / speed) * fps)), fps, { damping: 18, stiffness: 100 });
+        // Headline compat: provide scale/slideY/bar fields
+        r.scale = interpolate(anim.enterSpring, [0, 1], [0.95, 1]);
+        r.slideY = r.textSlideX; // slight slide
+        r.barSpring = r.barScaleY;
+        r.stampScale = r.scale;
+        r.stampAlpha = interpolate(anim.enterLinear, [0, 0.15], [0, 1], { extrapolateRight: 'clamp' });
+        r.revealProgress = interpolate(anim.enterLinear, [0, 1], [0, 1.1]);
         return r;
     }
 
@@ -695,6 +814,13 @@ class MGRenderer {
         r.textSpring = springValue(Math.max(0, frame - td), fps, { damping: 16, stiffness: 90, durationInFrames: Math.round((0.3 / speed) * fps) });
         r.textSlideX = interpolate(r.textSpring, [0, 1], [-20, 0]);
         r.subSpring = springValue(Math.max(0, frame - Math.round((0.4 / speed) * fps)), fps, { damping: 18, stiffness: 100 });
+        // Headline compat
+        r.scale = interpolate(anim.enterSpring, [0, 1], [0.95, 1]);
+        r.slideY = 0;
+        r.barSpring = r.textSpring;
+        r.stampScale = r.scale;
+        r.stampAlpha = interpolate(anim.enterLinear, [0, 0.15], [0, 1], { extrapolateRight: 'clamp' });
+        r.revealProgress = interpolate(anim.enterLinear, [0, 1], [0, 1.1]);
         return r;
     }
 
@@ -703,11 +829,16 @@ class MGRenderer {
         const speed = anim.speed;
         const r = {};
         r.scaleY = springValue(frame, fps, { damping: 12, stiffness: 150, durationInFrames: Math.round((0.4 / speed) * fps) });
+        r.scale = r.scaleY; // alias for headline variants
+        r.stampScale = r.scaleY;
+        r.stampAlpha = interpolate(anim.enterLinear, [0, 0.1], [0, 1], { extrapolateRight: 'clamp' });
         r.slideY = interpolate(r.scaleY, [0, 1], [40, 0]);
         const td = Math.round((0.15 / speed) * fps);
         r.textSpring = springValue(Math.max(0, frame - td), fps, { damping: 18, stiffness: 100, durationInFrames: Math.round((0.3 / speed) * fps) });
         r.textSlideX = 0;
         r.subSpring = springValue(Math.max(0, frame - Math.round((0.3 / speed) * fps)), fps, { damping: 18, stiffness: 100 });
+        r.revealProgress = interpolate(anim.enterLinear, [0, 1], [0, 1.1]);
+        r.barSpring = r.textSpring;
         return r;
     }
 
@@ -719,6 +850,44 @@ class MGRenderer {
         r.textSpring = r.fadeIn;
         r.textSlideX = 0;
         r.subSpring = interpolate(anim.enterLinear, [0.2, 0.8], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' });
+        // Headline compat
+        r.scale = 1;
+        r.barSpring = r.textSpring;
+        r.stampScale = 1;
+        r.stampAlpha = r.fadeIn;
+        r.revealProgress = interpolate(anim.enterLinear, [0, 1], [0, 1.1]);
+        return r;
+    }
+
+    // ── springScale animation (default for headline:standard) ──
+    // Produces: scale, slideY, blur, barSpring, subSpring — used by headline variants
+    _computeAnim_springScale(frame, fps, anim, mg) {
+        const { springValue, interpolate } = AnimationUtils;
+        const speed = anim.speed;
+        const r = {};
+        r.scale = anim.isExiting
+            ? interpolate(anim.exitProgress, [0, 1], [0.97, 1])
+            : interpolate(anim.enterSpring, [0, 1], [0.88, 1]);
+        r.slideY = anim.isExiting
+            ? interpolate(anim.exitProgress, [0, 1], [-12, 0])
+            : interpolate(anim.enterSpring, [0, 1], [30, 0]);
+        r.blur = anim.isExiting ? 0 : interpolate(anim.enterLinear, [0, 0.6], [6, 0], { extrapolateRight: 'clamp' });
+        const barDelay = Math.round((0.25 / speed) * fps);
+        r.barSpring = springValue(Math.max(0, frame - barDelay), fps, {
+            damping: 20, stiffness: 100, durationInFrames: Math.round((0.3 / speed) * fps),
+        });
+        const subDelay = Math.round((0.2 / speed) * fps);
+        r.subSpring = anim.isExiting ? anim.exitProgress
+            : springValue(Math.max(0, frame - subDelay), fps, { damping: 18, stiffness: 100 });
+        r.textSpring = r.barSpring;
+        // Stamp-specific: aggressive bounce scale for stamp variant
+        r.stampScale = anim.isExiting
+            ? interpolate(anim.exitProgress, [0, 1], [0.5, 1])
+            : springValue(frame, fps, { damping: 8, stiffness: 200, durationInFrames: Math.round((0.35 / speed) * fps) });
+        r.stampAlpha = interpolate(anim.enterLinear, [0, 0.15], [0, 1], { extrapolateRight: 'clamp' });
+        // Typewriter-specific: character reveal
+        const revealDur = Math.round((1.2 / speed) * fps);
+        r.revealProgress = Math.min(1.1, frame / Math.max(1, revealDur));
         return r;
     }
 
@@ -2359,6 +2528,249 @@ class MGRenderer {
         ctx.beginPath(); ctx.moveTo(pmX, 0); ctx.lineTo(pmX, H); ctx.stroke();
 
         ctx.globalAlpha = opacity;
+    }
+
+    // ========================================================================
+    // EXPLAINER RENDERER
+    // ========================================================================
+
+    /**
+     * Render an explainer MG: themed gradient background + transparent PNG image + label.
+     * Variant/animation resolved via registry.
+     */
+    _renderExplainer(ctx, frame, fps, mg, s, anim, scriptContext) {
+        const W = 1920, H = 1080;
+        const { opacity } = anim;
+        const speed = mg._animationSpeed || 1;
+        const elapsed = frame / fps;
+
+        // ── Resolve variant & animation ──
+        const variant = this._resolveVariant(mg, s, 'explainer') || 'standard';
+        const animType = this._resolveAnimation(mg, s, 'explainer') || 'fadeSlide';
+
+        // Explainer is always an overlay card on top of video.
+        // center = larger card centered, corner positions = smaller card in corner.
+        const isCorner = mg.position && mg.position !== 'center';
+
+        // ── Read custom properties ──
+        const imgScaleMult = (mg.explainerImgScale != null ? mg.explainerImgScale : 100) / 100;
+        const shadowStyle = mg.explainerShadow || 'medium';
+
+        ctx.save();
+        ctx.globalAlpha = opacity;
+
+        const primary = s.primary || '#3b82f6';
+        const accent = s.accent || '#f59e0b';
+
+        // ── Compute card positioning ──
+        // All drawing uses local coords (0,0 = card center), then translate+scale to position
+        let maxImgW, maxImgH, fontSize, subFontSize;
+        let anchorX, anchorY;
+
+        if (isCorner) {
+            // Corner: compact card
+            maxImgW = 200; maxImgH = 180;
+            fontSize = 22; subFontSize = 15;
+            const pos = mg.position || 'bottom-right';
+            const margin = 60;
+            if (pos.includes('left')) { anchorX = margin + maxImgW / 2; }
+            else { anchorX = W - margin - maxImgW / 2; }
+            if (pos.includes('top')) { anchorY = margin + maxImgH / 2 + 20; }
+            else { anchorY = H - margin - 60; }
+        } else {
+            // Center: larger card
+            maxImgW = 350; maxImgH = 300;
+            fontSize = 32; subFontSize = 20;
+            anchorX = W / 2;
+            anchorY = H * 0.45;
+        }
+
+        // Card draws at local origin (0,0), transformed to anchor point + scale
+        ctx.translate(anchorX, anchorY);
+        ctx.scale(imgScaleMult, imgScaleMult);
+
+        // Image area at local (0,0), label below
+        const imgAreaCenterX = 0;
+        const imgAreaCenterY = 0;
+        const labelCenterX = 0;
+        const labelY_base = maxImgH / 2 + 25;
+
+        // ── Compute animation state ──
+        let imgAlpha = opacity;
+        let imgOffsetX = 0, imgOffsetY = 0;
+        let imgScale = 1;
+        let labelAlpha = opacity;
+        let labelOffsetY = 0;
+
+        const enterDur = 0.6 / speed;
+        const exitDur = 0.4 / speed;
+        const totalDur = (mg.duration || 5);
+        const exitStart = totalDur - exitDur;
+        const t = elapsed;
+
+        const enterT = Math.min(1, t / enterDur);
+        const easeEnter = 1 - Math.pow(1 - enterT, 3);
+
+        let exitT = 0;
+        if (t > exitStart) {
+            exitT = Math.min(1, (t - exitStart) / exitDur);
+        }
+        const easeExit = 1 - Math.pow(1 - exitT, 2);
+
+        // Slide direction depends on position for overlay mode
+        const slideFromRight = !isCorner || (mg.position || '').includes('right');
+        const slideDist = isCorner ? 250 : 400;
+
+        if (animType === 'slideLeft' || variant === 'slideRight') {
+            imgOffsetX = (1 - easeEnter) * (slideFromRight ? slideDist : -slideDist);
+            imgAlpha = opacity * easeEnter;
+            if (exitT > 0) {
+                imgOffsetX = easeExit * (slideFromRight ? -slideDist * 0.75 : slideDist * 0.75);
+                imgAlpha = opacity * (1 - easeExit);
+            }
+        } else if (animType === 'popUp') {
+            const spring = easeEnter > 0.7 ? 1 + Math.sin((easeEnter - 0.7) / 0.3 * Math.PI) * 0.05 : easeEnter;
+            imgScale = 0.3 + spring * 0.7;
+            imgAlpha = opacity * Math.min(1, enterT * 2);
+            imgOffsetY = (1 - easeEnter) * 80;
+            if (exitT > 0) {
+                imgScale = 1 - easeExit * 0.3;
+                imgAlpha = opacity * (1 - easeExit);
+            }
+        } else {
+            // fadeSlide (default)
+            imgAlpha = opacity * easeEnter;
+            imgOffsetY = (1 - easeEnter) * 60;
+            if (exitT > 0) {
+                imgAlpha = opacity * (1 - easeExit);
+                imgOffsetY = -easeExit * 40;
+            }
+        }
+
+        // Label appears slightly after image
+        const labelDelay = 0.15 / speed;
+        const labelEnterT = Math.min(1, Math.max(0, (t - labelDelay) / enterDur));
+        const easeLabelEnter = 1 - Math.pow(1 - labelEnterT, 3);
+        labelAlpha = opacity * easeLabelEnter;
+        labelOffsetY = (1 - easeLabelEnter) * 30;
+        if (exitT > 0) {
+            labelAlpha = opacity * (1 - easeExit);
+        }
+
+        // ── Draw the image ──
+        const imgFile = mg.explainerImageFile;
+        const loadedImg = imgFile ? this._explainerImages[imgFile] : null;
+
+        // Shadow presets
+        const SHADOW_PRESETS = {
+            none:   { color: 'transparent', blur: 0, offY: 0 },
+            soft:   { color: 'rgba(0,0,0,0.25)', blur: 20, offY: 6 },
+            medium: { color: 'rgba(0,0,0,0.5)', blur: 30, offY: 10 },
+            heavy:  { color: 'rgba(0,0,0,0.7)', blur: 50, offY: 15 },
+            glow:   { color: this._hexToRgba(primary, 0.5), blur: 40, offY: 0 },
+        };
+        const shadow = SHADOW_PRESETS[shadowStyle] || SHADOW_PRESETS.medium;
+
+        if (loadedImg) {
+            const natW = loadedImg.naturalWidth || loadedImg.width;
+            const natH = loadedImg.naturalHeight || loadedImg.height;
+            const scale = Math.min(maxImgW / natW, maxImgH / natH) * imgScale;
+            const drawW = natW * scale;
+            const drawH = natH * scale;
+            const drawX = imgAreaCenterX - drawW / 2 + imgOffsetX;
+            const drawY = imgAreaCenterY - drawH / 2 + imgOffsetY;
+
+            ctx.globalAlpha = imgAlpha;
+            ctx.shadowColor = shadow.color;
+            ctx.shadowBlur = shadow.blur;
+            ctx.shadowOffsetX = 0;
+            ctx.shadowOffsetY = shadow.offY;
+            ctx.drawImage(loadedImg, drawX, drawY, drawW, drawH);
+            ctx.shadowColor = 'transparent';
+            ctx.shadowBlur = 0;
+        } else {
+            // Placeholder: pulsing circle with "Loading..."
+            ctx.globalAlpha = imgAlpha * 0.4;
+            const pulseR = (isCorner ? 40 : 60) + Math.sin(elapsed * 2) * 10;
+            ctx.beginPath();
+            ctx.arc(imgAreaCenterX + imgOffsetX, imgAreaCenterY + imgOffsetY, pulseR * imgScale, 0, Math.PI * 2);
+            ctx.fillStyle = primary;
+            ctx.fill();
+
+            ctx.globalAlpha = imgAlpha * 0.6;
+            MGRenderer._setFont(ctx, '400', isCorner ? 14 : 18, s.fontBody);
+            ctx.fillStyle = '#ffffff';
+            const dots = '.'.repeat(1 + Math.floor(elapsed * 2) % 3);
+            ctx.textAlign = 'center';
+            ctx.fillText('Loading' + dots, imgAreaCenterX + imgOffsetX, imgAreaCenterY + imgOffsetY + pulseR * imgScale + 25);
+        }
+
+        // ── Draw the label ──
+        const labelText = mg.explainerLabel || mg.text || '';
+        const subText = mg.subtext || '';
+        if (labelText) {
+            ctx.globalAlpha = labelAlpha;
+            const labelY = labelY_base + labelOffsetY;
+
+            MGRenderer._setFont(ctx, '700', fontSize, s.fontHeading);
+            ctx.textAlign = 'center';
+            const titleW = ctx.measureText(labelText).width;
+            MGRenderer._setFont(ctx, '400', subFontSize, s.fontBody);
+            const subW = subText ? ctx.measureText(subText).width : 0;
+            const pillW = Math.max(titleW, subW) + (isCorner ? 40 : 60);
+            const pillH = subText ? (isCorner ? 70 : 90) : (isCorner ? 45 : 60);
+            const pillX = labelCenterX - pillW / 2;
+            const pillY = labelY - pillH / 2;
+
+            // Semi-transparent pill bg
+            ctx.fillStyle = 'rgba(0,0,0,0.65)';
+            const pillR = 12;
+            ctx.beginPath();
+            ctx.moveTo(pillX + pillR, pillY);
+            ctx.lineTo(pillX + pillW - pillR, pillY);
+            ctx.quadraticCurveTo(pillX + pillW, pillY, pillX + pillW, pillY + pillR);
+            ctx.lineTo(pillX + pillW, pillY + pillH - pillR);
+            ctx.quadraticCurveTo(pillX + pillW, pillY + pillH, pillX + pillW - pillR, pillY + pillH);
+            ctx.lineTo(pillX + pillR, pillY + pillH);
+            ctx.quadraticCurveTo(pillX, pillY + pillH, pillX, pillY + pillH - pillR);
+            ctx.lineTo(pillX, pillY + pillR);
+            ctx.quadraticCurveTo(pillX, pillY, pillX + pillR, pillY);
+            ctx.closePath();
+            ctx.fill();
+
+            // Accent line
+            ctx.fillStyle = primary;
+            ctx.fillRect(pillX + 12, pillY, pillW - 24, 3);
+
+            // Title
+            MGRenderer._setFont(ctx, '700', fontSize, s.fontHeading);
+            ctx.fillStyle = s.text || '#ffffff';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            const titleY = subText ? pillY + pillH * 0.38 : pillY + pillH / 2;
+            ctx.fillText(labelText, labelCenterX, titleY);
+
+            if (subText) {
+                MGRenderer._setFont(ctx, '400', subFontSize, s.fontBody);
+                ctx.fillStyle = s.textSub || 'rgba(255,255,255,0.75)';
+                ctx.fillText(subText, labelCenterX, pillY + pillH * 0.7);
+            }
+        }
+
+        ctx.restore();
+    }
+
+    /**
+     * Convert hex color to rgba string.
+     */
+    _hexToRgba(hex, alpha) {
+        if (hex.startsWith('rgba') || hex.startsWith('rgb')) return hex;
+        const h = hex.replace('#', '');
+        if (h.length < 6) return `rgba(0,0,0,${alpha})`;
+        const r = parseInt(h.substring(0, 2), 16);
+        const g = parseInt(h.substring(2, 4), 16);
+        const b = parseInt(h.substring(4, 6), 16);
+        return `rgba(${r},${g},${b},${alpha})`;
     }
 
     /**

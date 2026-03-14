@@ -43,6 +43,38 @@ if (window._themeTokens) {
 // ========================================
 // MG Registry helpers — populate variant/animation dropdowns
 // ========================================
+function _resolveExplainerUrls(mgs) {
+    if (!window.electronAPI?.getProjectInfo || !window.electronAPI?.getFileUrl) return;
+    for (const mg of mgs) {
+        if (mg.type === 'explainer' && mg.explainerImageFile && !mg._explainerImageUrl) {
+            window.electronAPI.getProjectInfo().then(async (info) => {
+                const imgPath = info.projectDir + '/public/' + mg.explainerImageFile;
+                const url = await window.electronAPI.getFileUrl(imgPath);
+                if (url) mg._explainerImageUrl = url;
+            }).catch(() => {});
+        }
+    }
+}
+
+function _showExplainerControls(show, mg) {
+    const scaleRow = document.getElementById('mg-explainer-img-scale-row');
+    const shadowRow = document.getElementById('mg-explainer-shadow-row');
+    if (!scaleRow) return;
+    const display = show ? '' : 'none';
+    scaleRow.style.display = display;
+    shadowRow.style.display = display;
+    if (show && mg) {
+        const scaleEl = document.getElementById('mg-explainer-img-scale');
+        const scaleVal = document.getElementById('mg-explainer-img-scale-val');
+        const shadowEl = document.getElementById('mg-explainer-shadow');
+        const imgSc = mg.explainerImgScale != null ? mg.explainerImgScale : 100;
+        const shadow = mg.explainerShadow || 'medium';
+        if (scaleEl) scaleEl.value = imgSc;
+        if (scaleVal) scaleVal.textContent = imgSc + '%';
+        if (shadowEl) shadowEl.value = shadow;
+    }
+}
+
 function _populateMgVariantDropdown(mgType, currentSubType) {
     const row = document.getElementById('mg-subtype-row');
     const sel = document.getElementById('mg-subtype');
@@ -277,6 +309,8 @@ const state = {
         maxZoom: 200,
         isDraggingPlayhead: false,
         tracks: [
+            { id: 'video-track-5', label: 'V5', type: 'video' },
+            { id: 'video-track-4', label: 'V4', type: 'video' },
             { id: 'video-track-3', label: 'V3', type: 'video' },
             { id: 'video-track-2', label: 'V2', type: 'video' },
             { id: 'video-track-1', label: 'V1', type: 'video', main: true },
@@ -286,17 +320,17 @@ const state = {
             { id: 'sfx-track', label: 'SFX', type: 'audio' }
         ],
         trackHeights: {
-            'video-track-3': 28, 'video-track-2': 28, 'video-track-1': 40,
+            'video-track-5': 28, 'video-track-4': 28, 'video-track-3': 28, 'video-track-2': 28, 'video-track-1': 40,
             'mg-track': 32,
             'audio-track': 36, 'music-track': 28, 'sfx-track': 22
         },
         trackMinHeights: {
-            'video-track-3': 22, 'video-track-2': 22, 'video-track-1': 28,
+            'video-track-5': 22, 'video-track-4': 22, 'video-track-3': 22, 'video-track-2': 22, 'video-track-1': 28,
             'mg-track': 22,
             'audio-track': 26, 'music-track': 22, 'sfx-track': 18
         },
         trackMaxHeights: {
-            'video-track-3': 120, 'video-track-2': 120, 'video-track-1': 120,
+            'video-track-5': 120, 'video-track-4': 120, 'video-track-3': 120, 'video-track-2': 120, 'video-track-1': 120,
             'mg-track': 80,
             'audio-track': 80, 'music-track': 80, 'sfx-track': 60
         }
@@ -363,6 +397,8 @@ const elements = {
     buildFormat: document.getElementById('build-format'),
     buildNiche: document.getElementById('build-niche'),
     buildTheme: document.getElementById('build-theme'),
+    cinematicScale: document.getElementById('cinematic-scale'),
+    cinematicScaleVal: document.getElementById('cinematic-scale-val'),
     // Footage source toggles
     srcPexels: document.getElementById('src-pexels'),
     srcPixabay: document.getElementById('src-pixabay'),
@@ -810,6 +846,13 @@ function setupEventListeners() {
         globalAnimSpeedEl.addEventListener('input', (e) => {
             const val = parseFloat(e.target.value);
             document.getElementById('mg-global-anim-speed-val').textContent = `${val.toFixed(1)}x`;
+        });
+    }
+    // Cinematic scale slider
+    if (elements.cinematicScale) {
+        elements.cinematicScale.addEventListener('input', (e) => {
+            const val = parseFloat(e.target.value);
+            if (elements.cinematicScaleVal) elements.cinematicScaleVal.textContent = val.toFixed(2);
         });
     }
     // Footage source toggle listeners
@@ -1487,6 +1530,31 @@ function updateClipProperties() {
     if (elements.propFitMode) {
         elements.propFitMode.value = scene.fitMode || 'cover';
     }
+
+    // Overlay-specific controls (compositor directives on any upper track)
+    const isV2Overlay = !!scene._compositorDirective;
+    const slideDirRow = document.getElementById('prop-slide-dir-row');
+    const slideSpeedRow = document.getElementById('prop-slide-speed-row');
+    const bgBlurRow = document.getElementById('prop-bg-blur-row');
+    const bgRow = elements.propBackground?.closest('.property-row');
+    const fitRow = elements.propFitMode?.closest('.property-row');
+    if (slideDirRow) slideDirRow.style.display = isV2Overlay ? '' : 'none';
+    if (slideSpeedRow) slideSpeedRow.style.display = isV2Overlay ? '' : 'none';
+    if (bgBlurRow) bgBlurRow.style.display = isV2Overlay ? '' : 'none';
+    if (bgRow) bgRow.style.display = isV2Overlay ? 'none' : '';
+    if (fitRow) fitRow.style.display = isV2Overlay ? 'none' : '';
+    if (isV2Overlay) {
+        const slideDirEl = document.getElementById('prop-slide-dir');
+        const bgBlurEl = document.getElementById('prop-bg-blur');
+        const slideSpeedEl = document.getElementById('prop-slide-speed');
+        const slideSpeedValEl = document.getElementById('prop-slide-speed-val');
+        if (slideDirEl) slideDirEl.value = scene.slideDirection || 'auto';
+        if (bgBlurEl) bgBlurEl.value = scene.bgBlur || 'none';
+        const spd = scene.slideDuration || 0.4;
+        if (slideSpeedEl) slideSpeedEl.value = spd;
+        if (slideSpeedValEl) slideSpeedValEl.textContent = `${spd}s`;
+    }
+
     // Crop sliders
     const cropTop = scene.cropTop || 0;
     const cropBottom = scene.cropBottom || 0;
@@ -1596,6 +1664,9 @@ function updateMgProperties() {
     if (mapStyleRow) mapStyleRow.style.display = mg.type === 'mapChart' ? '' : 'none';
     if (mapStyleEl && mg.type === 'mapChart') mapStyleEl.value = mg.mapStyle || 'dark';
 
+    // Show explainer-specific controls
+    _showExplainerControls(mg.type === 'explainer', mg);
+
     // Populate variant and animation dropdowns from registry
     _populateMgVariantDropdown(mg.type, mg.subType);
     _populateMgAnimationDropdown(mg.type, mg.animation);
@@ -1644,6 +1715,9 @@ function updateMgPropertiesForScene(scene) {
     const mapStyleEl = document.getElementById('mg-map-style');
     if (mapStyleRow) mapStyleRow.style.display = sceneType === 'mapChart' ? '' : 'none';
     if (mapStyleEl && sceneType === 'mapChart') mapStyleEl.value = mg.mapStyle || scene.mapStyle || 'dark';
+
+    // Show explainer-specific controls
+    _showExplainerControls(sceneType === 'explainer', mg);
 
     // Populate variant and animation dropdowns from registry
     _populateMgVariantDropdown(sceneType, mg.subType || scene.subType);
@@ -1840,6 +1914,39 @@ function setupClipPropertyListeners() {
                 scene.background = 'blur';
                 if (elements.propBackground) elements.propBackground.value = 'blur';
             }
+            refreshCompositorScene(state.selectedClipIndex);
+            loadActiveScenes();
+        });
+    }
+    // V2 overlay: Slide direction
+    const slideDirEl = document.getElementById('prop-slide-dir');
+    if (slideDirEl) {
+        slideDirEl.addEventListener('change', (e) => {
+            if (state.selectedClipIndex < 0) return;
+            pushUndoState();
+            state.scenes[state.selectedClipIndex].slideDirection = e.target.value;
+            refreshCompositorScene(state.selectedClipIndex);
+        });
+    }
+    // V2 overlay: Slide speed/duration
+    const slideSpeedEl = document.getElementById('prop-slide-speed');
+    if (slideSpeedEl) {
+        slideSpeedEl.addEventListener('input', (e) => {
+            if (state.selectedClipIndex < 0) return;
+            const val = parseFloat(e.target.value);
+            state.scenes[state.selectedClipIndex].slideDuration = val;
+            const valEl = document.getElementById('prop-slide-speed-val');
+            if (valEl) valEl.textContent = `${val}s`;
+            refreshCompositorScene(state.selectedClipIndex);
+        });
+    }
+    // V2 overlay: Background blur on video
+    const bgBlurEl = document.getElementById('prop-bg-blur');
+    if (bgBlurEl) {
+        bgBlurEl.addEventListener('change', (e) => {
+            if (state.selectedClipIndex < 0) return;
+            pushUndoState();
+            state.scenes[state.selectedClipIndex].bgBlur = e.target.value;
             refreshCompositorScene(state.selectedClipIndex);
             loadActiveScenes();
         });
@@ -2041,12 +2148,36 @@ function setupMgPropertyListeners() {
         });
     }
 
-    // Show/hide map style row when type changes
+    // Show/hide map style row + explainer controls when type changes
     if (typeEl) {
         typeEl.addEventListener('change', () => {
             const mapStyleRow = document.getElementById('mg-map-style-row');
             if (mapStyleRow) mapStyleRow.style.display = typeEl.value === 'mapChart' ? '' : 'none';
-            // Variant/animation dropdowns already refreshed in the main type listener above
+            _showExplainerControls(typeEl.value === 'explainer', null);
+        });
+    }
+
+    // Explainer-specific property listeners
+    const explScaleEl = document.getElementById('mg-explainer-img-scale');
+    if (explScaleEl) {
+        explScaleEl.addEventListener('input', (e) => {
+            const val = parseInt(e.target.value);
+            document.getElementById('mg-explainer-img-scale-val').textContent = val + '%';
+            const active = getActiveMG();
+            if (!active) return;
+            active.mg.explainerImgScale = val;
+            if (active.mg.mgData) active.mg.mgData.explainerImgScale = val;
+            refreshCompositorMGs();
+        });
+    }
+    const explShadowEl = document.getElementById('mg-explainer-shadow');
+    if (explShadowEl) {
+        explShadowEl.addEventListener('change', (e) => {
+            const active = getActiveMG();
+            if (!active) return;
+            active.mg.explainerShadow = e.target.value;
+            if (active.mg.mgData) active.mg.mgData.explainerShadow = e.target.value;
+            refreshCompositorMGs();
         });
     }
 
@@ -3692,6 +3823,7 @@ async function generateVideo() {
             buildFormat: elements.buildFormat.value,
             buildNiche: elements.buildNiche ? elements.buildNiche.value : 'auto',
             buildTheme: elements.buildTheme.value,
+            cinematicScale: elements.cinematicScale ? elements.cinematicScale.value : '0.65',
             smartAI: elements.smartAiToggle ? elements.smartAiToggle.checked : true
         });
         if (result.success) {
@@ -3781,8 +3913,9 @@ async function loadVideoPlan({ freshBuild = false } = {}) {
                         endTime = nextScene.startTime;
                     }
 
-                    // Assign track based on media type: images → track 2, videos → track 1
-                    const trackId = scene.mediaType === 'image' ? 'video-track-2' : 'video-track-1';
+                    // Respect existing trackId (set by compositor planner for V2 overlays)
+                    // Regular footage (both images and videos) stays on track 1
+                    const trackId = scene.trackId || 'video-track-1';
 
                     processedScenes.push({
                         ...scene,
@@ -3801,16 +3934,18 @@ async function loadVideoPlan({ freshBuild = false } = {}) {
             state.currentTime = 0;
 
             if (plan.audio) {
-                const audioPath = await window.electronAPI.getAudioPath?.(plan.audio);
-                if (audioPath) {
-                    state.audioPath = audioPath;
-                    state.audioFile = { name: plan.audio, path: audioPath };
-                    elements.audioName.textContent = plan.audio;
-                    elements.audioInfo.classList.remove('hidden');
-                    elements.dropZone.style.display = 'none';
-                    elements.btnGenerate.disabled = false;
-                    await loadAudioFile(audioPath);
-                }
+                try {
+                    const audioPath = await window.electronAPI.getAudioPath?.(plan.audio);
+                    if (audioPath) {
+                        state.audioPath = audioPath;
+                        state.audioFile = { name: plan.audio, path: audioPath };
+                        elements.audioName.textContent = plan.audio;
+                        elements.audioInfo.classList.remove('hidden');
+                        elements.dropZone.style.display = 'none';
+                        elements.btnGenerate.disabled = false;
+                        await loadAudioFile(audioPath);
+                    }
+                } catch (e) { console.warn('Audio loading failed:', e.message); }
             }
 
             // Enable render button if we have scenes
@@ -3821,14 +3956,19 @@ async function loadVideoPlan({ freshBuild = false } = {}) {
             // Transitions disabled - hard cut only, skip planned transitions
 
             // Generate SFX for scene change points
-            generateSfxClips();
+            try { generateSfxClips(); } catch (e) { console.warn('SFX generation failed:', e.message); }
 
             // Load motion graphics from plan
             // Full-screen types (barChart, donutChart, etc.) go on V3 as scene objects
+            try {
             const FULLSCREEN_MG_TYPES = new Set(['barChart', 'donutChart', 'rankingList', 'timeline', 'comparisonCard', 'bulletList', 'mapChart', 'articleHighlight']);
             const allMGs = plan.motionGraphics || [];
+            // Explainer always stays as overlay MG (never fullscreen V3 scene)
             state.motionGraphics = allMGs.filter(mg => !FULLSCREEN_MG_TYPES.has(mg.type));
             state.mgStyle = plan.mgStyle || 'clean';
+
+            // Resolve explainer image URLs for overlay MGs
+            _resolveExplainerUrls(state.motionGraphics);
 
             // Load full-screen MGs onto V3 (from mgScenes or classified from motionGraphics)
             const fullscreenMGs = [
@@ -3891,6 +4031,26 @@ async function loadVideoPlan({ freshBuild = false } = {}) {
                         }
                     }).catch(() => { });
                 }
+                // Propagate explainer image properties
+                if (core.explainerImageFile) {
+                    sceneObj.explainerImageFile = core.explainerImageFile;
+                    if (sceneObj.mgData) sceneObj.mgData.explainerImageFile = core.explainerImageFile;
+                }
+                if (core.explainerLabel) {
+                    sceneObj.explainerLabel = core.explainerLabel;
+                    if (sceneObj.mgData) sceneObj.mgData.explainerLabel = core.explainerLabel;
+                }
+                // Pre-resolve explainer image URL for preview
+                if (core.explainerImageFile && window.electronAPI?.getProjectInfo && window.electronAPI?.getFileUrl) {
+                    window.electronAPI.getProjectInfo().then(async (info) => {
+                        const imgPath = info.projectDir + '/public/' + core.explainerImageFile;
+                        const url = await window.electronAPI.getFileUrl(imgPath);
+                        if (url) {
+                            sceneObj._explainerImageUrl = url;
+                            if (sceneObj.mgData) sceneObj.mgData._explainerImageUrl = url;
+                        }
+                    }).catch(() => { });
+                }
                 // Pre-resolve article image URL for preview
                 if (core.articleImageFile && window.electronAPI?.getSceneMediaPath) {
                     const ext = core.articleImageFile.match(/\.\w+$/)?.[0] || '.jpg';
@@ -3950,6 +4110,9 @@ async function loadVideoPlan({ freshBuild = false } = {}) {
                 state.scenes = carved;
                 console.log(`Loaded ${seenIds.size} full-screen MGs onto V3 (carved gaps in V2)`);
             }
+            } catch (mgError) {
+                console.warn('MG/overlay loading failed (scenes still OK):', mgError.message);
+            }
 
             renderScenes();
             renderTimeline();
@@ -3958,7 +4121,16 @@ async function loadVideoPlan({ freshBuild = false } = {}) {
             console.log(`[PreCache] Pre-caching media URLs for ${state.scenes.length} scenes...`);
             const cachePromises = state.scenes
                 .filter(s => !s.isMGScene)
-                .map((scene, i) => {
+                .map(async (scene, i) => {
+                    // V2 overlay scenes have mediaFile — cache their URL directly
+                    if (scene.mediaFile) {
+                        const url = await window.electronAPI.getFileUrl(scene.mediaFile).catch(() => null);
+                        if (url) {
+                            const cacheKey = `${scene.index}:${scene.mediaExtension || ''}:scene`;
+                            state._mediaUrlCache[cacheKey] = url;
+                            return url;
+                        }
+                    }
                     const idx = scene.index !== undefined ? scene.index : i;
                     return getCachedMediaUrl(idx, scene.mediaExtension).catch(() => null);
                 });
@@ -4007,6 +4179,9 @@ window._loadTestPlan = async function(plan) {
     const allMGs = plan.motionGraphics || [];
     state.motionGraphics = allMGs.filter(mg => !FULLSCREEN_MG_TYPES.has(mg.type));
     state.mgStyle = plan.mgStyle || 'clean';
+
+    // Resolve explainer image URLs for overlay MGs
+    _resolveExplainerUrls(state.motionGraphics);
 
     // Process regular scenes
     let nextIndex = 0;
@@ -4368,11 +4543,21 @@ function renderTracks() {
     let html = '';
     const svgMuted = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M11 5L6 9H2v6h4l5 4V5z"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>';
     const svgUnmuted = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>';
+    // Determine which video tracks have clips (auto-collapse empty upper tracks)
+    const usedVideoTracks = new Set();
+    state.scenes.forEach(s => usedVideoTracks.add(s.trackId || 'video-track-1'));
+
     state.timeline.tracks.forEach((track, trackIndex) => {
         const isMuted = state.mutedTracks[track.id] || false;
         const muteIcon = isMuted ? svgMuted : svgUnmuted;
         const muteClass = isMuted ? 'track-muted' : '';
         let trackHeight = state.timeline.trackHeights[track.id] || 36;
+
+        // Auto-collapse empty upper video tracks (V4, V5) to save space
+        const trackNum = parseInt(track.id.match(/\d+/)?.[0] || '0', 10);
+        const isEmptyUpper = track.type === 'video' && trackNum > 3 && !usedVideoTracks.has(track.id);
+        if (isEmptyUpper) trackHeight = 12;
+
         const mgTestBtn = track.id === 'mg-track' ? `<button class="mg-test-btn" data-action="inject-test-mg" title="Inject 6 test MGs">+</button>` : '';
         html += `<div class="timeline-row ${muteClass}" data-track="${track.id}" style="height:${trackHeight}px">
             <div class="track-label"><span class="track-label-text">${track.label}</span>${mgTestBtn}<button class="track-mute-btn ${isMuted ? 'muted' : ''}" data-track-mute="${track.id}" title="${isMuted ? 'Unmute' : 'Mute'} track">${muteIcon}</button></div>
@@ -4479,7 +4664,8 @@ function renderTracks() {
                 return;
             }
 
-            const mediaClass = scene.mediaType === 'image' ? 'clip-image' : 'clip-video';
+            const isOverlayDirective = scene._compositorDirective;
+            const mediaClass = isOverlayDirective ? 'clip-v2-overlay' : (scene.mediaType === 'image' ? 'clip-image' : 'clip-video');
             const isDisabled = scene.disabled === true;
             const eyeIcon = isDisabled ? '👁️‍🗨️' : '👁️';
             // Transition icon between clips (per-scene override > global force > AI-assigned)
@@ -4500,9 +4686,9 @@ function renderTracks() {
             }
 
             html += `<div class="timeline-clip ${mediaClass} ${isDisabled ? 'clip-disabled' : ''} ${idx === state.currentSceneIndex ? 'active' : ''} ${state.selectedClipIndices.includes(idx) ? 'selected' : ''}"
-                data-index="${idx}" style="left:${left}px;width:${width}px" title="${scene.text}${isDisabled ? ' [OFF]' : ''}">
+                data-index="${idx}" style="left:${left}px;width:${width}px" title="${scene.text || scene.keyword || ''}${isDisabled ? ' [OFF]' : ''}">
                 <div class="clip-trim-handle clip-trim-handle-left" data-index="${idx}" data-edge="left"></div>
-                <span class="clip-label">${scene.text.substring(0, 30)}${scene.text.length > 30 ? '...' : ''}</span>
+                <span class="clip-label">${(scene.text || scene.keyword || '').substring(0, 30)}${(scene.text || scene.keyword || '').length > 30 ? '...' : ''}</span>
                 <button class="clip-toggle-btn" data-toggle-idx="${idx}" title="${isDisabled ? 'Enable' : 'Disable'} clip">${eyeIcon}</button>
                 <div class="clip-trim-handle clip-trim-handle-right" data-index="${idx}" data-edge="right"></div>
             </div>`;
@@ -5160,6 +5346,8 @@ function startDragClip(e, clip) {
 
         state.scenes.sort((a, b) => a.startTime - b.startTime);
         renderTimeline();
+        // Refresh compositor with updated scene timing/track assignments
+        if (state.compositorActive) loadPlanIntoCompositor();
     };
 
     document.addEventListener('mousemove', onMove);
@@ -5282,6 +5470,8 @@ function startTrimClip(e, handle) {
         state.scenes.sort((a, b) => a.startTime - b.startTime);
         recalcTotalDuration();
         renderTimeline();
+        // Refresh compositor with updated scene timing
+        if (state.compositorActive) loadPlanIntoCompositor();
     };
 
     document.addEventListener('mousemove', onMove);
@@ -5668,8 +5858,23 @@ async function loadActiveScenes(activeScenes) {
         }
     });
 
+    // Apply blur to base video track when any upper-track overlay has bgBlur enabled
+    const upperBlurScene = activeScenes.find(({ scene }) => {
+        const tn = parseInt(scene.trackId?.match(/\d+/)?.[0] || '1', 10);
+        return tn > 1 && !scene.disabled && scene.bgBlur && scene.bgBlur !== 'none';
+    });
+    const blurLevel = upperBlurScene?.scene?.bgBlur || 'none';
+    const blurMap = { none: '', light: 'blur(3px)', medium: 'blur(6px)', heavy: 'blur(10px)' };
+    const blurFilter = blurMap[blurLevel] || '';
+    const t1Video = elements.videoTrack1;
+    const t1VideoB = elements.videoTrack1B;
+    const t1Img = elements.imgTrack1;
+    if (t1Video) t1Video.style.filter = blurFilter;
+    if (t1VideoB) t1VideoB.style.filter = blurFilter;
+    if (t1Img) t1Img.style.filter = blurFilter;
+
     // Only hide tracks that are NOT active (avoids unnecessary DOM thrashing)
-    ['1', '2', '3'].forEach(tn => {
+    ['1', '2', '3', '4', '5'].forEach(tn => {
         if (!activeTracks.has(tn)) {
             const videoA = elements[`videoTrack${tn}`];
             const videoB = elements[`videoTrack${tn}B`];
@@ -5748,7 +5953,14 @@ async function loadActiveScenes(activeScenes) {
                 const isImage = scene.mediaType === 'image';
 
                 const originalIndex = scene.index !== undefined ? scene.index : index;
-                const mediaUrl = await getCachedMediaUrl(originalIndex, scene.mediaExtension);
+                // V2 overlay scenes have mediaFile set directly — use it instead of index-based lookup
+                let mediaUrl;
+                if (scene.mediaFile) {
+                    mediaUrl = await window.electronAPI.getFileUrl(scene.mediaFile);
+                }
+                if (!mediaUrl) {
+                    mediaUrl = await getCachedMediaUrl(originalIndex, scene.mediaExtension);
+                }
                 if (!mediaUrl) {
                     console.warn(`[Preview] Scene ${index} (track ${trackNum}): no media URL found for index=${originalIndex} ext=${scene.mediaExtension}`);
                     return;
@@ -6111,7 +6323,7 @@ function initCompositor() {
 /**
  * Toggle between HTML preview and WebGL2 compositor preview.
  */
-function setCompositorMode(active) {
+async function setCompositorMode(active) {
     state.compositorActive = active;
     const canvas = document.getElementById('compositor-canvas');
     const htmlLayers = document.querySelectorAll('.track-wrapper, .mg-overlay, .mg-v3-preview-layer, .bg-media');
@@ -6124,9 +6336,6 @@ function setCompositorMode(active) {
             state.compositor.init();
         }
         // Load plan into compositor if we have one
-        if (state.compositor && state.videoPlan) {
-            loadPlanIntoCompositor();
-        }
         if (canvas) canvas.classList.add('active');
         htmlLayers.forEach(el => el.style.visibility = 'hidden');
         if (toggleBtn) {
@@ -6135,11 +6344,15 @@ function setCompositorMode(active) {
             toggleBtn.style.color = '#000';
         }
         if (qualitySelect) qualitySelect.style.display = '';
-        // Render current frame immediately
+        console.log('[Compositor] Preview mode ENABLED');
+        // Load plan (async preload) THEN render — must await so elements are ready
+        if (state.compositor && state.videoPlan) {
+            await loadPlanIntoCompositor();
+        }
+        // Render current frame AFTER preload completes so textures are available
         if (state.compositor && state.compositor.isInitialized) {
             state.compositor.renderAtTime(state.currentTime);
         }
-        console.log('[Compositor] Preview mode ENABLED');
     } else {
         if (canvas) canvas.classList.remove('active');
         htmlLayers.forEach(el => el.style.visibility = '');
@@ -6235,7 +6448,8 @@ function refreshCompositorMGs() {
             // Update all mutable fields including duration, frames, animation speed, and background
             Object.assign(existing, {
                 type: mgScene.type, text: mgScene.text, subtext: mgScene.subtext,
-                style: mgScene.style, position: mgScene.position,
+                style: mgScene.style, subType: mgScene.subType, animation: mgScene.animation,
+                position: mgScene.position,
                 data: mgScene.data, mgData: mgScene.mgData,
                 mgBackground: mgScene.mgBackground,
                 duration: mgScene.duration,
@@ -6324,7 +6538,18 @@ async function loadPlanIntoCompositor() {
 
         await state.compositor.loadPlan(compositorPlan, async (sceneIndex, ext) => {
             return getCachedMediaUrl(sceneIndex, ext);
+        }, async (mediaFile) => {
+            // Resolve full file path to a file:// URL for compositor overlay scenes
+            if (window.electronAPI.getFileUrl) {
+                return window.electronAPI.getFileUrl(mediaFile).catch(() => null);
+            }
+            return null;
         });
+
+        // Render current frame after preload so loaded textures are visible immediately
+        if (state.compositor.isInitialized) {
+            state.compositor.renderAtTime(state.currentTime || 0);
+        }
     } catch (e) {
         console.error('[Compositor] Failed to load plan:', e);
     }
@@ -6416,11 +6641,14 @@ async function renderVideo() {
                 style: mg.style || state.mgStyle || 'clean',
                 animationSpeed: mg.animationSpeed || undefined,
             };
-            // Preserve animatedIcons-specific fields
-            if (mg.type === 'animatedIcons') {
-                base.icons = mg.icons;
-                base.animationStyle = mg.animationStyle;
-                base.iconOpacity = mg.iconOpacity;
+            // Preserve explainer-specific fields
+            if (mg.type === 'explainer') {
+                if (mg.explainerImageFile) base.explainerImageFile = mg.explainerImageFile;
+                if (mg.explainerLabel) base.explainerLabel = mg.explainerLabel;
+                if (mg.explainerQuery) base.explainerQuery = mg.explainerQuery;
+                if (mg.explainerBgOpacity != null) base.explainerBgOpacity = mg.explainerBgOpacity;
+                if (mg.explainerImgScale != null) base.explainerImgScale = mg.explainerImgScale;
+                if (mg.explainerShadow) base.explainerShadow = mg.explainerShadow;
             }
             // Preserve articleHighlight-specific fields
             if (mg.articleImageFile) base.articleImageFile = mg.articleImageFile;
@@ -6760,7 +6988,8 @@ function saveSettings() {
         subtitlesEnabled: state.subtitlesEnabled,
         aiInstructions: state.aiInstructions,
         mutedTracks: state.mutedTracks,
-        buildNiche: elements.buildNiche ? elements.buildNiche.value : 'auto'
+        buildNiche: elements.buildNiche ? elements.buildNiche.value : 'auto',
+        cinematicScale: elements.cinematicScale ? elements.cinematicScale.value : '0.65'
     }));
     // Also trigger .fvp auto-save so settings persist per-project
     triggerAutoSave();
@@ -6829,6 +7058,11 @@ function loadSettings() {
             if (elements.aiInstructions) elements.aiInstructions.value = state.aiInstructions;
             // Restore Niche Preset
             if (elements.buildNiche && s.buildNiche) elements.buildNiche.value = s.buildNiche;
+            // Restore Cinematic Scale
+            if (elements.cinematicScale && s.cinematicScale) {
+                elements.cinematicScale.value = s.cinematicScale;
+                if (elements.cinematicScaleVal) elements.cinematicScaleVal.textContent = parseFloat(s.cinematicScale).toFixed(2);
+            }
             // Restore track mute state
             if (s.mutedTracks) state.mutedTracks = s.mutedTracks;
             // Restore footage source toggles
@@ -6890,6 +7124,11 @@ function applyProjectSettings(s) {
         if (elements.aiInstructions) elements.aiInstructions.value = state.aiInstructions;
         // Niche Preset
         if (elements.buildNiche && s.buildNiche) elements.buildNiche.value = s.buildNiche;
+        // Cinematic Scale
+        if (elements.cinematicScale && s.cinematicScale) {
+            elements.cinematicScale.value = s.cinematicScale;
+            if (elements.cinematicScaleVal) elements.cinematicScaleVal.textContent = parseFloat(s.cinematicScale).toFixed(2);
+        }
         // Track mute
         if (s.mutedTracks) state.mutedTracks = s.mutedTracks;
         // Footage sources

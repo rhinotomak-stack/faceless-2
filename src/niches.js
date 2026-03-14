@@ -29,10 +29,13 @@ const NICHES = {
         // Default visual theme (can be overridden independently)
         defaultTheme: 'tech',
 
+        // Shot style guidance — tells Visual Planner what kind of footage to prefer
+        shotStyle: 'Neon-lit close-ups of screens and hardware, dark rooms with monitor glow, data visualizations, smooth tracking shots of server rooms and labs, aerial shots of tech campuses.',
+
         // Allowed MG types for this niche
         allowedMGs: [
             'kineticText', 'statCounter', 'barChart', 'focusWord',
-            'animatedIcons', 'progressBar', 'headline', 'comparisonCard'
+            'explainer', 'progressBar', 'headline', 'comparisonCard'
         ],
 
         // Footage provider priority
@@ -43,6 +46,10 @@ const NICHES = {
 
         // Pacing preference (fast/moderate/slow) — used as default if AI is ambiguous
         defaultPacing: 'fast',
+
+        // Preferred media type balance — guides AI when choosing video vs image per scene
+        // 'video' = prefer video clips, 'image' = prefer still images, 'mixed' = no strong bias
+        preferredMediaType: 'mixed',   // tech: product shots (image) + demos (video)
 
         // Keywords for auto-detection from AI Director's topic analysis
         keywords: ['tech', 'ai', 'cyber', 'hack', 'digital', 'code', 'robot', 'future',
@@ -61,6 +68,15 @@ const NICHES = {
             entityBoost: true,
             // Max words for stock providers (Pexels/Pixabay/Unsplash) — shorter = better results
             stockMaxWords: 3,
+        },
+
+        // Compositor overlay preferences — controls V2 image overlays & explainer cards
+        overlayPrefs: {
+            v2Density: 'low',        // low/medium/high — how many V2 image overlays
+            explainerDensity: 'high', // low/medium/high — how many transparent PNG explainers
+            maxOverlays: 4,           // max total overlays per video
+            minGapSec: 12,            // min seconds between overlays
+            preferredTypes: ['explainer', 'v2'],  // priority order
         }
     },
 
@@ -70,6 +86,8 @@ const NICHES = {
         description: 'Nature, wildlife, environment, conservation',
 
         defaultTheme: 'nature',
+
+        shotStyle: 'Wide establishing shots of landscapes, slow-motion wildlife, macro nature details (insects, leaves, water droplets), aerial drone footage, golden hour and blue hour lighting.',
 
         allowedMGs: [
             'headline', 'lowerThird', 'callout', 'mapChart', 'timeline',
@@ -83,6 +101,8 @@ const NICHES = {
 
         defaultPacing: 'slow',
 
+        preferredMediaType: 'video',   // nature: wildlife, landscapes look better moving
+
         keywords: ['nature', 'wildlife', 'animal', 'environment', 'climate', 'earth',
                    'ocean', 'forest', 'plant', 'bird', 'ecosystem', 'conservation',
                    'species', 'habitat', 'marine', 'weather', 'geology'],
@@ -93,6 +113,14 @@ const NICHES = {
             fallbackKeywords: ['nature landscape', 'wildlife aerial', 'ocean waves', 'forest canopy'],
             entityBoost: true,
             stockMaxWords: 3,
+        },
+
+        overlayPrefs: {
+            v2Density: 'low',
+            explainerDensity: 'low',
+            maxOverlays: 2,
+            minGapSec: 20,
+            preferredTypes: ['v2'],
         }
     },
 
@@ -102,6 +130,8 @@ const NICHES = {
         description: 'Crime, mystery, thriller, investigation',
 
         defaultTheme: 'crime',
+
+        shotStyle: 'Dark moody lighting, surveillance-style angles, slow zooms on evidence/documents, grainy archival photos, night scenes with streetlights, courtroom interiors, police tape close-ups.',
 
         allowedMGs: [
             'headline', 'lowerThird', 'callout', 'timeline', 'articleHighlight',
@@ -115,6 +145,8 @@ const NICHES = {
 
         defaultPacing: 'moderate',
 
+        preferredMediaType: 'image',   // crime: mugshots, evidence photos, news stills
+
         keywords: ['crime', 'murder', 'investigation', 'detective', 'mystery', 'thriller',
                    'police', 'fbi', 'criminal', 'suspect', 'evidence', 'court', 'trial',
                    'victim', 'disappear', 'serial', 'forensic', 'kidnap'],
@@ -125,6 +157,14 @@ const NICHES = {
             fallbackKeywords: ['police investigation', 'crime scene tape', 'courtroom interior', 'dark alley night'],
             entityBoost: true,
             stockMaxWords: 3,
+        },
+
+        overlayPrefs: {
+            v2Density: 'medium',
+            explainerDensity: 'low',
+            maxOverlays: 4,
+            minGapSec: 10,
+            preferredTypes: ['v2'],
         }
     },
 
@@ -134,6 +174,8 @@ const NICHES = {
         description: 'Business, finance, economics, corporate',
 
         defaultTheme: 'corporate',
+
+        shotStyle: 'Clean corporate environments, glass office buildings, stock tickers, boardroom meetings, city skylines at dusk, data dashboards on screens, professional handshakes.',
 
         allowedMGs: [
             'barChart', 'donutChart', 'timeline', 'statCounter', 'bulletList',
@@ -147,6 +189,8 @@ const NICHES = {
 
         defaultPacing: 'moderate',
 
+        preferredMediaType: 'mixed',   // business: charts (image) + office/city (video)
+
         keywords: ['business', 'corporate', 'professional', 'company', 'startup', 'market',
                    'finance', 'economy', 'stock', 'revenue', 'profit', 'investment',
                    'ceo', 'quarterly', 'earnings', 'ipo', 'merger', 'acquisition'],
@@ -157,6 +201,14 @@ const NICHES = {
             fallbackKeywords: ['corporate office', 'stock market graph', 'business meeting', 'city skyline'],
             entityBoost: true,
             stockMaxWords: 3,
+        },
+
+        overlayPrefs: {
+            v2Density: 'high',
+            explainerDensity: 'medium',
+            maxOverlays: 6,
+            minGapSec: 8,
+            preferredTypes: ['v2', 'explainer'],
         }
     },
 
@@ -166,6 +218,8 @@ const NICHES = {
         description: 'High-end, fashion, lifestyle, premium',
 
         defaultTheme: 'luxury',
+
+        shotStyle: 'Macro photography with shallow depth of field (bokeh), slow smooth panning, elegant warm lighting, gold/black tones, glamorous interiors, fashion runway angles, product hero shots.',
 
         allowedMGs: [
             'headline', 'lowerThird', 'focusWord', 'kineticText', 'callout',
@@ -179,6 +233,8 @@ const NICHES = {
 
         defaultPacing: 'slow',
 
+        preferredMediaType: 'video',   // luxury: cars, watches, lifestyle in motion
+
         keywords: ['luxury', 'fashion', 'beauty', 'style', 'elegant', 'premium',
                    'designer', 'haute', 'couture', 'wedding', 'jewelry', 'art',
                    'brand', 'exclusive', 'boutique', 'lifestyle'],
@@ -189,6 +245,14 @@ const NICHES = {
             fallbackKeywords: ['luxury interior', 'fashion runway', 'gold texture close up', 'elegant architecture'],
             entityBoost: true,
             stockMaxWords: 3,
+        },
+
+        overlayPrefs: {
+            v2Density: 'low',
+            explainerDensity: 'medium',
+            maxOverlays: 3,
+            minGapSec: 15,
+            preferredTypes: ['explainer', 'v2'],
         }
     },
 
@@ -198,6 +262,8 @@ const NICHES = {
         description: 'Sports, competition, athletics, action',
 
         defaultTheme: 'sport',
+
+        shotStyle: 'Fast tracking shots, dynamic wide angles, high contrast, slow-motion replays, stadium crowd shots, close-ups of athletes in action, overhead tactical views.',
 
         allowedMGs: [
             'statCounter', 'rankingList', 'comparisonCard', 'headline', 'focusWord',
@@ -211,6 +277,8 @@ const NICHES = {
 
         defaultPacing: 'fast',
 
+        preferredMediaType: 'video',   // sport: action footage needs movement
+
         keywords: ['sport', 'game', 'team', 'player', 'athlete', 'competition',
                    'championship', 'match', 'race', 'fight', 'extreme', 'action',
                    'goal', 'score', 'tournament', 'league', 'coach', 'season'],
@@ -221,6 +289,14 @@ const NICHES = {
             fallbackKeywords: ['stadium crowd', 'athletic competition', 'sports action', 'running track'],
             entityBoost: true,
             stockMaxWords: 3,
+        },
+
+        overlayPrefs: {
+            v2Density: 'medium',
+            explainerDensity: 'low',
+            maxOverlays: 4,
+            minGapSec: 10,
+            preferredTypes: ['v2'],
         }
     },
 
@@ -231,9 +307,11 @@ const NICHES = {
 
         defaultTheme: 'corporate',
 
+        shotStyle: 'Clean well-lit scenes, diagrams and infographics, whiteboards, laboratory close-ups, book/library shots, step-by-step process footage, talking-head framing for authority.',
+
         allowedMGs: [
             'headline', 'bulletList', 'statCounter', 'barChart', 'timeline',
-            'comparisonCard', 'focusWord', 'callout', 'animatedIcons', 'progressBar'
+            'comparisonCard', 'focusWord', 'callout', 'explainer', 'progressBar'
         ],
 
         footagePriority: {
@@ -242,6 +320,8 @@ const NICHES = {
         },
 
         defaultPacing: 'moderate',
+
+        preferredMediaType: 'image',   // education: diagrams, charts, explainer stills
 
         keywords: ['education', 'study', 'academic', 'research', 'learn', 'teach',
                    'school', 'university', 'science', 'history', 'explain', 'tutorial',
@@ -253,6 +333,14 @@ const NICHES = {
             fallbackKeywords: ['classroom education', 'science laboratory', 'books library', 'university campus'],
             entityBoost: true,
             stockMaxWords: 3,
+        },
+
+        overlayPrefs: {
+            v2Density: 'medium',
+            explainerDensity: 'high',
+            maxOverlays: 5,
+            minGapSec: 10,
+            preferredTypes: ['explainer', 'v2'],
         }
     },
 
@@ -262,6 +350,8 @@ const NICHES = {
         description: 'News, politics, current events, journalism',
 
         defaultTheme: 'corporate',
+
+        shotStyle: 'Press conference angles, newsroom-style framing, split-screen layouts, on-location establishing shots, document/headline close-ups, crowd footage, official building exteriors.',
 
         allowedMGs: [
             'headline', 'lowerThird', 'statCounter', 'articleHighlight', 'mapChart',
@@ -275,6 +365,8 @@ const NICHES = {
 
         defaultPacing: 'fast',
 
+        preferredMediaType: 'image',   // news: press photos, screenshots, headlines
+
         keywords: ['news', 'politics', 'government', 'election', 'president', 'congress',
                    'war', 'conflict', 'crisis', 'breaking', 'report', 'journalist',
                    'scandal', 'policy', 'law', 'legislation', 'vote'],
@@ -285,6 +377,14 @@ const NICHES = {
             fallbackKeywords: ['news broadcast', 'press conference', 'government building', 'world map'],
             entityBoost: true,
             stockMaxWords: 3,
+        },
+
+        overlayPrefs: {
+            v2Density: 'high',
+            explainerDensity: 'low',
+            maxOverlays: 6,
+            minGapSec: 8,
+            preferredTypes: ['v2', 'explainer'],
         }
     },
 
@@ -294,6 +394,8 @@ const NICHES = {
         description: 'History, historical events, civilizations, biography',
 
         defaultTheme: 'neutral',
+
+        shotStyle: 'Slow pans across historical photos and paintings, sepia/desaturated tones, map animations, monument establishing shots, museum artifact close-ups, archival film grain.',
 
         allowedMGs: [
             'headline', 'lowerThird', 'timeline', 'mapChart', 'callout',
@@ -307,6 +409,8 @@ const NICHES = {
 
         defaultPacing: 'slow',
 
+        preferredMediaType: 'image',   // history: historical photos, paintings, maps
+
         keywords: ['history', 'ancient', 'medieval', 'century', 'empire', 'civilization',
                    'dynasty', 'revolution', 'colonial', 'archaeological', 'historic',
                    'era', 'kingdom', 'battle', 'monument', 'artifact', 'biography'],
@@ -317,6 +421,14 @@ const NICHES = {
             fallbackKeywords: ['historical documentary', 'ancient ruins', 'old photograph archive', 'museum artifact'],
             entityBoost: true,
             stockMaxWords: 3,
+        },
+
+        overlayPrefs: {
+            v2Density: 'medium',
+            explainerDensity: 'medium',
+            maxOverlays: 4,
+            minGapSec: 12,
+            preferredTypes: ['v2', 'explainer'],
         }
     },
 
@@ -326,6 +438,8 @@ const NICHES = {
         description: 'Motivational, self-improvement, inspirational, mindset',
 
         defaultTheme: 'neutral',
+
+        shotStyle: 'Cinematic wide shots of people in motion (running, climbing, working out), sunrise/sunset golden hour, silhouettes, dramatic clouds, slow-motion determination shots, urban hustle scenes.',
 
         allowedMGs: [
             'focusWord', 'kineticText', 'headline', 'statCounter', 'callout',
@@ -339,6 +453,8 @@ const NICHES = {
 
         defaultPacing: 'moderate',
 
+        preferredMediaType: 'video',   // motivation: people, nature, activity clips
+
         keywords: ['motivation', 'inspire', 'success', 'mindset', 'discipline', 'grind',
                    'hustle', 'self-improvement', 'habit', 'productivity', 'growth',
                    'confidence', 'resilience', 'goal', 'dream', 'overcome', 'achieve'],
@@ -349,6 +465,14 @@ const NICHES = {
             fallbackKeywords: ['sunrise mountain top', 'person running cinematic', 'city skyline golden hour', 'ocean waves dramatic'],
             entityBoost: false,
             stockMaxWords: 3,
+        },
+
+        overlayPrefs: {
+            v2Density: 'low',
+            explainerDensity: 'low',
+            maxOverlays: 2,
+            minGapSec: 20,
+            preferredTypes: ['v2'],
         }
     },
 
@@ -359,12 +483,14 @@ const NICHES = {
 
         defaultTheme: 'neutral',
 
+        shotStyle: 'Mix of wide establishing shots, medium close-ups, and aerial perspectives. Vary between static and slow movement. Match lighting to the mood of each scene.',
+
         // All MG types allowed (unrestricted fallback)
         allowedMGs: [
             'headline', 'lowerThird', 'statCounter', 'callout', 'bulletList',
             'focusWord', 'progressBar', 'barChart', 'donutChart', 'comparisonCard',
             'timeline', 'rankingList', 'kineticText', 'mapChart', 'articleHighlight',
-            'animatedIcons'
+            'explainer'
         ],
 
         footagePriority: {
@@ -374,6 +500,8 @@ const NICHES = {
 
         defaultPacing: 'moderate',
 
+        preferredMediaType: 'mixed',   // general: no strong bias
+
         keywords: [], // Fallback niche — matches when nothing else does
 
         searchPolicy: {
@@ -382,6 +510,14 @@ const NICHES = {
             fallbackKeywords: ['abstract background', 'cinematic landscape', 'aerial city view'],
             entityBoost: true,
             stockMaxWords: 4,
+        },
+
+        overlayPrefs: {
+            v2Density: 'medium',
+            explainerDensity: 'medium',
+            maxOverlays: 4,
+            minGapSec: 12,
+            preferredTypes: ['v2', 'explainer'],
         }
     }
 };
@@ -475,6 +611,9 @@ const STOCK_PROVIDERS = new Set(['pexels', 'pixabay', 'unsplash']);
 // Providers where context-enriched queries work better (web search)
 const WEB_PROVIDERS = new Set(['googleCSE', 'bing', 'googleScrape', 'duckduckgo', 'newsVideo']);
 
+// YouTube needs specific event/topic queries — not too short (stock-style) or too long (web-style)
+const YOUTUBE_PROVIDERS = new Set(['youtube']);
+
 /**
  * Get the search policy for a niche (with safe defaults).
  * @param {string} nicheId
@@ -509,6 +648,9 @@ function rewriteQuery(keyword, nicheId, providerKey, scene) {
     const policy = getSearchPolicy(nicheId);
     let query = keyword.trim();
 
+    // Step 0: Strip wrapping quotes (AI sometimes wraps queries in quotes)
+    query = query.replace(/^["']+|["']+$/g, '');
+
     // Step 1: Strip avoid terms
     if (policy.avoidTerms && policy.avoidTerms.length > 0) {
         for (const term of policy.avoidTerms) {
@@ -522,10 +664,19 @@ function rewriteQuery(keyword, nicheId, providerKey, scene) {
     // Step 2: Provider-specific rewriting
     if (STOCK_PROVIDERS.has(providerKey)) {
         // Stock providers: shorter queries = better results
+        // Smart word selection: prefer visual/descriptive words over generic ones
         const maxWords = policy.stockMaxWords || 3;
         const words = query.split(/\s+/);
         if (words.length > maxWords) {
-            // If entityBoost and scene has entities, keep entity words
+            // Words to deprioritize (not useful for stock search)
+            const WEAK_WORDS = new Set([
+                'photo', 'photos', 'image', 'images', 'footage', 'video', 'clip',
+                'real', 'actual', 'showing', 'featuring', 'scene', 'shot', 'view',
+                'press', 'conference', 'report', 'event', 'moment', 'latest',
+                'new', 'old', 'big', 'small', 'very', 'more', 'most', 'just',
+                'about', 'like', 'near', 'around', 'during', 'after', 'before',
+            ]);
+
             if (policy.entityBoost && scene && scene.entities && scene.entities.length > 0) {
                 const entityWords = scene.entities.join(' ').toLowerCase().split(/\s+/);
                 const entityKept = [];
@@ -537,18 +688,49 @@ function rewriteQuery(keyword, nicheId, providerKey, scene) {
                         otherWords.push(w);
                     }
                 }
-                // Entity words first, then fill remaining slots
                 const remaining = maxWords - entityKept.length;
                 query = [...entityKept, ...otherWords.slice(0, Math.max(1, remaining))].join(' ');
             } else {
-                query = words.slice(0, maxWords).join(' ');
+                // Score each word: longer words and visual descriptors score higher
+                const scored = words.map(w => ({
+                    word: w,
+                    score: (WEAK_WORDS.has(w.toLowerCase()) ? -5 : 0) + w.length
+                }));
+                // Sort by score descending, take top N, then restore original order
+                const topN = scored
+                    .map((s, idx) => ({ ...s, idx }))
+                    .sort((a, b) => b.score - a.score)
+                    .slice(0, maxWords)
+                    .sort((a, b) => a.idx - b.idx);
+                query = topN.map(s => s.word).join(' ');
             }
         }
+    } else if (YOUTUBE_PROVIDERS.has(providerKey)) {
+        // YouTube: 3-6 words, event/topic focused, add "footage" or "video" if missing
+        // Strip weak filler words but keep entity names and action words
+        const YOUTUBE_STRIP = new Set([
+            'photo', 'photos', 'image', 'images', 'portrait', 'picture',
+            'diagram', 'chart', 'infographic', 'illustration', 'schematic',
+            'showing', 'featuring', 'real', 'actual',
+        ]);
+        const words = query.split(/\s+/).filter(w => !YOUTUBE_STRIP.has(w.toLowerCase()));
+        // Target 3-6 words for YouTube search
+        if (words.length > 6) {
+            query = words.slice(0, 6).join(' ');
+        } else {
+            query = words.join(' ');
+        }
+        // Add "footage" if query is very short and doesn't have a video-related word
+        const lower = query.toLowerCase();
+        if (words.length <= 2 && !lower.includes('footage') && !lower.includes('video') && !lower.includes('clip')) {
+            query = query + ' footage';
+        }
     } else if (WEB_PROVIDERS.has(providerKey)) {
-        // Web providers: add context term if query doesn't already contain niche context
-        if (policy.contextTerms && policy.contextTerms.length > 0) {
+        // Web providers: only add context term if query is short/generic (≤3 words)
+        // The Visual Planner already generates 4-8 word specific queries — don't bloat them
+        const wordCount = query.split(/\s+/).length;
+        if (wordCount <= 3 && policy.contextTerms && policy.contextTerms.length > 0) {
             const lowerQuery = query.toLowerCase();
-            // Add the first context term that's not already in the query
             for (const term of policy.contextTerms) {
                 if (!lowerQuery.includes(term.toLowerCase())) {
                     query = query + ' ' + term;

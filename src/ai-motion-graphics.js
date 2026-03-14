@@ -32,7 +32,7 @@ const POSITION_MAP = {
     kineticText: 'center',
     mapChart: 'center',
     articleHighlight: 'center',
-    animatedIcons: 'center',
+    explainer: 'bottom-right',
 };
 
 // Style themes — must match MotionGraphics.jsx STYLES
@@ -213,8 +213,10 @@ const CONTENT_PATTERNS = {
         return { score: 0, reason: null };
     },
 
-    // Abstract / conceptual explanation (good for animated icons)
+    // Tools, products, concepts — triggers explainer MG
     conceptual: (text) => {
+        if (/\b(app|tool|platform|software|service|product|device|gadget|plugin|extension|API|SDK|library|browser|engine|program)\b/i.test(text))
+            return { score: 6, reason: 'tool/product mention' };
         if (/\b(concept|process|system|mechanism|framework|approach|method|technique|strategy|principle|theory|model)\b/i.test(text))
             return { score: 5, reason: 'conceptual language' };
         return { score: 0, reason: null };
@@ -243,7 +245,7 @@ const PATTERN_TO_MG_TYPES = {
     emphasis:    ['callout', 'kineticText', 'focusWord'],
     geographic:  ['mapChart', 'barChart', 'statCounter'],
     research:    ['articleHighlight', 'callout', 'statCounter'],
-    conceptual:  ['animatedIcons', 'bulletList', 'callout'],
+    conceptual:  ['explainer', 'bulletList', 'callout'],
     dramatic:    ['focusWord', 'kineticText', 'headline'],
 };
 
@@ -251,7 +253,7 @@ const PATTERN_TO_MG_TYPES = {
 const TYPE_CAPS = {
     focusWord: 2,
     headline: 3,
-    animatedIcons: 3,
+    explainer: 3,
     barChart: 1,
     donutChart: 1,
     comparisonCard: 1,
@@ -475,7 +477,7 @@ function computeSmartDuration(type, text, subtext) {
         kineticText: 5.0,
         mapChart: 6.0,
         articleHighlight: 7.0,
-        animatedIcons: 5.0,
+        explainer: 5.0,
     };
 
     let duration = readingTime + ANIM_OVERHEAD + HOLD_PADDING;
@@ -781,10 +783,10 @@ function buildPrompt(scene, sceneIndex, totalScenes, scriptContext, sceneVisual,
   text: the headline (max 8 words)
   subtext: MUST use pipe format: source|author|date|excerpt with **highlighted phrases**
   Example: "Nature|Dr. Jane Smith|Feb 2024|The study found that **AI automation** could affect **47% of jobs** in manufacturing"`,
-        animatedIcons: `animatedIcons: Animated background icons for explanation/educational scenes (max 3 per video).
-  WHEN: narration explains a concept, process, or abstract idea with no specific data/stats.
-  text: 3-5 comma-separated SINGLE-WORD icon names. E.g. "brain,gear,lightbulb,rocket,target"
-  subtext: animation style — one of: float, drift, bounce, slideIn, popIn, spin`,
+        explainer: `explainer: Visual explainer for tools, products, or concepts (max 3 per video).
+  WHEN: narration discusses a specific tool, product, app, technology, or abstract concept.
+  text: search query to find an image of the thing discussed (e.g. "ChatGPT logo", "Tesla Model 3", "blockchain diagram")
+  subtext: short label to display below the image (e.g. "ChatGPT", "Tesla Model 3")`,
     };
 
     const typeDescriptions = candidateTypes
@@ -894,10 +896,11 @@ function parseResponse(text, scene, sceneIndex) {
         'article_highlight': 'articleHighlight',
         'article highlight': 'articleHighlight',
         'article': 'articleHighlight',
-        'animatedicons': 'animatedIcons',
-        'animated_icons': 'animatedIcons',
-        'animated icons': 'animatedIcons',
-        'icons': 'animatedIcons',
+        'explainer': 'explainer',
+        'animatedicons': 'explainer',
+        'animated_icons': 'explainer',
+        'animated icons': 'explainer',
+        'icons': 'explainer',
         'none': 'none'
     };
 
@@ -1082,8 +1085,9 @@ Only pick the most impactful scenes. Reply with ONLY the lines, nothing else.`;
                 'kinetic': 'kineticText', 'mapchart': 'mapChart',
                 'map': 'mapChart', 'articlehighlight': 'articleHighlight',
                 'article': 'articleHighlight',
-                'animatedicons': 'animatedIcons',
-                'icons': 'animatedIcons'
+                'explainer': 'explainer',
+                'animatedicons': 'explainer',
+                'icons': 'explainer'
             };
 
             const text = parts[2].replace(/^["']+|["']+$/g, '');
@@ -1255,21 +1259,11 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
                     if (catOverride?.anim) mg.animation = catOverride.anim;
                 }
 
-                // Post-process animatedIcons: structure icons array from text keywords
-                if (mg.type === 'animatedIcons') {
-                    const keywords = (mg.text || '').split(',').map(k => k.trim()).filter(Boolean).slice(0, 5);
-                    const animStyle = ['float', 'drift', 'bounce', 'slideIn', 'popIn', 'spin'].includes(mg.subtext) ? mg.subtext : 'float';
-                    mg.icons = keywords.map((kw, idx) => ({
-                        keyword: kw,
-                        file: null, // populated by icon-provider.js
-                        animation: animStyle,
-                        x: 10 + (idx * 18) + Math.floor((idx * 37 + 13) % 15),
-                        y: 12 + Math.floor((idx * 53 + 7) % 65),
-                        size: 55 + Math.floor((idx * 29 + 11) % 40),
-                        delay: idx * 0.35,
-                    }));
-                    mg.animationStyle = animStyle;
-                    mg.iconOpacity = 0.15;
+                // Post-process explainer: set search query and label
+                if (mg.type === 'explainer') {
+                    mg.explainerQuery = mg.text || '';
+                    mg.explainerLabel = mg.subtext || mg.text || '';
+                    mg.explainerImageFile = null; // populated by explainer-image-provider.js
                     mg.sceneIndex = i;
                     mg.duration = Math.max(mg.duration, scene.endTime - mg.startTime - 0.2);
                 }

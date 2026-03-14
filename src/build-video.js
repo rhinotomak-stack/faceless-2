@@ -7,12 +7,14 @@ const { transcribeAudio } = require('./transcribe');
 const { createDirectorsBrief } = require('./directors-brief');
 const { analyzeAndCreateScenes } = require('./ai-director');
 const { planVisuals } = require('./ai-visual-planner');
+const { planCompositorOverlays } = require('./ai-compositor-planner');
 // Existing modules
 const { analyzeSceneVisuals, analyzeSingleScene, createDefaultAnalysis, analyzeArticleHighlights } = require('./ai-vision');
 const { processArticleImages } = require('./article-image');
 const { processMotionGraphics, FULLSCREEN_MG_TYPES } = require('./ai-motion-graphics');
-const { downloadAllMedia, downloadBackgroundCanvas, retryPoorMedia } = require('./footage-manager');
+const { downloadAllMedia, retryPoorMedia } = require('./footage-manager');
 const { loadRecipe } = require('./recipe-loader');
+const log = require('./logger');
 
 // Clean a folder of old build artifacts — removes ALL media and plan files
 function cleanFolder(folderPath, label) {
@@ -36,7 +38,7 @@ function cleanFolder(folderPath, label) {
 // DUMB MODE: No AI, uses Whisper segments + random keywords/MGs
 // ====================================================================
 async function buildDumbVideo(transcription, audioFile, directorsBrief) {
-    const { downloadAllMedia, downloadBackgroundCanvas } = require('./footage-manager');
+    const { downloadAllMedia } = require('./footage-manager');
     const { createDefaultAnalysis } = require('./ai-vision');
     const { assignTransitions } = require('./ai-director');
 
@@ -194,7 +196,7 @@ async function buildDumbVideo(transcription, audioFile, directorsBrief) {
         for (const sfxFile of sfxFiles) {
             fs.copyFileSync(path.join(sfxDir, sfxFile), path.join(publicDir, sfxFile));
         }
-        if (sfxFiles.length > 0) console.log(`   🔊 Copied ${sfxFiles.length} SFX files`);
+        if (sfxFiles.length > 0) log.dim(`🔊 Copied ${sfxFiles.length} SFX files`);
     }
 
     // Re-save plan with updated paths
@@ -212,20 +214,18 @@ async function buildDumbVideo(transcription, audioFile, directorsBrief) {
 }
 
 async function buildVideo() {
-    console.log('\n🎬 ==========================================');
-    console.log('🎬  FACELESS VIDEO GENERATOR - AUTO BUILD');
-    console.log('🎬 ==========================================\n');
+    log.banner('FACELESS VIDEO GENERATOR - AUTO BUILD');
 
     const startTime = Date.now();
 
     // Step 0: Clean old build artifacts
-    console.log('🧹 Step 0: Cleaning old build files...');
+    log.step('🧹 Step 0: Cleaning old build files');
     const PROJECT_DIR = process.env.PROJECT_DIR || path.join(__dirname, '..');
     cleanFolder(path.join(PROJECT_DIR, 'public'), 'public');
     cleanFolder(config.paths.temp, 'temp');
 
     // Step 1: Find voiceover file + create Director's Brief
-    console.log('📁 Step 1: Finding audio file...');
+    log.step('📁 Step 1: Finding audio file');
     // Use explicit filename from UI if provided via env var
     const explicitAudio = process.env.BUILD_AUDIO_FILE;
     const inputFiles = fs.readdirSync(config.paths.input);
@@ -234,26 +234,26 @@ async function buildVideo() {
         : inputFiles.find(f => f.endsWith('.mp3') || f.endsWith('.wav'));
 
     if (!audioFile) {
-        console.error('❌ No audio file found in /input folder!');
-        if (explicitAudio) console.error(`   Expected: ${explicitAudio}`);
-        console.log('💡 Add your voiceover.mp3 to the input folder and try again.');
+        log.fail('No audio file found in /input folder!');
+        if (explicitAudio) log.info(`Expected: ${explicitAudio}`);
+        log.info('💡 Add your voiceover.mp3 to the input folder and try again.');
         process.exit(1);
     }
-    console.log(`   ✅ Found: ${audioFile}`);
+    log.ok(`Found: ${audioFile}`);
 
     // Create Director's Brief (reads env vars: AI_INSTRUCTIONS, BUILD_FORMAT, BUILD_QUALITY_TIER, BUILD_AUDIENCE)
     const directorsBrief = createDirectorsBrief();
     const rawNiche = (process.env.BUILD_NICHE || 'auto').trim();
-    console.log(`\n📋 Director's Brief:`);
-    console.log(`   Format: ${directorsBrief.format} | Quality: ${directorsBrief.qualityTier} | Density: ${directorsBrief.tier.sceneDensity}/min`);
-    console.log(`   Niche: ${directorsBrief.nicheOverride}${rawNiche !== directorsBrief.nicheOverride ? ` (preset: ${rawNiche})` : ''} | Theme: ${directorsBrief.themeOverride}`);
-    if (directorsBrief.presetPacing) console.log(`   Preset pacing: ${directorsBrief.presetPacing}`);
-    if (directorsBrief.freeInstructions) console.log(`   Instructions: "${directorsBrief.freeInstructions.substring(0, 80)}${directorsBrief.freeInstructions.length > 80 ? '...' : ''}"`);
-    if (directorsBrief.audienceHint) console.log(`   Audience: "${directorsBrief.audienceHint}"`);
-    console.log('');
+    log.substep('📋 Director\'s Brief:');
+    log.kv('Format', `${directorsBrief.format} | Quality: ${directorsBrief.qualityTier} | Density: ${directorsBrief.tier.sceneDensity}/min`);
+    log.kv('Niche', `${directorsBrief.nicheOverride}${rawNiche !== directorsBrief.nicheOverride ? ` (preset: ${rawNiche})` : ''} | Theme: ${directorsBrief.themeOverride}`);
+    if (directorsBrief.presetPacing) log.kv('Pacing', directorsBrief.presetPacing);
+    if (directorsBrief.freeInstructions) log.kv('Instructions', `"${directorsBrief.freeInstructions.substring(0, 80)}${directorsBrief.freeInstructions.length > 80 ? '...' : ''}"`);
+    if (directorsBrief.audienceHint) log.kv('Audience', `"${directorsBrief.audienceHint}"`);
+    log.br();
 
     // Step 2: Transcribe
-    console.log('🎙️ Step 2: Transcribing audio...');
+    log.step('🎙️ Step 2: Transcribing audio');
     const audioPath = path.join(config.paths.input, audioFile);
     const transcription = await transcribeAudio(audioPath);
 
@@ -263,60 +263,54 @@ async function buildVideo() {
     const hasDumbFlag = process.argv.includes('--dumb');
     const smartAIEnv = (process.env.SMART_AI || '').trim().toLowerCase();
     const smartAI = !hasDumbFlag && smartAIEnv !== 'false' && smartAIEnv !== '0';
-    console.log(`   🧠 Smart AI: ${smartAI ? 'ON' : 'OFF'} (env="${process.env.SMART_AI}", flag=${hasDumbFlag})`);
+    log.kv('Smart AI', `${smartAI ? log.pc.green('ON') : log.pc.red('OFF')} (env="${process.env.SMART_AI}", flag=${hasDumbFlag})`);
     if (!smartAI) {
-        console.log('\n⚡ DUMB MODE — No AI credits used');
-        console.log('═'.repeat(60));
+        log.warn('DUMB MODE — No AI credits used');
+        log.divider();
         const dumbResult = await buildDumbVideo(transcription, audioFile, directorsBrief);
         return dumbResult;
     }
 
     // Step 3: AI Director — Scene creation + context analysis + format detection
-    // NEW: Uses ai-director.js which combines scene splitting + context + CTA/hook detection
-    // The AI reads the full script and intelligently splits it into scenes
-    // based on meaning, pacing, and user instructions. Also extracts rich context
-    // (summary, theme, mood, entities, format, CTA, hook, background canvas).
-    console.log('═'.repeat(60));
-    console.log('🎬 Step 3: AI Director (Scene Creation + Context Analysis)');
-    console.log('═'.repeat(60));
+    log.step('🎬 Step 3: AI Director (Scene Creation + Context Analysis)');
     const { scenes, scriptContext } = await analyzeAndCreateScenes(transcription, directorsBrief);
-    console.log(`   ✅ Created ${scenes.length} scenes with rich context\n`);
+    log.ok(`Created ${scenes.length} scenes with rich context`);
+    log.br();
     const actualAudioDuration = transcription.duration || (transcription.segments.length > 0 ? transcription.segments[transcription.segments.length - 1].end : 0);
 
     // Step 4: Visual Planning — Batch keywords + media type + source hints
-    // NEW: Uses ai-visual-planner.js which plans ALL scenes in one AI call
-    // This creates visual variety across the video and uses director's context
-    console.log('═'.repeat(60));
-    console.log('🎨 Step 4: Visual Planner (Batch Keyword Generation)');
-    console.log('═'.repeat(60));
+    log.step('🎨 Step 4: Visual Planner (Batch Keyword Generation)');
     const scenesWithKeywords = await planVisuals(scenes, scriptContext, directorsBrief);
 
     // Load genre recipe if available (auto-detects from content or BUILD_RECIPE env var)
     const recipeResult = loadRecipe(scriptContext, directorsBrief.freeInstructions);
     if (recipeResult.recipe) {
-        console.log(`   🍳 Genre recipe loaded: ${recipeResult.recipe.niche}`);
+        log.ok(`Genre recipe loaded: ${recipeResult.recipe.niche}`);
     }
 
     // Merge recipe prompt with user instructions — flows to all downstream AI modules
     const aiInstructions = [directorsBrief.freeInstructions, recipeResult.promptText].filter(Boolean).join('\n\n');
 
+    // Step 4.7: Compositor Planner — plan V2 image overlays & explainer cards
+    log.step('🎭 Step 4.7: Compositor Planner (V2 Overlays & Explainers)');
+    const nicheId = scriptContext.nicheId || 'general';
+    const compositorPlan = await planCompositorOverlays(scenesWithKeywords, scriptContext, nicheId);
+    const { v2Scenes: plannedV2Scenes, explainerMGs: compositorExplainers } = compositorPlan;
+
     // Step 4.5: Perplexity Research (optional — enriches keywords with real-world sources)
     if (config.perplexity?.apiKey) {
-        console.log('═'.repeat(60));
-        console.log('🔬 Step 4.5: Media Research (Perplexity)');
-        console.log('═'.repeat(60));
+        log.step('🔬 Step 4.5: Media Research (Perplexity)');
         try {
             const { researchSceneMedia } = require('./ai-research');
             await researchSceneMedia(scenesWithKeywords, scriptContext);
         } catch (error) {
-            console.log(`   ⚠️ Research step failed: ${error.message} (continuing without)\n`);
+            log.warn(`Research step failed: ${error.message} (continuing without)`);
+            log.br();
         }
     }
 
     // Step 5: Download media (videos + images from multiple providers)
-    console.log('═'.repeat(60));
-    console.log('🎥 Step 5: Downloading Media');
-    console.log('═'.repeat(60));
+    log.step('🎥 Step 5: Downloading Media');
     // TEMPORARY: Force skip vision AI to save API credits while testing themes
     const skipVisionAI = true; // was: directorsBrief.tier.skipVisionAI
     const downloadResult = await downloadAllMedia(scenesWithKeywords, scriptContext, {
@@ -326,10 +320,52 @@ async function buildVideo() {
     let scenesWithMedia = downloadResult.scenes;
     let inlineVisualAnalysis = downloadResult.visualAnalysis;
 
+    // Step 5.05: Download V2 overlay images (from compositor planner)
+    if (plannedV2Scenes.length > 0) {
+        log.step('📸 Step 5.05: Downloading V2 Overlay Images');
+        let v2Downloaded = 0;
+        for (let i = 0; i < plannedV2Scenes.length; i++) {
+            const v2 = plannedV2Scenes[i];
+            const v2Keyword = v2.keyword;
+            const v2Filename = `v2-overlay-${i}`;
+            try {
+                // Download as image using web-image source hint
+                const v2Scene = {
+                    index: v2Filename,
+                    keyword: v2Keyword,
+                    mediaType: 'image',
+                    sourceHint: 'web-image',
+                    text: v2.label || v2Keyword,
+                };
+                const v2Result = await downloadAllMedia([v2Scene], scriptContext, {
+                    inlineVision: false,
+                    skipVisionAI: true
+                });
+                if (v2Result.scenes && v2Result.scenes[0]) {
+                    const downloaded = v2Result.scenes[0];
+                    v2.mediaFile = downloaded.mediaFile;
+                    v2.mediaExtension = downloaded.mediaExtension || '.jpg';
+                    v2.mediaWidth = downloaded.mediaWidth;
+                    v2.mediaHeight = downloaded.mediaHeight;
+                    v2.sourceProvider = downloaded.sourceProvider;
+                    v2._fileIndex = v2Filename;
+                    v2Downloaded++;
+                    log.provider(v2.sourceProvider || 'unknown', 'ok', `V2 ${i}: "${v2Keyword}"`);
+                }
+            } catch (e) {
+                log.provider('download', 'fail', `V2 ${i}: "${v2Keyword}" — ${e.message}`);
+            }
+        }
+        // Remove V2 scenes that failed to download
+        const validV2 = plannedV2Scenes.filter(v2 => v2.mediaFile);
+        plannedV2Scenes.length = 0;
+        plannedV2Scenes.push(...validV2);
+        log.ok(`Downloaded ${v2Downloaded}/${plannedV2Scenes.length + (validV2.length - v2Downloaded)} V2 overlay images`);
+        log.br();
+    }
+
     // Step 5.1: Auto-detect aspect ratios + apply AI framing decisions
-    console.log('═'.repeat(60));
-    console.log('📐 Step 5.1: Aspect Ratio & Framing');
-    console.log('═'.repeat(60));
+    log.step('📐 Step 5.1: Aspect Ratio & Framing');
     let autoContainCount = 0;
     let cinematicCount = 0;
     for (const scene of scenesWithMedia) {
@@ -350,11 +386,12 @@ async function buildVideo() {
                 autoContainCount++;
 
                 const label = ratio < 0.7 ? 'vertical' : ratio < 1.1 ? 'square' : 'near-square';
-                console.log(`   📐 Scene ${scene.index}: ${w}x${h} (${label}, ratio ${ratio.toFixed(2)}) → contain + blur`);
+                log.dim(`📐 Scene ${scene.index}: ${w}x${h} (${label}, ratio ${ratio.toFixed(2)}) → contain + blur`);
             } else if (scene.framing === 'cinematic') {
-                // AI recommended cinematic framing — pull back slightly with background
+                // AI recommended cinematic framing — pull back with styled background
+                const cinematicScale = parseFloat(process.env.CINEMATIC_SCALE) || 0.65;
                 scene.fitMode = 'cover';
-                scene.scale = 0.88;
+                scene.scale = cinematicScale;
                 // Keep AI's background choice (blur, gradient:id, or pattern:file)
                 if (!scene.background || scene.background === 'none') {
                     scene.background = 'blur'; // Fallback if AI didn't set one
@@ -362,7 +399,7 @@ async function buildVideo() {
                 scene.posX = 0;
                 scene.posY = 0;
                 cinematicCount++;
-                console.log(`   🎬 Scene ${scene.index}: ${w}x${h} (cinematic) → scale 0.88 + ${scene.background}`);
+                log.dim(`🎬 Scene ${scene.index}: ${w}x${h} (cinematic) → scale ${cinematicScale} + ${scene.background}`);
             } else {
                 // Fullscreen — media fills the frame completely
                 scene.fitMode = 'cover';
@@ -375,29 +412,28 @@ async function buildVideo() {
 
     const framingTotal = autoContainCount + cinematicCount;
     if (framingTotal > 0) {
-        console.log(`   ✅ ${autoContainCount} auto-contained (non-widescreen) + ${cinematicCount} cinematic (AI-descaled)`);
+        log.ok(`${autoContainCount} auto-contained (non-widescreen) + ${cinematicCount} cinematic (AI-descaled)`);
     } else {
-        console.log(`   ✅ All scenes fullscreen — no auto-framing needed`);
+        log.ok('All scenes fullscreen — no auto-framing needed');
     }
-    console.log('');
+    log.br();
 
     // Step 5.5: Vision Analysis (already done inline with downloads)
-    console.log('═'.repeat(60));
-    console.log('👁️ Step 5.5: Vision Analysis');
-    console.log('═'.repeat(60));
+    log.step('👁️ Step 5.5: Vision Analysis');
     let visualAnalysis = inlineVisualAnalysis || scenes.map((_, i) => createDefaultAnalysis(i));
     // Fill any gaps with defaults
     for (let i = 0; i < scenes.length; i++) {
         if (!visualAnalysis[i]) visualAnalysis[i] = createDefaultAnalysis(i);
     }
     if (skipVisionAI) {
-        console.log(`   ⏭️  Skipped (${directorsBrief.qualityTier} tier)\n`);
+        log.dim(`⏭️  Skipped (${directorsBrief.qualityTier} tier)`);
+        log.br();
     } else {
         const analyzed = visualAnalysis.filter(r => r.description !== 'No visual analysis available').length;
         const poor = visualAnalysis.filter(r => r.suitability === 'poor').length;
-        console.log(`\n📊 Vision analysis: ${analyzed}/${scenesWithMedia.length} analyzed (inline with downloads)`);
-        if (poor > 0) console.log(`   ⚠️ ${poor} scene(s) with poor footage match`);
-        console.log('');
+        log.info(`📊 Vision analysis: ${analyzed}/${scenesWithMedia.length} analyzed (inline with downloads)`);
+        if (poor > 0) log.warn(`${poor} scene(s) with poor footage match`);
+        log.br();
     }
 
     // Step 5.6: Retry poor footage — keep searching providers until "good" found
@@ -406,16 +442,15 @@ async function buildVideo() {
         .filter(({ va }) => va.suitability === 'poor');
 
     if (poorScenes.length > 0 && !directorsBrief.tier.skipVisionAI) {
-        console.log('═'.repeat(60));
-        console.log('🔄 Step 5.6: Retrying Poor Footage');
-        console.log('═'.repeat(60));
+        log.step('🔄 Step 5.6: Retrying Poor Footage');
 
         const SUITABILITY_SCORE = { poor: 1, fair: 2, good: 3 };
         const MAX_SCENES = 5;          // Max scenes to retry (API cost control)
         const MAX_ATTEMPTS_PER_SCENE = 4; // Max provider attempts per scene
         const toRetry = poorScenes.slice(0, MAX_SCENES);
 
-        console.log(`   Found ${poorScenes.length} poor scene(s), retrying up to ${toRetry.length}...\n`);
+        log.info(`Found ${poorScenes.length} poor scene(s), retrying up to ${toRetry.length}...`);
+        log.br();
 
         let improved = 0;
         for (const { va: originalAnalysis, i } of toRetry) {
@@ -423,7 +458,7 @@ async function buildVideo() {
             if (!scene || !scene.keyword) continue;
 
             const sceneDuration = (scene.endTime || 0) - (scene.startTime || 0) || 10;
-            console.log(`   Scene ${i}: "${scene.keyword}" (was: ${originalAnalysis.suitability} — ${originalAnalysis.suitabilityReason})`);
+            log.info(`Scene ${i}: "${scene.keyword}" (was: ${log.pc.red(originalAnalysis.suitability)} — ${originalAnalysis.suitabilityReason})`);
 
             // Track best candidate across all attempts
             let bestResult = null;
@@ -443,7 +478,7 @@ async function buildVideo() {
                     );
 
                     if (!retryResult) {
-                        console.log(`      ⚠️ No more providers to try\n`);
+                        log.warn('No more providers to try');
                         break;
                     }
 
@@ -457,11 +492,11 @@ async function buildVideo() {
                         mediaExtension: retryResult.ext
                     };
 
-                    console.log(`      🔍 Attempt ${attempt + 1}: [${retryResult.provider}]...`);
+                    log.provider(retryResult.provider, 'ok', `Attempt ${attempt + 1}...`);
                     const newAnalysis = await analyzeSingleScene(retryScene, i, scriptContext);
                     const newScore = SUITABILITY_SCORE[newAnalysis.suitability] || 1;
 
-                    console.log(`         ${newAnalysis.suitability}: "${newAnalysis.description.substring(0, 55)}"`);
+                    log.dim(`   ${newAnalysis.suitability}: "${newAnalysis.description.substring(0, 55)}"`);
 
                     if (newScore > bestScore) {
                         // Clean up previous best retry file if it exists
@@ -480,11 +515,11 @@ async function buildVideo() {
 
                     // Found "good" footage — stop searching
                     if (bestScore >= 3) {
-                        console.log(`      🎯 Found good footage, stopping search`);
+                        log.ok('Found good footage, stopping search');
                         break;
                     }
                 } catch (retryError) {
-                    console.log(`      ⚠️ Attempt ${attempt + 1} failed: ${retryError.message}`);
+                    log.provider('retry', 'fail', `Attempt ${attempt + 1}: ${retryError.message}`);
                 }
             }
 
@@ -507,29 +542,28 @@ async function buildVideo() {
                 visualAnalysis[i] = bestAnalysis;
                 improved++;
 
-                console.log(`      ✅ Upgraded: ${originalAnalysis.suitability} → ${bestAnalysis.suitability} [${bestResult.provider}]\n`);
+                log.ok(`Upgraded: ${log.pc.red(originalAnalysis.suitability)} → ${log.pc.green(bestAnalysis.suitability)} [${bestResult.provider}]`);
             } else {
                 // Clean up any leftover retry file
                 if (bestResult && fs.existsSync(bestResult.path)) {
                     fs.unlinkSync(bestResult.path);
                 }
-                console.log(`      ↩️ Kept original (no better footage found)\n`);
+                log.dim('↩️ Kept original (no better footage found)');
             }
         }
 
         if (improved > 0) {
-            console.log(`   📊 Improved ${improved}/${toRetry.length} scene(s)\n`);
+            log.ok(`Improved ${improved}/${toRetry.length} scene(s)`);
         } else {
-            console.log(`   ℹ️ No improvements found — keeping original footage\n`);
+            log.dim('No improvements found — keeping original footage');
         }
+        log.br();
     }
 
     // Step 5.7: Image-to-MP4 conversion (DISABLED — images sanitized to PNG at download time)
 
     // Step 6: AI Motion Graphics (now with both script context AND visual analysis)
-    console.log('═'.repeat(60));
-    console.log('✨ Step 6: AI Motion Graphics');
-    console.log('═'.repeat(60));
+    log.step('✨ Step 6: AI Motion Graphics');
     const mgResult = await processMotionGraphics(scenesWithKeywords, scriptContext, visualAnalysis, aiInstructions);
     let allMGs = mgResult.motionGraphics || mgResult;
     const mgStyle = mgResult.mgStyle || 'clean';
@@ -545,7 +579,7 @@ async function buildVideo() {
         const kept = rest.slice(0, ctaMG ? maxMGs - 1 : maxMGs);
         if (ctaMG) kept.push(ctaMG);
         allMGs = kept;
-        console.log(`   📊 MG cap: ${before} → ${allMGs.length} (${directorsBrief.qualityTier} tier, max ${maxMGs})`);
+        log.info(`📊 MG cap: ${before} → ${allMGs.length} (${directorsBrief.qualityTier} tier, max ${maxMGs})`);
     }
 
     // Split MGs: overlay types stay in motionGraphics, full-screen types become V3 scenes
@@ -610,52 +644,55 @@ async function buildVideo() {
         }
         const removed = scenesWithMedia.length - carved.length;
         scenesWithMedia = carved;
-        if (removed > 0) console.log(`   🔪 Carved ${removed} scene(s) to make room for full-screen MGs`);
+        if (removed > 0) log.info(`🔪 Carved ${removed} scene(s) to make room for full-screen MGs`);
     }
 
-    console.log(`   ✅ Placed ${allMGs.length} motion graphics (style: ${mgStyle})`);
+    log.ok(`Placed ${allMGs.length} motion graphics (style: ${log.pc.cyan(mgStyle)})`);
     if (mgScenes.length > 0) {
-        console.log(`      → ${mgScenes.length} full-screen (V3), ${motionGraphics.length} overlay (MG track)`);
+        log.info(`→ ${mgScenes.length} full-screen (V3), ${motionGraphics.length} overlay (MG track)`);
         for (const mg of mgScenes) {
-            console.log(`      🎨 [${mg.type}] "${mg.text || ''}" @ ${mg.startTime.toFixed(1)}s-${mg.endTime.toFixed(1)}s (full-screen MG, replaces footage)`);
+            log.dim(`🎨 [${mg.type}] "${mg.text || ''}" @ ${mg.startTime.toFixed(1)}s-${mg.endTime.toFixed(1)}s`);
         }
     }
-    console.log('');
+    log.br();
 
-    // Step 6.05: Download animated background icons (if any animatedIcons MGs exist)
-    const iconMGs = allMGs.filter(mg => mg.type === 'animatedIcons');
-    if (iconMGs.length > 0) {
-        console.log('═'.repeat(60));
-        console.log('🎯 Step 6.05: Background Icons');
-        console.log('═'.repeat(60));
+    // Merge compositor planner explainer MGs into the MG pipeline
+    if (compositorExplainers.length > 0) {
+        allMGs.push(...compositorExplainers);
+        motionGraphics.push(...compositorExplainers);
+        log.ok(`Merged ${compositorExplainers.length} compositor explainer(s) into MG pipeline`);
+    }
+
+    // Step 6.05: Download explainer images (search + bg removal)
+    const explainerMGs = allMGs.filter(mg => mg.type === 'explainer');
+    if (explainerMGs.length > 0) {
+        log.step('🖼️ Step 6.05: Explainer Images');
         try {
-            const { downloadAllIcons } = require('./icon-provider');
-            const iconCount = await downloadAllIcons(iconMGs, config.paths.temp);
-            console.log(`   ✅ Downloaded ${iconCount} icons for ${iconMGs.length} scenes`);
+            const { downloadExplainerImages } = require('./explainer-image-provider');
+            const count = await downloadExplainerImages(explainerMGs, config.paths.temp, scriptContext);
+            log.ok(`Processed ${count}/${explainerMGs.length} explainer images`);
         } catch (e) {
-            console.log(`   ⚠️ Icon download failed: ${e.message} (skipping)`);
+            log.warn(`Explainer image download failed: ${e.message} (skipping)`);
         }
-        console.log('');
+        log.br();
     }
 
     // Step 6.06: Download static map images for mapChart MGs (via MapTiler API)
     const mapMGs = allMGs.filter(mg => mg.type === 'mapChart');
     if (mapMGs.length > 0) {
-        console.log('═'.repeat(60));
-        console.log('🗺️ Step 6.06: Map Images');
-        console.log('═'.repeat(60));
+        log.step('🗺️ Step 6.06: Map Images');
         try {
             const { downloadMapsForMGs } = require('./map-provider');
             const mapCount = await downloadMapsForMGs(allMGs, scriptContext, config.paths.temp);
             if (mapCount > 0) {
-                console.log(`   ✅ Downloaded ${mapCount} map image(s) for ${mapMGs.length} mapChart scene(s)`);
+                log.ok(`Downloaded ${mapCount} map image(s) for ${mapMGs.length} mapChart scene(s)`);
             } else {
-                console.log(`   ℹ️ No map images downloaded (will use Canvas2D fallback)`);
+                log.dim('No map images downloaded (will use Canvas2D fallback)');
             }
         } catch (e) {
-            console.log(`   ⚠️ Map download failed: ${e.message} (will use Canvas2D fallback)`);
+            log.warn(`Map download failed: ${e.message} (will use Canvas2D fallback)`);
         }
-        console.log('');
+        log.br();
 
         // Propagate mapImageFile + _mapView from allMGs to mgScenes (mgScenes are copies)
         for (const mg of fullscreenMGs) {
@@ -672,7 +709,7 @@ async function buildVideo() {
     // Step 6.9: Search for article images (if articleHighlight MG exists)
     const hasArticleMG = mgScenes.some(mg => mg.type === 'articleHighlight');
     if (hasArticleMG) {
-        console.log('📰 Step 6.9: Searching for article images...');
+        log.substep('📰 Step 6.9: Article Images');
         try {
             const articleResult = await processArticleImages(mgScenes);
             if (articleResult) {
@@ -685,65 +722,59 @@ async function buildVideo() {
                     mg.highlightBoxes = boxes;
                 }
 
-                console.log(`   ✅ Article image ready: ${articleResult.filename}${mg.highlightBoxes ? ' (headline highlight found)' : ''}\n`);
+                log.ok(`Article image ready: ${articleResult.filename}${mg.highlightBoxes ? ' (headline highlight found)' : ''}`);
             } else {
-                console.log('   ℹ️ No article image found, will use HTML card fallback\n');
+                log.dim('No article image found, will use HTML card fallback');
             }
         } catch (error) {
-            console.log(`   ⚠️ Article image step failed: ${error.message}`);
-            console.log('   ℹ️ Continuing with HTML card fallback\n');
+            log.warn(`Article image step failed: ${error.message}`);
+            log.dim('Continuing with HTML card fallback');
         }
+        log.br();
     }
 
-    // Step 6.95: Download background canvas for theme
-    let backgroundCanvasFile = null;
-    let backgroundOpacity = null;
-    const bgThemeId = scriptContext?.themeId || 'neutral';
-    try {
-        const bgPath = await downloadBackgroundCanvas(bgThemeId);
-        if (bgPath && fs.existsSync(bgPath)) {
-            backgroundCanvasFile = `bg-canvas-${bgThemeId}.mp4`;
-            // Get opacity from theme background config
-            const { getBackgroundSource } = require('./themes');
-            const bgSource = getBackgroundSource(bgThemeId);
-            backgroundOpacity = bgSource?.opacity ?? 0.15;
-            console.log(`   ✅ Background canvas: ${backgroundCanvasFile} (opacity ${backgroundOpacity})\n`);
-        }
-    } catch (error) {
-        console.log(`   ⚠️ Background canvas skipped: ${error.message}\n`);
-    }
+    // Step 6.95: (removed — backgroundCanvas was dead code, never rendered)
 
     // Assign final scene indices (after carving, these match the file names scene-0, scene-1, etc.)
     scenesWithMedia.forEach((scene, i) => { scene.index = i; });
 
+    // Assign V2 overlay scene indices (after V1 scenes)
+    const v2ScenesForPlan = plannedV2Scenes.filter(v2 => v2.mediaFile);
+    v2ScenesForPlan.forEach((v2, i) => {
+        v2.index = scenesWithMedia.length + i;
+    });
+
     // Step 7: Create video plan
-    console.log('📋 Step 7: Creating video plan...');
+    log.step('📋 Step 7: Creating video plan');
+    // Merge V1 + V2 scenes into a single array for the renderer
+    const allScenes = [...scenesWithMedia, ...v2ScenesForPlan];
+    if (v2ScenesForPlan.length > 0) {
+        log.ok(`Merged ${v2ScenesForPlan.length} V2 overlay scenes into plan`);
+    }
+
     const videoPlan = {
         audio: audioFile,
         totalDuration: actualAudioDuration,
         fps: config.video.fps,
         width: config.video.width,
         height: config.video.height,
-        scenes: scenesWithMedia,
+        scenes: allScenes,
         mgScenes: mgScenes,
         motionGraphics: motionGraphics,
         mgStyle: mgStyle,
         mapStyle: mapStyle,
         scriptContext: scriptContext,
         visualAnalysis: visualAnalysis,
-        ...(backgroundCanvasFile ? {
-            backgroundCanvas: backgroundCanvasFile,
-            backgroundOpacity: backgroundOpacity,
-            themeId: bgThemeId,
-        } : {})
+        themeId: scriptContext?.themeId || 'neutral'
     };
 
     const planPath = path.join(config.paths.temp, 'video-plan.json');
     fs.writeFileSync(planPath, JSON.stringify(videoPlan, (k, v) => k === '_fileIndex' ? undefined : v, 2));
-    console.log(`   ✅ Plan saved\n`);
+    log.ok('Plan saved');
+    log.br();
 
     // Step 8: Copy files to public folder
-    console.log('📂 Step 8: Copying files to public folder...');
+    log.step('📂 Step 8: Copying files to public folder');
     const publicDir = path.join(PROJECT_DIR, 'public');
 
     // Ensure public folder exists
@@ -778,6 +809,20 @@ async function buildVideo() {
         scene.index = i;
         delete scene._fileIndex;
     }
+    // Copy V2 overlay images
+    for (let i = 0; i < v2ScenesForPlan.length; i++) {
+        const v2 = v2ScenesForPlan[i];
+        if (v2.mediaFile && fs.existsSync(v2.mediaFile)) {
+            const ext = v2.mediaExtension || '.jpg';
+            const destName = `v2-overlay-${i}-asset${ext}`;
+            const destPath = path.join(publicDir, destName);
+            fs.copyFileSync(v2.mediaFile, destPath);
+            v2.mediaFile = path.join(publicDir, destName);
+            log.dim(`📸 Copied V2 overlay: ${destName}`);
+        }
+        delete v2._fileIndex;
+    }
+
     // Copy article image files (for articleHighlight image mode)
     // Copy map image files (for mapChart API mode)
     for (const mg of mgScenes) {
@@ -786,7 +831,7 @@ async function buildVideo() {
             const destArticle = path.join(publicDir, mg.articleImageFile);
             if (fs.existsSync(srcArticle)) {
                 fs.copyFileSync(srcArticle, destArticle);
-                console.log(`   📰 Copied article image: ${mg.articleImageFile}`);
+                log.dim(`📰 Copied article image: ${mg.articleImageFile}`);
             }
         }
         if (mg.mapImageFile) {
@@ -794,7 +839,7 @@ async function buildVideo() {
             const destMap = path.join(publicDir, mg.mapImageFile);
             if (fs.existsSync(srcMap)) {
                 fs.copyFileSync(srcMap, destMap);
-                console.log(`   🗺️ Copied map image: ${mg.mapImageFile}`);
+                log.dim(`🗺️ Copied map image: ${mg.mapImageFile}`);
             }
         }
     }
@@ -805,7 +850,7 @@ async function buildVideo() {
             const destMap = path.join(publicDir, mg.mapImageFile);
             if (fs.existsSync(srcMap)) {
                 fs.copyFileSync(srcMap, destMap);
-                console.log(`   🗺️ Copied map image: ${mg.mapImageFile}`);
+                log.dim(`🗺️ Copied map image: ${mg.mapImageFile}`);
             }
         }
     }
@@ -817,7 +862,7 @@ async function buildVideo() {
         for (const sfxFile of sfxFiles) {
             fs.copyFileSync(path.join(sfxDir, sfxFile), path.join(publicDir, sfxFile));
         }
-        if (sfxFiles.length > 0) console.log(`   🔊 Copied ${sfxFiles.length} SFX files`);
+        if (sfxFiles.length > 0) log.dim(`🔊 Copied ${sfxFiles.length} SFX files`);
     }
 
     // Copy background pattern files referenced by scenes
@@ -836,73 +881,63 @@ async function buildVideo() {
             }
         }
     }
-    if (bgFilesCopied.size > 0) console.log(`   🖼️ Copied ${bgFilesCopied.size} background pattern files`);
+    if (bgFilesCopied.size > 0) log.dim(`🖼️ Copied ${bgFilesCopied.size} background pattern files`);
 
-    // Copy background canvas video if available
-    if (backgroundCanvasFile) {
-        const bgCanvasSrc = path.join(__dirname, '..', 'assets', 'backgrounds', `${bgThemeId}.mp4`);
-        if (fs.existsSync(bgCanvasSrc)) {
-            fs.copyFileSync(bgCanvasSrc, path.join(publicDir, backgroundCanvasFile));
-            console.log(`   🎨 Copied background canvas: ${backgroundCanvasFile}`);
-        }
-    }
-
-    // Copy animated icon SVGs
-    let iconsCopied = 0;
+    // Copy explainer transparent PNGs
+    let explainersCopied = 0;
     for (const mg of allMGs) {
-        if (mg.type === 'animatedIcons' && mg.icons) {
-            for (const icon of mg.icons) {
-                if (icon.file) {
-                    const srcIcon = path.join(config.paths.temp, icon.file);
-                    const destIcon = path.join(publicDir, icon.file);
-                    if (fs.existsSync(srcIcon)) {
-                        fs.copyFileSync(srcIcon, destIcon);
-                        iconsCopied++;
-                    }
-                }
+        if (mg.type === 'explainer' && mg.explainerImageFile) {
+            const srcImg = path.join(config.paths.temp, mg.explainerImageFile);
+            const destImg = path.join(publicDir, mg.explainerImageFile);
+            if (fs.existsSync(srcImg)) {
+                fs.copyFileSync(srcImg, destImg);
+                explainersCopied++;
             }
         }
     }
-    if (iconsCopied > 0) console.log(`   🎯 Copied ${iconsCopied} icon SVGs`);
+    if (explainersCopied > 0) log.dim(`🖼️ Copied ${explainersCopied} explainer images`);
 
-    console.log(`   ✅ Files copied to public folder`);
+    log.ok('Files copied to public folder');
 
     // Re-save video plan with updated public mediaFile paths
     fs.writeFileSync(
         path.join(publicDir, 'video-plan.json'),
         JSON.stringify(videoPlan, null, 2)
     );
-    console.log(`   ✅ Updated video-plan.json with public paths\n`);
+    log.ok('Updated video-plan.json with public paths');
+    log.br();
 
     // Done!
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
 
-    console.log('🎬 ==========================================');
-    console.log('✅ BUILD COMPLETE!');
-    console.log('🎬 ==========================================\n');
-    console.log(`⏱️  Total time: ${elapsed} seconds`);
-    console.log(`🎵 Audio: ${audioFile}`);
-    console.log(`⏱️  Duration: ${videoPlan.totalDuration.toFixed(2)} seconds`);
-    console.log(`🎬 Scenes: ${scenesWithMedia.length} footage + ${mgScenes.length} full-screen MG`);
-    console.log('\n📊 All scenes (timeline order):');
-    // Merge footage + MG scenes and sort by startTime for unified log
+    log.banner('BUILD COMPLETE!');
+    log.timing('Total time', elapsed);
+    log.kv('Audio', audioFile);
+    log.kv('Duration', `${videoPlan.totalDuration.toFixed(2)} seconds`);
+    log.kv('Scenes', `${scenesWithMedia.length} footage + ${mgScenes.length} full-screen MG + ${v2ScenesForPlan.length} V2 overlays`);
+    log.br();
+    log.substep('📊 All scenes (timeline order):');
+    log.divider();
+    // Merge footage + MG + V2 scenes and sort by startTime for unified log
     const allScenesSorted = [
         ...scenesWithMedia.map((s, i) => ({ ...s, _logIdx: i, _kind: 'footage' })),
         ...mgScenes.map((s, i) => ({ ...s, _logIdx: i, _kind: 'mg' })),
+        ...v2ScenesForPlan.map((s, i) => ({ ...s, _logIdx: i, _kind: 'v2' })),
     ].sort((a, b) => a.startTime - b.startTime);
     allScenesSorted.forEach((scene, i) => {
         if (scene._kind === 'mg') {
-            console.log(`   Scene ${i}: 🎨 [${scene.type}] "${scene.text || ''}" (full-screen MG)`);
+            log.scene(i, 'mg', `[${scene.type}] "${scene.text || ''}"`, '');
+        } else if (scene._kind === 'v2') {
+            log.scene(i, 'v2', scene.keyword, '');
         } else {
-            const type = scene.mediaType === 'image' ? '🖼️' : '🎥';
-            const source = scene.sourceProvider || 'unknown';
-            console.log(`   Scene ${i}: ${type} "${scene.keyword}" [${source}]`);
+            log.scene(i, scene.mediaType === 'image' ? 'image' : 'video', scene.keyword, scene.sourceProvider || 'unknown');
         }
     });
+    log.divider();
 
-    console.log('\n🚀 Next steps:');
-    console.log('   Open the app and use the WebGL2 renderer to render your video.');
-    console.log('');
+    log.br();
+    log.info(`🚀 Open the app and use the WebGL2 renderer to render your video.`);
+    log.br();
 }
 
 // Run

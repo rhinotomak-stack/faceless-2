@@ -175,6 +175,19 @@ const MG_REGISTRY = {
         fields: ['text', 'subtext'],
     },
 
+    explainer: {
+        label: 'Explainer',
+        group: 'overlay',  // always overlays on top of video scene
+        types: {
+            standard:  { label: 'Standard',       animation: 'fadeSlide' },
+            popIn:     { label: 'Pop In',          animation: 'popUp' },
+            slideRight:{ label: 'Slide Right',     animation: 'slideLeft' },
+        },
+        animations: ['fadeSlide', 'popUp', 'slideLeft', 'springScale'],
+        defaultType: 'standard',
+        fields: ['text', 'subtext'],
+    },
+
     kineticText: {
         label: 'Kinetic Text',
         group: 'fullscreen',

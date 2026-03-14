@@ -17,6 +17,10 @@ const GoogleImagesProvider = require('./providers/google-images');
 const YouTubeVideoProvider = require('./providers/youtube-video');
 const NewsVideoProvider = require('./providers/news-video');
 
+// Provider type sets (mirrors niches.js for query routing)
+const STOCK_PROVIDERS = new Set(['pexels', 'pixabay', 'unsplash']);
+const WEB_PROVIDERS = new Set(['googleCSE', 'bing', 'googleScrape', 'duckduckgo', 'newsVideo']);
+
 // ============ CONCURRENCY UTILITY ============
 
 /**
@@ -64,7 +68,7 @@ const IMAGE_SOURCE_MAP = {
 
 // Default provider priority order (when no smart hint available)
 const VIDEO_PRIORITY = ['pexels', 'pixabay', 'youtube', 'newsVideo'];
-const IMAGE_PRIORITY = ['pexels', 'pixabay', 'googleCSE', 'bing', 'unsplash', 'googleScrape'];
+const IMAGE_PRIORITY = ['pexels', 'pixabay', 'bing', 'unsplash', 'googleCSE', 'googleScrape'];
 
 // ============ SMART SOURCE PRIORITY ============
 
@@ -72,39 +76,39 @@ const IMAGE_PRIORITY = ['pexels', 'pixabay', 'googleCSE', 'bing', 'unsplash', 'g
 const SOURCE_PRIORITY_MAP = {
     'stock': {
         video: ['pexels', 'pixabay', 'youtube', 'newsVideo'],
-        image: ['pexels', 'pixabay', 'unsplash', 'googleCSE', 'bing', 'googleScrape']
+        image: ['pexels', 'pixabay', 'unsplash', 'bing', 'googleCSE', 'googleScrape']
     },
     'youtube': {
         video: ['youtube', 'pexels', 'pixabay', 'newsVideo'],
-        image: ['googleScrape', 'googleCSE', 'bing', 'pexels', 'pixabay', 'unsplash']
+        image: ['bing', 'googleCSE', 'googleScrape', 'pexels', 'pixabay', 'unsplash']
     },
     'web-image': {
         video: ['pexels', 'pixabay', 'youtube', 'newsVideo'],
-        image: ['googleCSE', 'bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash']
+        image: ['bing', 'googleCSE', 'googleScrape', 'pexels', 'pixabay', 'unsplash']
     },
     'news': {
         video: ['newsVideo', 'youtube', 'pexels', 'pixabay'],
-        image: ['googleCSE', 'bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash']
+        image: ['bing', 'googleCSE', 'googleScrape', 'pexels', 'pixabay', 'unsplash']
     },
 };
 
 // Theme-level fallback when AI source hint is missing
 const THEME_PRIORITY_MAP = {
     // News/factual themes → prefer real footage (news sites, YouTube)
-    politics:      { video: ['newsVideo', 'youtube', 'pexels', 'pixabay'], image: ['googleCSE', 'bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
-    finance:       { video: ['newsVideo', 'youtube', 'pexels', 'pixabay'], image: ['googleCSE', 'bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
-    business:      { video: ['youtube', 'newsVideo', 'pexels', 'pixabay'], image: ['googleCSE', 'bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
-    technology:    { video: ['youtube', 'pexels', 'pixabay', 'newsVideo'], image: ['googleCSE', 'bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
-    crime:         { video: ['newsVideo', 'youtube', 'pexels', 'pixabay'], image: ['googleScrape', 'googleCSE', 'bing', 'pexels', 'pixabay', 'unsplash'] },
-    documentary:   { video: ['youtube', 'newsVideo', 'pexels', 'pixabay'], image: ['googleScrape', 'googleCSE', 'bing', 'pexels', 'pixabay', 'unsplash'] },
+    politics:      { video: ['newsVideo', 'youtube', 'pexels', 'pixabay'], image: ['bing', 'googleCSE', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
+    finance:       { video: ['newsVideo', 'youtube', 'pexels', 'pixabay'], image: ['bing', 'googleCSE', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
+    business:      { video: ['youtube', 'newsVideo', 'pexels', 'pixabay'], image: ['bing', 'googleCSE', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
+    technology:    { video: ['youtube', 'pexels', 'pixabay', 'newsVideo'], image: ['bing', 'googleCSE', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
+    crime:         { video: ['newsVideo', 'youtube', 'pexels', 'pixabay'], image: ['bing', 'googleCSE', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
+    documentary:   { video: ['youtube', 'newsVideo', 'pexels', 'pixabay'], image: ['bing', 'googleCSE', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
     // Aesthetic themes → prefer stock footage
-    nature:        { video: ['pexels', 'pixabay', 'youtube', 'newsVideo'], image: ['pexels', 'pixabay', 'unsplash', 'googleScrape', 'googleCSE', 'bing'] },
-    travel:        { video: ['pexels', 'pixabay', 'youtube', 'newsVideo'], image: ['pexels', 'pixabay', 'unsplash', 'googleScrape', 'googleCSE', 'bing'] },
-    lifestyle:     { video: ['pexels', 'pixabay', 'youtube', 'newsVideo'], image: ['pexels', 'unsplash', 'pixabay', 'googleScrape', 'googleCSE', 'bing'] },
+    nature:        { video: ['pexels', 'pixabay', 'youtube', 'newsVideo'], image: ['pexels', 'pixabay', 'unsplash', 'bing', 'googleCSE', 'googleScrape'] },
+    travel:        { video: ['pexels', 'pixabay', 'youtube', 'newsVideo'], image: ['pexels', 'pixabay', 'unsplash', 'bing', 'googleCSE', 'googleScrape'] },
+    lifestyle:     { video: ['pexels', 'pixabay', 'youtube', 'newsVideo'], image: ['pexels', 'unsplash', 'pixabay', 'bing', 'googleCSE', 'googleScrape'] },
     // Other
-    history:       { video: ['youtube', 'newsVideo', 'pexels', 'pixabay'], image: ['googleScrape', 'googleCSE', 'bing', 'pexels', 'pixabay', 'unsplash'] },
-    entertainment: { video: ['youtube', 'pexels', 'pixabay', 'newsVideo'], image: ['googleScrape', 'googleCSE', 'bing', 'pexels', 'pixabay', 'unsplash'] },
-    sports:        { video: ['youtube', 'pexels', 'pixabay', 'newsVideo'], image: ['googleScrape', 'googleCSE', 'bing', 'pexels', 'pixabay', 'unsplash'] },
+    history:       { video: ['youtube', 'newsVideo', 'pexels', 'pixabay'], image: ['bing', 'googleCSE', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
+    entertainment: { video: ['youtube', 'pexels', 'pixabay', 'newsVideo'], image: ['bing', 'googleCSE', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
+    sports:        { video: ['youtube', 'pexels', 'pixabay', 'newsVideo'], image: ['bing', 'googleCSE', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
 };
 
 /**
@@ -152,7 +156,7 @@ function getEnabledSources() {
         if (raw) return JSON.parse(raw);
     } catch (e) { }
     // Default: all on except API-key-only ones
-    return { pexels: true, pixabay: true, unsplash: true, googleCSE: false, bing: false, duckduckgo: false, googleScrape: true, youtube: false, newsVideo: false };
+    return { pexels: true, pixabay: true, unsplash: true, googleCSE: false, bing: true, duckduckgo: false, googleScrape: true, youtube: false, newsVideo: false };
 }
 
 function initProviders(scriptContext) {
@@ -211,9 +215,30 @@ function getProviderKey(provider) {
 
 // ============ KEYWORD VARIANTS ============
 
+// Common visual synonyms for retry — maps generic terms to more searchable alternatives
+const VISUAL_SYNONYMS = {
+    'person': ['man', 'woman', 'people'], 'people': ['crowd', 'group', 'audience'],
+    'building': ['architecture', 'skyscraper', 'structure'], 'house': ['home', 'residence', 'property'],
+    'car': ['vehicle', 'automobile', 'driving'], 'money': ['currency', 'cash', 'finance'],
+    'water': ['ocean', 'river', 'waves'], 'city': ['urban', 'downtown', 'skyline'],
+    'road': ['highway', 'street', 'path'], 'forest': ['woods', 'trees', 'woodland'],
+    'fight': ['conflict', 'battle', 'confrontation'], 'danger': ['risk', 'warning', 'emergency'],
+    'police': ['law enforcement', 'officers', 'patrol'], 'crime': ['investigation', 'evidence', 'forensic'],
+    'technology': ['digital', 'innovation', 'computing'], 'data': ['analytics', 'statistics', 'graph'],
+    'meeting': ['conference', 'discussion', 'boardroom'], 'doctor': ['medical', 'hospital', 'healthcare'],
+    'food': ['cuisine', 'cooking', 'restaurant'], 'night': ['dark', 'evening', 'nighttime'],
+    'old': ['vintage', 'historic', 'ancient'], 'fast': ['speed', 'racing', 'rapid'],
+    'explosion': ['blast', 'detonation', 'debris'], 'fire': ['flames', 'blaze', 'burning'],
+    'storm': ['hurricane', 'thunderstorm', 'tempest'], 'mountain': ['peak', 'summit', 'highland'],
+    'rich': ['luxury', 'wealth', 'affluent'], 'poor': ['poverty', 'deprived', 'struggling'],
+};
+
 /**
- * Generate simplified keyword variants for retry.
- * "intel workers leaving factory" → ["intel workers leaving", "intel workers", "workers leaving factory"]
+ * Generate keyword variants for retry with smarter strategies:
+ * 1-4: Mechanical word dropping (original)
+ * 5: Longest meaningful word
+ * 6: Synonym substitution
+ * 7: Broadest 2-word distillation
  */
 function getKeywordVariants(keyword) {
     const variants = [];
@@ -221,30 +246,46 @@ function getKeywordVariants(keyword) {
 
     if (words.length <= 1) return variants;
 
-    // Drop last word: "intel workers leaving" → "intel workers"
-    if (words.length >= 3) {
-        variants.push(words.slice(0, -1).join(' '));
-    }
+    // 1. Drop last word
+    if (words.length >= 3) variants.push(words.slice(0, -1).join(' '));
 
-    // Drop first word: "workers leaving factory"
-    if (words.length >= 3) {
-        variants.push(words.slice(1).join(' '));
-    }
+    // 2. Drop first word
+    if (words.length >= 3) variants.push(words.slice(1).join(' '));
 
-    // Keep only first 2 words: "intel workers"
-    if (words.length >= 3) {
-        variants.push(words.slice(0, 2).join(' '));
-    }
+    // 3. Keep only first 2 words
+    if (words.length >= 3) variants.push(words.slice(0, 2).join(' '));
 
-    // Keep only last 2 words: "leaving factory"
+    // 4. Keep only last 2 words
     if (words.length >= 3) {
         const last2 = words.slice(-2).join(' ');
         if (!variants.includes(last2)) variants.push(last2);
     }
 
-    // Single most meaningful word (longest word, likely the most specific)
+    // 5. Single most meaningful word (longest = most specific)
     const sorted = [...words].sort((a, b) => b.length - a.length);
     if (!variants.includes(sorted[0])) variants.push(sorted[0]);
+
+    // 6. Synonym substitution — swap first matchable word with a visual synonym
+    const lowerWords = words.map(w => w.toLowerCase());
+    for (let i = 0; i < lowerWords.length; i++) {
+        const syns = VISUAL_SYNONYMS[lowerWords[i]];
+        if (syns) {
+            const synVariant = [...words];
+            synVariant[i] = syns[0];
+            const v = synVariant.slice(0, 3).join(' ');
+            if (!variants.includes(v)) { variants.push(v); break; }
+        }
+    }
+
+    // 7. Broadest 2-word distillation — the 2 longest non-stop words
+    if (words.length >= 4) {
+        const STOP = new Set(['the', 'a', 'an', 'and', 'or', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'from', 'is', 'are', 'was', 'were']);
+        const meaningful = words.filter(w => !STOP.has(w.toLowerCase()) && w.length > 2);
+        if (meaningful.length >= 2) {
+            const broad = meaningful.sort((a, b) => b.length - a.length).slice(0, 2).join(' ');
+            if (!variants.includes(broad)) variants.push(broad);
+        }
+    }
 
     return variants;
 }
@@ -282,6 +323,72 @@ function probeMediaDimensions(filePath) {
     return null;
 }
 
+// ============ KEYWORD VALIDATION ============
+
+/**
+ * Validate and fix AI-generated keywords before searching.
+ * Catches common AI mistakes that waste API calls.
+ */
+function validateKeyword(keyword, scene) {
+    if (!keyword || typeof keyword !== 'string') {
+        // Fallback: extract from scene text
+        return _extractFromText(scene?.text || '');
+    }
+
+    let kw = keyword.trim();
+
+    // Strip quotes the AI might wrap around the keyword
+    kw = kw.replace(/^["']|["']$/g, '').trim();
+
+    // Strip common AI prefixes/suffixes
+    kw = kw.replace(/^(keyword:|search:|query:|find:|look for:)\s*/i, '').trim();
+
+    // Strip markdown formatting
+    kw = kw.replace(/\*\*/g, '').replace(/\*/g, '').trim();
+
+    // Reject if too short (single char or empty)
+    if (kw.length < 3) {
+        console.log(`  ⚠️ Keyword too short ("${kw}"), extracting from scene text`);
+        return _extractFromText(scene?.text || '') || kw;
+    }
+
+    // Reject if too long (AI sometimes dumps entire sentences)
+    if (kw.split(/\s+/).length > 10) {
+        console.log(`  ⚠️ Keyword too long (${kw.split(/\s+/).length} words), truncating`);
+        // Keep the most meaningful 5 words
+        const STOP = new Set(['the', 'a', 'an', 'and', 'or', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'from', 'is', 'are', 'was', 'were', 'that', 'this', 'it']);
+        const words = kw.split(/\s+/).filter(w => !STOP.has(w.toLowerCase()));
+        kw = words.slice(0, 5).join(' ');
+    }
+
+    // Reject if it's just a description instead of a search term
+    const DESCRIPTION_PATTERNS = [
+        /^(a|an|the)\s+(scene|shot|clip|view|image|video)\s+(of|showing|depicting|featuring)/i,
+        /^(close-?up|wide|aerial|overhead)\s+(shot|view|angle)\s+(of|showing)/i,
+    ];
+    for (const pattern of DESCRIPTION_PATTERNS) {
+        if (pattern.test(kw)) {
+            // Strip the description prefix, keep the subject
+            kw = kw.replace(pattern, '').trim();
+            if (kw.length < 3) kw = keyword.trim();
+        }
+    }
+
+    return kw;
+}
+
+/**
+ * Extract a searchable keyword from scene text as last resort.
+ */
+function _extractFromText(text) {
+    if (!text) return 'abstract background';
+    const STOP = new Set(['the', 'a', 'an', 'and', 'or', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'from', 'is', 'are', 'was', 'were', 'that', 'this', 'it', 'but', 'not', 'so', 'if', 'be', 'has', 'have', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should', 'can', 'may']);
+    const words = text.split(/\s+/).filter(w => w.length > 3 && !STOP.has(w.toLowerCase()));
+    // Take 2-4 of the longest words (most likely to be nouns/subjects)
+    const sorted = words.sort((a, b) => b.length - a.length);
+    return sorted.slice(0, 3).join(' ') || text.split(/\s+/).slice(0, 3).join(' ');
+}
+
 // ============ DOWNLOAD LOGIC ============
 
 /**
@@ -315,9 +422,23 @@ async function downloadMedia(keyword, mediaType, filenameBase, sceneDuration = 1
         if (!provider.isAvailable()) continue;
 
         try {
-            // Apply niche search policy to rewrite query per-provider
+            // Smart query selection: use stockQuery for stock providers, webQuery for web providers
             const providerKey = getProviderKey(provider);
-            const searchQuery = nicheId ? rewriteQuery(keyword, nicheId, providerKey, scene) : keyword;
+            const isStock = STOCK_PROVIDERS.has(providerKey);
+            const isWeb = WEB_PROVIDERS.has(providerKey);
+
+            // Pick the best pre-optimized query for this provider type
+            let baseQuery = keyword;
+            if (scene) {
+                if (isStock && scene.stockQuery) {
+                    baseQuery = scene.stockQuery;
+                } else if (isWeb && scene.webQuery) {
+                    baseQuery = scene.webQuery;
+                }
+            }
+
+            // Then apply niche search policy on top
+            const searchQuery = nicheId ? rewriteQuery(baseQuery, nicheId, providerKey, scene) : baseQuery;
             const queryChanged = searchQuery !== keyword;
             console.log(`  🔍 [${provider.name}] Searching: "${searchQuery}"${queryChanged ? ` (from: "${keyword}")` : ''}...`);
             let results = await provider.search(searchQuery);
@@ -407,10 +528,17 @@ async function downloadAllMedia(scenes, scriptContext, options = {}) {
             scene.mediaType = 'video';
         }
 
-        const keyword = scene.researchKeyword || scene.keyword;
+        let keyword = scene.researchKeyword || scene.keyword;
         const sceneDuration = (scene.endTime || 0) - (scene.startTime || 0) || 10;
         const nicheId = scriptContext?.nicheId || '';
+
+        // Validate and fix keyword before searching
+        keyword = validateKeyword(keyword, scene);
+
         console.log(`\nScene ${i} (${mediaType}): "${keyword}"${sourceHint ? ` [hint: ${sourceHint}]` : ''}${nicheId ? ` [niche: ${nicheId}]` : ''}`);
+        if (scene.stockQuery || scene.webQuery) {
+            console.log(`  🎯 Optimized: stock="${scene.stockQuery || '-'}" web="${scene.webQuery || '-'}"`);
+        }
 
         // Log provider priority for first scene or when source hint changes per scene
         const priorityOrder = getSmartPriority(sourceHint, mediaType, scriptContext);
@@ -722,4 +850,4 @@ async function retryPoorMedia(keyword, mediaType, filenameBase, sceneDuration = 
     return null;
 }
 
-module.exports = { downloadMedia, downloadAllMedia, initProviders, downloadBackgroundCanvas, retryPoorMedia };
+module.exports = { downloadMedia, downloadAllMedia, initProviders, retryPoorMedia };

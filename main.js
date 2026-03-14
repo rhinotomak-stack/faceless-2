@@ -842,6 +842,9 @@ ipcMain.handle('run-build', async (event, options) => {
             if (options.buildTheme) {
                 buildEnv.BUILD_THEME = options.buildTheme;
             }
+            if (options.cinematicScale) {
+                buildEnv.CINEMATIC_SCALE = options.cinematicScale;
+            }
             // Smart AI toggle
             const isSmartAI = options.smartAI !== false && options.smartAI !== 'false';
             buildEnv.SMART_AI = isSmartAI ? 'true' : 'false';

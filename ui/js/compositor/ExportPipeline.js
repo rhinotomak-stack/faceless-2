@@ -344,7 +344,7 @@ class ExportPipeline {
                 if (scene.isMGScene || scene.mediaType === 'motion-graphic') continue;
                 const localFrame = frame - scene._startFrame;
                 const mediaOffsetFrames = Math.round((scene.mediaOffset || 0) * fps);
-                await this.compositor.seekVideoToFrame(scene.index, localFrame + mediaOffsetFrames);
+                await this.compositor.seekVideoToFrame(scene, localFrame + mediaOffsetFrames);
                 didSeek = true;
             }
 
@@ -456,7 +456,8 @@ class ExportPipeline {
             if (scene.isMGScene || scene.mediaType === 'motion-graphic') continue;
             if (scene.mediaType === 'image') continue;
             const idx = scene.index;
-            const url = this.compositor._mediaUrls[idx];
+            const key = this.compositor._sceneKey(scene);
+            const url = this.compositor._mediaUrls[key];
             if (!url) {
                 legacyScenes.add(idx);
                 console.log(`[ExportPipeline] Fallback to LEGACY for scene ${idx} (no media URL)`);
@@ -525,11 +526,11 @@ class ExportPipeline {
                         if (videoFrame) {
                             exportFrameSources.set(idx, videoFrame);
                         } else {
-                            await this.compositor.seekVideoToFrame(idx, localFrame + mediaOffsetFrames);
+                            await this.compositor.seekVideoToFrame(scene, localFrame + mediaOffsetFrames);
                             didLegacySeek = true;
                         }
                     } else if (legacyScenes.has(idx)) {
-                        await this.compositor.seekVideoToFrame(idx, localFrame + mediaOffsetFrames);
+                        await this.compositor.seekVideoToFrame(scene, localFrame + mediaOffsetFrames);
                         didLegacySeek = true;
                     }
                 }
@@ -577,7 +578,7 @@ class ExportPipeline {
                                         if (scene.isMGScene || scene.mediaType === 'motion-graphic' || scene.mediaType === 'image') continue;
                                         const lf = p.frame - scene._startFrame;
                                         const mof = Math.round((scene.mediaOffset || 0) * fps);
-                                        await this.compositor.seekVideoToFrame(scene.index, lf + mof);
+                                        await this.compositor.seekVideoToFrame(scene, lf + mof);
                                     }
                                     await new Promise(resolve => setTimeout(resolve, 0));
                                     this.compositor.renderFrame(p.frame);
@@ -610,7 +611,7 @@ class ExportPipeline {
                             if (scene.isMGScene || scene.mediaType === 'motion-graphic' || scene.mediaType === 'image') continue;
                             const lf = frame - scene._startFrame;
                             const mof = Math.round((scene.mediaOffset || 0) * fps);
-                            await this.compositor.seekVideoToFrame(scene.index, lf + mof);
+                            await this.compositor.seekVideoToFrame(scene, lf + mof);
                         }
                         await new Promise(resolve => setTimeout(resolve, 0));
                         this.compositor.renderFrame(frame);
@@ -646,7 +647,7 @@ class ExportPipeline {
                             if (scene.isMGScene || scene.mediaType === 'motion-graphic' || scene.mediaType === 'image') continue;
                             const lf = p.frame - scene._startFrame;
                             const mof = Math.round((scene.mediaOffset || 0) * fps);
-                            await this.compositor.seekVideoToFrame(scene.index, lf + mof);
+                            await this.compositor.seekVideoToFrame(scene, lf + mof);
                         }
                         await new Promise(resolve => setTimeout(resolve, 0));
                         this.compositor.renderFrame(p.frame);
@@ -703,7 +704,7 @@ class ExportPipeline {
                     if (scene.isMGScene || scene.mediaType === 'motion-graphic') continue;
                     const localFrame = frame - scene._startFrame;
                     const mediaOffsetFrames = Math.round((scene.mediaOffset || 0) * fps);
-                    await this.compositor.seekVideoToFrame(scene.index, localFrame + mediaOffsetFrames);
+                    await this.compositor.seekVideoToFrame(scene, localFrame + mediaOffsetFrames);
                 }
                 await new Promise(resolve => setTimeout(resolve, 0));
 

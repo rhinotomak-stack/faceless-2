@@ -46,12 +46,14 @@ class BaseProvider {
     }
 
     /**
-     * Pick first result not already downloaded
+     * Pick first result not already downloaded (dedup by both ID and URL)
      */
     pickUnused(results) {
         for (const result of results) {
-            if (!this.downloadedIds.has(result.id)) {
+            const urlKey = result.url ? result.url.split('?')[0] : ''; // Ignore query params for dedup
+            if (!this.downloadedIds.has(result.id) && !this.downloadedIds.has(urlKey)) {
                 this.downloadedIds.add(result.id);
+                if (urlKey) this.downloadedIds.add(urlKey);
                 return result;
             }
         }

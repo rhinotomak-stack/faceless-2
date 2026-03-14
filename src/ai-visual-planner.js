@@ -44,6 +44,56 @@ function _buildBackgroundList(themeId) {
     return shown.map(bg => `   - "${bg.id}" = ${bg.name}`).join('\n');
 }
 
+/**
+ * Auto-generate a stock-optimized query from a descriptive keyword.
+ * Stock APIs work best with 2-3 visual/generic words.
+ * Strips names, dates, specifics — keeps visual descriptors.
+ */
+function _autoStockQuery(keyword) {
+    // Common non-visual words to strip for stock search
+    const STRIP = new Set([
+        'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of',
+        'with', 'by', 'from', 'as', 'is', 'was', 'are', 'were', 'been', 'be',
+        'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'should',
+        'this', 'that', 'their', 'its', 'photo', 'photos', 'image', 'images',
+        'footage', 'video', 'clip', 'picture', 'portrait', 'press', 'conference',
+        'report', 'event', 'scene', 'shot', 'view', 'real', 'actual',
+    ]);
+
+    // Words that are visual descriptors (keep these)
+    const VISUAL = new Set([
+        'aerial', 'closeup', 'close-up', 'wide', 'panoramic', 'night', 'dark',
+        'dramatic', 'cinematic', 'golden', 'silhouette', 'underwater', 'slow',
+        'timelapse', 'drone', 'macro', 'bokeh', 'sunset', 'sunrise', 'rain',
+        'fog', 'smoke', 'fire', 'explosion', 'neon', 'glowing', 'abstract',
+    ]);
+
+    const words = keyword.toLowerCase().replace(/[^a-z0-9\s-]/g, ' ').split(/\s+/).filter(Boolean);
+    // Remove stop words, keep visual descriptors and nouns
+    const kept = words.filter(w => !STRIP.has(w) && w.length > 2);
+
+    if (kept.length <= 3) return kept.join(' ') || keyword.split(/\s+/).slice(0, 3).join(' ');
+
+    // Prioritize: visual descriptors first, then longest words (likely nouns)
+    const visual = kept.filter(w => VISUAL.has(w));
+    const rest = kept.filter(w => !VISUAL.has(w)).sort((a, b) => b.length - a.length);
+    const selected = [...visual.slice(0, 1), ...rest].slice(0, 3);
+    return selected.join(' ');
+}
+
+/**
+ * Auto-generate a web-optimized query from a descriptive keyword.
+ * Web search benefits from specificity — keep names, dates, add context.
+ */
+function _autoWebQuery(keyword, sourceHint) {
+    let query = keyword.trim();
+    // If it's already short enough for web, use as-is
+    if (query.split(/\s+/).length <= 6) return query;
+    // Take first 6 meaningful words
+    const words = query.split(/\s+/).slice(0, 6).join(' ');
+    return words;
+}
+
 // ============================================================
 // PROMPT BUILDER
 // ============================================================
@@ -52,9 +102,13 @@ function _buildBackgroundList(themeId) {
  * Build the batch visual planning prompt.
  * AI sees ALL scenes at once and plans visuals with full story context.
  */
-function buildBatchPrompt(scenes, scriptContext, directorsBrief) {
+function buildBatchPrompt(scenes, scriptContext, directorsBrief, options = {}) {
     const { theme, tone, mood, pacing, format, visualStyle, entities, hookEndTime, ctaDetected, ctaStartTime } = scriptContext;
     const { qualityTier, tier, audienceHint } = directorsBrief;
+    const nicheId = scriptContext.nicheId || 'general';
+    const { getNiche, getSearchPolicy } = require('./niches');
+    const niche = getNiche(nicheId);
+    const searchPolicy = getSearchPolicy(nicheId);
 
     // Build scene list with timing info
     let sceneList = '';
@@ -67,6 +121,31 @@ function buildBatchPrompt(scenes, scriptContext, directorsBrief) {
         sceneList += `   "${scene.text}"\n\n`;
     }
 
+    // Build topic anchor from summary + web context
+    const summary = scriptContext.summary || '';
+    const webContext = scriptContext.webContext || '';
+    let topicBlock = '';
+    if (summary || webContext) {
+        topicBlock = `\nTOPIC CONTEXT (use this to stay on-topic and pick relevant visuals):`;
+        if (summary) {
+            topicBlock += `\n- Summary: ${summary}`;
+        }
+        if (webContext) {
+            topicBlock += `\n- Research: ${webContext.substring(0, 500)}`;
+        }
+        topicBlock += `\n`;
+    }
+
+    // Build cross-chunk awareness block
+    const previousKeywords = options.previousKeywords || [];
+    let chunkBlock = '';
+    if (previousKeywords.length > 0) {
+        chunkBlock = `\nALREADY USED KEYWORDS (from previous scenes — DO NOT repeat these):
+${previousKeywords.map(k => `- "${k}"`).join('\n')}
+
+You MUST pick DIFFERENT keywords for the scenes below. Vary your visuals!\n`;
+    }
+
     let prompt = `You are a visual director planning B-ROLL FOOTAGE for a FACELESS VIDEO.
 
 The AI Director has analyzed this script and provided deep context. Your job is to plan SPECIFIC, SEARCHABLE visuals for EVERY scene that:
@@ -75,12 +154,12 @@ The AI Director has analyzed this script and provided deep context. Your job is 
 3. Use the ENTITIES and context to be specific (not generic)
 4. Consider the story arc (hook → body → CTA)
 5. INTELLIGENTLY mix sources: stock video, YouTube clips, and web images
-
+${topicBlock}
 ${directorsBrief.freeInstructions ? `\n🔥 USER INSTRUCTIONS (HIGHEST PRIORITY — OVERRIDE ALL DEFAULTS):
 ${directorsBrief.freeInstructions}
 
 ↑ These instructions are MANDATORY. Follow them exactly, even if they conflict with the rules below.\n` : ''}
-
+${chunkBlock}
 DIRECTOR'S ANALYSIS:
 - Theme: ${theme || 'general'}
 - Tone: ${tone || 'informative'}
@@ -92,6 +171,14 @@ ${entities.length > 0 ? `- Key Entities: ${entities.join(', ')}` : ''}
 ${hookEndTime ? `- Hook Period: 0-${hookEndTime}s (needs strong visuals to grab attention)` : ''}
 ${ctaDetected ? `- CTA Period: ${ctaStartTime}s-end (wind down, show branding/channel elements)` : ''}
 ${audienceHint ? `- Target Audience: ${audienceHint}` : ''}
+- Content Niche: ${niche.name} (${niche.description})
+
+SEARCH STRATEGY FOR THIS NICHE:
+- For STOCK providers (Pexels/Pixabay): use SHORT, VISUAL keywords (max ${searchPolicy.stockMaxWords || 3} words). These are generic footage libraries — search for what the shot LOOKS LIKE.
+${searchPolicy.avoidTerms?.length ? `- AVOID these terms in stock queries: ${searchPolicy.avoidTerms.join(', ')}` : ''}
+${searchPolicy.contextTerms?.length ? `- For WEB providers (Bing/Google): adding "${searchPolicy.contextTerms[0]}" helps find relevant results` : ''}
+${searchPolicy.entityBoost ? '- Entity names (people, companies) work well in web searches but NOT in stock searches' : ''}
+- Fallback keywords if nothing specific works: ${(searchPolicy.fallbackKeywords || []).slice(0, 3).join(', ')}
 
 QUALITY TIER: ${qualityTier}
 ${tier.allowVideo ? '- Can use VIDEO clips (preferred for motion and impact)' : '- IMAGES ONLY (no video allowed)'}
@@ -168,7 +255,13 @@ PLANNING RULES:
 4. MEDIA TYPE SELECTION:
 ${tier.allowVideo
     ? `   - Prefer VIDEO for: action scenes, locations, events, motion-heavy moments
-   - Use IMAGE for: data/stats, specific people, charts, historical photos`
+   - Use IMAGE for: data/stats, specific people, charts, historical photos
+   - NICHE PREFERENCE: This "${niche.name}" content works best with ${
+       niche.preferredMediaType === 'video' ? 'MORE VIDEO clips (aim for ~70% video, 30% image) — this niche needs motion and energy'
+     : niche.preferredMediaType === 'image' ? 'MORE IMAGES (aim for ~60-70% image, 30-40% video) — this niche relies on photos, stills, and evidence'
+     : 'a BALANCED MIX of video and images (~50/50) — use whichever fits each scene best'
+   }
+   - But ALWAYS override this preference when the scene content clearly calls for the other type (e.g., a named person → image regardless of niche)`
     : `   - IMAGES ONLY (quality tier: ${qualityTier})`}
 
 5. HOOK PERIOD (first ${hookEndTime || 15}s):
@@ -195,12 +288,13 @@ ${tier.allowVideo
 8. VISUAL INTENT:
    - Describe the EXACT shot you want
    - Include: camera angle, lighting, subject, action, mood
+   - SHOT STYLE FOR THIS NICHE: ${niche.shotStyle || 'Mix of wide shots, close-ups, and varied perspectives.'}
    - Example: "Aerial drone shot of abandoned mansion at twilight with police tape"
    - Example: "Close-up of hands typing on laptop keyboard, data on screen, dark room"
 
 9. FRAMING (how the footage fills the 16:9 frame):
    - "fullscreen" = media fills the entire frame edge-to-edge (DEFAULT for most scenes)
-   - "cinematic" = slightly pulled back (~88% scale) with a styled background visible behind the footage
+   - "cinematic" = pulled back with a styled background visible behind the footage (scale set by user)
 
    USE "fullscreen" FOR (MOST scenes should be this):
    - Generic B-roll: cityscapes, nature, actions, establishing shots
@@ -225,14 +319,46 @@ ${_buildBackgroundList(theme)}
    Pick the background that best matches the scene mood. Use "blur" as safe default if unsure.
    When framing is "fullscreen", set backgroundId to "none".
 
+11. SEARCHABILITY (CRITICAL — bad keywords = no footage found):
+   Every keyword MUST be something a real person would type into a search engine and get results.
+   - GOOD: "deep sea submersible", "underwater volcano eruption", "scientist in lab"
+   - BAD: "human-in-the-loop latency constraint" (too abstract, no results)
+   - BAD: "triple-sensor redundancy validation overlay" (too technical, no footage exists)
+   - BAD: "silent AI flagging mechanism" (conceptual, unsearchable)
+   If a concept is abstract, find a CONCRETE VISUAL that represents it:
+   - "latency constraint" → "underwater signal delay" or "radio wave graphic"
+   - "sensor redundancy" → "underwater sensor array" or "circuit board closeup"
+   - "AI flagging" → "computer screen alert" or "drone camera lens"
+
+12. SEARCH-OPTIMIZED QUERIES (CRITICAL FOR QUALITY):
+   You must provide TWO different search queries optimized for different providers:
+
+   **stockQuery** (for Pexels, Pixabay, Unsplash — stock footage APIs):
+   - MAXIMUM 3 words — shorter = much better results
+   - Use VISUAL/GENERIC terms, NOT specific names or events
+   - Focus on what the shot LOOKS LIKE, not what it IS about
+   - Good: "police car night", "office meeting", "sunset ocean"
+   - Bad: "FBI agents raiding Gene Hackman mansion" (too specific, stock won't have this)
+   - Bad: "technology" (too vague, returns random results)
+
+   **webQuery** (for Bing, Google — web image search):
+   - Can be 4-8 words, specific is BETTER
+   - Use REAL NAMES, dates, events — web search is good at this
+   - Add context words like "photo", "footage", "press conference"
+   - Good: "Gene Hackman 2024 photo", "Tesla Cybertruck reveal event"
+   - Bad: "man standing" (too generic for web)
+   - NEVER wrap the query in quotation marks — just plain words
+
+   The right stockQuery + webQuery combo is THE difference between good and bad footage!
+
 OUTPUT FORMAT (one line per scene):
 
-SCENE 0: keyword: <searchable keyword phrase> | mediaType: <video|image> | sourceHint: <stock|youtube|web-image> | framing: <fullscreen|cinematic> | backgroundId: <none|blur|gradient-id> | visualIntent: <detailed shot description>
-SCENE 1: keyword: <searchable keyword phrase> | mediaType: <video|image> | sourceHint: <stock|youtube|web-image> | framing: <fullscreen|cinematic> | backgroundId: <none|blur|gradient-id> | visualIntent: <detailed shot description>
+SCENE 0: keyword: <descriptive phrase> | stockQuery: <2-3 word visual query> | webQuery: <4-8 word specific query> | mediaType: <video|image> | sourceHint: <stock|youtube|web-image> | framing: <fullscreen|cinematic> | backgroundId: <none|blur|gradient-id> | visualIntent: <detailed shot description>
+SCENE 1: keyword: <descriptive phrase> | stockQuery: <2-3 word visual query> | webQuery: <4-8 word specific query> | mediaType: <video|image> | sourceHint: <stock|youtube|web-image> | framing: <fullscreen|cinematic> | backgroundId: <none|blur|gradient-id> | visualIntent: <detailed shot description>
 ...
 
 CRITICAL: YOU MUST OUTPUT EXACTLY ${scenes.length} LINES (one per scene).
-Each keyword must be UNIQUE and SEARCHABLE.`;
+Each keyword must be UNIQUE and SEARCHABLE. stockQuery and webQuery must BOTH be provided for every scene.`;
 
     return prompt;
 }
@@ -278,6 +404,12 @@ function parseBatchResponse(rawText, scenes) {
                 if (lower.startsWith('keyword:')) {
                     scene.keyword = part.substring(part.indexOf(':') + 1).trim();
                 }
+                if (lower.startsWith('stockquery:') || lower.startsWith('stock query:')) {
+                    scene.stockQuery = part.substring(part.indexOf(':') + 1).trim();
+                }
+                if (lower.startsWith('webquery:') || lower.startsWith('web query:')) {
+                    scene.webQuery = part.substring(part.indexOf(':') + 1).trim();
+                }
                 if (lower.startsWith('mediatype:') || lower.startsWith('media type:')) {
                     const val = part.substring(part.indexOf(':') + 1).trim().toLowerCase();
                     scene.mediaType = val === 'video' ? 'video' : 'image';
@@ -307,6 +439,21 @@ function parseBatchResponse(rawText, scenes) {
                     const val = part.substring(part.indexOf(':') + 1).trim().toLowerCase();
                     scene.backgroundId = val;
                 }
+            }
+
+            // Strip wrapping quotes from parsed values (AI sometimes wraps in quotes)
+            const stripQuotes = v => v ? v.replace(/^["']+|["']+$/g, '').trim() : v;
+            if (scene.keyword) scene.keyword = stripQuotes(scene.keyword);
+            if (scene.stockQuery) scene.stockQuery = stripQuotes(scene.stockQuery);
+            if (scene.webQuery) scene.webQuery = stripQuotes(scene.webQuery);
+            if (scene.visualIntent) scene.visualIntent = stripQuotes(scene.visualIntent);
+
+            // Auto-generate stockQuery/webQuery from keyword if AI didn't provide them
+            if (scene.keyword && !scene.stockQuery) {
+                scene.stockQuery = _autoStockQuery(scene.keyword);
+            }
+            if (scene.keyword && !scene.webQuery) {
+                scene.webQuery = _autoWebQuery(scene.keyword, scene.sourceHint);
             }
         }
 
@@ -379,22 +526,24 @@ async function planVisuals(scenes, scriptContext, directorsBrief) {
     console.log(`\n🎨 Visual Planner — Step 4`);
     console.log(`📡 Provider: ${config.aiProvider.toUpperCase()}`);
     console.log(`🎬 Planning visuals for ${scenes.length} scenes`);
-    console.log(`🧠 Using director's context: theme=${scriptContext.theme}, mood=${scriptContext.mood}, pacing=${scriptContext.pacing}`);
+    console.log(`🧠 Using director's context: theme=${scriptContext.theme}, mood=${scriptContext.mood}, pacing=${scriptContext.pacing}, niche=${scriptContext.nicheId || 'general'}`);
     console.log('');
 
-    // Ollama (local models) can't handle large batches — chunk into groups of 8
+    // Auto-chunk based on provider and scene count
+    // Ollama: 8 scenes per batch (local model limits)
+    // Cloud APIs: 15 scenes per batch (prevents token truncation on tail scenes)
     const isOllama = (config.aiProvider || 'ollama') === 'ollama';
-    const OLLAMA_CHUNK_SIZE = 8;
+    const CHUNK_SIZE = isOllama ? 8 : 15;
 
-    if (isOllama && scenes.length > OLLAMA_CHUNK_SIZE) {
-        return await _planVisualsChunked(scenes, scriptContext, directorsBrief, OLLAMA_CHUNK_SIZE);
+    if (scenes.length > CHUNK_SIZE) {
+        return await _planVisualsChunked(scenes, scriptContext, directorsBrief, CHUNK_SIZE);
     }
 
     try {
         const prompt = buildBatchPrompt(scenes, scriptContext, directorsBrief);
 
-        // Batch call for ALL scenes
-        const maxTokens = Math.max(800, scenes.length * 80); // ~80 tokens per scene
+        // Batch call for ALL scenes — ~150 tokens per scene (keyword + stockQuery + webQuery + intent)
+        const maxTokens = Math.max(1000, scenes.length * 150);
         const rawText = await callAI(prompt, { maxTokens });
 
         if (!rawText) throw new Error('Empty AI response');
@@ -406,7 +555,9 @@ async function planVisuals(scenes, scriptContext, directorsBrief) {
         // Log results
         console.log(`   ✅ Visual plan created for ${enrichedScenes.length} scenes:\n`);
         for (const scene of enrichedScenes.slice(0, 5)) { // Show first 5
-            console.log(`      Scene ${scene.index}: "${scene.keyword}" [${scene.mediaType}, ${scene.sourceHint}]`);
+            const sq = scene.stockQuery ? ` stock:"${scene.stockQuery}"` : '';
+            const wq = scene.webQuery ? ` web:"${scene.webQuery}"` : '';
+            console.log(`      Scene ${scene.index}: "${scene.keyword}" [${scene.mediaType}, ${scene.sourceHint}]${sq}${wq}`);
         }
         if (enrichedScenes.length > 5) {
             console.log(`      ... and ${enrichedScenes.length - 5} more scenes`);
@@ -425,9 +576,8 @@ async function planVisuals(scenes, scriptContext, directorsBrief) {
 }
 
 /**
- * Chunked batch planning for Ollama — splits scenes into smaller groups
- * so the local model can handle each batch without timing out.
- * Only used when provider is Ollama and scene count exceeds chunk size.
+ * Chunked batch planning — splits scenes into smaller groups
+ * to prevent timeout on large scripts. Works for all providers.
  */
 async function _planVisualsChunked(scenes, scriptContext, directorsBrief, chunkSize) {
     const chunks = [];
@@ -435,23 +585,38 @@ async function _planVisualsChunked(scenes, scriptContext, directorsBrief, chunkS
         chunks.push(scenes.slice(i, i + chunkSize));
     }
 
-    console.log(`   🔀 Ollama mode: splitting ${scenes.length} scenes into ${chunks.length} batches of ~${chunkSize}\n`);
+    console.log(`   🔀 Splitting ${scenes.length} scenes into ${chunks.length} batches of ~${chunkSize}`);
+    if (scriptContext.webContext) {
+        console.log(`   🌐 Web research context will be injected into each batch`);
+    }
+    if (scriptContext.summary) {
+        console.log(`   📝 Topic summary will anchor each batch`);
+    }
+    console.log('');
 
     const allEnriched = [];
+    const usedKeywords = []; // Track keywords across chunks to prevent repeats
 
     for (let c = 0; c < chunks.length; c++) {
         const chunk = chunks[c];
         console.log(`   📦 Batch ${c + 1}/${chunks.length} (scenes ${chunk[0].index}-${chunk[chunk.length - 1].index})...`);
 
         try {
-            const prompt = buildBatchPrompt(chunk, scriptContext, directorsBrief);
-            const maxTokens = Math.max(800, chunk.length * 80);
+            const prompt = buildBatchPrompt(chunk, scriptContext, directorsBrief, {
+                previousKeywords: usedKeywords,
+            });
+            const maxTokens = Math.max(1000, chunk.length * 150);
             const rawText = await callAI(prompt, { maxTokens });
 
             if (!rawText) throw new Error('Empty AI response');
 
             const enriched = parseBatchResponse(rawText, chunk);
             allEnriched.push(...enriched);
+
+            // Collect keywords for next chunk's awareness
+            for (const scene of enriched) {
+                if (scene.keyword) usedKeywords.push(scene.keyword);
+            }
 
             for (const scene of enriched) {
                 console.log(`      Scene ${scene.index}: "${scene.keyword}" [${scene.mediaType}, ${scene.sourceHint}]`);
