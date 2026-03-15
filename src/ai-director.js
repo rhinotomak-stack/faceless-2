@@ -191,7 +191,7 @@ function parseDirectorContext(contextText) {
         hookEndTime: null,
         densityTarget: 3,
         nicheId: 'general',  // Content strategy (MG types, footage priority, pacing)
-        themeId: 'neutral'   // Visual system (colors, fonts, transitions, overlays)
+        themeId: 'standard'   // Visual system (colors, fonts, transitions, overlays)
     };
 
     const lines = contextText.trim().split('\n');
@@ -993,6 +993,62 @@ async function analyzeAndCreateScenes(transcription, directorsBrief) {
             scriptContext.sections = _mapSectionsToScenes(scriptContext.sections, scenes);
         }
 
+        // Listicle format: build rich item map, override hook, apply transitions
+        if (scriptContext.format === 'listicle') {
+            const listicle = require('./listicle-format');
+
+            // Override hookEndTime with listicle-specific detection
+            const hookResult = listicle.detectListicleHookEnd(scenes, scriptContext);
+            if (hookResult.hookEndTime) {
+                scriptContext.hookEndTime = hookResult.hookEndTime;
+                console.log(`      [Listicle] Hook ends at ${hookResult.hookEndTime.toFixed(1)}s (${hookResult.hookSceneIndices.length} hook scenes)`);
+            }
+
+            // Apply fast hook pacing — split long hook scenes for faster cuts
+            const hookPacing = listicle.getListicleHookPacing();
+            scriptContext.listicleHookPacing = hookPacing;
+            if (hookResult.hookSceneIndices.length > 0) {
+                // Re-split hook scenes with tighter max duration (faster cuts in intro)
+                const hookMaxDuration = 12.0 / hookPacing.sceneDensityMultiplier; // ~9.2s vs normal 12s
+                const hookScenes = hookResult.hookSceneIndices.map(hi => scenes[hi]).filter(Boolean);
+                const splitHookScenes = autoSplitLongScenes(hookScenes, allWords, audioDuration, fps, hookMaxDuration);
+
+                // Replace hook scenes in the main array if splits happened
+                if (splitHookScenes.length > hookScenes.length) {
+                    const hookEnd = hookResult.hookSceneIndices[hookResult.hookSceneIndices.length - 1] + 1;
+                    const hookStart = hookResult.hookSceneIndices[0];
+                    scenes.splice(hookStart, hookEnd - hookStart, ...splitHookScenes);
+                    // Re-index all scenes
+                    scenes.forEach((s, idx) => { s.index = idx; });
+                    console.log(`      [Listicle] Hook split: ${hookScenes.length} → ${splitHookScenes.length} scenes (faster pacing)`);
+                }
+
+                // Tag all hook scenes
+                for (const s of scenes) {
+                    if (s.endTime <= (hookResult.hookEndTime || 0)) {
+                        s.isListicleHook = true;
+                        s.preferredMediaType = hookPacing.preferredMediaType;
+                        s.transitionStyle = hookPacing.transitionStyle;
+                    }
+                }
+            }
+
+            // Build rich item map
+            const items = listicle.buildListicleItemMap(scenes, scriptContext);
+            scriptContext.listicleItems = items;
+            if (items.length > 0) {
+                console.log(`      [Listicle] Detected ${items.length} items: ${items.map(it => `#${it.itemNumber}`).join(', ')}`);
+            }
+
+            // Apply listicle transition rules
+            for (let i = 1; i < scenes.length; i++) {
+                const rule = listicle.getListicleTransitionRules(i, items, scriptContext);
+                if (rule) {
+                    scenes[i].transition = rule;
+                }
+            }
+        }
+
         // Log results
         _logResults(scriptContext, scenes);
 
@@ -1132,7 +1188,7 @@ function _defaultContext(fullScript) {
         entities: [], keyStats: [], mainPoints: [], targetAudience: '', emotionalArc: '',
         format: 'documentary', sections: [],
         ctaDetected: false, ctaStartTime: null, hookEndTime: null,
-        densityTarget: 3, nicheId: 'general', themeId: 'neutral'
+        densityTarget: 3, nicheId: 'general', themeId: 'standard'
     };
 }
 
@@ -1169,7 +1225,7 @@ function _logResults(ctx, scenes) {
     console.log(`      Summary: "${ctx.summary || 'unknown'}"`);
     console.log(`      Theme: ${ctx.theme || '?'} | Tone: ${ctx.tone || '?'} | Mood: ${ctx.mood || '?'}`);
     console.log(`      Pacing: ${ctx.pacing || '?'} | Style: ${ctx.visualStyle || '?'}`);
-    console.log(`      Format: ${ctx.format} | Niche: ${ctx.nicheId || 'general'} | Theme: ${ctx.themeId || 'neutral'}`);
+    console.log(`      Format: ${ctx.format} | Niche: ${ctx.nicheId || 'general'} | Theme: ${ctx.themeId || 'standard'}`);
     if (ctx.entities.length > 0) console.log(`      Entities: ${ctx.entities.join(', ')}`);
     if (ctx.hookEndTime) console.log(`      Hook ends: ~${ctx.hookEndTime}s`);
     if (ctx.ctaDetected) console.log(`      CTA detected: ~${ctx.ctaStartTime}s`);

@@ -41,6 +41,11 @@ function _logModelsOnce() {
     } else if (p === 'groq') {
         console.log(`  🤖 Text model: ${config.groq?.model || 'llama-3.3-70b'}`);
     }
+    // Show vision provider override if set
+    const vp = config.visionProvider;
+    if (vp && vp !== p) {
+        console.log(`  👁️ Vision provider: ${vp} (override)`);
+    }
 }
 
 // ============================================================
@@ -132,7 +137,7 @@ async function _dispatchText(provider, prompt, { maxTokens, temperature, systemP
  */
 async function callVisionAI(prompt, base64Image, mimeType = 'image/jpeg', options = {}) {
     const { maxTokens = 200 } = options;
-    const provider = config.aiProvider || 'ollama';
+    const provider = config.visionProvider || config.aiProvider || 'ollama';
 
     let attempt = 0;
     const maxRetries = 1;

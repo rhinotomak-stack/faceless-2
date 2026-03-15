@@ -38,7 +38,7 @@ const { getMatchingBackgrounds, BACKGROUND_LIBRARY } = require('./themes');
  * Shows backgrounds that match the current theme, plus a few extras.
  */
 function _buildBackgroundList(themeId) {
-    const matched = getMatchingBackgrounds(themeId || 'neutral');
+    const matched = getMatchingBackgrounds(themeId || 'standard');
     // Show top 6 matches to keep prompt concise
     const shown = matched.slice(0, 6);
     return shown.map(bg => `   - "${bg.id}" = ${bg.name}`).join('\n');
@@ -172,6 +172,7 @@ ${hookEndTime ? `- Hook Period: 0-${hookEndTime}s (needs strong visuals to grab 
 ${ctaDetected ? `- CTA Period: ${ctaStartTime}s-end (wind down, show branding/channel elements)` : ''}
 ${audienceHint ? `- Target Audience: ${audienceHint}` : ''}
 - Content Niche: ${niche.name} (${niche.description})
+${format === 'listicle' && scriptContext.listicleItems ? require('./listicle-format').getListiclePromptRules(scriptContext.listicleItems) : ''}
 
 SEARCH STRATEGY FOR THIS NICHE:
 - For STOCK providers (Pexels/Pixabay): use SHORT, VISUAL keywords (max ${searchPolicy.stockMaxWords || 3} words). These are generic footage libraries — search for what the shot LOOKS LIKE.
@@ -551,6 +552,12 @@ async function planVisuals(scenes, scriptContext, directorsBrief) {
         console.log(`   [AI Response Preview]:\n${rawText.substring(0, 400)}${rawText.length > 400 ? '...' : ''}\n`);
 
         const enrichedScenes = parseBatchResponse(rawText, scenes);
+
+        // Listicle keyword variety enforcement
+        if (scriptContext.format === 'listicle' && scriptContext.listicleItems) {
+            const { enforceKeywordVariety } = require('./listicle-format');
+            enforceKeywordVariety(enrichedScenes, scriptContext.listicleItems);
+        }
 
         // Log results
         console.log(`   ✅ Visual plan created for ${enrichedScenes.length} scenes:\n`);

@@ -1249,7 +1249,7 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
                 if (mg.type === 'mapChart') mg.mapStyle = mapStyle;
 
                 // Resolve subType from theme override → registry default
-                const themeId = scriptContext?.themeId || 'neutral';
+                const themeId = scriptContext?.themeId || 'standard';
                 const themeOverrides = MG_THEME_OVERRIDES[themeId] || {};
                 const catOverride = themeOverrides[mg.type];
                 const reg = MG_REGISTRY[mg.type];
@@ -1335,7 +1335,7 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
             const batchResults = await batchFallback(scenes, scriptContext, allowedMGs);
             // Filter to allowed types and apply styles
             const filteredBatch = batchResults.filter(mg => allowedMGs.includes(mg.type));
-            const batchThemeId = scriptContext?.themeId || 'neutral';
+            const batchThemeId = scriptContext?.themeId || 'standard';
             const batchThemeOvr = MG_THEME_OVERRIDES[batchThemeId] || {};
             filteredBatch.forEach(mg => {
                 mg.style = mgStyle;
@@ -1358,8 +1358,25 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
         }
     }
 
+    // Listicle item counter MGs
+    if (scriptContext.format === 'listicle' && scriptContext.listicleItems) {
+        const { generateItemCounterMG } = require('./listicle-format');
+        let counterCount = 0;
+        for (const item of scriptContext.listicleItems) {
+            const counterMG = generateItemCounterMG(item, scenes, mgStyle);
+            if (counterMG) {
+                counterMG.style = mgStyle;
+                results.push(counterMG);
+                counterCount++;
+            }
+        }
+        if (counterCount > 0) {
+            console.log(`  [Listicle] Added ${counterCount} item counter MGs`);
+        }
+    }
+
     // Log selection summary
-    const modeCounts = { ai: 0, rule: 0, 'rule-fallback': 0 };
+    const modeCounts = { ai: 0, rule: 0, 'rule-fallback': 0, 'listicle-counter': 0 };
     const typeCounts = {};
     for (const mg of results) {
         modeCounts[mg.selectionMode || 'ai']++;

@@ -27,11 +27,25 @@ const config = require('./src/config');
 
 const CACHE_FILE = path.join(config.paths.temp, 'test-pipeline-cache.json');
 
+const DOWNLOAD_CACHE = path.join(config.paths.temp, 'test-download-cache.json');
+
 async function main() {
     const args = process.argv.slice(2);
     const skipTranscribe = args.includes('--skip-transcribe');
+    const downloadOnly = args.includes('--download-only');
     const stopAfter = parseInt(getArgAfter(args, '--stop-after') || '99');
     const audioArg = args.find(a => !a.startsWith('--'));
+
+    // Fast path: skip straight to interactive download using cached scene data
+    if (downloadOnly) {
+        if (!fs.existsSync(DOWNLOAD_CACHE)) {
+            console.error('❌ No download cache found. Run the full pipeline first.');
+            process.exit(1);
+        }
+        const cached = JSON.parse(fs.readFileSync(DOWNLOAD_CACHE, 'utf8'));
+        console.log(`\n  ⏩ Loading ${cached.scenes.length} scenes from cache (niche=${cached.scriptContext.nicheId})\n`);
+        return runInteractiveDownload(cached.scenes, cached.scriptContext);
+    }
 
     // Tee all output to a log file so nothing is lost when terminal overflows
     const LOG_FILE = path.join(config.paths.temp, 'pipeline-test.log');
@@ -349,12 +363,19 @@ Return ONLY the analysis, no disclaimers.`,
     // ══════════════════════════════════════════════════════════════
     printSceneResults(scenesWithKeywords, scriptContext);
 
+    // Save scene data for --download-only reuse
+    try {
+        fs.writeFileSync(DOWNLOAD_CACHE, JSON.stringify({ scenes: scenesWithKeywords, scriptContext }, null, 2));
+        console.log(`\n  💾 Scene data cached for --download-only`);
+    } catch {}
+
     if (stopAfter <= 6) { console.log('\n  ⏹️  Stopped after Step 6'); return; }
 
-    // ══════════════════════════════════════════════════════════════
-    // STEP 7: INTERACTIVE DOWNLOAD (type scene numbers to download)
-    // ══════════════════════════════════════════════════════════════
-    console.log('\n' + '━'.repeat(70));
+    return runInteractiveDownload(scenesWithKeywords, scriptContext);
+}
+
+function runInteractiveDownload(scenesWithKeywords, scriptContext) {
+    console.log('━'.repeat(70));
     console.log('  📌 STEP 7: INTERACTIVE DOWNLOAD');
     console.log('━'.repeat(70));
     console.log('  Type a scene number to download it (e.g. "5")');

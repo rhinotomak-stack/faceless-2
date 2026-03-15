@@ -141,7 +141,7 @@ async function buildDumbVideo(transcription, audioFile, directorsBrief) {
         entities: [], keyStats: [], mainPoints: [], targetAudience: '', emotionalArc: '',
         format: 'documentary', sections: [],
         ctaDetected: false, ctaStartTime: null, hookEndTime: null,
-        densityTarget: 3, nicheId: 'general', themeId: 'neutral'
+        densityTarget: 3, nicheId: 'general', themeId: 'standard'
     };
 
     const videoPlan = {
@@ -765,7 +765,7 @@ async function buildVideo() {
         mapStyle: mapStyle,
         scriptContext: scriptContext,
         visualAnalysis: visualAnalysis,
-        themeId: scriptContext?.themeId || 'neutral'
+        themeId: scriptContext?.themeId || 'standard'
     };
 
     const planPath = path.join(config.paths.temp, 'video-plan.json');

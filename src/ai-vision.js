@@ -282,27 +282,54 @@ async function analyzeArticleHighlights(imagePath) {
  * @param {string} keyword - the search keyword to match against
  * @returns {number} score 1-10 (10 = perfect match), or 0 on failure
  */
-async function scoreVideoFrame(base64Image, mimeType, keyword) {
+async function scoreVideoFrame(base64Image, mimeType, keyword, context) {
     try {
-        const prompt = `Rate how well this video frame matches the topic: "${keyword}"
+        const contextBlock = context
+            ? `${context.videoTopic ? `\nVideo topic: "${context.videoTopic}"` : ''}${context.sceneText ? `\nScene narration: "${context.sceneText}"` : ''}${context.niche ? `\nContent niche: ${context.niche}` : ''}`
+            : '';
 
-Score 1-10:
-- 10: Perfect visual match for the topic
-- 7-9: Good relevant footage (people, places, objects related to topic)
-- 4-6: Somewhat related or generic footage
-- 1-3: Unrelated, or showing intros/logos/title cards/text screens/outros/subscribe screens
+        const prompt = `Analyze this image/frame for use in a faceless YouTube video about: "${keyword}"${contextBlock}
 
-Reply with ONLY a single number (1-10), nothing else.`;
+IMPORTANT: Score based on what is LITERALLY visible in the image, NOT symbolic or metaphorical interpretations.
+For example: a circuit board does NOT match "underwater drone" even if drones contain circuits. An actual underwater drone/submersible WOULD match.
+
+Describe what you LITERALLY see in ONE short sentence (10-15 words max). Note any problems (watermarks, text overlays, logos, low quality, AI-generated artifacts).
+Then score 1-10:
+- 9-10: Shows exactly what the topic describes, clean footage, no watermarks
+- 7-8: Closely related real footage, minor issues
+- 5-6: Loosely related or too generic (e.g. generic stock photo instead of specific subject)
+- 3-4: Wrong subject but same general category
+- 1-2: Completely unrelated, or heavy watermarks/logos/text/AI-generated
+
+Reply format (exactly 2 lines):
+[your one-sentence description]
+[score number]`;
 
         const response = await callVisionAI(prompt, base64Image, mimeType);
-        const match = response.trim().match(/(\d+)/);
-        if (match) {
-            const score = parseInt(match[1]);
-            return Math.min(10, Math.max(1, score));
+        const lines = response.trim().split('\n').filter(l => l.trim());
+        let description = '';
+        let score = 0;
+
+        // Parse: last line with a number is the score, everything before is description
+        for (let i = lines.length - 1; i >= 0; i--) {
+            const numMatch = lines[i].trim().match(/^(\d+)$/);
+            if (numMatch) {
+                score = Math.min(10, Math.max(1, parseInt(numMatch[1])));
+                description = lines.slice(0, i).join(' ').trim();
+                break;
+            }
         }
-        return 0;
+
+        // Fallback: find any number in response
+        if (score === 0) {
+            const anyNum = response.match(/(\d+)\s*(?:\/\s*10)?/);
+            if (anyNum) score = Math.min(10, Math.max(1, parseInt(anyNum[1])));
+            description = lines[0] || '';
+        }
+
+        return { score, description };
     } catch (err) {
-        return 0;
+        return { score: 0, description: 'Vision AI error' };
     }
 }
 

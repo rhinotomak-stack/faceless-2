@@ -18,6 +18,7 @@ const REJECT_TITLE_PATTERNS = [
     'karaoke', 'full album', 'audio only', 'official audio',
     'sing along', 'instrumental', 'remix', 'live performance',
     'reaction video', 'unboxing', 'asmr',
+    '#shorts', '#short',
 ];
 
 // Theme-specific query strategies for YouTube
@@ -98,22 +99,32 @@ class YouTubeVideoProvider extends BaseProvider {
      */
     _buildSearchQueries(keyword) {
         const queries = [];
+        const words = keyword.trim().split(/\s+/);
+        const isSpecific = words.length >= 4; // 4+ words = already specific, don't pollute
+
+        // Specific queries (entities, proper nouns, long phrases): raw keyword first
+        if (isSpecific) {
+            queries.push(keyword);
+        }
+
         const theme = (this._scriptContext?.theme || '').toLowerCase();
 
-        // Use theme-specific strategies if available
-        if (theme && QUERY_STRATEGIES[theme]) {
+        // Use theme-specific strategies if available (skip for specific queries)
+        if (!isSpecific && theme && QUERY_STRATEGIES[theme]) {
             queries.push(...QUERY_STRATEGIES[theme](keyword));
         }
 
-        // Tone-based additions
+        // Tone-based additions (skip for specific queries)
         const tone = (this._scriptContext?.tone || '').toLowerCase();
-        if (tone === 'urgent' || tone === 'dramatic' || tone === 'serious') {
+        if (!isSpecific && (tone === 'urgent' || tone === 'dramatic' || tone === 'serious')) {
             queries.push(`${keyword} breaking news`);
         }
 
-        // Always add generic fallbacks
-        queries.push(`${keyword} stock footage`);
-        queries.push(keyword); // raw keyword as last resort
+        // Generic fallbacks
+        if (!isSpecific) {
+            queries.push(`${keyword} stock footage`);
+        }
+        queries.push(keyword); // raw keyword always included
 
         // Deduplicate while preserving order
         return [...new Set(queries)];
@@ -124,6 +135,9 @@ class YouTubeVideoProvider extends BaseProvider {
      */
     _filterByTitle(results) {
         return results.filter(r => {
+            // Reject YouTube Shorts URLs (vertical video, unusable for 1920x1080 canvas)
+            if (r.url && r.url.includes('/shorts/')) return false;
+
             if (!r.title) return true; // no title info, let it through
             const lower = r.title.toLowerCase();
             for (const pattern of REJECT_TITLE_PATTERNS) {
@@ -163,6 +177,8 @@ class YouTubeVideoProvider extends BaseProvider {
                         chapters: data.chapters || [],
                         title: data.title || '',
                         description: data.description || '',
+                        width: data.width || 0,
+                        height: data.height || 0,
                     });
                 } catch (e) {
                     console.log(`  [YouTube] Failed to parse metadata JSON`);
@@ -260,11 +276,59 @@ class YouTubeVideoProvider extends BaseProvider {
     }
 
     /**
+     * Resolve the direct stream URL for a YouTube video using yt-dlp.
+     * Returns the URL that ffmpeg can seek into directly (no full download needed).
+     */
+    async _resolveStreamUrl(url) {
+        return new Promise((resolve, reject) => {
+            const args = [
+                url,
+                '-f', 'worst[ext=mp4]/worst[vcodec!=none]/worstvideo/worst',
+                '--get-url',
+                '--no-playlist',
+                '--no-warnings',
+                '--no-check-certificates',
+            ];
+
+            execFile(this._ytdlpPath, args, {
+                timeout: 20000,
+                windowsHide: true,
+            }, (error, stdout) => {
+                if (error) return reject(error);
+                const streamUrl = stdout.trim().split('\n')[0];
+                if (!streamUrl || !streamUrl.startsWith('http')) {
+                    return reject(new Error('No valid stream URL returned'));
+                }
+                resolve(streamUrl);
+            });
+        });
+    }
+
+    /**
+     * Extract a single frame from a stream URL at a given timestamp using ffmpeg.
+     * Seeks directly into the HTTP stream — no full download needed.
+     */
+    _extractFrameFromStream(ffmpegPath, streamUrl, timestamp, outputPath) {
+        return new Promise((resolve) => {
+            execFile(ffmpegPath, [
+                '-ss', String(timestamp),  // seek BEFORE input = fast keyframe seek
+                '-i', streamUrl,
+                '-vf', 'scale=512:-1',
+                '-frames:v', '1',
+                '-q:v', '3',
+                '-y', outputPath
+            ], { timeout: 15000, windowsHide: true }, (err) => {
+                resolve(err ? null : outputPath);
+            });
+        });
+    }
+
+    /**
      * Find the best segment of a video by sampling frames and scoring with vision AI.
-     * Downloads a low-res copy, extracts frames at sample points, scores each against keyword.
+     * Extracts frames directly from the YouTube stream URL (no full video download).
      * @returns {number|null} best start time in seconds, or null if analysis fails
      */
-    async _findBestSegment(url, keyword, metadata, neededDuration) {
+    async _findBestSegment(url, keyword, metadata, neededDuration, context = {}) {
         const { scoreVideoFrame, isVisionAvailable, checkFfmpegAvailable } = require('../ai-vision');
 
         if (!isVisionAvailable()) {
@@ -285,83 +349,80 @@ class YouTubeVideoProvider extends BaseProvider {
         if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
 
         const uid = Date.now();
-        const lowResPath = path.join(tempDir, `_yt_sample_${uid}.mp4`);
         const framePaths = [];
 
         try {
-            // Step 1: Download low-res video (no audio, worst quality — fast)
-            console.log(`  [YouTube] Downloading low-res sample for frame analysis...`);
-            await this._downloadLowRes(url, lowResPath);
-
-            if (!fs.existsSync(lowResPath) || fs.statSync(lowResPath).size < 1000) {
-                console.log(`  [YouTube] Low-res download failed`);
+            // Step 1: Resolve direct stream URL (fast, no download)
+            console.log(`  [YouTube] Resolving stream URL for frame sampling...`);
+            let streamUrl;
+            try {
+                streamUrl = await this._resolveStreamUrl(url);
+            } catch (e) {
+                console.log(`  [YouTube] Could not resolve stream URL: ${e.message}, using heuristic`);
                 return null;
             }
 
-            // Step 2: Calculate 3 sample timestamps (at 10%, 47%, 85% of video)
-            const startAt = Math.floor(totalDuration * 0.10);
-            const endAt = Math.floor(totalDuration * 0.85);
+            // Step 2: Calculate 6 sample timestamps (spread across 8%-90% of video)
+            const startAt = Math.floor(totalDuration * 0.08);
+            const endAt = Math.floor(totalDuration * 0.90);
             const range = endAt - startAt;
-            const numSamples = 3;
+            const numSamples = 6;
             const timestamps = [];
             for (let i = 0; i < numSamples; i++) {
                 timestamps.push(Math.floor(startAt + (range * i) / (numSamples - 1)));
             }
 
-            // Step 3: Extract frames in parallel (async)
-            console.log(`  [YouTube] Extracting ${numSamples} sample frames at: ${timestamps.map(t => t + 's').join(', ')}`);
-            const extractPromises = timestamps.map((ts, i) => {
-                const framePath = path.join(tempDir, `_yt_frame_${uid}_${i}.jpg`);
-                framePaths.push(framePath);
-                return new Promise((resolve) => {
-                    execFile(ffmpegPath, [
-                        '-ss', String(ts),
-                        '-i', lowResPath,
-                        '-vf', 'scale=512:-1',
-                        '-frames:v', '1',
-                        '-q:v', '3',
-                        '-y', framePath
-                    ], { timeout: 10000, windowsHide: true }, (err) => {
-                        resolve(err ? null : framePath);
-                    });
-                });
-            });
-            const extractedFrames = await Promise.all(extractPromises);
-            // Mark failed extractions
-            for (let i = 0; i < extractedFrames.length; i++) {
-                if (!extractedFrames[i]) framePaths[i] = null;
+            // Step 3: Extract frames directly from stream (parallel, 3 at a time)
+            console.log(`  [YouTube] Extracting ${numSamples} frames from stream at: ${timestamps.map(t => t + 's').join(', ')}`);
+            for (let batch = 0; batch < numSamples; batch += 3) {
+                const batchPromises = [];
+                for (let j = batch; j < Math.min(batch + 3, numSamples); j++) {
+                    const framePath = path.join(tempDir, `_yt_frame_${uid}_${j}.jpg`);
+                    framePaths.push(framePath);
+                    batchPromises.push(this._extractFrameFromStream(ffmpegPath, streamUrl, timestamps[j], framePath));
+                }
+                await Promise.all(batchPromises);
             }
 
-            // Step 4: Score each frame against the keyword in parallel
-            const validIndices = [];
-            const scorePromises = [];
-
+            // Step 4: Score each frame sequentially (bail fast on API errors)
+            const validFrames = [];
             for (let i = 0; i < framePaths.length; i++) {
                 if (!framePaths[i] || !fs.existsSync(framePaths[i])) continue;
                 try {
+                    const stat = fs.statSync(framePaths[i]);
+                    if (stat.size < 500) continue; // empty/corrupt frame
                     const imageBuffer = fs.readFileSync(framePaths[i]);
-                    const base64 = imageBuffer.toString('base64');
-                    validIndices.push(i);
-                    scorePromises.push(scoreVideoFrame(base64, 'image/jpeg', keyword));
-                } catch (e) {
-                    // Skip this frame
-                }
+                    validFrames.push({ idx: i, base64: imageBuffer.toString('base64') });
+                } catch (e) {}
             }
 
-            if (scorePromises.length < 2) {
+            if (validFrames.length < 2) {
                 console.log(`  [YouTube] Too few frames extracted, using heuristic`);
                 return null;
             }
 
-            console.log(`  [YouTube] Scoring ${scorePromises.length} frames with Vision AI...`);
-            const scores = await Promise.all(scorePromises);
+            const visionProvider = require('../config').visionProvider || require('../config').aiProvider || 'ollama';
+            console.log(`  [YouTube] Scoring ${validFrames.length} frames with Vision AI (${visionProvider})...`);
+            const scores = [];
+            const validIndices = [];
+            for (const frame of validFrames) {
+                const result = await scoreVideoFrame(frame.base64, 'image/jpeg', keyword, context);
+                scores.push(result.score);
+                validIndices.push(frame.idx);
+                const desc = result.description ? ` → ${result.description}` : '';
+                console.log(`    Frame ${frame.idx + 1} (${timestamps[frame.idx]}s): score ${result.score}/10${desc}`);
+                // Fast fail: if first frame scores 0, Vision AI is likely broken — skip rest
+                if (scores.length === 1 && result.score === 0) {
+                    console.log(`  [YouTube] Vision AI returned 0 on first frame — skipping rest, using heuristic`);
+                    return null;
+                }
+            }
 
             // Step 5: Pick the highest-scoring frame
             let bestIdx = 0;
             let bestScore = 0;
             for (let i = 0; i < scores.length; i++) {
                 const frameNum = validIndices[i];
-                console.log(`    Frame ${frameNum + 1} (${timestamps[frameNum]}s): score ${scores[i]}/10`);
                 if (scores[i] > bestScore) {
                     bestScore = scores[i];
                     bestIdx = frameNum;
@@ -384,48 +445,11 @@ class YouTubeVideoProvider extends BaseProvider {
             console.log(`  [YouTube] Smart segment analysis failed: ${err.message}`);
             return null;
         } finally {
-            // Clean up all temp files
-            const cleanupFiles = [lowResPath, ...framePaths.filter(Boolean)];
-            for (const f of cleanupFiles) {
+            // Clean up frame temp files (no video file to clean up anymore)
+            for (const f of framePaths.filter(Boolean)) {
                 try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch (e) {}
             }
         }
-    }
-
-    /**
-     * Download a low-resolution copy of the video (no audio) for frame analysis.
-     */
-    async _downloadLowRes(url, outputPath) {
-        return new Promise((resolve, reject) => {
-            // Use flexible format: try worst mp4 combined, then any worst format
-            // "worstvideo[ext=mp4]" alone fails on videos with only webm video streams
-            const args = [
-                url,
-                '-f', 'worst[ext=mp4]/worst[vcodec!=none]/worstvideo/worst',
-                '--no-playlist',
-                '--no-warnings',
-                '--no-check-certificates',
-                '-o', outputPath,
-                '--force-overwrites',
-                '--no-audio',  // We only need video for frame extraction
-            ];
-
-            // Use ffmpeg-static if available
-            try {
-                const ffmpegPath = require('ffmpeg-static');
-                if (ffmpegPath) {
-                    args.push('--ffmpeg-location', path.dirname(ffmpegPath));
-                }
-            } catch (e) {}
-
-            execFile(this._ytdlpPath, args, {
-                timeout: 60000,
-                windowsHide: true,
-            }, (error) => {
-                if (error) return reject(error);
-                resolve(outputPath);
-            });
-        });
     }
 
     async search(keyword) {
@@ -465,7 +489,6 @@ class YouTubeVideoProvider extends BaseProvider {
             q: keyword,
             key: config.youtube.apiKey,
             maxResults: 10,
-            videoDuration: 'short',
             videoEmbeddable: 'true',
             order: 'relevance',
         };
@@ -527,7 +550,7 @@ class YouTubeVideoProvider extends BaseProvider {
             ];
 
             // Try with duration filter (newer yt-dlp versions)
-            // 10s minimum to avoid shorts/intros, 600s max (10 min)
+            // 60s minimum to avoid Shorts/intros, 600s max (10 min)
             args.push('--match-filter', 'duration > 10 & duration < 600');
 
             execFile(this._ytdlpPath, args, {
@@ -588,11 +611,17 @@ class YouTubeVideoProvider extends BaseProvider {
         console.log(`  [YouTube] Fetching metadata for smart clip selection...`);
         const metadata = await this._getVideoMetadata(url);
 
+        // Reject vertical videos (Shorts, phone recordings) — unusable on 1920x1080 canvas
+        if (metadata && metadata.width && metadata.height && metadata.height > metadata.width) {
+            console.log(`  [YouTube] Rejecting vertical video (${metadata.width}x${metadata.height})`);
+            throw new Error('Vertical video (portrait aspect ratio)');
+        }
+
         let startTime = null;
 
         // Try vision-based segment selection (most accurate)
         if (keyword && metadata && metadata.duration >= 60) {
-            startTime = await this._findBestSegment(url, keyword, metadata, downloadDuration);
+            startTime = await this._findBestSegment(url, keyword, metadata, downloadDuration, { sceneText: options.sceneText || '', niche: options.niche || '', videoTopic: options.videoTopic || '' });
         }
 
         // Fall back to chapter/percentage-based heuristic

@@ -65,7 +65,7 @@ const QUALITY_TIERS = {
  *   BUILD_FORMAT       — 'auto' | 'documentary' | 'listicle'
  *   BUILD_QUALITY_TIER — 'mini' | 'standard' | 'pro'
  *   BUILD_AUDIENCE     — Optional target audience description
- *   BUILD_THEME        — 'auto' | 'tech' | 'nature' | 'crime' | 'corporate' | 'luxury' | 'sport' | 'neutral'
+ *   BUILD_THEME        — 'auto' | 'crime' | 'history' | 'modern' | 'minimal' | 'standard'
  *   BUILD_NICHE        — Preset key ('auto'|'trueCrime'|'documentary'|'finance'|...) or direct niche ID
  *   BUILD_RECIPE       — Optional genre recipe name (e.g., 'politics', 'tech', 'crime')
  *

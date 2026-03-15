@@ -24,6 +24,8 @@ const nvidiaApiKeys = parseEnvList(process.env.NVIDIA_API_KEYS || process.env.NV
 const config = {
     // AI Provider: 'ollama', 'claude', 'openai', 'deepseek', 'qwen', 'nvidia', 'gemini', or 'groq'
     aiProvider: process.env.AI_PROVIDER || 'ollama',
+    // Vision provider override — use a different provider for vision tasks (e.g., 'gemini' while text uses 'qwen')
+    visionProvider: process.env.VISION_PROVIDER || '',
 
     // Ollama settings (free, runs locally)
     ollama: {
@@ -58,7 +60,7 @@ const config = {
         apiKey: process.env.QWEN_API_KEY || '',
         baseUrl: process.env.QWEN_BASE_URL || 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
         model: process.env.QWEN_MODEL || 'qwen3-omni-flash',
-        visionModel: process.env.QWEN_VISION_MODEL || 'qwen3-omni-flash'
+        visionModel: process.env.QWEN_VISION_MODEL || 'qwen-vl-plus-2025-05-07'
     },
 
     // Google Gemini API settings (free tier available, text + vision)

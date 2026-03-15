@@ -21,86 +21,11 @@
 // ============================================================
 
 const THEMES = {
-    tech: {
-        id: 'tech',
-        name: 'Tech/Cyberpunk',
-        description: 'Futuristic, digital, high-tech visuals',
-
-        background: 'tech-grid',
-        canvasBackground: 'matrixDots',
-        mgStyle: 'neon',
-
-        colors: {
-            primary: '#00ffff',
-            secondary: '#ff00ff',
-            accent: '#00ff00',
-            text: '#ffffff',
-            background: '#0a0a0a',
-            shadow: 'rgba(0, 255, 255, 0.5)'
-        },
-
-        fonts: {
-            heading: 'Orbitron, Electrolize, "Courier New", monospace',
-            body: '"Roboto Mono", "Source Code Pro", monospace'
-        },
-
-        transitions: {
-            primary: ['glitch', 'pixelate', 'flash', 'rgbSplit', 'dataMosh', 'scanline'],
-            secondary: ['wipe', 'slide', 'zoom', 'static', 'crossBlur'],
-            avoid: ['ripple', 'dissolve', 'dreamFade', 'ink']
-        },
-
-        overlays: {
-            preferred: ['crt', 'vhs', 'scanline', 'digital', 'glitch', 'static', 'grain'],
-            avoid: ['paper', 'film', 'vintage'],
-            effects: ['grain', 'chromatic'],
-            blendMode: 'screen',
-            intensity: { min: 0.2, max: 0.5 }
-        }
-    },
-
-    nature: {
-        id: 'nature',
-        name: 'Nature Documentary',
-        description: 'Natural, organic, earthy visuals',
-
-        background: 'nature',
-        canvasBackground: 'organicNoise',
-        mgStyle: 'cinematic',
-
-        colors: {
-            primary: '#8B4513',
-            secondary: '#228B22',
-            accent: '#87CEEB',
-            text: '#FFFFFF',
-            background: '#1a1a1a',
-            shadow: 'rgba(0, 0, 0, 0.6)'
-        },
-
-        fonts: {
-            heading: '"Libre Baskerville", Merriweather, Georgia, serif',
-            body: 'Lora, "Open Sans", Georgia, sans-serif'
-        },
-
-        transitions: {
-            primary: ['dissolve', 'crossBlur', 'fade', 'ripple', 'dreamFade', 'morph'],
-            secondary: ['luma', 'blur', 'crossfade', 'lightLeak', 'ink'],
-            avoid: ['glitch', 'flash', 'pixelate', 'dataMosh', 'static', 'rgbSplit']
-        },
-
-        overlays: {
-            preferred: ['dust', 'lightleak', 'film', 'grain', 'bokeh', 'blur'],
-            avoid: ['crt', 'vhs', 'glitch', 'scanline', 'digital'],
-            effects: ['grain', 'lightLeak', 'blurVignette'],
-            blendMode: 'screen',
-            intensity: { min: 0.15, max: 0.4 }
-        }
-    },
-
+    // ── CRIME ── Dark, moody, high-contrast. For: crime, military/geopolitics
     crime: {
         id: 'crime',
-        name: 'True Crime/Dark',
-        description: 'Dark, moody, high-contrast visuals',
+        name: 'Crime / Dark',
+        description: 'Dark, moody, high-contrast visuals — crime, military, geopolitics',
 
         background: 'dark',
         canvasBackground: 'vignette',
@@ -135,48 +60,11 @@ const THEMES = {
         }
     },
 
-    corporate: {
-        id: 'corporate',
-        name: 'Corporate/Professional',
-        description: 'Clean, professional, polished visuals',
-
-        background: 'light',
-        canvasBackground: 'gridLines',
-        mgStyle: 'clean',
-
-        colors: {
-            primary: '#0066cc',
-            secondary: '#333333',
-            accent: '#00cc66',
-            text: '#FFFFFF',
-            background: '#f5f5f5',
-            shadow: 'rgba(0, 0, 0, 0.3)'
-        },
-
-        fonts: {
-            heading: 'Montserrat, "Work Sans", Arial, sans-serif',
-            body: '"Source Sans Pro", "Open Sans", "Segoe UI", sans-serif'
-        },
-
-        transitions: {
-            primary: ['push', 'slide', 'fade', 'crossBlur', 'splitWipe'],
-            secondary: ['dissolve', 'luma', 'blur', 'morph'],
-            avoid: ['glitch', 'pixelate', 'flash', 'dataMosh', 'static', 'rgbSplit', 'spin']
-        },
-
-        overlays: {
-            preferred: ['paper', 'lightleak', 'blur', 'bokeh'],
-            avoid: ['crt', 'vhs', 'glitch', 'damage', 'scratch', 'scanline'],
-            effects: ['blurVignette', 'lightLeak'],
-            blendMode: 'soft-light',
-            intensity: { min: 0.1, max: 0.3 }
-        }
-    },
-
-    luxury: {
-        id: 'luxury',
-        name: 'Luxury/Fashion',
-        description: 'Elegant, golden, premium visuals',
+    // ── HISTORY ── Elegant, warm, cinematic. For: history, luxury, biography
+    history: {
+        id: 'history',
+        name: 'History / Elegant',
+        description: 'Warm, cinematic, elegant — history, luxury, biography',
 
         background: 'warm',
         canvasBackground: 'softGlow',
@@ -198,94 +86,135 @@ const THEMES = {
 
         transitions: {
             primary: ['dissolve', 'crossBlur', 'colorFade', 'luma', 'flare', 'lightLeak'],
-            secondary: ['fade', 'reveal', 'blur', 'dreamFade', 'prismShift'],
+            secondary: ['fade', 'reveal', 'blur', 'dreamFade', 'filmGrain'],
             avoid: ['glitch', 'pixelate', 'swipe', 'dataMosh', 'static', 'bounce']
         },
 
         overlays: {
-            preferred: ['lightleak', 'bokeh', 'blur', 'film', 'dust'],
+            preferred: ['lightleak', 'bokeh', 'film', 'dust', 'grain'],
             avoid: ['crt', 'vhs', 'glitch', 'damage', 'scanline', 'scratch'],
-            effects: ['lightLeak', 'blurVignette'],
+            effects: ['lightLeak', 'blurVignette', 'grain'],
             blendMode: 'screen',
             intensity: { min: 0.15, max: 0.4 }
         }
     },
 
-    sport: {
-        id: 'sport',
-        name: 'Sports/Action',
-        description: 'Bold, high-energy, dynamic visuals',
+    // ── MODERN ── Vibrant, energetic, bold. For: tech, sport, news
+    modern: {
+        id: 'modern',
+        name: 'Modern / Vibrant',
+        description: 'Bold, vibrant, high-energy — tech, sport, news',
 
-        background: 'dark',
+        background: 'tech-grid',
         canvasBackground: 'energyBurst',
         mgStyle: 'bold',
 
         colors: {
-            primary: '#ff4500',
-            secondary: '#ffd700',
-            accent: '#00ff00',
+            primary: '#00ccff',
+            secondary: '#ff4500',
+            accent: '#00ff88',
             text: '#FFFFFF',
             background: '#0a0a0a',
-            shadow: 'rgba(255, 69, 0, 0.5)'
+            shadow: 'rgba(0, 204, 255, 0.4)'
         },
 
         fonts: {
-            heading: '"Bebas Neue", "Fjalla One", Impact, sans-serif',
+            heading: '"Bebas Neue", Oswald, "Fjalla One", Impact, sans-serif',
             body: '"Roboto Condensed", "Barlow Condensed", Arial, sans-serif'
         },
 
         transitions: {
-            primary: ['swipe', 'push', 'directionalBlur', 'zoom', 'whip', 'zoomBlur', 'shutterSlice'],
-            secondary: ['wipe', 'flash', 'slide', 'bounce', 'splitWipe'],
-            avoid: ['dissolve', 'ripple', 'crossBlur', 'dreamFade', 'ink', 'morph']
+            primary: ['swipe', 'push', 'directionalBlur', 'zoom', 'whip', 'zoomBlur', 'glitch'],
+            secondary: ['wipe', 'flash', 'slide', 'splitWipe', 'shutterSlice'],
+            avoid: ['dissolve', 'ripple', 'dreamFade', 'ink', 'morph']
         },
 
         overlays: {
-            preferred: ['grain', 'dust', 'lightleak', 'scratch'],
+            preferred: ['grain', 'dust', 'lightleak', 'scanline', 'digital'],
             avoid: ['paper', 'bokeh', 'crt', 'vhs'],
-            effects: ['grain', 'dust'],
+            effects: ['grain', 'chromatic', 'dust'],
             blendMode: 'screen',
-            intensity: { min: 0.2, max: 0.45 }
+            intensity: { min: 0.2, max: 0.5 }
         }
     },
 
-    neutral: {
-        id: 'neutral',
-        name: 'Neutral/Balanced',
-        description: 'Clean, versatile, balanced visuals',
+    // ── MINIMAL ── Understated, organic, calm. For: nature, food/health, motivation
+    minimal: {
+        id: 'minimal',
+        name: 'Minimal / Organic',
+        description: 'Understated, earthy, calm — nature, food, motivation',
 
-        background: 'neutral',
-        canvasBackground: 'subtleGrain',
-        mgStyle: 'clean',
+        background: 'nature',
+        canvasBackground: 'organicNoise',
+        mgStyle: 'minimal',
 
         colors: {
-            primary: '#4a90e2',
-            secondary: '#2c3e50',
-            accent: '#e74c3c',
+            primary: '#8B4513',
+            secondary: '#228B22',
+            accent: '#87CEEB',
             text: '#FFFFFF',
             background: '#1a1a1a',
-            shadow: 'rgba(0, 0, 0, 0.5)'
+            shadow: 'rgba(0, 0, 0, 0.6)'
         },
 
         fonts: {
-            heading: 'Nunito, Raleway, Arial, sans-serif',
-            body: '"Open Sans", Roboto, Arial, sans-serif'
+            heading: '"Libre Baskerville", Merriweather, Georgia, serif',
+            body: 'Lora, "Open Sans", Georgia, sans-serif'
         },
 
         transitions: {
-            primary: ['fade', 'dissolve', 'slide', 'zoom', 'wipe', 'push'],
-            secondary: ['blur', 'crossBlur', 'crossfade', 'lightLeak', 'reveal'],
-            avoid: []
+            primary: ['dissolve', 'crossBlur', 'fade', 'ripple', 'dreamFade', 'morph'],
+            secondary: ['luma', 'blur', 'crossfade', 'lightLeak', 'ink'],
+            avoid: ['glitch', 'flash', 'pixelate', 'dataMosh', 'static', 'rgbSplit']
         },
 
         overlays: {
-            preferred: ['grain', 'dust', 'lightleak', 'blur', 'bokeh'],
-            avoid: [],
-            effects: ['grain', 'lightLeak', 'blurVignette', 'dust'],
+            preferred: ['dust', 'lightleak', 'film', 'grain', 'bokeh', 'blur'],
+            avoid: ['crt', 'vhs', 'glitch', 'scanline', 'digital'],
+            effects: ['grain', 'lightLeak', 'blurVignette'],
             blendMode: 'screen',
-            intensity: { min: 0.15, max: 0.4 }
+            intensity: { min: 0.12, max: 0.35 }
         }
-    }
+    },
+
+    // ── STANDARD ── Clean, professional, versatile. For: business, education, diy, general
+    standard: {
+        id: 'standard',
+        name: 'Standard / Clean',
+        description: 'Clean, professional, versatile — business, education, general',
+
+        background: 'neutral',
+        canvasBackground: 'gridLines',
+        mgStyle: 'clean',
+
+        colors: {
+            primary: '#0066cc',
+            secondary: '#333333',
+            accent: '#00cc66',
+            text: '#FFFFFF',
+            background: '#1a1a1a',
+            shadow: 'rgba(0, 0, 0, 0.4)'
+        },
+
+        fonts: {
+            heading: 'Montserrat, "Work Sans", Arial, sans-serif',
+            body: '"Source Sans Pro", "Open Sans", "Segoe UI", sans-serif'
+        },
+
+        transitions: {
+            primary: ['push', 'slide', 'fade', 'crossBlur', 'splitWipe', 'wipe'],
+            secondary: ['dissolve', 'luma', 'blur', 'morph', 'zoom'],
+            avoid: ['glitch', 'pixelate', 'dataMosh', 'static', 'rgbSplit', 'spin']
+        },
+
+        overlays: {
+            preferred: ['paper', 'lightleak', 'blur', 'bokeh', 'grain'],
+            avoid: ['crt', 'vhs', 'glitch', 'damage', 'scratch', 'scanline'],
+            effects: ['blurVignette', 'lightLeak', 'grain'],
+            blendMode: 'soft-light',
+            intensity: { min: 0.1, max: 0.3 }
+        }
+    },
 };
 
 // ============================================================
@@ -361,73 +290,73 @@ const BACKGROUND_LIBRARY = {
     'dark-gradient': {
         name: 'Dark Gradient',
         css: 'radial-gradient(ellipse at 50% 40%, #1a1a2e 0%, #0a0a14 60%, #000000 100%)',
-        themes: ['crime', 'dark', 'tech', 'neutral'],
+        themes: ['crime', 'modern', 'standard'],
         mood: ['dark', 'dramatic', 'mysterious'],
     },
     'blue-minimal': {
         name: 'Blue Minimal',
         css: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-        themes: ['tech', 'corporate', 'neutral'],
+        themes: ['modern', 'standard'],
         mood: ['calm', 'professional', 'cool'],
     },
     'dark-blue': {
         name: 'Dark Blue',
         css: 'radial-gradient(ellipse at 50% 50%, #0f2027 0%, #203a43 40%, #2c5364 100%)',
-        themes: ['tech', 'corporate', 'crime', 'neutral'],
+        themes: ['modern', 'standard', 'crime'],
         mood: ['calm', 'professional', 'dark'],
     },
     'green-gradient': {
         name: 'Green Gradient',
         css: 'linear-gradient(160deg, #0f3443 0%, #34e89e 100%)',
-        themes: ['nature', 'health', 'tech'],
+        themes: ['minimal', 'modern'],
         mood: ['calm', 'energetic', 'bright'],
     },
     'warm-sunset': {
         name: 'Warm Sunset',
         css: 'linear-gradient(135deg, #f093fb 0%, #f5576c 50%, #fda085 100%)',
-        themes: ['lifestyle', 'entertainment', 'luxury'],
+        themes: ['history', 'minimal'],
         mood: ['warm', 'energetic', 'bright'],
     },
     'midnight': {
         name: 'Midnight',
         css: 'radial-gradient(ellipse at 30% 50%, #1a0a2e 0%, #0a0014 50%, #000000 100%)',
-        themes: ['crime', 'dark', 'luxury', 'entertainment'],
+        themes: ['crime', 'history'],
         mood: ['dark', 'dramatic', 'mysterious'],
     },
     'cream': {
         name: 'Cream',
         css: 'linear-gradient(180deg, #fdf6e3 0%, #ede0c8 50%, #d4c5a9 100%)',
-        themes: ['lifestyle', 'corporate', 'nature'],
+        themes: ['minimal', 'standard', 'history'],
         mood: ['warm', 'calm', 'bright'],
     },
     'grid-texture': {
         name: 'Grid Texture',
         css: 'repeating-linear-gradient(0deg, transparent, transparent 49px, rgba(255,255,255,0.03) 49px, rgba(255,255,255,0.03) 50px), repeating-linear-gradient(90deg, transparent, transparent 49px, rgba(255,255,255,0.03) 49px, rgba(255,255,255,0.03) 50px), linear-gradient(135deg, #0a0a1a 0%, #1a1a2e 100%)',
-        themes: ['tech', 'corporate', 'neutral'],
+        themes: ['modern', 'standard'],
         mood: ['professional', 'dark', 'cool'],
     },
     'red-dark': {
         name: 'Red Dark',
         css: 'radial-gradient(ellipse at 50% 50%, #2a0a0a 0%, #1a0505 50%, #0a0000 100%)',
-        themes: ['crime', 'dark', 'entertainment', 'sport'],
+        themes: ['crime', 'modern'],
         mood: ['dramatic', 'dark', 'energetic'],
     },
     'purple-haze': {
         name: 'Purple Haze',
         css: 'linear-gradient(135deg, #667eea 0%, #764ba2 50%, #3a1c71 100%)',
-        themes: ['entertainment', 'tech', 'luxury'],
+        themes: ['modern', 'history'],
         mood: ['dramatic', 'cool', 'mysterious'],
     },
     'noir': {
         name: 'Noir',
         css: 'radial-gradient(ellipse at 50% 30%, #1a1a1a 0%, #0a0a0a 40%, #000000 100%)',
-        themes: ['crime', 'dark', 'neutral'],
+        themes: ['crime', 'standard'],
         mood: ['dark', 'dramatic', 'mysterious'],
     },
     'ocean-deep': {
         name: 'Ocean Deep',
         css: 'linear-gradient(180deg, #0c3547 0%, #0a2a3a 40%, #051a2a 100%)',
-        themes: ['nature', 'tech', 'corporate'],
+        themes: ['minimal', 'modern', 'standard'],
         mood: ['calm', 'cool', 'professional'],
     },
 };
@@ -1022,26 +951,20 @@ const MG_STYLE_PRESETS = {
 // E.g. crime + nature both use 'cinematic' mgStyle, but crime needs a red banner lowerThird.
 // Structure: MG_THEME_OVERRIDES[themeId][mgCategory] = { style, anim, colors }
 const MG_THEME_OVERRIDES = {
-    tech: {
-        lowerThird: { style: 'bar',       anim: 'slideLeft', colors: null },
-    },
-    nature: {
-        lowerThird: { style: 'underline', anim: 'fadeSlide', colors: null },
-    },
     crime: {
         lowerThird: { style: 'banner',    anim: 'wipeRight', colors: { bgFill: '#cc0000', textFill: '#ffffff', accentFill: '#ffffff' } },
     },
-    corporate: {
-        lowerThird: { style: 'box',       anim: 'slideLeft', colors: { bgFill: '#0055aa', textFill: '#ffffff', accentFill: '#00cc66' } },
-    },
-    luxury: {
+    history: {
         lowerThird: { style: 'glass',     anim: 'fadeSlide', colors: { bgFill: 'rgba(20,10,5,0.7)', textFill: '#ffffff', accentFill: '#d4af37' } },
     },
-    sport: {
-        lowerThird: { style: 'split',     anim: 'popUp',     colors: { bgFill: '#ff4500', textFill: '#ffffff', accentFill: '#ffd700' } },
+    modern: {
+        lowerThird: { style: 'split',     anim: 'popUp',     colors: { bgFill: '#00ccff', textFill: '#ffffff', accentFill: '#ff4500' } },
     },
-    neutral: {
-        lowerThird: { style: 'bar',       anim: 'slideLeft', colors: null },
+    minimal: {
+        lowerThird: { style: 'underline', anim: 'fadeSlide', colors: null },
+    },
+    standard: {
+        lowerThird: { style: 'box',       anim: 'slideLeft', colors: { bgFill: '#0055aa', textFill: '#ffffff', accentFill: '#00cc66' } },
     },
 };
 
@@ -1059,7 +982,7 @@ for (const [themeId, cats] of Object.entries(MG_THEME_OVERRIDES)) {
  * @returns {Object} Full token set
  */
 function getThemeTokens(themeId) {
-    const theme = THEMES[themeId] || THEMES.neutral;
+    const theme = THEMES[themeId] || THEMES.standard;
     const stylePreset = MG_STYLE_PRESETS[theme.mgStyle] || MG_STYLE_PRESETS.clean;
     const mod = stylePreset.modifier;
 
@@ -1222,7 +1145,7 @@ function getMGStylePreset(styleName) {
  * @returns {Object} Theme object
  */
 function getTheme(themeId) {
-    return THEMES[themeId] || THEMES.neutral;
+    return THEMES[themeId] || THEMES.standard;
 }
 
 /**

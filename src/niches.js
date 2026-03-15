@@ -27,7 +27,7 @@ const NICHES = {
         description: 'Technology, AI, software, digital, cybersecurity',
 
         // Default visual theme (can be overridden independently)
-        defaultTheme: 'tech',
+        defaultTheme: 'modern',
 
         // Shot style guidance — tells Visual Planner what kind of footage to prefer
         shotStyle: 'Neon-lit close-ups of screens and hardware, dark rooms with monitor glow, data visualizations, smooth tracking shots of server rooms and labs, aerial shots of tech campuses.',
@@ -85,7 +85,7 @@ const NICHES = {
         name: 'Nature/Documentary',
         description: 'Nature, wildlife, environment, conservation',
 
-        defaultTheme: 'nature',
+        defaultTheme: 'minimal',
 
         shotStyle: 'Wide establishing shots of landscapes, slow-motion wildlife, macro nature details (insects, leaves, water droplets), aerial drone footage, golden hour and blue hour lighting.',
 
@@ -173,7 +173,7 @@ const NICHES = {
         name: 'Business/Corporate',
         description: 'Business, finance, economics, corporate',
 
-        defaultTheme: 'corporate',
+        defaultTheme: 'standard',
 
         shotStyle: 'Clean corporate environments, glass office buildings, stock tickers, boardroom meetings, city skylines at dusk, data dashboards on screens, professional handshakes.',
 
@@ -217,7 +217,7 @@ const NICHES = {
         name: 'Luxury/Fashion',
         description: 'High-end, fashion, lifestyle, premium',
 
-        defaultTheme: 'luxury',
+        defaultTheme: 'history',
 
         shotStyle: 'Macro photography with shallow depth of field (bokeh), slow smooth panning, elegant warm lighting, gold/black tones, glamorous interiors, fashion runway angles, product hero shots.',
 
@@ -261,7 +261,7 @@ const NICHES = {
         name: 'Sports/Action',
         description: 'Sports, competition, athletics, action',
 
-        defaultTheme: 'sport',
+        defaultTheme: 'modern',
 
         shotStyle: 'Fast tracking shots, dynamic wide angles, high contrast, slow-motion replays, stadium crowd shots, close-ups of athletes in action, overhead tactical views.',
 
@@ -305,7 +305,7 @@ const NICHES = {
         name: 'Education/Explainer',
         description: 'Educational, how-to, explainer, tutorials',
 
-        defaultTheme: 'corporate',
+        defaultTheme: 'standard',
 
         shotStyle: 'Clean well-lit scenes, diagrams and infographics, whiteboards, laboratory close-ups, book/library shots, step-by-step process footage, talking-head framing for authority.',
 
@@ -349,7 +349,7 @@ const NICHES = {
         name: 'News/Current Events',
         description: 'News, politics, current events, journalism',
 
-        defaultTheme: 'corporate',
+        defaultTheme: 'modern',
 
         shotStyle: 'Press conference angles, newsroom-style framing, split-screen layouts, on-location establishing shots, document/headline close-ups, crowd footage, official building exteriors.',
 
@@ -393,7 +393,7 @@ const NICHES = {
         name: 'History/Documentary',
         description: 'History, historical events, civilizations, biography',
 
-        defaultTheme: 'neutral',
+        defaultTheme: 'history',
 
         shotStyle: 'Slow pans across historical photos and paintings, sepia/desaturated tones, map animations, monument establishing shots, museum artifact close-ups, archival film grain.',
 
@@ -437,7 +437,7 @@ const NICHES = {
         name: 'Motivation/Self-Help',
         description: 'Motivational, self-improvement, inspirational, mindset',
 
-        defaultTheme: 'neutral',
+        defaultTheme: 'minimal',
 
         shotStyle: 'Cinematic wide shots of people in motion (running, climbing, working out), sunrise/sunset golden hour, silhouettes, dramatic clouds, slow-motion determination shots, urban hustle scenes.',
 
@@ -476,12 +476,147 @@ const NICHES = {
         }
     },
 
+    military: {
+        id: 'military',
+        name: 'Military/Geopolitics',
+        description: 'Military, war, geopolitics, global conflicts, defense',
+
+        defaultTheme: 'crime',
+
+        shotStyle: 'Satellite imagery, military vehicle footage, map animations with troop movements, night-vision style shots, naval fleet aerials, press conferences, border checkpoints, destroyed infrastructure.',
+
+        allowedMGs: [
+            'headline', 'lowerThird', 'mapChart', 'timeline', 'statCounter',
+            'comparisonCard', 'callout', 'focusWord', 'bulletList', 'barChart'
+        ],
+
+        footagePriority: {
+            video: ['newsVideo', 'youtube', 'pexels', 'pixabay'],
+            image: ['googleCSE', 'bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash']
+        },
+
+        defaultPacing: 'moderate',
+
+        preferredMediaType: 'mixed',   // military: maps (image) + action footage (video)
+
+        keywords: ['military', 'army', 'navy', 'war', 'conflict', 'geopolitics', 'geopolitical',
+                   'troops', 'missile', 'weapon', 'defense', 'nato', 'invasion', 'border',
+                   'sanctions', 'nuclear', 'submarine', 'drone', 'airforce', 'tank',
+                   'soldier', 'regiment', 'alliance', 'territory', 'occupation'],
+
+        searchPolicy: {
+            contextTerms: ['military', 'conflict', 'geopolitical'],
+            avoidTerms: ['cartoon', 'game', 'movie', 'fiction', 'call of duty', 'anime'],
+            fallbackKeywords: ['military operation', 'world map geopolitics', 'naval fleet ocean', 'satellite aerial view'],
+            entityBoost: true,
+            stockMaxWords: 3,
+        },
+
+        overlayPrefs: {
+            v2Density: 'high',
+            explainerDensity: 'medium',
+            maxOverlays: 5,
+            minGapSec: 8,
+            preferredTypes: ['v2', 'explainer'],
+        }
+    },
+
+    food: {
+        id: 'food',
+        name: 'Food/Health',
+        description: 'Food, nutrition, health, diet, cooking, wellness',
+
+        defaultTheme: 'minimal',
+
+        shotStyle: 'Close-up food photography with shallow depth of field, kitchen prep shots, ingredient flat-lays, grocery store aisles, farm-to-table scenes, vibrant produce macro shots, scientific diagrams of nutrition.',
+
+        allowedMGs: [
+            'headline', 'bulletList', 'statCounter', 'callout', 'focusWord',
+            'comparisonCard', 'rankingList', 'lowerThird', 'barChart', 'explainer'
+        ],
+
+        footagePriority: {
+            video: ['pexels', 'pixabay', 'youtube', 'newsVideo'],
+            image: ['pexels', 'unsplash', 'pixabay', 'googleCSE', 'bing', 'googleScrape']
+        },
+
+        defaultPacing: 'moderate',
+
+        preferredMediaType: 'mixed',   // food: product shots (image) + cooking/prep (video)
+
+        keywords: ['food', 'recipe', 'cook', 'nutrition', 'diet', 'health', 'superfood',
+                   'ingredient', 'vitamin', 'organic', 'vegan', 'meal', 'restaurant',
+                   'calorie', 'protein', 'supplement', 'wellness', 'detox', 'gut',
+                   'kitchen', 'grocery', 'fda', 'contamination', 'pesticide'],
+
+        searchPolicy: {
+            contextTerms: ['food', 'nutrition', 'health'],
+            avoidTerms: ['cartoon', 'clipart', 'illustration', 'anime', 'game'],
+            fallbackKeywords: ['fresh food kitchen', 'healthy meal preparation', 'organic produce close up', 'nutrition science'],
+            entityBoost: true,
+            stockMaxWords: 3,
+        },
+
+        overlayPrefs: {
+            v2Density: 'medium',
+            explainerDensity: 'high',
+            maxOverlays: 5,
+            minGapSec: 10,
+            preferredTypes: ['explainer', 'v2'],
+        }
+    },
+
+    diy: {
+        id: 'diy',
+        name: 'DIY/Lifehacks',
+        description: 'Do-it-yourself, life hacks, home improvement, tips & tricks',
+
+        defaultTheme: 'standard',
+
+        shotStyle: 'Hands-on POV shots, before/after reveals, step-by-step close-ups, workshop/garage/kitchen settings, tool close-ups, bright well-lit practical demonstrations, split-screen comparisons.',
+
+        allowedMGs: [
+            'headline', 'bulletList', 'callout', 'focusWord', 'statCounter',
+            'comparisonCard', 'progressBar', 'lowerThird', 'rankingList', 'explainer'
+        ],
+
+        footagePriority: {
+            video: ['youtube', 'pexels', 'pixabay', 'newsVideo'],
+            image: ['googleCSE', 'bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash']
+        },
+
+        defaultPacing: 'moderate',
+
+        preferredMediaType: 'video',   // diy: demos need to show process in motion
+
+        keywords: ['diy', 'hack', 'trick', 'tip', 'homemade', 'craft', 'repair',
+                   'fix', 'build', 'project', 'woodworking', 'cleaning', 'organize',
+                   'renovation', 'garden', 'tool', 'home improvement', 'upcycle',
+                   'tutorial', 'step by step', 'before after', 'life hack'],
+
+        searchPolicy: {
+            contextTerms: ['DIY', 'how to', 'tutorial'],
+            avoidTerms: ['cartoon', 'clipart', 'anime', 'game', 'illustration'],
+            fallbackKeywords: ['DIY workshop tools', 'home improvement project', 'hands on craft', 'before after renovation'],
+            entityBoost: false,
+            stockMaxWords: 4,
+        },
+
+        overlayPrefs: {
+            v2Density: 'medium',
+            explainerDensity: 'high',
+            maxOverlays: 5,
+            minGapSec: 10,
+            preferredTypes: ['explainer', 'v2'],
+        }
+    },
+
     general: {
         id: 'general',
         name: 'General/Neutral',
         description: 'General-purpose, versatile, any topic',
 
-        defaultTheme: 'neutral',
+        defaultTheme: 'standard',
 
         shotStyle: 'Mix of wide establishing shots, medium close-ups, and aerial perspectives. Vary between static and slow movement. Match lighting to the mood of each scene.',
 
@@ -552,7 +687,6 @@ function pickNicheFromContent(scriptContext) {
     const THEME_TO_NICHE = {
         'technology': 'tech',
         'science': 'education',
-        'history': 'education',
         'finance': 'business',
         'business': 'business',
         'politics': 'news',
@@ -564,9 +698,19 @@ function pickNicheFromContent(scriptContext) {
         'education': 'education',
         'lifestyle': 'luxury',
         'travel': 'nature',
-        'health': 'education',
+        'health': 'food',
+        'food': 'food',
+        'nutrition': 'food',
+        'cooking': 'food',
         'motivation': 'motivation',
         'history': 'history',
+        'military': 'military',
+        'war': 'military',
+        'geopolitics': 'military',
+        'defense': 'military',
+        'diy': 'diy',
+        'crafts': 'diy',
+        'home improvement': 'diy',
     };
 
     // If AI gave us a direct theme match, start with that as a strong candidate
@@ -808,14 +952,17 @@ function getAllNiches() {
 const NICHE_PRESETS = {
     auto:         { nicheId: null, suggestedFormat: null, suggestedPacing: null, label: 'Auto-Detect', emoji: '🤖' },
     trueCrime:    { nicheId: 'crime', suggestedFormat: 'documentary', suggestedPacing: 'moderate', label: 'True Crime', emoji: '🔪' },
-    documentary:  { nicheId: 'nature', suggestedFormat: 'documentary', suggestedPacing: 'slow', label: 'Documentary', emoji: '🎬' },
+    military:     { nicheId: 'military', suggestedFormat: 'documentary', suggestedPacing: 'moderate', label: 'Military / Geopolitics', emoji: '🎖️' },
+    documentary:  { nicheId: 'nature', suggestedFormat: 'documentary', suggestedPacing: 'slow', label: 'Nature Documentary', emoji: '🎬' },
     finance:      { nicheId: 'business', suggestedFormat: null, suggestedPacing: 'moderate', label: 'Finance / Business', emoji: '💰' },
     luxury:       { nicheId: 'luxury', suggestedFormat: null, suggestedPacing: 'slow', label: 'Luxury / Fashion', emoji: '💎' },
     sports:       { nicheId: 'sport', suggestedFormat: null, suggestedPacing: 'fast', label: 'Sports', emoji: '⚽' },
-    tech:         { nicheId: 'tech', suggestedFormat: null, suggestedPacing: 'fast', label: 'Tech / Cyberpunk', emoji: '🤖' },
+    tech:         { nicheId: 'tech', suggestedFormat: null, suggestedPacing: 'fast', label: 'Tech', emoji: '💻' },
     history:      { nicheId: 'history', suggestedFormat: 'documentary', suggestedPacing: 'slow', label: 'History', emoji: '📜' },
     motivation:   { nicheId: 'motivation', suggestedFormat: null, suggestedPacing: 'moderate', label: 'Motivation', emoji: '🔥' },
     news:         { nicheId: 'news', suggestedFormat: null, suggestedPacing: 'fast', label: 'News Commentary', emoji: '📰' },
+    food:         { nicheId: 'food', suggestedFormat: null, suggestedPacing: 'moderate', label: 'Food / Health', emoji: '🍎' },
+    diy:          { nicheId: 'diy', suggestedFormat: null, suggestedPacing: 'moderate', label: 'DIY / Lifehacks', emoji: '🔧' },
 };
 
 /**
