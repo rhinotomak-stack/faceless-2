@@ -1,0 +1,102 @@
+{
+  "niche": "listicle-history",
+  "description": "Historical listicle videos — numbered lists of people, events, or facts from history",
+  "version": 1,
+
+  "detectKeywords": [
+    "worst", "best", "top", "number", "ranked", "list",
+    "history", "historic", "golden age", "century", "era",
+    "hollywood", "stars", "famous", "notorious", "legendary",
+    "named", "exposed", "revealed", "secrets", "untold",
+    "oscar", "academy", "biography", "autobiography"
+  ],
+
+  "formatMatch": "listicle",
+  "nicheMatch": "history",
+
+  "mgPreferences": [
+    { "type": "headline", "when": "listicle item transition (Number 9, Number 1, etc.) — announce each new item", "priority": "high" },
+    { "type": "focusWord", "when": "the item number itself (#9, #1) or a single shocking word from the narration", "priority": "high" },
+    { "type": "lowerThird", "when": "first time a person is introduced with their name and title/role", "priority": "high" },
+    { "type": "timeline", "when": "sequence of dates or years mentioned (1915, 1925, 1999)", "priority": "high" },
+    { "type": "callout", "when": "direct quotes spoken verbatim in the narration", "priority": "medium" },
+    { "type": "articleHighlight", "when": "citing books, memoirs, interviews, or official statements", "priority": "medium" },
+    { "type": "statCounter", "when": "specific numbers (5 million members, 32000 mourners, 3 Academy Awards)", "priority": "medium" },
+    { "type": "mapChart", "when": "a specific city or location is central to the scene", "priority": "low" },
+    { "type": "comparisonCard", "when": "explicit contrast between two things (public vs private, image vs reality)", "priority": "low" },
+    { "type": "kineticText", "when": "rare — only for the single most pivotal quote or revelation in the entire video", "priority": "low" }
+  ],
+
+  "footageRules": [
+    "When a PERSON is named → web-image (their real photo)",
+    "When a filmed EVENT is described (speech, protest, ceremony) → youtube",
+    "When a BOOK, DOCUMENT, or NEWSPAPER is mentioned → web-image",
+    "When NO specific entity — just mood/atmosphere → stock",
+    "Item introduction scenes (Number 9, etc.) → web-image of that person's face",
+    "Transition scenes between items → stock B-roll for visual breathing room"
+  ],
+
+  "pacing": {
+    "sceneDuration": "6-10 seconds per scene, slightly longer for emotional moments",
+    "transitionStyle": "70% cuts, 20% crossfade, 10% fade-to-black (between listicle items)",
+    "textAppearance": "fade-slide for lowerThirds, wipe for headlines at item transitions"
+  },
+
+  "sceneStructure": [
+    {
+      "section": "hook",
+      "durationHint": "10-20 seconds",
+      "mgTypes": ["headline", "focusWord"],
+      "footage": "Most dramatic or shocking image from the story — the person or event that hooks viewers",
+      "notes": "Open with the main subject. If it's about a person naming others, show THAT person first. Tease the most shocking item."
+    },
+    {
+      "section": "context",
+      "durationHint": "15-30 seconds",
+      "mgTypes": ["lowerThird", "timeline"],
+      "footage": "Historical context — archival photos, era-establishing shots, the main subject in their prime",
+      "notes": "Set the stage. Who is this person? Why does their list matter? Build credibility before the countdown."
+    },
+    {
+      "section": "items",
+      "durationHint": "bulk of the video",
+      "mgTypes": ["headline", "focusWord", "lowerThird", "callout", "statCounter", "timeline"],
+      "footage": "Each numbered item: ALWAYS show the person's photo first, then supporting footage (their work, events, locations)",
+      "notes": "Pattern per item: 1) headline/focusWord with item number, 2) person's photo with lowerThird, 3) supporting scenes with evidence. More scenes for higher-ranked items."
+    },
+    {
+      "section": "conclusion",
+      "durationHint": "15-30 seconds",
+      "mgTypes": ["callout", "kineticText"],
+      "footage": "Return to the main subject, reflective imagery, the lasting impact",
+      "notes": "Wrap up the emotional arc. What does this list mean? Why does it matter today?"
+    },
+    {
+      "section": "cta",
+      "durationHint": "5-10 seconds",
+      "mgTypes": [],
+      "footage": "Atmospheric closing shot, channel branding",
+      "notes": "Subscribe prompt — keep it short, let the story's weight carry the CTA"
+    }
+  ],
+
+  "keywordRules": {
+    "itemIntroduction": "When a numbered item is introduced (e.g. 'Number 9, DW Griffith'), the keyword MUST be that person's name — not a generic description",
+    "entityFirst": "If a scene mentions a real person by name, keyword = their name. Always. No exceptions.",
+    "supportingScenes": "Scenes within an item's section that don't mention the person by name can use contextual keywords (their movies, events, locations)",
+    "noScreenplayKeywords": "Keywords are search terms, NOT cinematic shot descriptions. 'DW Griffith' not 'stern man in bow tie at film studio'"
+  },
+
+  "mgRules": {
+    "itemTransition": "Every numbered item transition MUST get a headline or focusWord MG — this is the visual cue that we're moving to the next item",
+    "personIntro": "First mention of each person in the list gets a lowerThird with their name and brief title",
+    "noCluster": "Never put MGs on more than 2 consecutive scenes — leave breathing room",
+    "quotesOnly": "callout and articleHighlight are for VERBATIM quotes or cited sources only, not paraphrasing"
+  },
+
+  "stylePreferences": {
+    "mgStyle": "elegant",
+    "mapStyle": "vintage",
+    "colorScheme": "warm muted tones — sepia accents, gold highlights on dark backgrounds"
+  }
+}

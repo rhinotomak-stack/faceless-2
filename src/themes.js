@@ -57,6 +57,12 @@ const THEMES = {
             effects: ['grain', 'dust', 'vignette'],
             blendMode: 'screen',
             intensity: { min: 0.25, max: 0.55 }
+        },
+
+        effectParams: {
+            grain:        { intensity: 0.18, scale: 1.2 },
+            dust:         { intensity: 0.12, density: 0.4 },
+            vignette:     { intensity: 0.7, radius: 0.35, softness: 0.55 },
         }
     },
 
@@ -96,6 +102,12 @@ const THEMES = {
             effects: ['lightLeak', 'blurVignette', 'grain'],
             blendMode: 'screen',
             intensity: { min: 0.15, max: 0.4 }
+        },
+
+        effectParams: {
+            grain:        { intensity: 0.10, scale: 1.5 },
+            lightLeak:    { intensity: 0.18, warmth: 0.8 },
+            blurVignette: { intensity: 0.45, radius: 0.50, blurAmount: 4.0 },
         }
     },
 
@@ -135,6 +147,12 @@ const THEMES = {
             effects: ['grain', 'chromatic', 'dust'],
             blendMode: 'screen',
             intensity: { min: 0.2, max: 0.5 }
+        },
+
+        effectParams: {
+            grain:     { intensity: 0.14, scale: 1.0 },
+            chromatic: { intensity: 0.006, angle: 0.0 },
+            dust:      { intensity: 0.10, density: 0.3 },
         }
     },
 
@@ -174,6 +192,12 @@ const THEMES = {
             effects: ['grain', 'lightLeak', 'blurVignette'],
             blendMode: 'screen',
             intensity: { min: 0.12, max: 0.35 }
+        },
+
+        effectParams: {
+            grain:        { intensity: 0.08, scale: 1.8 },
+            lightLeak:    { intensity: 0.12, warmth: 0.6 },
+            blurVignette: { intensity: 0.35, radius: 0.55, blurAmount: 3.0 },
         }
     },
 
@@ -213,6 +237,12 @@ const THEMES = {
             effects: ['blurVignette', 'lightLeak', 'grain'],
             blendMode: 'soft-light',
             intensity: { min: 0.1, max: 0.3 }
+        },
+
+        effectParams: {
+            grain:        { intensity: 0.06, scale: 2.0 },
+            lightLeak:    { intensity: 0.10, warmth: 0.5 },
+            blurVignette: { intensity: 0.30, radius: 0.60, blurAmount: 2.5 },
         }
     },
 };
@@ -1051,6 +1081,7 @@ function getThemeTokens(themeId) {
             preferred: theme.overlays.preferred,
             avoid: theme.overlays.avoid,
             effects: theme.overlays.effects,
+            effectParams: theme.effectParams || {},
             blendMode: theme.overlays.blendMode,
             intensityMin: theme.overlays.intensity.min,
             intensityMax: theme.overlays.intensity.max,

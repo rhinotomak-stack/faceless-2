@@ -461,6 +461,9 @@ function printSceneResults(scenesWithKeywords, scriptContext) {
         if (scene.visualIntent) {
             console.log(`    intent:     "${scene.visualIntent.substring(0, 80)}"`);
         }
+        const effects = (scene.effects && scene.effects.length > 0) ? scene.effects.join(', ') : 'none';
+        console.log(`    effects:    [${effects}]`);
+        console.log(`    mgHint:     ${scene.mgHint || 'null'}`);
         const text = (scene.text || '').substring(0, 60);
         console.log(`    narration:  "${text}${scene.text?.length > 60 ? '...' : ''}"`);
     }
@@ -479,6 +482,12 @@ function printSceneResults(scenesWithKeywords, scriptContext) {
     console.log(`  Types: ${Object.entries(types).map(([k, v]) => `${k}(${v})`).join(', ')}`);
     console.log(`  Has stockQuery: ${scenesWithKeywords.filter(s => s.stockQuery).length}/${scenesWithKeywords.length}`);
     console.log(`  Has webQuery: ${scenesWithKeywords.filter(s => s.webQuery).length}/${scenesWithKeywords.length}`);
+    const withEffects = scenesWithKeywords.filter(s => s.effects && s.effects.length > 0);
+    const withMgHint = scenesWithKeywords.filter(s => s.mgHint);
+    const effectCounts = {};
+    for (const s of scenesWithKeywords) { for (const e of (s.effects || [])) { effectCounts[e] = (effectCounts[e] || 0) + 1; } }
+    console.log(`  Has effects: ${withEffects.length}/${scenesWithKeywords.length} (${Object.entries(effectCounts).map(([k, v]) => `${k}(${v})`).join(', ') || 'none'})`);
+    console.log(`  Has mgHint: ${withMgHint.length}/${scenesWithKeywords.length}`);
     console.log('='.repeat(70));
     console.log(`\n  📄 Full log saved to: ${path.join(config.paths.temp, 'pipeline-test.log')}`);
 }

@@ -101,9 +101,10 @@ class Compositor {
         this.gl = gl;
 
         // Compile blit shaders
-        const { QUAD_VERT, BLIT_FRAG, BLUR_BLIT_FRAG, ShaderProgram } = window.ShaderLib;
+        const { QUAD_VERT, BLIT_FRAG, BLUR_BLIT_FRAG, EFFECTS_FRAG, ShaderProgram } = window.ShaderLib;
         this._blitProgram = new ShaderProgram(gl, QUAD_VERT, BLIT_FRAG);
         this._blurBlitProgram = new ShaderProgram(gl, QUAD_VERT, BLUR_BLIT_FRAG);
+        this._effectsProgram = new ShaderProgram(gl, QUAD_VERT, EFFECTS_FRAG);
 
         // Gradient background cache: gradientId → WebGL texture
         this._gradientCache = {};
@@ -111,6 +112,9 @@ class Compositor {
         this._gradientCanvas.width = this.width;
         this._gradientCanvas.height = this.height;
         this._gradientCtx = this._gradientCanvas.getContext('2d');
+
+        // Pattern background cache: "pattern:filename" → { texture, width, height }
+        this._patternCache = {};
 
         // Create fullscreen quad VAO
         this._quadVAO = this._createQuadVAO(gl);
@@ -128,6 +132,9 @@ class Compositor {
             this._createFBO(gl, rw, rh),
         ];
 
+        // Effects FBO — post-process pass for per-scene visual effects
+        this._effectsFBO = this._createFBO(gl, rw, rh);
+
         this._initialized = true;
         console.log('[Compositor] Initialized WebGL2 engine', rw, 'x', rh, `(preview scale ${this._previewScale})`, '@', this.fps, 'fps');
     }
@@ -140,6 +147,7 @@ class Compositor {
         if (this.transitionRenderer) this.transitionRenderer.destroy();
         if (this._blitProgram) this._blitProgram.destroy();
         if (this._blurBlitProgram) this._blurBlitProgram.destroy();
+        if (this._effectsProgram) this._effectsProgram.destroy();
         // Clean up gradient textures
         if (this._gradientCache && this.gl) {
             for (const tex of Object.values(this._gradientCache)) {
@@ -157,6 +165,12 @@ class Compositor {
                 this.gl.deleteTexture(fbo.texture);
             }
             this._transitionFBOs = null;
+        }
+        // Clean up effects FBO
+        if (this._effectsFBO && this.gl) {
+            this.gl.deleteFramebuffer(this._effectsFBO.fbo);
+            this.gl.deleteTexture(this._effectsFBO.texture);
+            this._effectsFBO = null;
         }
         if (this.mgRenderer) this.mgRenderer.destroy();
 
@@ -666,12 +680,28 @@ class Compositor {
             }
         }
 
+        // Check if scene has visual effects
+        const sceneEffects = scene ? (scene.effects || []) : [];
+        const hasEffects = sceneEffects.length > 0 && this._effectsFBO;
+
+        // If effects active: render scene into effects FBO, apply effects, blit to screen
+        const gl = this.gl;
+        const rw = this._renderWidth();
+        const rh = this._renderHeight();
+
+        if (hasEffects) {
+            // Redirect rendering to effects FBO
+            gl.bindFramebuffer(gl.FRAMEBUFFER, this._effectsFBO.fbo);
+            gl.viewport(0, 0, rw, rh);
+            gl.clearColor(0, 0, 0, 1);
+            gl.clear(gl.COLOR_BUFFER_BIT);
+        }
+
         // Background rendering
         const bg = scene ? (scene.background || 'none') : 'none';
         const needsBgLayer = bg !== 'none';
 
         if (needsBgLayer) {
-            const gl = this.gl;
             if (bg === 'blur') {
                 // Blur: render blurred cover-fill behind the video
                 let bgSx = 1, bgSy = 1;
@@ -686,6 +716,12 @@ class Compositor {
                 this._blurBlitProgram.set4f('u_transform', bgSx, bgSy, 0, 0);
                 this._blurBlitProgram.set2f('u_texelSize', 1.0 / texEntry.width, 1.0 / texEntry.height);
                 this._drawQuad();
+            } else if (bg.startsWith('pattern:')) {
+                // Pattern: render custom background image/video file as texture
+                const patTex = this._getPatternTexture(bg);
+                if (patTex) {
+                    this._blitTexture(patTex, opacity, 1, 1, 0, 0, null);
+                }
             } else if (bg.startsWith('gradient:')) {
                 // Gradient: render CSS gradient from cache
                 const gradTex = this._getGradientTexture(bg);
@@ -701,6 +737,79 @@ class Compositor {
         } else {
             this._blitTexture(texEntry.texture, opacity, scaleX, scaleY, offsetX, offsetY, scene);
         }
+
+        // Apply effects pass: read from FBO, apply effects shader, blit to default framebuffer
+        if (hasEffects) {
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+            gl.viewport(0, 0, rw, rh);
+            this._applyEffectsPass(this._effectsFBO.texture, sceneEffects, scene);
+        }
+    }
+
+    /**
+     * Apply post-process visual effects.
+     * Reads from the effects FBO texture, runs the effects shader, draws to current framebuffer.
+     * @param {WebGLTexture} srcTexture - FBO texture with scene rendered into it
+     * @param {string[]} effects - Array of effect names (e.g. ['grain', 'vignette'])
+     * @param {Object} scene - Scene object (for reading effectParams overrides)
+     */
+    _applyEffectsPass(srcTexture, effects, scene) {
+        const gl = this.gl;
+        const rw = this._renderWidth();
+        const rh = this._renderHeight();
+        const prog = this._effectsProgram;
+
+        prog.use();
+        prog.setTexture('u_texture', 0, srcTexture);
+        prog.set2f('u_resolution', rw, rh);
+        prog.set2f('u_texelSize', 1.0 / rw, 1.0 / rh);
+        prog.set1f('u_time', (this._currentFrame || 0) / this.fps);
+
+        // Get theme effect params (passed via scriptContext)
+        const themeParams = (this._scriptContext && this._scriptContext.effectParams) || {};
+
+        // Build effect set for quick lookup
+        const effectSet = new Set(effects);
+
+        // -- Grain --
+        prog.set1f('u_grainOn', effectSet.has('grain') ? 1.0 : 0.0);
+        const grain = themeParams.grain || {};
+        prog.set1f('u_grainIntensity', grain.intensity || 0.12);
+        prog.set1f('u_grainScale', grain.scale || 1.5);
+
+        // -- Dust --
+        prog.set1f('u_dustOn', effectSet.has('dust') ? 1.0 : 0.0);
+        const dust = themeParams.dust || {};
+        prog.set1f('u_dustIntensity', dust.intensity || 0.10);
+        prog.set1f('u_dustDensity', dust.density || 0.3);
+
+        // -- Vignette --
+        prog.set1f('u_vignetteOn', effectSet.has('vignette') ? 1.0 : 0.0);
+        const vig = themeParams.vignette || {};
+        prog.set1f('u_vignetteIntensity', vig.intensity || 0.6);
+        prog.set1f('u_vignetteRadius', vig.radius || 0.4);
+        prog.set1f('u_vignetteSoftness', vig.softness || 0.5);
+
+        // -- BlurVignette --
+        prog.set1f('u_blurVignetteOn', effectSet.has('blurVignette') ? 1.0 : 0.0);
+        const bv = themeParams.blurVignette || {};
+        prog.set1f('u_blurVigIntensity', bv.intensity || 0.4);
+        prog.set1f('u_blurVigRadius', bv.radius || 0.5);
+        prog.set1f('u_blurVigAmount', bv.blurAmount || 3.0);
+
+        // -- Chromatic --
+        prog.set1f('u_chromaticOn', effectSet.has('chromatic') ? 1.0 : 0.0);
+        const chrom = themeParams.chromatic || {};
+        prog.set1f('u_chromaticIntensity', chrom.intensity || 0.005);
+        prog.set1f('u_chromaticAngle', chrom.angle || 0.0);
+
+        // -- Light Leak --
+        prog.set1f('u_lightLeakOn', effectSet.has('lightLeak') ? 1.0 : 0.0);
+        const ll = themeParams.lightLeak || {};
+        prog.set1f('u_lightLeakIntensity', ll.intensity || 0.15);
+        prog.set1f('u_lightLeakWarmth', ll.warmth || 0.7);
+
+        this._drawQuad();
     }
 
     /**
@@ -792,6 +901,111 @@ class Compositor {
 
         this._gradientCache[bgValue] = tex;
         return tex;
+    }
+
+    /**
+     * Get or create a WebGL texture for a custom pattern background file.
+     * Supports both images (.jpg, .png, .gif) and videos (.mp4, .webm, .mov).
+     * Loads from public/bg-{filename} (copied by build pipeline) or assets/backgrounds/.
+     * Returns cached texture, or null if not yet loaded (triggers async load).
+     * Video backgrounds return a live texture that must be updated each frame.
+     */
+    _getPatternTexture(bgValue) {
+        // bgValue is "pattern:filename.jpg" or "pattern:filename.mp4"
+        const cached = this._patternCache[bgValue];
+        if (cached === false) return null; // loading in progress
+        if (cached === null) return null;  // failed to load
+
+        const filename = bgValue.replace('pattern:', '');
+        const ext = filename.split('.').pop().toLowerCase();
+        const isVideo = ['mp4', 'webm', 'mov'].includes(ext);
+
+        // For video backgrounds, update texture from current video frame each call
+        if (cached && cached._isVideoTex) {
+            const vid = cached._videoEl;
+            if (vid && vid.readyState >= 2 && !vid.paused) {
+                const gl = this.gl;
+                gl.bindTexture(gl.TEXTURE_2D, cached);
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, vid);
+            }
+            return cached;
+        }
+
+        // Already loaded image texture
+        if (cached) return cached;
+
+        // Mark as loading to avoid duplicate loads
+        this._patternCache[bgValue] = false;
+
+        const gl = this.gl;
+
+        // Try public/bg-{filename} first (build pipeline copy), then assets/backgrounds/
+        const candidates = [
+            `bg-${filename}`,           // build pipeline copies with bg- prefix
+            `../assets/backgrounds/${filename}`,  // direct from assets
+        ];
+
+        const _uploadTexture = (source) => {
+            const tex = gl.createTexture();
+            gl.bindTexture(gl.TEXTURE_2D, tex);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+            return tex;
+        };
+
+        if (isVideo) {
+            const vid = document.createElement('video');
+            vid.crossOrigin = 'anonymous';
+            vid.muted = true;
+            vid.loop = true;
+            vid.playsInline = true;
+
+            vid.oncanplay = () => {
+                vid.play().catch(() => {});
+                const tex = _uploadTexture(vid);
+                tex._isVideoTex = true;
+                tex._videoEl = vid;
+                this._patternCache[bgValue] = tex;
+            };
+
+            vid.onerror = () => {
+                if (vid._candidateIdx < candidates.length - 1) {
+                    vid._candidateIdx++;
+                    vid.src = candidates[vid._candidateIdx];
+                } else {
+                    console.warn(`[Compositor] Failed to load video background: ${filename}`);
+                    this._patternCache[bgValue] = null;
+                }
+            };
+
+            vid._candidateIdx = 0;
+            vid.src = candidates[0];
+        } else {
+            const img = new Image();
+            img.crossOrigin = 'anonymous';
+
+            img.onload = () => {
+                this._patternCache[bgValue] = _uploadTexture(img);
+            };
+
+            img.onerror = () => {
+                if (img._candidateIdx < candidates.length - 1) {
+                    img._candidateIdx++;
+                    img.src = candidates[img._candidateIdx];
+                } else {
+                    console.warn(`[Compositor] Failed to load pattern background: ${filename}`);
+                    this._patternCache[bgValue] = null;
+                }
+            };
+
+            img._candidateIdx = 0;
+            img.src = candidates[0];
+        }
+
+        return null; // Not ready yet, will render on next frame
     }
 
     /**

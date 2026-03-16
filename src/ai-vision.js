@@ -285,7 +285,7 @@ async function analyzeArticleHighlights(imagePath) {
 async function scoreVideoFrame(base64Image, mimeType, keyword, context) {
     try {
         const contextBlock = context
-            ? `${context.videoTopic ? `\nVideo topic: "${context.videoTopic}"` : ''}${context.sceneText ? `\nScene narration: "${context.sceneText}"` : ''}${context.niche ? `\nContent niche: ${context.niche}` : ''}`
+            ? `${context.videoTopic ? `\nVideo topic: "${context.videoTopic}"` : ''}${context.sceneText ? `\nScene narration: "${context.sceneText}"` : ''}${context.niche ? `\nContent niche: ${context.niche}` : ''}${context.theme ? `\nVisual theme: ${context.theme}` : ''}${context.tone ? `\nTone: ${context.tone}` : ''}${context.entities?.length ? `\nKey entities: ${context.entities.slice(0, 5).join(', ')}` : ''}`
             : '';
 
         const prompt = `Analyze this image/frame for use in a faceless YouTube video about: "${keyword}"${contextBlock}

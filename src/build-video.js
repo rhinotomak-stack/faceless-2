@@ -9,10 +9,10 @@ const { analyzeAndCreateScenes } = require('./ai-director');
 const { planVisuals } = require('./ai-visual-planner');
 const { planCompositorOverlays } = require('./ai-compositor-planner');
 // Existing modules
-const { analyzeSceneVisuals, analyzeSingleScene, createDefaultAnalysis, analyzeArticleHighlights } = require('./ai-vision');
+const { createDefaultAnalysis, analyzeArticleHighlights } = require('./ai-vision');
 const { processArticleImages } = require('./article-image');
 const { processMotionGraphics, FULLSCREEN_MG_TYPES } = require('./ai-motion-graphics');
-const { downloadAllMedia, retryPoorMedia } = require('./footage-manager');
+const { downloadAllMedia } = require('./footage-manager');
 const { loadRecipe } = require('./recipe-loader');
 const log = require('./logger');
 
@@ -39,7 +39,6 @@ function cleanFolder(folderPath, label) {
 // ====================================================================
 async function buildDumbVideo(transcription, audioFile, directorsBrief) {
     const { downloadAllMedia } = require('./footage-manager');
-    const { createDefaultAnalysis } = require('./ai-vision');
     const { assignTransitions } = require('./ai-director');
 
     const fps = config.video.fps;
@@ -89,10 +88,7 @@ async function buildDumbVideo(transcription, audioFile, directorsBrief) {
     console.log('═'.repeat(60));
     console.log('🎥 Downloading Media (no vision analysis)');
     console.log('═'.repeat(60));
-    const downloadResult = await downloadAllMedia(scenes, defaultContext, {
-        inlineVision: false,
-        skipVisionAI: true
-    });
+    const downloadResult = await downloadAllMedia(scenes, defaultContext);
     let scenesWithMedia = downloadResult.scenes;
 
     // Generate random MGs (simple overlay types only)
@@ -282,6 +278,16 @@ async function buildVideo() {
     log.step('🎨 Step 4: Visual Planner (Batch Keyword Generation)');
     const scenesWithKeywords = await planVisuals(scenes, scriptContext, directorsBrief);
 
+    // DEBUG: Stop after Visual Planner for testing
+    if (process.env.STOP_AFTER === 'visual-planner') {
+        log.ok('=== STOP_AFTER=visual-planner — dumping results ===');
+        for (const s of scenesWithKeywords) {
+            log.info(`Scene ${s.index}: keyword="${s.keyword}" effects=[${(s.effects||[]).join(',')}] mgHint=${s.mgHint || 'null'}`);
+        }
+        log.ok('Visual Planner test complete.');
+        process.exit(0);
+    }
+
     // Load genre recipe if available (auto-detects from content or BUILD_RECIPE env var)
     const recipeResult = loadRecipe(scriptContext, directorsBrief.freeInstructions);
     if (recipeResult.recipe) {
@@ -311,14 +317,8 @@ async function buildVideo() {
 
     // Step 5: Download media (videos + images from multiple providers)
     log.step('🎥 Step 5: Downloading Media');
-    // TEMPORARY: Force skip vision AI to save API credits while testing themes
-    const skipVisionAI = true; // was: directorsBrief.tier.skipVisionAI
-    const downloadResult = await downloadAllMedia(scenesWithKeywords, scriptContext, {
-        inlineVision: true,
-        skipVisionAI
-    });
+    const downloadResult = await downloadAllMedia(scenesWithKeywords, scriptContext);
     let scenesWithMedia = downloadResult.scenes;
-    let inlineVisualAnalysis = downloadResult.visualAnalysis;
 
     // Step 5.05: Download V2 overlay images (from compositor planner)
     if (plannedV2Scenes.length > 0) {
@@ -337,10 +337,7 @@ async function buildVideo() {
                     sourceHint: 'web-image',
                     text: v2.label || v2Keyword,
                 };
-                const v2Result = await downloadAllMedia([v2Scene], scriptContext, {
-                    inlineVision: false,
-                    skipVisionAI: true
-                });
+                const v2Result = await downloadAllMedia([v2Scene], scriptContext);
                 if (v2Result.scenes && v2Result.scenes[0]) {
                     const downloaded = v2Result.scenes[0];
                     v2.mediaFile = downloaded.mediaFile;
@@ -418,149 +415,8 @@ async function buildVideo() {
     }
     log.br();
 
-    // Step 5.5: Vision Analysis (already done inline with downloads)
-    log.step('👁️ Step 5.5: Vision Analysis');
-    let visualAnalysis = inlineVisualAnalysis || scenes.map((_, i) => createDefaultAnalysis(i));
-    // Fill any gaps with defaults
-    for (let i = 0; i < scenes.length; i++) {
-        if (!visualAnalysis[i]) visualAnalysis[i] = createDefaultAnalysis(i);
-    }
-    if (skipVisionAI) {
-        log.dim(`⏭️  Skipped (${directorsBrief.qualityTier} tier)`);
-        log.br();
-    } else {
-        const analyzed = visualAnalysis.filter(r => r.description !== 'No visual analysis available').length;
-        const poor = visualAnalysis.filter(r => r.suitability === 'poor').length;
-        log.info(`📊 Vision analysis: ${analyzed}/${scenesWithMedia.length} analyzed (inline with downloads)`);
-        if (poor > 0) log.warn(`${poor} scene(s) with poor footage match`);
-        log.br();
-    }
-
-    // Step 5.6: Retry poor footage — keep searching providers until "good" found
-    const poorScenes = visualAnalysis
-        .map((va, i) => ({ va, i }))
-        .filter(({ va }) => va.suitability === 'poor');
-
-    if (poorScenes.length > 0 && !directorsBrief.tier.skipVisionAI) {
-        log.step('🔄 Step 5.6: Retrying Poor Footage');
-
-        const SUITABILITY_SCORE = { poor: 1, fair: 2, good: 3 };
-        const MAX_SCENES = 5;          // Max scenes to retry (API cost control)
-        const MAX_ATTEMPTS_PER_SCENE = 4; // Max provider attempts per scene
-        const toRetry = poorScenes.slice(0, MAX_SCENES);
-
-        log.info(`Found ${poorScenes.length} poor scene(s), retrying up to ${toRetry.length}...`);
-        log.br();
-
-        let improved = 0;
-        for (const { va: originalAnalysis, i } of toRetry) {
-            const scene = scenesWithMedia[i];
-            if (!scene || !scene.keyword) continue;
-
-            const sceneDuration = (scene.endTime || 0) - (scene.startTime || 0) || 10;
-            log.info(`Scene ${i}: "${scene.keyword}" (was: ${log.pc.red(originalAnalysis.suitability)} — ${originalAnalysis.suitabilityReason})`);
-
-            // Track best candidate across all attempts
-            let bestResult = null;
-            let bestAnalysis = originalAnalysis;
-            let bestScore = SUITABILITY_SCORE[originalAnalysis.suitability] || 1;
-            const triedProviders = [scene.sourceProvider || ''];
-
-            for (let attempt = 0; attempt < MAX_ATTEMPTS_PER_SCENE; attempt++) {
-                try {
-                    const retryResult = await retryPoorMedia(
-                        scene.keyword,
-                        scene.mediaType || 'video',
-                        `scene-${i}-retry`,
-                        sceneDuration,
-                        scene.sourceHint || '',
-                        triedProviders
-                    );
-
-                    if (!retryResult) {
-                        log.warn('No more providers to try');
-                        break;
-                    }
-
-                    // Add this provider to tried list so next attempt skips it
-                    triedProviders.push(retryResult.provider);
-
-                    // Analyze the new footage
-                    const retryScene = {
-                        ...scene,
-                        mediaFile: retryResult.path,
-                        mediaExtension: retryResult.ext
-                    };
-
-                    log.provider(retryResult.provider, 'ok', `Attempt ${attempt + 1}...`);
-                    const newAnalysis = await analyzeSingleScene(retryScene, i, scriptContext);
-                    const newScore = SUITABILITY_SCORE[newAnalysis.suitability] || 1;
-
-                    log.dim(`   ${newAnalysis.suitability}: "${newAnalysis.description.substring(0, 55)}"`);
-
-                    if (newScore > bestScore) {
-                        // Clean up previous best retry file if it exists
-                        if (bestResult && bestResult.path !== retryResult.path && fs.existsSync(bestResult.path)) {
-                            fs.unlinkSync(bestResult.path);
-                        }
-                        bestResult = retryResult;
-                        bestAnalysis = newAnalysis;
-                        bestScore = newScore;
-                    } else {
-                        // This attempt wasn't better — clean up the file
-                        if (fs.existsSync(retryResult.path)) {
-                            fs.unlinkSync(retryResult.path);
-                        }
-                    }
-
-                    // Found "good" footage — stop searching
-                    if (bestScore >= 3) {
-                        log.ok('Found good footage, stopping search');
-                        break;
-                    }
-                } catch (retryError) {
-                    log.provider('retry', 'fail', `Attempt ${attempt + 1}: ${retryError.message}`);
-                }
-            }
-
-            // Apply best result if it's better than original
-            if (bestResult && bestScore > (SUITABILITY_SCORE[originalAnalysis.suitability] || 1)) {
-                const origExt = scene.mediaExtension || '.mp4';
-                const origPath = path.join(config.paths.temp, `scene-${i}${origExt}`);
-
-                if (fs.existsSync(bestResult.path)) {
-                    fs.copyFileSync(bestResult.path, origPath);
-                    fs.unlinkSync(bestResult.path);
-                }
-
-                scene.mediaFile = origPath;
-                scene.mediaExtension = bestResult.ext;
-                scene.sourceProvider = bestResult.provider;
-                scene.mediaWidth = bestResult.mediaWidth || scene.mediaWidth;
-                scene.mediaHeight = bestResult.mediaHeight || scene.mediaHeight;
-
-                visualAnalysis[i] = bestAnalysis;
-                improved++;
-
-                log.ok(`Upgraded: ${log.pc.red(originalAnalysis.suitability)} → ${log.pc.green(bestAnalysis.suitability)} [${bestResult.provider}]`);
-            } else {
-                // Clean up any leftover retry file
-                if (bestResult && fs.existsSync(bestResult.path)) {
-                    fs.unlinkSync(bestResult.path);
-                }
-                log.dim('↩️ Kept original (no better footage found)');
-            }
-        }
-
-        if (improved > 0) {
-            log.ok(`Improved ${improved}/${toRetry.length} scene(s)`);
-        } else {
-            log.dim('No improvements found — keeping original footage');
-        }
-        log.br();
-    }
-
-    // Step 5.7: Image-to-MP4 conversion (DISABLED — images sanitized to PNG at download time)
+    // Visual analysis — inline scoring already happened during downloads
+    let visualAnalysis = scenes.map((_, i) => createDefaultAnalysis(i));
 
     // Step 6: AI Motion Graphics (now with both script context AND visual analysis)
     log.step('✨ Step 6: AI Motion Graphics');
@@ -752,6 +608,16 @@ async function buildVideo() {
         log.ok(`Merged ${v2ScenesForPlan.length} V2 overlay scenes into plan`);
     }
 
+    // Inject theme effectParams into scriptContext so the renderer can read them
+    const resolvedThemeId = scriptContext?.themeId || 'standard';
+    try {
+        const { getTheme } = require('./themes');
+        const resolvedTheme = getTheme(resolvedThemeId);
+        if (resolvedTheme && resolvedTheme.effectParams) {
+            scriptContext.effectParams = resolvedTheme.effectParams;
+        }
+    } catch (e) { /* themes.js not available — skip */ }
+
     const videoPlan = {
         audio: audioFile,
         totalDuration: actualAudioDuration,
@@ -765,7 +631,7 @@ async function buildVideo() {
         mapStyle: mapStyle,
         scriptContext: scriptContext,
         visualAnalysis: visualAnalysis,
-        themeId: scriptContext?.themeId || 'standard'
+        themeId: resolvedThemeId
     };
 
     const planPath = path.join(config.paths.temp, 'video-plan.json');

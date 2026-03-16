@@ -249,6 +249,161 @@ class ShaderProgram {
     }
 }
 
+// ============================================================================
+// EFFECTS FRAGMENT — Post-process effects applied per-scene
+// All 6 effects in one shader, toggled by uniforms.
+// ============================================================================
+const EFFECTS_FRAG = `#version 300 es
+precision highp float;
+
+uniform sampler2D u_texture;
+uniform vec2 u_resolution;   // canvas width, height in pixels
+uniform float u_time;         // time in seconds (for animated effects)
+uniform vec2 u_texelSize;     // 1/width, 1/height
+
+// Effect toggles (0.0 = off, 1.0 = on)
+uniform float u_grainOn;
+uniform float u_dustOn;
+uniform float u_vignetteOn;
+uniform float u_blurVignetteOn;
+uniform float u_chromaticOn;
+uniform float u_lightLeakOn;
+
+// Grain params
+uniform float u_grainIntensity;  // 0-1, typically 0.06-0.18
+uniform float u_grainScale;      // pixel scale, 1.0-2.0
+
+// Dust params
+uniform float u_dustIntensity;   // 0-1
+uniform float u_dustDensity;     // 0-1 (threshold)
+
+// Vignette params
+uniform float u_vignetteIntensity; // 0-1, how dark the edges get
+uniform float u_vignetteRadius;    // 0-1, where darkening starts (0=center, 1=edge)
+uniform float u_vignetteSoftness;  // 0-1, falloff smoothness
+
+// BlurVignette params
+uniform float u_blurVigIntensity;  // 0-1
+uniform float u_blurVigRadius;     // 0-1
+uniform float u_blurVigAmount;     // blur kernel radius in texels
+
+// Chromatic params
+uniform float u_chromaticIntensity; // UV offset for R/B channels, typically 0.003-0.01
+uniform float u_chromaticAngle;     // direction angle in radians
+
+// LightLeak params
+uniform float u_lightLeakIntensity; // 0-1
+uniform float u_lightLeakWarmth;    // 0-1 (0=neutral, 1=warm orange)
+
+in vec2 v_texCoord;
+out vec4 fragColor;
+
+// ---- Noise functions ----
+float hash(vec2 p) {
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+float valueNoise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f); // smoothstep
+    float a = hash(i);
+    float b = hash(i + vec2(1.0, 0.0));
+    float c = hash(i + vec2(0.0, 1.0));
+    float d = hash(i + vec2(1.0, 1.0));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+// ---- Grain ----
+vec3 applyGrain(vec3 color, vec2 uv) {
+    vec2 grainUV = uv * u_resolution / u_grainScale;
+    float noise = hash(grainUV + fract(u_time * 7.23)) * 2.0 - 1.0;
+    return color + noise * u_grainIntensity;
+}
+
+// ---- Dust ----
+vec3 applyDust(vec3 color, vec2 uv) {
+    // Sparse bright specks — slow-moving over time
+    float t = u_time * 0.3;
+    vec2 dustUV = uv * u_resolution * 0.08;
+    float n1 = hash(floor(dustUV) + floor(t));
+    float n2 = hash(floor(dustUV * 0.5 + 17.0) + floor(t * 0.7));
+    float speck = step(1.0 - u_dustDensity * 0.02, n1) * n1;
+    speck += step(1.0 - u_dustDensity * 0.015, n2) * n2 * 0.6;
+    return color + speck * u_dustIntensity;
+}
+
+// ---- Vignette ----
+vec3 applyVignette(vec3 color, vec2 uv) {
+    vec2 center = uv - 0.5;
+    float dist = length(center) * 1.414; // normalize so corners = 1.0
+    float vig = smoothstep(u_vignetteRadius, u_vignetteRadius + u_vignetteSoftness, dist);
+    return color * (1.0 - vig * u_vignetteIntensity);
+}
+
+// ---- BlurVignette ----
+vec3 applyBlurVignette(vec3 color, vec2 uv) {
+    vec2 center = uv - 0.5;
+    float dist = length(center) * 1.414;
+    float blurFactor = smoothstep(u_blurVigRadius, u_blurVigRadius + 0.4, dist) * u_blurVigIntensity;
+
+    if (blurFactor < 0.01) return color;
+
+    // 8-tap blur scaled by blurFactor
+    float r = u_blurVigAmount * blurFactor;
+    vec3 blurred = vec3(0.0);
+    blurred += texture(u_texture, clamp(uv + vec2( r,  0.0) * u_texelSize, 0.0, 1.0)).rgb;
+    blurred += texture(u_texture, clamp(uv + vec2(-r,  0.0) * u_texelSize, 0.0, 1.0)).rgb;
+    blurred += texture(u_texture, clamp(uv + vec2( 0.0, r)  * u_texelSize, 0.0, 1.0)).rgb;
+    blurred += texture(u_texture, clamp(uv + vec2( 0.0,-r)  * u_texelSize, 0.0, 1.0)).rgb;
+    blurred += texture(u_texture, clamp(uv + vec2( r,  r) * 0.707 * u_texelSize, 0.0, 1.0)).rgb;
+    blurred += texture(u_texture, clamp(uv + vec2(-r,  r) * 0.707 * u_texelSize, 0.0, 1.0)).rgb;
+    blurred += texture(u_texture, clamp(uv + vec2( r, -r) * 0.707 * u_texelSize, 0.0, 1.0)).rgb;
+    blurred += texture(u_texture, clamp(uv + vec2(-r, -r) * 0.707 * u_texelSize, 0.0, 1.0)).rgb;
+    blurred /= 8.0;
+
+    return mix(color, blurred, blurFactor);
+}
+
+// ---- Chromatic Aberration ----
+vec3 applyChromatic(vec3 color, vec2 uv) {
+    vec2 dir = vec2(cos(u_chromaticAngle), sin(u_chromaticAngle)) * u_chromaticIntensity;
+    float r = texture(u_texture, clamp(uv + dir, 0.0, 1.0)).r;
+    float b = texture(u_texture, clamp(uv - dir, 0.0, 1.0)).b;
+    return vec3(r, color.g, b);
+}
+
+// ---- Light Leak ----
+vec3 applyLightLeak(vec3 color, vec2 uv) {
+    // Animated warm gradient from edges
+    float t = u_time * 0.15;
+    float n = valueNoise(uv * 3.0 + t);
+    // Leak from top-right and bottom-left corners
+    float leak1 = smoothstep(0.6, 0.0, length(uv - vec2(0.85, 0.15)));
+    float leak2 = smoothstep(0.5, 0.0, length(uv - vec2(0.1, 0.9)));
+    float leak = (leak1 + leak2 * 0.6) * n;
+    // Warm color: interpolate between white and warm orange based on warmth
+    vec3 leakColor = mix(vec3(1.0), vec3(1.0, 0.7, 0.3), u_lightLeakWarmth);
+    return color + leakColor * leak * u_lightLeakIntensity;
+}
+
+void main() {
+    vec2 uv = v_texCoord;
+    vec3 color = texture(u_texture, uv).rgb;
+
+    // Apply effects in order: chromatic first (re-samples texture), then color effects
+    if (u_chromaticOn > 0.5) color = applyChromatic(color, uv);
+    if (u_blurVignetteOn > 0.5) color = applyBlurVignette(color, uv);
+    if (u_vignetteOn > 0.5) color = applyVignette(color, uv);
+    if (u_grainOn > 0.5) color = applyGrain(color, uv);
+    if (u_dustOn > 0.5) color = applyDust(color, uv);
+    if (u_lightLeakOn > 0.5) color = applyLightLeak(color, uv);
+
+    fragColor = vec4(clamp(color, 0.0, 1.0), 1.0);
+}`;
+
 // Export to global scope (loaded via <script> tag)
 window.ShaderLib = {
     QUAD_VERT,
@@ -256,6 +411,7 @@ window.ShaderLib = {
     BLUR_BLIT_FRAG,
     CROSSFADE_FRAG,
     WIPE_FRAG,
+    EFFECTS_FRAG,
     ShaderProgram,
     compileShader,
     createProgram,

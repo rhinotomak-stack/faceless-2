@@ -86,7 +86,7 @@ class BingImagesProvider extends BaseProvider {
 
         try {
             // Bing image search URL — qft filters: large size, photo type, wide aspect
-            const url = `https://www.bing.com/images/search?q=${encodeURIComponent(keyword)}&qft=+filterui:imagesize-large+filterui:photo-photo+filterui:aspect-wide&form=IRFLTR&first=1`;
+            const url = `https://www.bing.com/images/search?q=${encodeURIComponent(keyword)}&qft=+filterui%3Aimagesize-custom_750_564+filterui%3Aphoto-photo&form=QBIR&first=1`;
 
             const response = await axios.get(url, {
                 headers: {

@@ -249,6 +249,30 @@ const PATTERN_TO_MG_TYPES = {
     dramatic:    ['focusWord', 'kineticText', 'headline'],
 };
 
+// ============ mgHint PARSER ============
+// Parses Visual Planner's mgHint field: "type: content" or "none"
+function parseMgHint(mgHint) {
+    if (!mgHint || mgHint === 'none' || mgHint === 'null') {
+        return { type: null, content: null, isNone: !mgHint || mgHint === 'none' };
+    }
+    const match = mgHint.match(/^(\w+)\s*:\s*(.+)$/);
+    if (!match) return { type: null, content: null, isNone: false };
+
+    const rawType = match[1].trim().toLowerCase();
+    const content = match[2].trim();
+
+    // Normalize type names (same aliases as parseResponse typeMap)
+    const TYPE_ALIASES = {
+        statcounter: 'statCounter', lowerthird: 'lowerThird', focusword: 'focusWord',
+        barchart: 'barChart', donutchart: 'donutChart', comparisoncard: 'comparisonCard',
+        rankinglist: 'rankingList', kinetictext: 'kineticText', mapchart: 'mapChart',
+        articlehighlight: 'articleHighlight', progressbar: 'progressBar', bulletlist: 'bulletList',
+        headline: 'headline', callout: 'callout', timeline: 'timeline', explainer: 'explainer',
+    };
+    const type = TYPE_ALIASES[rawType] || null;
+    return { type, content, isNone: false };
+}
+
 // Per-video caps for certain MG types
 const TYPE_CAPS = {
     focusWord: 2,
@@ -274,13 +298,16 @@ const TYPE_CAPS = {
  * @param {string[]} alreadyPlaced - Types already placed in the video
  * @returns {{ candidates: Array<{type: string, score: number, reason: string}>, patternHits: Array<{pattern: string, score: number, reason: string}>, skipped: Array<{type: string, reason: string}>, shouldSkip: boolean }}
  */
-function generateCandidates(scene, sceneIndex, totalScenes, allowedMGs, alreadyPlaced) {
+function generateCandidates(scene, sceneIndex, totalScenes, allowedMGs, alreadyPlaced, mgHint) {
     const text = scene.text || '';
     const duration = (scene.endTime || 0) - (scene.startTime || 0);
 
+    // Parse mgHint from Visual Planner
+    const hint = parseMgHint(mgHint);
+
     // Very short scenes or empty text → skip
     if (duration < 2.0 || text.trim().length < 15) {
-        return { candidates: [], patternHits: [], skipped: [], shouldSkip: true, skipReason: `too short (${duration.toFixed(1)}s / ${text.length} chars)` };
+        return { candidates: [], patternHits: [], skipped: [], shouldSkip: true, skipReason: `too short (${duration.toFixed(1)}s / ${text.length} chars)`, hint };
     }
 
     // Run all pattern detectors
@@ -292,9 +319,16 @@ function generateCandidates(scene, sceneIndex, totalScenes, allowedMGs, alreadyP
         }
     }
 
-    // If no patterns matched at all → likely transitional scene
+    // If Visual Planner said "none" AND no strong patterns → skip
+    // If hint is "none" but patterns found strong signals, patterns win (safety net)
     if (patternHits.length === 0) {
-        return { candidates: [], patternHits: [], skipped: [], shouldSkip: true, skipReason: 'no content patterns detected' };
+        if (hint.isNone) {
+            return { candidates: [], patternHits: [], skipped: [], shouldSkip: true, skipReason: 'no content patterns + mgHint=none', hint };
+        }
+        // No patterns but hint suggests a type → let hint inject a candidate below
+        if (!hint.type) {
+            return { candidates: [], patternHits: [], skipped: [], shouldSkip: true, skipReason: 'no content patterns detected', hint };
+        }
     }
 
     // Aggregate scores per MG type from all matching patterns
@@ -312,6 +346,18 @@ function generateCandidates(scene, sceneIndex, totalScenes, allowedMGs, alreadyP
             typeReasons[type].push(hit.reason);
         }
     }
+
+    // mgHint boost: if Visual Planner suggested a specific type, boost it significantly
+    // This ensures the planner's scene-level context (which sees the full script) influences scoring
+    if (hint.type && allowedMGs.includes(hint.type)) {
+        const HINT_BOOST = 6; // Strong signal — planner saw full script context
+        typeScores[hint.type] = (typeScores[hint.type] || 0) + HINT_BOOST;
+        if (!typeReasons[hint.type]) typeReasons[hint.type] = [];
+        typeReasons[hint.type].push(`mgHint:${hint.type}`);
+    }
+
+    // mgHint "none" penalty: reduce all candidates if planner says no MG needed
+    const hintNonePenalty = hint.isNone ? 0.6 : 1.0; // 40% reduction
 
     // Filter: only allowed by niche + not over cap
     const candidates = [];
@@ -334,7 +380,7 @@ function generateCandidates(scene, sceneIndex, totalScenes, allowedMGs, alreadyP
         }
 
         // Penalize if same as last placed type (avoid repetition)
-        let score = rawScore;
+        let score = rawScore * hintNonePenalty;
         if (alreadyPlaced.length > 0 && alreadyPlaced[alreadyPlaced.length - 1] === type) {
             score *= 0.5; // halve score for consecutive same type
         }
@@ -355,7 +401,8 @@ function generateCandidates(scene, sceneIndex, totalScenes, allowedMGs, alreadyP
         patternHits,
         skipped,
         shouldSkip: topCandidates.length === 0,
-        skipReason: topCandidates.length === 0 ? 'all candidates filtered out' : null
+        skipReason: topCandidates.length === 0 ? 'all candidates filtered out' : null,
+        hint
     };
 }
 
@@ -725,7 +772,7 @@ function buildRuleMG(scene, sceneIndex, type) {
     };
 }
 
-function buildPrompt(scene, sceneIndex, totalScenes, scriptContext, sceneVisual, candidateTypes) {
+function buildPrompt(scene, sceneIndex, totalScenes, scriptContext, sceneVisual, candidateTypes, mgHintObj) {
     const sceneDuration = (scene.endTime - scene.startTime).toFixed(1);
 
     let prompt = '';
@@ -794,6 +841,11 @@ function buildPrompt(scene, sceneIndex, totalScenes, scriptContext, sceneVisual,
         .filter(Boolean)
         .map(d => `- ${d}`)
         .join('\n');
+
+    // Include Visual Planner's mgHint as a strong suggestion
+    if (mgHintObj && mgHintObj.type && candidateTypes.includes(mgHintObj.type)) {
+        prompt += `\nVISUAL PLANNER SUGGESTION: "${mgHintObj.type}: ${mgHintObj.content}" — The planner analyzed the full script and suggests this type. Strongly prefer it unless another type clearly fits better.`;
+    }
 
     prompt += `\n
 === CANDIDATE TYPES (pre-selected based on scene content analysis) ===
@@ -1183,10 +1235,14 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
         const sceneVisual = visualAnalysis ? visualAnalysis.find(v => v.sceneIndex === i) : null;
         console.log(`  Scene ${i}: "${scene.text.substring(0, 50)}..."`);
 
-        // ---- HYBRID STEP 1: Rule-based candidate generation ----
-        const candidateResult = generateCandidates(scene, i, scenes.length, allowedMGs, placedTypes);
+        // ---- HYBRID STEP 1: Rule-based candidate generation (with mgHint from Visual Planner) ----
+        const candidateResult = generateCandidates(scene, i, scenes.length, allowedMGs, placedTypes, scene.mgHint);
 
-        // Debug: log candidate analysis
+        // Debug: log mgHint + candidate analysis
+        if (candidateResult.hint && (candidateResult.hint.type || candidateResult.hint.isNone)) {
+            const hintTag = candidateResult.hint.isNone ? 'none' : `${candidateResult.hint.type}: ${candidateResult.hint.content}`;
+            console.log(`    [mgHint]: ${hintTag}`);
+        }
         if (candidateResult.patternHits.length > 0) {
             const hitsSummary = candidateResult.patternHits.map(h => `${h.pattern}(${h.score})`).join(', ');
             console.log(`    [Patterns]: ${hitsSummary}`);
@@ -1222,7 +1278,7 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
         try {
             if (selectionMode === 'ai') {
                 // ---- HYBRID STEP 3: AI picks from narrowed candidates ----
-                const prompt = buildPrompt(scene, i, scenes.length, scriptContext, sceneVisual, candidateTypes);
+                const prompt = buildPrompt(scene, i, scenes.length, scriptContext, sceneVisual, candidateTypes, candidateResult.hint);
                 const rawText = await callAI(prompt);
                 console.log(`    [AI raw]: ${rawText.substring(0, 80).replace(/\n/g, ' | ')}`);
                 mg = parseResponse(rawText, scene, i);
@@ -1238,8 +1294,13 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
 
             if (selectionMode === 'rule' || selectionMode === 'rule-fallback') {
                 // Build MG from top candidate deterministically
-                // We still need text/subtext/triggerWord — extract from narration
+                // Use mgHint content if available (Visual Planner's suggestion is higher quality)
                 mg = buildRuleMG(scene, i, topCandidate.type);
+                if (mg && candidateResult.hint?.content && candidateResult.hint.type === topCandidate.type) {
+                    // Visual Planner provided display text for this exact type — use it
+                    mg.text = candidateResult.hint.content;
+                    mg.hintSource = true;
+                }
             }
 
             if (mg) {

@@ -70,6 +70,24 @@ const NICHES = {
             stockMaxWords: 3,
         },
 
+        // Keyword formation rules — how Visual Planner builds the keyword field per scene
+        keywordRules: {
+            // Primary strategy for keyword formation
+            strategy: 'product-first',
+            // Rules injected into the Visual Planner prompt
+            rules: [
+                'Product/tool name mentioned → keyword = product name (e.g., "ChatGPT interface", "iPhone 16 Pro")',
+                'Company mentioned → keyword = company + context (e.g., "NVIDIA headquarters", "Apple keynote")',
+                'Abstract concept → keyword = concrete visual representation (e.g., "server rack data center" not "cloud computing")',
+                'Never use jargon-only keywords — always include a visual anchor word',
+            ],
+            // Examples of good vs bad keywords for this niche
+            examples: {
+                good: ['"ChatGPT interface screenshot"', '"NVIDIA GPU chip"', '"server room rows"', '"robot arm factory"'],
+                bad: ['"artificial intelligence"', '"machine learning algorithm"', '"cloud-native architecture"'],
+            }
+        },
+
         // Compositor overlay preferences — controls V2 image overlays & explainer cards
         overlayPrefs: {
             v2Density: 'low',        // low/medium/high — how many V2 image overlays
@@ -113,6 +131,20 @@ const NICHES = {
             fallbackKeywords: ['nature landscape', 'wildlife aerial', 'ocean waves', 'forest canopy'],
             entityBoost: true,
             stockMaxWords: 3,
+        },
+
+        keywordRules: {
+            strategy: 'species-first',
+            rules: [
+                'Named animal/plant species → keyword = species name (e.g., "great white shark", "giant sequoia")',
+                'Named location → keyword = location + natural feature (e.g., "Amazon rainforest canopy")',
+                'Conservation topic → keyword = specific subject (e.g., "coral reef bleaching", "glacier retreat")',
+                'Generic nature → keyword = specific visual subject, not abstract concepts (e.g., "wolf pack hunting" not "predator-prey dynamics")',
+            ],
+            examples: {
+                good: ['"great white shark underwater"', '"Amazon rainforest aerial"', '"coral reef bleaching"', '"polar bear ice"'],
+                bad: ['"ecosystem dynamics"', '"biodiversity loss"', '"environmental degradation"'],
+            }
         },
 
         overlayPrefs: {
@@ -159,6 +191,21 @@ const NICHES = {
             stockMaxWords: 3,
         },
 
+        keywordRules: {
+            strategy: 'entity-first',
+            rules: [
+                'Suspect/victim named → keyword = their name (e.g., "Ted Bundy mugshot", "Nicole Brown Simpson")',
+                'Crime event → keyword = event descriptor (e.g., "OJ Simpson car chase", "Zodiac cipher letter")',
+                'Location of crime → keyword = location + crime context (e.g., "Whitechapel alley night", "Alcatraz prison")',
+                'Evidence/forensic → keyword = specific evidence type (e.g., "fingerprint analysis", "crime scene tape")',
+                'Never use generic thriller imagery — always tie to the actual case/person discussed',
+            ],
+            examples: {
+                good: ['"Ted Bundy courtroom"', '"crime scene tape night"', '"FBI raid mansion"', '"autopsy report document"'],
+                bad: ['"dark mystery"', '"scary investigation"', '"creepy atmosphere"'],
+            }
+        },
+
         overlayPrefs: {
             v2Density: 'medium',
             explainerDensity: 'low',
@@ -201,6 +248,20 @@ const NICHES = {
             fallbackKeywords: ['corporate office', 'stock market graph', 'business meeting', 'city skyline'],
             entityBoost: true,
             stockMaxWords: 3,
+        },
+
+        keywordRules: {
+            strategy: 'entity-first',
+            rules: [
+                'Company/person named → keyword = entity name + context (e.g., "Elon Musk Tesla", "Warren Buffett portrait")',
+                'Financial data → keyword = specific metric visual (e.g., "stock market crash graph", "GDP growth chart")',
+                'Corporate event → keyword = event name (e.g., "Apple WWDC keynote", "IPO bell ceremony")',
+                'Generic business → keyword = concrete setting (e.g., "trading floor monitors", "boardroom meeting")',
+            ],
+            examples: {
+                good: ['"Warren Buffett portrait"', '"stock market crash 2008"', '"Wall Street trading floor"', '"corporate merger handshake"'],
+                bad: ['"business strategy"', '"economic impact"', '"financial situation"'],
+            }
         },
 
         overlayPrefs: {
@@ -247,6 +308,21 @@ const NICHES = {
             stockMaxWords: 3,
         },
 
+        keywordRules: {
+            strategy: 'brand-first',
+            rules: [
+                'Brand/designer named → keyword = brand name + product (e.g., "Louis Vuitton runway", "Rolex Submariner")',
+                'Celebrity/personality → keyword = their name (e.g., "Kim Kardashian Met Gala", "David Beckham")',
+                'Luxury location → keyword = specific place (e.g., "Monaco yacht harbor", "Dubai Burj Khalifa")',
+                'Generic luxury → keyword = specific aspirational visual (e.g., "champagne crystal glass", "sports car showroom")',
+                'Avoid generic "luxury" or "expensive" — show, don\'t tell',
+            ],
+            examples: {
+                good: ['"Rolex Submariner close up"', '"Monaco Grand Prix yacht"', '"Chanel runway model"', '"penthouse skyline view"'],
+                bad: ['"luxury lifestyle"', '"expensive things"', '"rich person"'],
+            }
+        },
+
         overlayPrefs: {
             v2Density: 'low',
             explainerDensity: 'medium',
@@ -289,6 +365,21 @@ const NICHES = {
             fallbackKeywords: ['stadium crowd', 'athletic competition', 'sports action', 'running track'],
             entityBoost: true,
             stockMaxWords: 3,
+        },
+
+        keywordRules: {
+            strategy: 'athlete-first',
+            rules: [
+                'Athlete named → keyword = athlete name + sport context (e.g., "LeBron James dunk", "Messi World Cup")',
+                'Team named → keyword = team name + action (e.g., "Lakers championship", "Manchester United")',
+                'Sporting event → keyword = event name (e.g., "Super Bowl halftime", "Olympics 100m final")',
+                'Generic sports → keyword = specific sport action (e.g., "soccer penalty kick", "basketball slam dunk")',
+                'Never use abstract terms — sports need action and energy in the keyword',
+            ],
+            examples: {
+                good: ['"LeBron James dunk"', '"World Cup penalty kick"', '"Formula 1 pit stop"', '"boxing knockout ring"'],
+                bad: ['"sports competition"', '"athletic achievement"', '"team spirit"'],
+            }
         },
 
         overlayPrefs: {
@@ -335,6 +426,21 @@ const NICHES = {
             stockMaxWords: 3,
         },
 
+        keywordRules: {
+            strategy: 'concept-visual',
+            rules: [
+                'Scientific concept → keyword = visual representation (e.g., "DNA double helix", "brain neuron diagram")',
+                'Historical figure → keyword = their name (e.g., "Albert Einstein", "Marie Curie laboratory")',
+                'Process/method → keyword = concrete step visual (e.g., "chemistry lab experiment", "telescope observatory")',
+                'Abstract topic → keyword = tangible related image (e.g., "classroom whiteboard" not "learning methodology")',
+                'Always pick something a camera could photograph — avoid textbook abstractions',
+            ],
+            examples: {
+                good: ['"DNA double helix model"', '"chemistry lab experiment"', '"space telescope Hubble"', '"ancient Rome Colosseum"'],
+                bad: ['"educational concept"', '"learning theory"', '"scientific method"'],
+            }
+        },
+
         overlayPrefs: {
             v2Density: 'medium',
             explainerDensity: 'high',
@@ -379,6 +485,21 @@ const NICHES = {
             stockMaxWords: 3,
         },
 
+        keywordRules: {
+            strategy: 'entity-first',
+            rules: [
+                'Politician/leader named → keyword = their name + context (e.g., "Biden press conference", "Putin Kremlin")',
+                'News event → keyword = specific event descriptor (e.g., "Capitol riot January 6", "earthquake Turkey 2023")',
+                'Organization/agency → keyword = org name + visual (e.g., "FBI headquarters", "United Nations assembly")',
+                'Policy/legislation → keyword = related visual (e.g., "Supreme Court building", "protest march signs")',
+                'Always use real names and dates — news needs specificity to find the right footage',
+            ],
+            examples: {
+                good: ['"Biden State of the Union"', '"Ukraine frontline 2024"', '"Congress vote floor"', '"wildfire California aerial"'],
+                bad: ['"political situation"', '"breaking news event"', '"government decision"'],
+            }
+        },
+
         overlayPrefs: {
             v2Density: 'high',
             explainerDensity: 'low',
@@ -413,14 +534,31 @@ const NICHES = {
 
         keywords: ['history', 'ancient', 'medieval', 'century', 'empire', 'civilization',
                    'dynasty', 'revolution', 'colonial', 'archaeological', 'historic',
-                   'era', 'kingdom', 'battle', 'monument', 'artifact', 'biography'],
+                   'era', 'kingdom', 'battle', 'monument', 'artifact', 'biography',
+                   'golden age', 'hollywood', 'oscar', 'academy award', 'autobiography',
+                   'segregation', 'civil rights', 'racism', 'decades ago', 'archival'],
 
         searchPolicy: {
             contextTerms: ['historical', 'vintage', 'archive'],
-            avoidTerms: ['cartoon', 'anime', 'game', 'movie', 'fiction'],
+            avoidTerms: ['cartoon', 'anime', 'game', 'fiction'],
             fallbackKeywords: ['historical documentary', 'ancient ruins', 'old photograph archive', 'museum artifact'],
             entityBoost: true,
             stockMaxWords: 3,
+        },
+
+        keywordRules: {
+            strategy: 'entity-first',
+            rules: [
+                'Historical person mentioned → keyword = their name (e.g., "Sammy Davis Jr.", "Cleopatra portrait")',
+                'Historical event → keyword = event + era (e.g., "D-Day Normandy 1944", "Boston Tea Party")',
+                'Era/period discussed → keyword = iconic visual of that era (e.g., "Victorian London street", "1920s jazz club")',
+                'Historical place → keyword = place name + period (e.g., "ancient Rome Forum", "medieval castle")',
+                'No screenplay descriptions — keyword is for SEARCH, not shot direction',
+            ],
+            examples: {
+                good: ['"Sammy Davis Jr."', '"D-Day Normandy beach"', '"Victorian London street"', '"Egyptian pyramids Giza"'],
+                bad: ['"dramatic historical moment"', '"ancient civilization glory"', '"slow pan across old battlefield"'],
+            }
         },
 
         overlayPrefs: {
@@ -465,6 +603,21 @@ const NICHES = {
             fallbackKeywords: ['sunrise mountain top', 'person running cinematic', 'city skyline golden hour', 'ocean waves dramatic'],
             entityBoost: false,
             stockMaxWords: 3,
+        },
+
+        keywordRules: {
+            strategy: 'visual-metaphor',
+            rules: [
+                'Inspirational figure → keyword = person + achievement (e.g., "David Goggins running", "Steve Jobs Apple")',
+                'Abstract concept (discipline, hustle) → keyword = visual metaphor (e.g., "sunrise mountain summit", "runner finish line")',
+                'Success story → keyword = concrete achievement visual (e.g., "marathon finish line", "graduation ceremony")',
+                'Motivational quote context → keyword = powerful imagery (e.g., "ocean storm waves", "man climbing mountain")',
+                'Always pick visuals with emotional energy — avoid static/boring imagery',
+            ],
+            examples: {
+                good: ['"sunrise mountain summit"', '"runner crossing finish line"', '"ocean storm waves"', '"person meditating sunrise"'],
+                bad: ['"motivation concept"', '"success mindset"', '"self improvement"'],
+            }
         },
 
         overlayPrefs: {
@@ -512,6 +665,21 @@ const NICHES = {
             stockMaxWords: 3,
         },
 
+        keywordRules: {
+            strategy: 'entity-first',
+            rules: [
+                'Military leader/figure → keyword = their name + context (e.g., "General Patton portrait", "Zelensky address")',
+                'Specific conflict → keyword = conflict name + visual (e.g., "Ukraine frontline trench", "Syria Aleppo ruins")',
+                'Military hardware → keyword = specific equipment (e.g., "F-35 fighter jet", "aircraft carrier deck")',
+                'Strategic location → keyword = place + military context (e.g., "Taiwan Strait naval", "NATO summit Brussels")',
+                'Use military terminology — accurate equipment names and conflict references',
+            ],
+            examples: {
+                good: ['"F-35 fighter jet takeoff"', '"Ukraine trench warfare"', '"aircraft carrier deck"', '"NATO summit leaders"'],
+                bad: ['"military operation"', '"war zone"', '"conflict area"'],
+            }
+        },
+
         overlayPrefs: {
             v2Density: 'high',
             explainerDensity: 'medium',
@@ -555,6 +723,21 @@ const NICHES = {
             fallbackKeywords: ['fresh food kitchen', 'healthy meal preparation', 'organic produce close up', 'nutrition science'],
             entityBoost: true,
             stockMaxWords: 3,
+        },
+
+        keywordRules: {
+            strategy: 'ingredient-first',
+            rules: [
+                'Specific food/ingredient named → keyword = food item (e.g., "avocado close up", "salmon sushi platter")',
+                'Brand/restaurant named → keyword = brand + food context (e.g., "McDonalds Big Mac", "Whole Foods organic aisle")',
+                'Health condition/nutrient → keyword = visual representation (e.g., "vitamin supplement pills", "gut bacteria diagram")',
+                'Cooking process → keyword = specific action (e.g., "chef slicing vegetables", "boiling pasta pot")',
+                'Food should look appetizing — prefer close-up, well-lit food photography keywords',
+            ],
+            examples: {
+                good: ['"avocado toast close up"', '"sushi platter Japanese"', '"farmer market produce"', '"chef knife slicing"'],
+                bad: ['"healthy food"', '"nutrition concept"', '"diet plan"'],
+            }
         },
 
         overlayPrefs: {
@@ -602,6 +785,21 @@ const NICHES = {
             stockMaxWords: 4,
         },
 
+        keywordRules: {
+            strategy: 'process-first',
+            rules: [
+                'Specific tool/material → keyword = tool/material name (e.g., "power drill wood", "paint roller wall")',
+                'Before/after → keyword = specific transformation (e.g., "kitchen renovation before", "rusty furniture restored")',
+                'Step in a process → keyword = hands-on action (e.g., "measuring tape cutting wood", "soldering circuit board")',
+                'Generic hack/tip → keyword = concrete visual of the tip in action (e.g., "baking soda cleaning sink" not "cleaning hack")',
+                'Show hands doing things — DIY is about process, not finished products alone',
+            ],
+            examples: {
+                good: ['"power drill wood plank"', '"paint roller white wall"', '"garden raised bed building"', '"hands sewing fabric"'],
+                bad: ['"DIY project"', '"life hack idea"', '"home improvement"'],
+            }
+        },
+
         overlayPrefs: {
             v2Density: 'medium',
             explainerDensity: 'high',
@@ -645,6 +843,20 @@ const NICHES = {
             fallbackKeywords: ['abstract background', 'cinematic landscape', 'aerial city view'],
             entityBoost: true,
             stockMaxWords: 4,
+        },
+
+        keywordRules: {
+            strategy: 'balanced',
+            rules: [
+                'Person named → keyword = their name (e.g., "Elon Musk", "Taylor Swift")',
+                'Specific event → keyword = event descriptor (e.g., "solar eclipse 2024", "Olympic opening ceremony")',
+                'No specific entity → keyword = concrete visual subject (e.g., "city skyline sunset", "office workspace")',
+                'Keep keywords between 3-6 words, directly searchable, no abstract concepts',
+            ],
+            examples: {
+                good: ['"city skyline sunset"', '"Elon Musk portrait"', '"laptop coffee desk"', '"crowd concert night"'],
+                bad: ['"interesting concept"', '"important topic"', '"various things happening"'],
+            }
         },
 
         overlayPrefs: {
@@ -694,7 +906,7 @@ function pickNicheFromContent(scriptContext) {
         'mystery': 'crime',
         'nature': 'nature',
         'sports': 'sport',
-        'entertainment': 'general',
+        // 'entertainment' intentionally omitted — too broad, falls through to keyword scoring
         'education': 'education',
         'lifestyle': 'luxury',
         'travel': 'nature',
@@ -716,14 +928,17 @@ function pickNicheFromContent(scriptContext) {
     // If AI gave us a direct theme match, start with that as a strong candidate
     const directMatch = THEME_TO_NICHE[aiTheme];
 
-    // Score each niche based on keyword matches
+    // Score each niche based on keyword matches (word-boundary aware)
     const scores = {};
     for (const [nicheId, niche] of Object.entries(NICHES)) {
         if (nicheId === 'general') continue;
 
         let score = 0;
         for (const keyword of niche.keywords) {
-            if (text.includes(keyword)) {
+            // Use word boundary regex to avoid partial matches (e.g. 'ai' inside 'raid')
+            const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const re = new RegExp(`\\b${escaped}\\b`);
+            if (re.test(text)) {
                 score += 1;
             }
         }
@@ -757,6 +972,16 @@ const WEB_PROVIDERS = new Set(['googleCSE', 'bing', 'googleScrape', 'duckduckgo'
 
 // YouTube needs specific event/topic queries — not too short (stock-style) or too long (web-style)
 const YOUTUBE_PROVIDERS = new Set(['youtube']);
+
+/**
+ * Get the keyword formation rules for a niche (with safe defaults).
+ * @param {string} nicheId
+ * @returns {Object} keywordRules
+ */
+function getKeywordRules(nicheId) {
+    const niche = NICHES[nicheId] || NICHES.general;
+    return niche.keywordRules || NICHES.general.keywordRules;
+}
 
 /**
  * Get the search policy for a niche (with safe defaults).
@@ -1009,6 +1234,7 @@ module.exports = {
     getAllNiches,
     getPresets,
     resolvePreset,
+    getKeywordRules,
     getSearchPolicy,
     rewriteQuery,
     getFallbackKeywords

@@ -53,18 +53,30 @@ function detectRecipe(scriptContext, userInstructions) {
     let bestMatch = null;
     let bestScore = 0;
 
+    const contentFormat = (scriptContext?.format || '').toLowerCase();
+    const contentNiche = (scriptContext?.nicheId || '').toLowerCase();
+
     for (const recipe of recipes) {
-        if (!recipe.detectKeywords?.length) continue;
-        const score = recipe.detectKeywords.reduce((acc, kw) => {
-            return acc + (searchText.includes(kw.toLowerCase()) ? 1 : 0);
-        }, 0);
+        let score = 0;
+
+        // Keyword matching
+        if (recipe.detectKeywords?.length) {
+            score += recipe.detectKeywords.reduce((acc, kw) => {
+                return acc + (searchText.includes(kw.toLowerCase()) ? 1 : 0);
+            }, 0);
+        }
+
+        // Format + niche matching (strong signals)
+        if (recipe.formatMatch && contentFormat === recipe.formatMatch.toLowerCase()) score += 5;
+        if (recipe.nicheMatch && contentNiche === recipe.nicheMatch.toLowerCase()) score += 5;
+
         if (score > bestScore) {
             bestScore = score;
             bestMatch = recipe;
         }
     }
 
-    // Require at least 3 keyword hits to auto-detect
+    // Require at least 3 keyword hits OR format+niche match to auto-detect
     return bestScore >= 3 ? bestMatch : null;
 }
 
@@ -93,7 +105,16 @@ function formatRecipePrompt(recipe) {
         lines.push('');
     }
 
-    // Footage strategy
+    // Footage rules (content-driven, no fixed percentages)
+    if (recipe.footageRules?.length) {
+        lines.push('FOOTAGE SOURCE RULES:');
+        for (const rule of recipe.footageRules) {
+            lines.push(`  - ${rule}`);
+        }
+        lines.push('');
+    }
+
+    // Legacy footage strategy (percentage-based, for older recipes)
     if (recipe.footageStrategy) {
         lines.push('FOOTAGE STRATEGY:');
         for (const [source, cfg] of Object.entries(recipe.footageStrategy)) {
@@ -114,6 +135,24 @@ function formatRecipePrompt(recipe) {
         for (const section of recipe.sceneStructure) {
             const mgs = section.mgTypes?.join(', ') || 'none';
             lines.push(`  ${section.section.toUpperCase()} (${section.durationHint}): MGs=[${mgs}], footage=${section.footage}. ${section.notes || ''}`);
+        }
+        lines.push('');
+    }
+
+    // Keyword rules
+    if (recipe.keywordRules) {
+        lines.push('KEYWORD RULES:');
+        for (const [key, rule] of Object.entries(recipe.keywordRules)) {
+            lines.push(`  - ${rule}`);
+        }
+        lines.push('');
+    }
+
+    // MG placement rules
+    if (recipe.mgRules) {
+        lines.push('MG PLACEMENT RULES:');
+        for (const [key, rule] of Object.entries(recipe.mgRules)) {
+            lines.push(`  - ${rule}`);
         }
         lines.push('');
     }

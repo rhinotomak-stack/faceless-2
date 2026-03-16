@@ -1808,15 +1808,33 @@ ipcMain.handle('scan-backgrounds', async () => {
         return supportedExts.has(ext) && !f.startsWith('.');
     });
 
+    // Theme tagging convention: "{theme}--{name}.ext"
+    // e.g. "history--vintage-paper.jpg" → theme: 'history', name: 'vintage-paper'
+    // Files without a theme prefix are available for all themes
+    const VALID_THEMES = new Set(['crime', 'history', 'modern', 'minimal', 'standard']);
+
     return files.map(f => {
         const ext = path.extname(f).toLowerCase();
-        const name = path.basename(f, path.extname(f));
+        let name = path.basename(f, path.extname(f));
         const isVideo = ['.mp4', '.webm', '.mov'].includes(ext);
         const fullPath = path.join(bgDir, f);
         const stat = fs.statSync(fullPath);
+
+        // Parse theme prefix: "history--vintage-paper" → theme='history', name='vintage-paper'
+        let theme = null;
+        const dashIdx = name.indexOf('--');
+        if (dashIdx > 0) {
+            const prefix = name.substring(0, dashIdx).toLowerCase();
+            if (VALID_THEMES.has(prefix)) {
+                theme = prefix;
+                name = name.substring(dashIdx + 2);
+            }
+        }
+
         return {
             filename: f,
             name: name,
+            theme: theme,   // null = all themes, or specific theme ID
             ext: ext,
             mediaType: isVideo ? 'video' : 'image',
             size: stat.size,

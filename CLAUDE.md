@@ -21,17 +21,15 @@ npm run preview    # Launch with DevTools
 
 **Electron app**: `main.js` (main process), `preload.js` (IPC bridge), `ui/` (renderer)
 
-**Build pipeline** (`src/build-video.js`) runs ~10 steps sequentially:
+**Build pipeline** (`src/build-video.js`) runs ~8 steps sequentially:
 1. Clean → Find audio → Transcribe (Whisper)
 2. **AI Director** (`ai-director.js`) — scene splitting, context extraction, format/hook/CTA detection
-3. **Visual Planner** (`ai-visual-planner.js`) — batch keyword generation for all scenes in one AI call
-4. **Download Media** (`footage-manager.js`) — multi-provider parallel downloads with smart priority per scene
-5. **Vision Analysis** (`ai-vision.js`) — ffmpeg frame extraction + AI analysis of downloaded clips
-6. **Motion Graphics** (`ai-motion-graphics.js`) — placement of 15+ MG types (charts, headlines, stats, etc.)
-7. **Transitions** (`ai-transitions.js`) — algorithmic 70/30 rule, theme-aware, zero AI cost
-8. **Visual Effects** (`ai-effects.js`) — overlay selection + CSS effects
-9. **Overlay Download** (`overlay-manager.js`) — grain/dust/lightLeak video clips from Pexels/Pixabay
-10. Build `video-plan.json` → copy assets to `public/`
+3. **Visual Planner** (`ai-visual-planner.js`) — batch planning for all scenes in one AI call (keywords, queries, effects, mgHint — 10 fields per scene)
+4. **Download Media** (`footage-manager.js`) — multi-provider parallel downloads with inline vision scoring per clip
+5. **Motion Graphics** (`ai-motion-graphics.js`) — placement of 15+ MG types (charts, headlines, stats, etc.)
+6. **Transitions** (`ai-transitions.js`) — algorithmic 70/30 rule, theme-aware, zero AI cost
+7. **Overlay Download** (`overlay-manager.js`) — grain/dust/lightLeak video clips from Pexels/Pixabay
+8. Build `video-plan.json` → copy assets to `public/`
 
 **AI Provider layer** (`src/ai-provider.js`): Unified `callAI()` and `callVisionAI()` supporting 8 providers (Ollama, Claude, OpenAI, DeepSeek, Qwen, Gemini, NVIDIA, Groq). Config in `src/config.js`.
 
@@ -48,7 +46,7 @@ npm run preview    # Launch with DevTools
 
 ## Key Data Flow
 
-All steps produce data that feeds into `public/video-plan.json`, which is the contract between the build pipeline and WebGL2 renderer. Key fields: `scenes[]`, `mgScenes[]`, `transitions[]`, `visualEffects[]`, `overlayScenes[]`, `scriptContext`, `sfxClips[]`.
+All steps produce data that feeds into `public/video-plan.json`, which is the contract between the build pipeline and WebGL2 renderer. Key fields: `scenes[]`, `mgScenes[]`, `transitions[]`, `overlayScenes[]`, `scriptContext`, `sfxClips[]`.
 
 ## Critical Patterns
 
@@ -83,7 +81,7 @@ Reads `video-plan.json`, uses pure FFmpeg compositing + NVENC GPU encoding.
 
 ## Theme System
 
-7 themes in `src/themes.js` (tech, nature, crime, corporate, luxury, sport, neutral). Each defines colors, fonts, transition preferences, overlay preferences, MG style. Theme flows: AI Director selects → `directors-brief.js` allows override → stored in `scriptContext.themeId` → used by WebGL2 renderer + preview.
+5 themes in `src/themes.js` (crime, history, modern, minimal, standard). Each defines colors, fonts, transition preferences, overlay preferences (incl. effects pool), MG style overrides. Theme flows: AI Director selects → `directors-brief.js` allows override → stored in `scriptContext.themeId` → used by WebGL2 renderer + preview. 13 niches in `src/niches.js` control content strategy (allowedMGs, footagePriority, pacing, searchPolicy). Visual Planner picks per-scene effects from theme's pool and mgHint from niche's allowedMGs.
 
 ## Footage Providers
 

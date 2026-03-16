@@ -21,27 +21,75 @@
  *     • mediaType: "video" | "image"
  *     • sourceHint: "stock" | "youtube" | "web-image"
  *     • visualIntent: "Aerial establishing shot of large mansion surrounded by police vehicles"
+ *     • effects: ["grain", "vignette"] — per-scene CSS effects from theme's allowed pool
+ *     • mgHint: "lowerThird: Detective Smith, Lead Investigator" — MG suggestion from niche's allowed list (or null)
  *
  * Uses shared ai-provider.js for all AI calls.
  */
 
 const { callAI } = require('./ai-provider');
 const config = require('./config');
-const { getMatchingBackgrounds, BACKGROUND_LIBRARY } = require('./themes');
+const path = require('path');
+const fs = require('fs');
+const { getMatchingBackgrounds, BACKGROUND_LIBRARY, getTheme } = require('./themes');
 
 // ============================================================
 // HELPERS
 // ============================================================
 
 /**
- * Build a list of available gradient backgrounds for the AI prompt.
- * Shows backgrounds that match the current theme, plus a few extras.
+ * Scan assets/backgrounds/ for custom background files, optionally filtered by theme.
+ * Theme tagging convention: "{theme}--{name}.ext" (e.g., "history--vintage-paper.jpg")
+ * Files without a theme prefix are available for all themes.
+ */
+function _scanCustomBackgrounds(themeId) {
+    const bgDir = path.join(__dirname, '..', 'assets', 'backgrounds');
+    if (!fs.existsSync(bgDir)) return [];
+
+    const VALID_THEMES = new Set(['crime', 'history', 'modern', 'minimal', 'standard']);
+    const supportedExts = new Set(['.mp4', '.webm', '.mov', '.jpg', '.jpeg', '.png', '.gif']);
+
+    try {
+        const files = fs.readdirSync(bgDir).filter(f => {
+            const ext = path.extname(f).toLowerCase();
+            return supportedExts.has(ext) && !f.startsWith('.');
+        });
+
+        return files.map(f => {
+            let name = path.basename(f, path.extname(f));
+            let theme = null;
+            const dashIdx = name.indexOf('--');
+            if (dashIdx > 0) {
+                const prefix = name.substring(0, dashIdx).toLowerCase();
+                if (VALID_THEMES.has(prefix)) {
+                    theme = prefix;
+                    name = name.substring(dashIdx + 2);
+                }
+            }
+            return { filename: f, name, theme };
+        }).filter(bg => !bg.theme || bg.theme === themeId);
+    } catch (e) {
+        return [];
+    }
+}
+
+/**
+ * Build a list of available backgrounds for the AI prompt.
+ * Includes built-in gradients + custom files matching the current theme.
  */
 function _buildBackgroundList(themeId) {
     const matched = getMatchingBackgrounds(themeId || 'standard');
-    // Show top 6 matches to keep prompt concise
+    // Show top 6 gradient matches to keep prompt concise
     const shown = matched.slice(0, 6);
-    return shown.map(bg => `   - "${bg.id}" = ${bg.name}`).join('\n');
+    let lines = shown.map(bg => `   - "${bg.id}" = ${bg.name} (gradient)`);
+
+    // Add custom background files matching this theme
+    const customBgs = _scanCustomBackgrounds(themeId);
+    for (const bg of customBgs) {
+        lines.push(`   - "file:${bg.filename}" = ${bg.name} (custom image/video)`);
+    }
+
+    return lines.join('\n');
 }
 
 /**
@@ -106,7 +154,7 @@ function buildBatchPrompt(scenes, scriptContext, directorsBrief, options = {}) {
     const { theme, tone, mood, pacing, format, visualStyle, entities, hookEndTime, ctaDetected, ctaStartTime } = scriptContext;
     const { qualityTier, tier, audienceHint } = directorsBrief;
     const nicheId = scriptContext.nicheId || 'general';
-    const { getNiche, getSearchPolicy } = require('./niches');
+    const { getNiche, getSearchPolicy, getKeywordRules } = require('./niches');
     const niche = getNiche(nicheId);
     const searchPolicy = getSearchPolicy(nicheId);
 
@@ -183,6 +231,38 @@ ${searchPolicy.entityBoost ? '- Entity names (people, companies) work well in we
 
 QUALITY TIER: ${qualityTier}
 ${tier.allowVideo ? '- Can use VIDEO clips (preferred for motion and impact)' : '- IMAGES ONLY (no video allowed)'}
+
+AVAILABLE EFFECTS FOR THIS THEME (${theme || 'standard'}):
+${(() => {
+    const t = getTheme(theme || 'standard');
+    const fx = t.overlays.effects || [];
+    const params = t.effectParams || {};
+    if (fx.length === 0) return 'grain';
+    return fx.map(e => {
+        const p = params[e];
+        if (!p) return e;
+        const desc = Object.entries(p).map(([k, v]) => `${k}=${v}`).join(', ');
+        return `${e} (${desc})`;
+    }).join('\n');
+})()}
+- Pick 0-2 effects per scene from this list ONLY. Use "none" if the scene doesn't need effects.
+- The theme controls each effect's intensity/params — you just pick WHICH effects fit the scene mood.
+- Intense/dramatic scenes → more effects. Calm/simple scenes → none or one subtle effect.
+
+EFFECT DESCRIPTIONS:
+- grain: Film grain noise overlay — adds texture and grit
+- dust: Sparse bright dust particles — adds atmosphere, aged feel
+- vignette: Dark edges, bright center — draws focus, adds drama
+- blurVignette: Blurred edges, sharp center — cinematic depth-of-field feel
+- chromatic: RGB channel offset — tech/glitch aesthetic
+- lightLeak: Warm light bleed from edges — dreamy, vintage, elegant
+
+ALLOWED MOTION GRAPHICS FOR THIS NICHE (${niche.name}):
+${niche.allowedMGs.join(', ')}
+- Suggest an MG only when the scene content clearly benefits from one.
+- NOT every scene needs an MG — use "none" for scenes that work best as pure footage.
+- Fullscreen MGs (focusWord, kineticText) replace the footage entirely — use sparingly for impact.
+- Overlay MGs (lowerThird, headline, statCounter, barChart, etc.) appear ON TOP of footage.
 
 SCENES TO PLAN (${scenes.length} total):
 
@@ -320,16 +400,30 @@ ${_buildBackgroundList(theme)}
    Pick the background that best matches the scene mood. Use "blur" as safe default if unsure.
    When framing is "fullscreen", set backgroundId to "none".
 
-11. SEARCHABILITY (CRITICAL — bad keywords = no footage found):
-   Every keyword MUST be something a real person would type into a search engine and get results.
-   - GOOD: "deep sea submersible", "underwater volcano eruption", "scientist in lab"
-   - BAD: "human-in-the-loop latency constraint" (too abstract, no results)
-   - BAD: "triple-sensor redundancy validation overlay" (too technical, no footage exists)
-   - BAD: "silent AI flagging mechanism" (conceptual, unsearchable)
-   If a concept is abstract, find a CONCRETE VISUAL that represents it:
-   - "latency constraint" → "underwater signal delay" or "radio wave graphic"
-   - "sensor redundancy" → "underwater sensor array" or "circuit board closeup"
-   - "AI flagging" → "computer screen alert" or "drone camera lens"
+11. KEYWORD FORMAT (CRITICAL — this is THE primary search term):
+   The keyword field must be SHORT (3-6 words) and directly searchable.
+   Strategy for this niche (${niche.name}): "${(() => {
+       const kr = getKeywordRules(nicheId);
+       return kr.strategy || 'balanced';
+   })()}"
+${(() => {
+    const kr = getKeywordRules(nicheId);
+    let block = '';
+    if (kr.rules && kr.rules.length > 0) {
+        block += kr.rules.map(r => `   - ${r}`).join('\n');
+    }
+    if (kr.examples) {
+        if (kr.examples.good) {
+            block += `\n   - GOOD: ${kr.examples.good.join(', ')}`;
+        }
+        if (kr.examples.bad) {
+            block += `\n   - BAD: ${kr.examples.bad.join(', ')}`;
+        }
+    }
+    return block;
+})()}
+   The keyword is NOT a shot description. Save cinematic details for visualIntent.
+   If the scene names a person, the keyword MUST be that person's name (+ optional context word).
 
 12. SEARCH-OPTIMIZED QUERIES (CRITICAL FOR QUALITY):
    You must provide TWO different search queries optimized for different providers:
@@ -352,14 +446,45 @@ ${_buildBackgroundList(theme)}
 
    The right stockQuery + webQuery combo is THE difference between good and bad footage!
 
+13. EFFECTS (per-scene CSS visual effects):
+   - Pick from the AVAILABLE EFFECTS list above (theme-specific)
+   - Use comma-separated values for multiple effects, or "none"
+   - Match effects to scene mood:
+     • Dark/tense scenes → vignette, grain
+     • Dreamy/elegant scenes → lightLeak, blurVignette
+     • High-energy scenes → chromatic, grain
+     • Clean/informational scenes → none
+   - Don't overuse effects — ~40-50% of scenes should be "none"
+   - HOOK scenes benefit from subtle effects for visual impact
+
+14. MG HINT (motion graphic suggestion — CONTENT-DRIVEN, not decorative):
+   - Format: "<mgType>: <brief content description>" or "none"
+   - MGs exist to DISPLAY DATA the viewer needs to see. Default is "none".
+   - ONLY add an MG when the narration contains one of these CONTENT SIGNALS:
+     • A SPECIFIC NUMBER or STATISTIC is spoken → "statCounter: 5 million members" or "barChart: box office 1939-1943"
+     • A LISTICLE ITEM TRANSITION (e.g. "Number nine", "Number 1") → "headline: NUMBER NINE" or "focusWord: #1"
+     • A NEW PERSON is INTRODUCED BY NAME + TITLE for the FIRST time → "lowerThird: DW Griffith, Film Director"
+       (Do NOT repeat lowerThird for the same person in later scenes)
+     • A SPECIFIC DATE or SEQUENCE OF DATES → "timeline: 1915 → 1925 → 1999"
+     • A SPECIFIC LOCATION is central to the scene → "mapChart: Atlanta, Georgia — 1915"
+     • A DIRECT QUOTE is spoken verbatim → "callout: I believe in white supremacy"
+     • An explicit COMPARISON is made (X vs Y) → "comparisonCard: Public Image vs Private Reality"
+   - If the scene is just narration/storytelling with no data signal → "none"
+   - Most scenes are pure storytelling — they should have NO MG
+   - NEVER add MGs just to fill space or make scenes "look interesting"
+   - Do NOT cluster MGs — leave gaps of 2-4 scenes between MGs
+   - Fullscreen MGs (focusWord, kineticText) are RARE — only for truly pivotal moments
+
 OUTPUT FORMAT (one line per scene):
 
-SCENE 0: keyword: <descriptive phrase> | stockQuery: <2-3 word visual query> | webQuery: <4-8 word specific query> | mediaType: <video|image> | sourceHint: <stock|youtube|web-image> | framing: <fullscreen|cinematic> | backgroundId: <none|blur|gradient-id> | visualIntent: <detailed shot description>
-SCENE 1: keyword: <descriptive phrase> | stockQuery: <2-3 word visual query> | webQuery: <4-8 word specific query> | mediaType: <video|image> | sourceHint: <stock|youtube|web-image> | framing: <fullscreen|cinematic> | backgroundId: <none|blur|gradient-id> | visualIntent: <detailed shot description>
+SCENE 0: keyword: <3-6 word search term, entity name if applicable> | stockQuery: <2-3 word visual query> | webQuery: <4-8 word specific query> | mediaType: <video|image> | sourceHint: <stock|youtube|web-image> | framing: <fullscreen|cinematic> | backgroundId: <none|blur|gradient-id> | visualIntent: <detailed shot description> | effects: <comma-separated or none> | mgHint: <type: description or none>
+SCENE 1: keyword: <3-6 word search term, entity name if applicable> | stockQuery: <2-3 word visual query> | webQuery: <4-8 word specific query> | mediaType: <video|image> | sourceHint: <stock|youtube|web-image> | framing: <fullscreen|cinematic> | backgroundId: <none|blur|gradient-id> | visualIntent: <detailed shot description> | effects: <comma-separated or none> | mgHint: <type: description or none>
 ...
 
 CRITICAL: YOU MUST OUTPUT EXACTLY ${scenes.length} LINES (one per scene).
-Each keyword must be UNIQUE and SEARCHABLE. stockQuery and webQuery must BOTH be provided for every scene.`;
+Each keyword must be UNIQUE, SEARCHABLE, and SHORT (3-6 words). When a person is named in the scene, keyword = their name.
+Do NOT put cinematic shot descriptions in keyword — that goes in visualIntent.
+stockQuery and webQuery must BOTH be provided for every scene.`;
 
     return prompt;
 }
@@ -440,6 +565,22 @@ function parseBatchResponse(rawText, scenes) {
                     const val = part.substring(part.indexOf(':') + 1).trim().toLowerCase();
                     scene.backgroundId = val;
                 }
+                if (lower.startsWith('effects:')) {
+                    const val = part.substring(part.indexOf(':') + 1).trim().toLowerCase();
+                    if (val === 'none' || val === '') {
+                        scene.effects = [];
+                    } else {
+                        scene.effects = val.split(',').map(e => e.trim()).filter(Boolean);
+                    }
+                }
+                if (lower.startsWith('mghint:') || lower.startsWith('mg hint:')) {
+                    const val = part.substring(part.indexOf(':') + 1).trim();
+                    if (val.toLowerCase() === 'none' || val === '') {
+                        scene.mgHint = null;
+                    } else {
+                        scene.mgHint = val;
+                    }
+                }
             }
 
             // Strip wrapping quotes from parsed values (AI sometimes wraps in quotes)
@@ -475,6 +616,9 @@ function parseBatchResponse(rawText, scenes) {
                     scene.background = 'blur';
                 } else if (bgId === 'none') {
                     scene.background = 'none';
+                } else if (bgId.startsWith('file:')) {
+                    // Custom background file: "file:history--vintage-paper.jpg" → "pattern:history--vintage-paper.jpg"
+                    scene.background = `pattern:${bgId.replace('file:', '')}`;
                 } else if (BACKGROUND_LIBRARY[bgId]) {
                     scene.background = `gradient:${bgId}`;
                 } else {
@@ -485,6 +629,8 @@ function parseBatchResponse(rawText, scenes) {
             }
         }
         scene.visualIntent = scene.visualIntent || scene.keyword;
+        if (!scene.effects) scene.effects = [];
+        if (scene.mgHint === undefined) scene.mgHint = null;
 
         enrichedScenes.push(scene);
     }
@@ -544,7 +690,7 @@ async function planVisuals(scenes, scriptContext, directorsBrief) {
         const prompt = buildBatchPrompt(scenes, scriptContext, directorsBrief);
 
         // Batch call for ALL scenes — ~150 tokens per scene (keyword + stockQuery + webQuery + intent)
-        const maxTokens = Math.max(1000, scenes.length * 150);
+        const maxTokens = Math.max(1000, scenes.length * 200);
         const rawText = await callAI(prompt, { maxTokens });
 
         if (!rawText) throw new Error('Empty AI response');
@@ -564,7 +710,9 @@ async function planVisuals(scenes, scriptContext, directorsBrief) {
         for (const scene of enrichedScenes.slice(0, 5)) { // Show first 5
             const sq = scene.stockQuery ? ` stock:"${scene.stockQuery}"` : '';
             const wq = scene.webQuery ? ` web:"${scene.webQuery}"` : '';
-            console.log(`      Scene ${scene.index}: "${scene.keyword}" [${scene.mediaType}, ${scene.sourceHint}]${sq}${wq}`);
+            const fx = scene.effects && scene.effects.length ? ` fx:[${scene.effects.join(',')}]` : '';
+            const mg = scene.mgHint ? ` mg:"${scene.mgHint}"` : '';
+            console.log(`      Scene ${scene.index}: "${scene.keyword}" [${scene.mediaType}, ${scene.sourceHint}]${sq}${wq}${fx}${mg}`);
         }
         if (enrichedScenes.length > 5) {
             console.log(`      ... and ${enrichedScenes.length - 5} more scenes`);
@@ -644,7 +792,9 @@ async function _planVisualsChunked(scenes, scriptContext, directorsBrief, chunkS
                         keyword: extractFallbackKeyword(scene.text),
                         mediaType: 'video',
                         sourceHint: 'stock',
-                        visualIntent: scene.text
+                        visualIntent: scene.text,
+                        effects: [],
+                        mgHint: null
                     });
                     console.log(`      Scene ${scene.index}: fallback keyword`);
                 }
@@ -682,7 +832,9 @@ async function planVisualsPerScene(scenes, scriptContext, directorsBrief) {
                 keyword: extractFallbackKeyword(scene.text),
                 mediaType: 'video',
                 sourceHint: 'stock',
-                visualIntent: scene.text
+                visualIntent: scene.text,
+                effects: [],
+                mgHint: null
             });
             console.log(`   Scene ${scene.index}: fallback keyword`);
         }
@@ -737,6 +889,8 @@ function parseSingleSceneResponse(rawText, scene) {
         enriched.background = enriched.framing === 'cinematic' ? 'blur' : 'none';
     }
     enriched.visualIntent = enriched.visualIntent || enriched.keyword;
+    if (!enriched.effects) enriched.effects = [];
+    if (enriched.mgHint === undefined) enriched.mgHint = null;
 
     return enriched;
 }

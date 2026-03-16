@@ -702,7 +702,15 @@ async function downloadMedia(keyword, mediaType, filenameBase, sceneDuration = 1
                     // Inline vision scoring — skip for YouTube (does its own internal scoring)
                     let visionScore = 0;
                     if (_visionEnabled && !isYouTube && fs.existsSync(finalPath)) {
-                        const visionResult = await _scoreDownloadedMedia(finalPath, finalExt, keyword, { sceneText: scene?.text || '', niche: nicheId || '', videoTopic: scriptContextRef?.summary || '' });
+                        const visionResult = await _scoreDownloadedMedia(finalPath, finalExt, keyword, {
+                            sceneText: scene?.text || '',
+                            niche: nicheId || '',
+                            videoTopic: scriptContextRef?.summary || '',
+                            theme: scriptContextRef?.themeId || scriptContextRef?.theme || '',
+                            entities: scriptContextRef?.entities || [],
+                            tone: scriptContextRef?.tone || '',
+                            mood: scriptContextRef?.mood || '',
+                        });
                         if (visionResult) {
                             const { score, description } = visionResult;
                             visionScore = score;
@@ -733,7 +741,12 @@ async function downloadMedia(keyword, mediaType, filenameBase, sceneDuration = 1
             // Vision rejected all attempts — ask AI to suggest a better keyword
             if (visionRejections.length >= 3) {
                 const suggestion = await _visionSuggestKeyword(visionRejections, keyword, {
-                    sceneText: scene?.text || '', niche: nicheId || '', videoTopic: scriptContextRef?.summary || ''
+                    sceneText: scene?.text || '',
+                    niche: nicheId || '',
+                    videoTopic: scriptContextRef?.summary || '',
+                    theme: scriptContextRef?.themeId || scriptContextRef?.theme || '',
+                    entities: scriptContextRef?.entities || [],
+                    tone: scriptContextRef?.tone || '',
                 });
                 if (suggestion) {
                     console.log(`  🧠 Vision AI suggests: "${suggestion.keyword}"${suggestion.switchToVideo ? ' (as VIDEO)' : ''}`);
@@ -1049,93 +1062,4 @@ async function downloadBackgroundCanvas(themeId) {
     }
 }
 
-// ============================================================
-// FOOTAGE RETRY FOR POOR VISION SCORES
-// ============================================================
-
-/**
- * Retry downloading media for a scene that scored "poor" in vision analysis.
- * Skips the provider that returned poor footage, tries others + keyword variants.
- *
- * @param {string} keyword - Original search keyword
- * @param {string} mediaType - 'video' or 'image'
- * @param {string} filenameBase - Base name for the file (e.g., 'scene-3-retry')
- * @param {number} sceneDuration - Duration in seconds
- * @param {string} sourceHint - AI source hint
- * @param {string[]} excludeProviders - Provider names to skip (already tried, returned poor footage)
- * @returns {Object|null} Download result or null
- */
-async function retryPoorMedia(keyword, mediaType, filenameBase, sceneDuration = 10, sourceHint = '', excludeProviders = []) {
-    const priorityOrder = getSmartPriority(sourceHint, mediaType, scriptContextRef);
-    const allProviders = mediaType === 'video' ? videoProviders : imageProviders;
-    const sourceMap = mediaType === 'video' ? VIDEO_SOURCE_MAP : IMAGE_SOURCE_MAP;
-    const providers = reorderProviders(allProviders, priorityOrder, sourceMap);
-    const ext = mediaType === 'video' ? '.mp4' : '.jpg';
-    const excludeSet = new Set(excludeProviders);
-
-    // Try 1: Other providers with same keyword (skip already-tried providers)
-    for (const provider of providers) {
-        if (!provider.isAvailable()) continue;
-        if (excludeSet.has(provider.name)) continue;
-
-        try {
-            let results = await provider.search(keyword);
-            results = provider.filterResults(results);
-            if (results.length === 0) continue;
-
-            const selected = provider.pickUnused(results);
-            if (!selected) continue;
-
-            const outputPath = path.join(config.paths.temp, filenameBase + ext);
-            const finalPath = await provider.download(selected.url, outputPath, { duration: sceneDuration, keyword, _directVideoUrl: selected._directVideoUrl || null });
-
-            return {
-                path: finalPath,
-                ext: path.extname(finalPath),
-                provider: provider.name,
-                mediaType,
-                mediaWidth: selected.width || 0,
-                mediaHeight: selected.height || 0
-            };
-        } catch (e) {
-            continue;
-        }
-    }
-
-    // Try 2: Keyword variants — but still skip excluded providers
-    // (same YouTube video found with different keywords = same poor result)
-    const variants = getKeywordVariants(keyword);
-    for (const variant of variants) {
-        for (const provider of providers) {
-            if (!provider.isAvailable()) continue;
-            if (excludeSet.has(provider.name)) continue;
-
-            try {
-                let results = await provider.search(variant);
-                results = provider.filterResults(results);
-                if (results.length === 0) continue;
-
-                const selected = provider.pickUnused(results);
-                if (!selected) continue;
-
-                const outputPath = path.join(config.paths.temp, filenameBase + ext);
-                const finalPath = await provider.download(selected.url, outputPath, { duration: sceneDuration, keyword: variant, _directVideoUrl: selected._directVideoUrl || null });
-
-                return {
-                    path: finalPath,
-                    ext: path.extname(finalPath),
-                    provider: provider.name,
-                    mediaType,
-                    mediaWidth: selected.width || 0,
-                    mediaHeight: selected.height || 0
-                };
-            } catch (e) {
-                continue;
-            }
-        }
-    }
-
-    return null;
-}
-
-module.exports = { downloadMedia, downloadAllMedia, initProviders, retryPoorMedia };
+module.exports = { downloadMedia, downloadAllMedia, initProviders };

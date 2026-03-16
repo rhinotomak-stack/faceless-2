@@ -2011,7 +2011,8 @@ function populateBackgroundDropdown() {
             const opt = document.createElement('option');
             opt.value = `pattern:${bg.filename}`;
             const icon = bg.mediaType === 'video' ? '🎬' : '🖼️';
-            opt.textContent = `${icon} ${bg.name}`;
+            const themeTag = bg.theme ? ` [${bg.theme}]` : '';
+            opt.textContent = `${icon} ${bg.name}${themeTag}`;
             grp.appendChild(opt);
         }
         sel.appendChild(grp);
