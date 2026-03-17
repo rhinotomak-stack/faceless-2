@@ -1446,9 +1446,9 @@ ipcMain.handle('get-export-config', async (event, options) => {
     }
 });
 
-ipcMain.handle('mux-audio', async (event, videoFile, outputFile) => {
+ipcMain.handle('mux-audio', async (event, videoFile, outputFile, audioTrimStartSec, audioTrimEndSec) => {
     try {
-        const exp = { videoFile, outputFile };
+        const exp = { videoFile, outputFile, audioTrimStartSec, audioTrimEndSec };
         const finalOutput = await _webglMuxAudio(exp);
         return { success: true, outputPath: finalOutput };
     } catch (err) {
@@ -1495,6 +1495,24 @@ async function _webglMuxAudio(exp) {
                 }
             }
         } catch (_) { }
+    }
+
+    // If rendering a sub-range (in/out points), filter SFX to that range and adjust timing
+    const trimStart = exp.audioTrimStartSec || 0;
+    const trimEnd = exp.audioTrimEndSec || Infinity;
+    if (trimStart > 0 || trimEnd < Infinity) {
+        const before = sfxClips.length;
+        sfxClips = sfxClips.filter(sfx => {
+            const sfxEnd = sfx.startTime + sfx.duration;
+            return sfxEnd > trimStart && sfx.startTime < trimEnd;
+        });
+        // Adjust startTime relative to the trim start
+        for (const sfx of sfxClips) {
+            sfx.startTime = Math.max(0, sfx.startTime - trimStart);
+        }
+        if (before !== sfxClips.length) {
+            console.log(`[WebGL Export] SFX trimmed: ${before} → ${sfxClips.length} clips (range ${trimStart.toFixed(1)}s-${trimEnd === Infinity ? 'end' : trimEnd.toFixed(1) + 's'})`);
+        }
     }
 
     const hasSfx = sfxClips.length > 0;
@@ -1571,9 +1589,11 @@ async function _webglMuxAudio(exp) {
         }
 
         // Mix all streams together
+        // normalize=0 prevents amix from dividing volume by input count
+        // (with 200+ SFX clips, the default normalize=1 makes everything silent)
         const mixCount = mixInputs.length;
         filterParts.push(
-            `${mixInputs.join('')}amix=inputs=${mixCount}:duration=longest:dropout_transition=0[aout]`
+            `${mixInputs.join('')}amix=inputs=${mixCount}:duration=longest:dropout_transition=0:normalize=0[aout]`
         );
 
         const filterComplex = filterParts.join(';');
@@ -1600,21 +1620,26 @@ async function _webglMuxAudio(exp) {
         muxProc.stderr.on('data', (d) => { stderr += d.toString(); });
 
         muxProc.on('close', (code) => {
-            try { fs.unlinkSync(exp.videoFile); } catch (_) { }
-
             if (code === 0) {
                 console.log('[WebGL Export] Final output:', exp.outputFile);
+                // Clean up temp video after successful mux
+                try { fs.unlinkSync(exp.videoFile); } catch (_) { }
                 resolve(exp.outputFile);
             } else {
                 console.error('[WebGL Export] Mux failed:', stderr.slice(-500));
-                // Fallback: use video-only file
-                try { fs.copyFileSync(exp.videoFile, exp.outputFile); } catch (_) { }
+                // Fallback: use video-only file (rename, don't delete first)
+                try { fs.renameSync(exp.videoFile, exp.outputFile); } catch (_) {
+                    try { fs.copyFileSync(exp.videoFile, exp.outputFile); } catch (_2) { }
+                }
                 resolve(exp.outputFile);
             }
         });
 
         muxProc.on('error', (err) => {
-            try { fs.copyFileSync(exp.videoFile, exp.outputFile); } catch (_) { }
+            console.error('[WebGL Export] Mux process error:', err.message);
+            try { fs.renameSync(exp.videoFile, exp.outputFile); } catch (_) {
+                try { fs.copyFileSync(exp.videoFile, exp.outputFile); } catch (_2) { }
+            }
             resolve(exp.outputFile);
         });
     });
