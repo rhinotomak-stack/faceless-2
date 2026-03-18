@@ -76,13 +76,18 @@ class ExportPipeline {
         const width = (options && options.width) || this.compositor.width;
         const height = (options && options.height) || this.compositor.height;
         const fps = (options && options.fps) || this.compositor.fps;
-        const totalFrames = this.compositor.totalFrames;
+        // In/Out point support: render only a sub-range of the timeline
+        const fullTotalFrames = this.compositor.totalFrames;
+        const startFrame = (options && options.startFrame != null) ? options.startFrame : 0;
+        const endFrame = (options && options.endFrame != null) ? options.endFrame : fullTotalFrames;
+        const totalFrames = endFrame - startFrame;
 
         if (totalFrames <= 0) {
-            return { success: false, error: 'No frames to export (empty timeline)' };
+            return { success: false, error: 'No frames to export (empty timeline or invalid in/out range)' };
         }
 
         const legacy = !!(options && options.legacy);
+        this._startFrame = startFrame;
         const expectedFrameSize = width * height * 4;
 
         this._running = true;
@@ -100,7 +105,10 @@ class ExportPipeline {
             return { success: false, error: 'Direct-spawn not available. Check contextIsolation/sandbox settings.' };
         }
 
-        console.log(`[ExportPipeline] Starting ${legacy ? 'LEGACY' : 'OPTIMIZED'} DIRECT-SPAWN export: ${totalFrames} frames, ${width}x${height} @ ${fps}fps`);
+        const rangeInfo = startFrame > 0 || endFrame < fullTotalFrames
+            ? ` (frames ${startFrame}-${endFrame} of ${fullTotalFrames})`
+            : '';
+        console.log(`[ExportPipeline] Starting ${legacy ? 'LEGACY' : 'OPTIMIZED'} DIRECT-SPAWN export: ${totalFrames} frames${rangeInfo}, ${width}x${height} @ ${fps}fps`);
         const startTime = performance.now();
 
         let videoFile = null;
@@ -190,9 +198,13 @@ class ExportPipeline {
                 // Backpressure: wait for FFmpeg to drain before accepting more frames
                 if (!canWrite) {
                     await new Promise((resolve, reject) => {
-                        ffmpegProc.stdin.once('drain', resolve);
-                        ffmpegProc.stdin.once('error', reject);
+                        const timeout = setTimeout(() => {
+                            if (this._cancelled) resolve(); // Unblock on cancel
+                        }, 500);
+                        ffmpegProc.stdin.once('drain', () => { clearTimeout(timeout); resolve(); });
+                        ffmpegProc.stdin.once('error', (err) => { clearTimeout(timeout); reject(err); });
                     });
+                    if (this._cancelled) throw new Error('Export cancelled');
                 }
 
                 // Periodic logging
@@ -240,7 +252,8 @@ class ExportPipeline {
             console.log(`[ExportPipeline] Video encoded: ${videoFile} (${this._framesWritten} frames)`);
 
             // 7. Mux audio via IPC (lightweight, one-time call)
-            const muxResult = await window.electronAPI.muxAudio(videoFile, outputFile);
+            // Pass audio trim range if rendering a sub-range (in/out points)
+            const muxResult = await window.electronAPI.muxAudio(videoFile, outputFile, startFrame > 0 ? startFrame / fps : undefined, endFrame < fullTotalFrames ? endFrame / fps : undefined);
             if (!muxResult || !muxResult.success) {
                 throw new Error(muxResult?.error || 'Audio mux failed');
             }
@@ -327,14 +340,16 @@ class ExportPipeline {
      */
     async _runLegacyFrameLoop(fps, totalFrames, startTime, writeFrame) {
         let usePBO = this._pboEnabled;
-        console.log(`[ExportPipeline] Legacy loop: pbo=${usePBO}`);
+        const startFrame = this._startFrame || 0;
+        console.log(`[ExportPipeline] Legacy loop: pbo=${usePBO}, startFrame=${startFrame}`);
         let lastProgressTime = 0;
 
         // PBO pipeline FIFO
         const pending = [];
         let consecutiveTimeouts = 0;
+        let framesRendered = 0;
 
-        for (let frame = 0; frame < totalFrames; frame++) {
+        for (let frame = startFrame; frame < startFrame + totalFrames; frame++) {
             if (this._cancelled) throw new Error('Export cancelled');
 
             // Seek all active videos to this frame
@@ -405,11 +420,13 @@ class ExportPipeline {
                 await writeFrame(target.buffer);
             }
 
-            this._reportProgress(frame, totalFrames, startTime, lastProgressTime, (t) => { lastProgressTime = t; });
+            framesRendered++;
+            this._reportProgress(framesRendered - 1, totalFrames, startTime, lastProgressTime, (t) => { lastProgressTime = t; });
         }
 
         // PBO DRAIN
         while (pending.length > 0) {
+            if (this._cancelled) throw new Error('Export cancelled');
             const old = pending.shift();
             const fenceOk = await this.compositor.awaitFence(old.sync);
             if (!fenceOk) {
@@ -419,6 +436,7 @@ class ExportPipeline {
                 this.compositor.readPixelsInto(target);
                 await writeFrame(target.buffer);
                 for (const p of pending) {
+                    if (this._cancelled) throw new Error('Export cancelled');
                     if (p.sync) try { this.compositor.gl.deleteSync(p.sync); } catch (_) { }
                     this.compositor.renderFrame(p.frame);
                     const t = this._nextPoolBuffer();
@@ -497,16 +515,18 @@ class ExportPipeline {
 
         // 2. Frame loop
         let usePBO = this._pboEnabled;
-        console.log(`[ExportPipeline] Optimized loop: pbo=${usePBO}`);
+        const startFrame = this._startFrame || 0;
+        console.log(`[ExportPipeline] Optimized loop: pbo=${usePBO}, startFrame=${startFrame}`);
         let lastProgressTime = 0;
         const exportFrameSources = new Map();
         this.compositor._exportFrameSources = exportFrameSources;
 
         const pending = [];
         let consecutiveTimeouts = 0;
+        let framesRendered = 0;
 
         try {
-            for (let frame = 0; frame < totalFrames; frame++) {
+            for (let frame = startFrame; frame < startFrame + totalFrames; frame++) {
                 if (this._cancelled) throw new Error('Export cancelled');
 
                 const activeScenes = this.compositor.sceneGraph.getActiveScenesAtFrame(frame);
@@ -625,11 +645,13 @@ class ExportPipeline {
                     await writeFrame(target.buffer);
                 }
 
-                this._reportProgress(frame, totalFrames, startTime, lastProgressTime, (t) => { lastProgressTime = t; });
+                framesRendered++;
+                this._reportProgress(framesRendered - 1, totalFrames, startTime, lastProgressTime, (t) => { lastProgressTime = t; });
             }
 
             // PBO DRAIN
             while (pending.length > 0) {
+                if (this._cancelled) throw new Error('Export cancelled');
                 const old = pending.shift();
                 const fenceOk = await this.compositor.awaitFence(old.sync);
                 if (!fenceOk) {
@@ -641,6 +663,7 @@ class ExportPipeline {
                     const allRemaining = [old, ...pending];
                     pending.length = 0;
                     for (const p of allRemaining) {
+                        if (this._cancelled) throw new Error('Export cancelled');
                         if (p.sync) try { this.compositor.gl.deleteSync(p.sync); } catch (_) { }
                         const activeAtFrame = this.compositor.sceneGraph.getActiveScenesAtFrame(p.frame);
                         for (const { scene } of activeAtFrame) {
@@ -750,14 +773,24 @@ class ExportPipeline {
 
     /**
      * Cancel an in-progress export.
+     * Uses taskkill on Windows for reliable FFmpeg termination.
      */
     cancel() {
         this._cancelled = true;
-        if (this._ffmpegProc && !this._ffmpegProc.killed) {
-            try {
-                this._ffmpegProc.stdin.destroy();
-                this._ffmpegProc.kill('SIGTERM');
-            } catch (_) { }
+        const proc = this._ffmpegProc;
+        if (proc && !proc.killed) {
+            const pid = proc.pid;
+            try { proc.stdin.destroy(); } catch (_) { }
+            // On Windows, SIGTERM is unreliable — use taskkill /f /t to kill the process tree
+            if (typeof process !== 'undefined' && process.platform === 'win32' && pid) {
+                try {
+                    _spawn('taskkill', ['/pid', String(pid), '/f', '/t'], { windowsHide: true });
+                } catch (_) {
+                    try { proc.kill('SIGKILL'); } catch (_2) { }
+                }
+            } else {
+                try { proc.kill('SIGTERM'); } catch (_) { }
+            }
         }
     }
 }

@@ -229,8 +229,8 @@ window.electronAPI = {
     },
 
     // Mux audio onto a finished video file (uses main process for path resolution)
-    muxAudio: (videoFile, outputFile) => {
-        return ipcRenderer.invoke('mux-audio', videoFile, outputFile);
+    muxAudio: (videoFile, outputFile, audioTrimStartSec, audioTrimEndSec) => {
+        return ipcRenderer.invoke('mux-audio', videoFile, outputFile, audioTrimStartSec, audioTrimEndSec);
     },
 };
 

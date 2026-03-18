@@ -69,7 +69,7 @@ class SceneGraph {
         // --- Parse transitions ---
         if (plan.transitions && plan.transitions.length) {
             for (const t of plan.transitions) {
-                if (!t.type || t.type === 'cut') continue; // Skip hard cuts
+                if (!t.type || t.type === 'cut' || t.type === 'none') continue; // Skip hard cuts
                 const dur = t.duration || 0.5; // seconds
                 const durationFrames = Math.round(dur * fps);
                 const halfDur = Math.round(durationFrames / 2);

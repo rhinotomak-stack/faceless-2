@@ -69,6 +69,12 @@ class Compositor {
         // Preview resolution scaling (0.5 = half-res for performance)
         this._previewScale = 0.5;
 
+        // FBO nesting: when rendering a scene into a transition FBO, the effects
+        // pass must restore to that FBO (not the screen). null = default (screen).
+        this._outerFBO = null;
+        this._outerFBOWidth = 0;
+        this._outerFBOHeight = 0;
+
     }
 
     // ========================================================================
@@ -455,11 +461,24 @@ class Compositor {
         const rw = this._renderWidth();
         const rh = this._renderHeight();
         gl.viewport(0, 0, rw, rh);
-        gl.clearColor(0, 0, 0, 1);
-        gl.clear(gl.COLOR_BUFFER_BIT);
 
         // 1. Get active scenes at this frame
         const activeScenes = this.sceneGraph.getActiveScenesAtFrame(frame);
+
+        if (activeScenes.length === 0) {
+            // No active scenes — keep previous frame on screen (don't clear to black)
+            // This prevents black flash at scene boundaries with timing gaps
+            if (!this._warnedEmptyFrame) {
+                console.warn(`[Compositor] No active scenes at frame ${frame} (t=${(frame / this.fps).toFixed(2)}s)`);
+                this._warnedEmptyFrame = true;
+            }
+            return;
+        }
+        this._warnedEmptyFrame = false;
+
+        // Clear to black before rendering (only when we have content to draw)
+        gl.clearColor(0, 0, 0, 1);
+        gl.clear(gl.COLOR_BUFFER_BIT);
 
         // 2. Check for transitions
         const transition = this.sceneGraph.getTransitionAtFrame(frame);
@@ -478,10 +497,24 @@ class Compositor {
                     () => this._drawQuad()
                 );
             } else {
-                // Fallback: render whichever is available
-                const fallbackScene = fboTexA ? transition.sceneA : transition.sceneB;
-                const fallbackTex = this._getSceneTexture(fallbackScene, frame);
-                if (fallbackTex) this._renderSceneTexture(fallbackTex, 1.0, fallbackScene);
+                // Fallback: render the scene that HAS a texture directly (no FBO)
+                if (!this._transWarnThrottle || frame - this._transWarnThrottle > 30) {
+                    console.warn(`[Compositor] Transition FBO fail at frame ${frame}: A=${!!fboTexA} B=${!!fboTexB}, type=${transition.type}, sceneA=${transition.sceneA.index} sceneB=${transition.sceneB.index}`);
+                    this._transWarnThrottle = frame;
+                }
+                // Try to render at least one scene directly
+                const sceneToRender = fboTexA ? transition.sceneA : (fboTexB ? transition.sceneB : null);
+                if (sceneToRender) {
+                    const fallbackTex = this._getSceneTexture(sceneToRender, frame);
+                    if (fallbackTex) this._renderSceneTexture(fallbackTex, 1.0, sceneToRender);
+                } else {
+                    // Both FBOs failed - try to render both scenes directly as fallback
+                    const texA = this._getSceneTexture(transition.sceneA, frame);
+                    const texB = this._getSceneTexture(transition.sceneB, frame);
+                    const best = texB || texA;
+                    const bestScene = texB ? transition.sceneB : transition.sceneA;
+                    if (best) this._renderSceneTexture(best, 1.0, bestScene);
+                }
             }
 
             // Also render non-transitioning scenes on other tracks
@@ -537,13 +570,8 @@ class Compositor {
                         this._renderSceneTexture(tex, 1.0, scene);
                     }
                 } else if (scene._compositorDirective) {
-                    // Compositor overlay: render as a floating image using viewport
-                    gl.enable(gl.BLEND);
-                    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-                    const overlayScene = Object.assign({}, scene, { background: 'none' });
-                    this._applySlideAnimation(overlayScene, frame);
-                    this._renderOverlayTexture(tex, 1.0, overlayScene);
-                    gl.disable(gl.BLEND);
+                    // V2 overlay system DISABLED — skip compositor directive scenes
+                    continue;
                 } else {
                     // Upper tracks (non-overlay): alpha blend, slide animation
                     gl.enable(gl.BLEND);
@@ -598,18 +626,22 @@ class Compositor {
         if (!el) return null;
 
         if (el instanceof HTMLVideoElement) {
-            // Sync video time for preview mode
-            if (!this._exporting && el.readyState >= 2) {
-                const localTime = (frame - scene._startFrame) / this.fps;
-                const mediaOffset = scene.mediaOffset || 0;
-                // Clamp to valid range (during transitions, frame may be outside scene bounds)
-                const targetTime = Math.max(0, localTime + mediaOffset);
-                // Only seek if drift is significant (avoid constant seeks)
-                if (Math.abs(el.currentTime - targetTime) > 0.1) {
-                    el.currentTime = Math.min(targetTime, el.duration || targetTime);
+            if (el.readyState >= 2 && el.videoWidth > 0 && el.videoHeight > 0) {
+                // Sync video time for preview mode
+                if (!this._exporting) {
+                    const localTime = (frame - scene._startFrame) / this.fps;
+                    const mediaOffset = scene.mediaOffset || 0;
+                    // Clamp to valid range (during transitions, frame may be outside scene bounds)
+                    const targetTime = Math.max(0, localTime + mediaOffset);
+                    // Only seek if drift is significant (avoid constant seeks)
+                    if (Math.abs(el.currentTime - targetTime) > 0.08) {
+                        el.currentTime = Math.min(targetTime, el.duration || targetTime);
+                    }
                 }
+                return this.textureManager.createOrUpdate(texId, el);
             }
-            return this.textureManager.createOrUpdate(texId, el);
+            // Video not ready — return existing texture (last valid frame) instead of black placeholder
+            return this.textureManager.get(texId);
         } else if (el instanceof HTMLImageElement) {
             if (el.naturalWidth > 0) {
                 return this.textureManager.createOrUpdate(texId, el);
@@ -738,10 +770,13 @@ class Compositor {
             this._blitTexture(texEntry.texture, opacity, scaleX, scaleY, offsetX, offsetY, scene);
         }
 
-        // Apply effects pass: read from FBO, apply effects shader, blit to default framebuffer
+        // Apply effects pass: read from effects FBO, apply effects shader, blit to destination
         if (hasEffects) {
-            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-            gl.viewport(0, 0, rw, rh);
+            // Restore to outer FBO (transition FBO) if nested, otherwise screen
+            gl.bindFramebuffer(gl.FRAMEBUFFER, this._outerFBO || null);
+            const destW = this._outerFBO ? this._outerFBOWidth : rw;
+            const destH = this._outerFBO ? this._outerFBOHeight : rh;
+            gl.viewport(0, 0, destW, destH);
             this._applyEffectsPass(this._effectsFBO.texture, sceneEffects, scene);
         }
     }
@@ -851,7 +886,8 @@ class Compositor {
         // Set viewport to overlay region
         gl.viewport(vpX, vpY, Math.round(imgW), Math.round(imgH));
 
-        // Render with identity transform (image fills the viewport exactly)
+        // Render with identity transform — FLIP_Y=true on upload + standard vertex shader
+        // means all HTML-source textures are correctly oriented without extra flips.
         this._blitTexture(texEntry.texture, opacity, 1, 1, 0, 0, scene);
 
         // Restore full viewport
@@ -890,7 +926,8 @@ class Compositor {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         this._drawCSSGradient(ctx, cssGradient, canvas.width, canvas.height);
 
-        // Upload to WebGL texture
+        // Upload to WebGL texture (canvas — no FLIP_Y)
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
         const tex = gl.createTexture();
         gl.bindTexture(gl.TEXTURE_2D, tex);
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, canvas);
@@ -925,6 +962,7 @@ class Compositor {
             const vid = cached._videoEl;
             if (vid && vid.readyState >= 2 && !vid.paused) {
                 const gl = this.gl;
+                gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
                 gl.bindTexture(gl.TEXTURE_2D, cached);
                 gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, vid);
             }
@@ -946,6 +984,8 @@ class Compositor {
         ];
 
         const _uploadTexture = (source) => {
+            // Pattern backgrounds are HTML image/video elements — need FLIP_Y
+            gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, !(source instanceof HTMLCanvasElement));
             const tex = gl.createTexture();
             gl.bindTexture(gl.TEXTURE_2D, tex);
             gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
@@ -1318,8 +1358,18 @@ class Compositor {
         gl.clearColor(0, 0, 0, 1);
         gl.clear(gl.COLOR_BUFFER_BIT);
 
+        // Tell _renderSceneTexture to restore to THIS FBO after effects pass
+        // (without this, the effects pass restores to null = screen, leaving the FBO black)
+        this._outerFBO = fboEntry.fbo;
+        this._outerFBOWidth = fboEntry.width;
+        this._outerFBOHeight = fboEntry.height;
+
         // Use the full scene rendering pipeline (background, transform, crop, etc.)
         this._renderSceneTexture(tex, 1.0, scene);
+
+        this._outerFBO = null;
+        this._outerFBOWidth = 0;
+        this._outerFBOHeight = 0;
 
         // Restore rendering to the screen framebuffer
         gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -1734,8 +1784,15 @@ class Compositor {
                 fbo.width = rw;
                 fbo.height = rh;
             }
-            gl.bindTexture(gl.TEXTURE_2D, null);
         }
+        // Resize effects FBO
+        if (this._effectsFBO) {
+            gl.bindTexture(gl.TEXTURE_2D, this._effectsFBO.texture);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, rw, rh, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+            this._effectsFBO.width = rw;
+            this._effectsFBO.height = rh;
+        }
+        gl.bindTexture(gl.TEXTURE_2D, null);
 
         console.log(`[Compositor] Resolution set to ${rw}x${rh} (scale: ${this._previewScale})`);
     }
@@ -1754,8 +1811,15 @@ class Compositor {
                 fbo.width = this.width;
                 fbo.height = this.height;
             }
-            gl.bindTexture(gl.TEXTURE_2D, null);
         }
+        // Resize effects FBO to full resolution too
+        if (gl && this._effectsFBO) {
+            gl.bindTexture(gl.TEXTURE_2D, this._effectsFBO.texture);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, this.width, this.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+            this._effectsFBO.width = this.width;
+            this._effectsFBO.height = this.height;
+        }
+        if (gl) gl.bindTexture(gl.TEXTURE_2D, null);
         // MG renderer at full res for export
         if (this.mgRenderer) this.mgRenderer.setPreviewScale(1.0);
         console.log(`[Compositor] Export resolution: ${this.width}x${this.height}`);

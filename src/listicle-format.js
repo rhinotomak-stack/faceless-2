@@ -152,6 +152,9 @@ function buildListicleItemMap(scenes, scriptContext) {
         }
 
         if (itemNumber !== null && !items.some(it => it.itemNumber === itemNumber)) {
+            // Find exact spoken timestamp from word-level data
+            const spokenTime = _findSpokenTime(scenes[i], itemNumber);
+
             items.push({
                 itemNumber,
                 displayLabel,
@@ -160,6 +163,7 @@ function buildListicleItemMap(scenes, scriptContext) {
                 endSceneIndex: -1, // filled below
                 startTime: scenes[i].startTime,
                 endTime: -1, // filled below
+                spokenTime, // word-level timestamp of when number is actually said
             });
         }
     }
@@ -234,13 +238,58 @@ function getListicleTransitionRules(sceneIndex, listicleItems, scriptContext) {
     return null;
 }
 
+// ============ WORD TIMESTAMP SEARCH ============
+
+/**
+ * Strip punctuation from a Whisper word for matching.
+ * Whisper often outputs "nine," or "nine." — we need clean "nine".
+ */
+function _cleanWord(w) {
+    return (w || '').toLowerCase().replace(/[^a-z0-9#]/g, '');
+}
+
+/**
+ * Search a scene's word timestamps to find when a number is actually spoken.
+ * Handles: "nine", "9", "#9", and the phrase "number nine" (two consecutive words).
+ *
+ * @param {Object} scene - Scene with .words array
+ * @param {number} itemNumber - The list item number to find
+ * @returns {number|null} - Timestamp when the number is spoken, or null
+ */
+function _findSpokenTime(scene, itemNumber) {
+    const words = scene.words;
+    if (!words || words.length === 0) return null;
+
+    const numStr = String(itemNumber);
+    const numWord = Object.keys(WORD_TO_NUM).find(w => WORD_TO_NUM[w] === itemNumber);
+
+    for (let wi = 0; wi < words.length; wi++) {
+        const clean = _cleanWord(words[wi].word || words[wi].text);
+
+        // Direct match: "nine", "9", "#9"
+        if (clean === numStr || clean === numWord || clean === `#${numStr}`) {
+            return words[wi].start || words[wi].startTime || null;
+        }
+
+        // Phrase match: "number" + "nine" as consecutive words
+        if (clean === 'number' && wi + 1 < words.length) {
+            const nextClean = _cleanWord(words[wi + 1].word || words[wi + 1].text);
+            if (nextClean === numStr || nextClean === numWord) {
+                return words[wi].start || words[wi].startTime || null;
+            }
+        }
+    }
+
+    return null;
+}
+
 // ============ ITEM COUNTER MG ============
 
 /**
  * Generate a counter MG for a listicle item (e.g., "10", "9", "8").
  * Reuses existing focusWord MG type — no new renderer needed.
  *
- * @param {Object} item - ListicleItem { itemNumber, displayLabel, startSceneIndex, startTime, title }
+ * @param {Object} item - ListicleItem { itemNumber, displayLabel, startSceneIndex, startTime, spokenTime, title }
  * @param {Array} scenes
  * @param {Object} mgStyle - Current MG style from theme
  * @returns {Object|null} MG object
@@ -249,30 +298,56 @@ function generateItemCounterMG(item, scenes, mgStyle) {
     const scene = scenes[item.startSceneIndex];
     if (!scene) return null;
 
-    // Try to align with the spoken number using word timestamps
-    let mgStartTime = item.startTime;
-    if (scene.words && scene.words.length > 0) {
-        // Find the word that contains the number
-        const numberStr = String(item.itemNumber);
-        const numberWord = Object.keys(WORD_TO_NUM).find(w => WORD_TO_NUM[w] === item.itemNumber);
+    // Priority: spokenTime (from buildListicleItemMap) > word-sync fallback > startTime
+    let mgStartTime = item.spokenTime || null;
 
-        for (const word of scene.words) {
-            const wLower = (word.word || word.text || '').toLowerCase().trim();
-            if (wLower === numberStr || wLower === numberWord || wLower === `#${numberStr}`) {
-                mgStartTime = word.start || word.startTime || item.startTime;
-                break;
-            }
+    // If buildListicleItemMap didn't find it, try adjacent scenes too
+    if (!mgStartTime) {
+        const searchIndices = [item.startSceneIndex];
+        if (item.startSceneIndex + 1 < scenes.length) searchIndices.push(item.startSceneIndex + 1);
+
+        for (const si of searchIndices) {
+            mgStartTime = _findSpokenTime(scenes[si], item.itemNumber);
+            if (mgStartTime) break;
         }
     }
 
+    // Final fallback: scene start time
+    if (!mgStartTime) mgStartTime = item.startTime;
+
+    // Small lead-in: show MG 0.3s before the word so visual cue leads audio
+    mgStartTime = Math.max(0, mgStartTime - 0.3);
+
+    // Pick overlay type based on MG style — consistent across all items in a video
+    const STYLE_TO_COUNTER_TYPE = {
+        cinematic: 'lowerThird',
+        elegant:   'typewriter',
+        bold:      'headline',
+        minimal:   'callout',
+        clean:     'lowerThird',
+        neon:      'headline',
+    };
+    const mgType = STYLE_TO_COUNTER_TYPE[mgStyle] || 'lowerThird';
+
+    const numberPrefix = `#${item.itemNumber}`;
+    const title = item.title || '';
+    const displayText = title ? `${numberPrefix} ${title}` : numberPrefix;
+
+    const positions = {
+        lowerThird: 'bottomLeft',
+        headline: 'center',
+        typewriter: 'bottomLeft',
+        callout: 'center',
+    };
+
     return {
-        type: 'focusWord',
-        text: String(item.itemNumber),
-        subtext: item.title || '',
+        type: mgType,
+        text: displayText,
+        subtext: '',
         startTime: mgStartTime,
-        duration: 3.0,
-        position: 'center',
-        category: 'fullscreen',
+        duration: 4.0,
+        position: positions[mgType] || 'bottomLeft',
+        category: 'overlay',
         isListicleCounter: true,
         sceneIndex: item.startSceneIndex,
         selectionMode: 'listicle-counter',

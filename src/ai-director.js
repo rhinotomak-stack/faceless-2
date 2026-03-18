@@ -18,6 +18,7 @@ const axios = require('axios');
 const config = require('./config');
 const { callAI } = require('./ai-provider');
 const { pickNicheFromContent, getNiche } = require('./niches');
+const { getTheme, TRANSITION_LIBRARY } = require('./themes');
 const { searchWeb, hasAnyWebSearchCredentials } = require('./web-search-client');
 
 // ============================================================
@@ -1089,21 +1090,37 @@ function assignTransitions(scenes, scriptContext) {
     const pacing = (scriptContext && scriptContext.pacing) || 'moderate';
     const isFast = pacing === 'fast' || pacing === 'rapid';
     const isSlow = pacing === 'slow' || pacing === 'relaxed';
+    const themeId = (scriptContext && scriptContext.themeId) || 'standard';
+    const theme = getTheme(themeId);
+
+    // Theme-driven transition pools
+    const primaryPool = theme.transitions.primary || ['crossfade'];
+    const secondaryPool = theme.transitions.secondary || ['fade'];
+    const avoidSet = new Set(theme.transitions.avoid || []);
 
     // Pacing-driven duration multiplier — fast = snappy, slow = smooth
     const durScale = isFast ? 0.4 : isSlow ? 1.5 : 1.0;
 
-    // Base durations (moderate pacing) — scaled by durScale
-    const dur = {
-        crossfade:     +(0.5 * durScale).toFixed(2),   // fast: 0.2s, moderate: 0.5s, slow: 0.75s
-        flash:         +(0.15 * durScale).toFixed(2),   // fast: 0.06s, moderate: 0.15s, slow: 0.23s
-        fade_to_black: +(0.4 * durScale).toFixed(2),    // fast: 0.16s, moderate: 0.4s, slow: 0.6s
-        slide:         +(0.35 * durScale).toFixed(2),    // fast: 0.14s, moderate: 0.35s, slow: 0.53s
-        wipe:          +(0.4 * durScale).toFixed(2),     // fast: 0.16s, moderate: 0.4s, slow: 0.6s
-        zoom:          +(0.35 * durScale).toFixed(2),    // fast: 0.14s, moderate: 0.35s, slow: 0.53s
-        blur:          +(0.4 * durScale).toFixed(2),     // fast: 0.16s, moderate: 0.4s, slow: 0.6s
-        dissolve:      +(0.5 * durScale).toFixed(2),     // fast: 0.2s, moderate: 0.5s, slow: 0.75s
-    };
+    // Cut ratio: how often to use hard cuts (pacing-driven)
+    // Fast = lots of cuts, slow = very few, moderate = some
+    const cutRatio = isFast ? 0.50 : isSlow ? 0.08 : 0.25;
+
+    // Get duration for a transition type from TRANSITION_LIBRARY, scaled by pacing
+    function getDuration(type) {
+        const libEntry = TRANSITION_LIBRARY[type];
+        const baseDur = libEntry ? libEntry.duration / 1000 : 0.5; // ms → seconds
+        return +(baseDur * durScale).toFixed(2);
+    }
+
+    // Pick a random transition from theme pools
+    // 70% primary pool, 30% secondary pool (gives variety while staying on-theme)
+    function pickThemeTransition() {
+        const pool = Math.random() < 0.7 ? primaryPool : secondaryPool;
+        return pool[Math.floor(Math.random() * pool.length)];
+    }
+
+    // Track recent transitions to avoid too many repeats
+    const recentTypes = [];
 
     for (let i = 0; i < scenes.length; i++) {
         const scene = scenes[i];
@@ -1116,7 +1133,7 @@ function assignTransitions(scenes, scriptContext) {
 
         // Last scene — fade out
         if (i === scenes.length - 1) {
-            scene.transition = { type: 'fade_to_black', duration: dur.fade_to_black };
+            scene.transition = { type: 'fade_to_black', duration: getDuration('fade_to_black') || +(0.4 * durScale).toFixed(2) };
             continue;
         }
 
@@ -1126,47 +1143,40 @@ function assignTransitions(scenes, scriptContext) {
 
         // Gap between scenes — natural pause = fade to black
         if (gap > 0.5) {
-            scene.transition = { type: 'fade_to_black', duration: dur.fade_to_black };
+            scene.transition = { type: 'fade_to_black', duration: getDuration('fade_to_black') || +(0.4 * durScale).toFixed(2) };
             continue;
         }
 
-        // Very short scene or fast pacing — hard cut or flash
-        if (isFast || sceneDuration < 3) {
-            const r = Math.random();
-            scene.transition = r < 0.7
-                ? { type: 'cut', duration: 0 }
-                : { type: 'flash', duration: dur.flash };
-            continue;
-        }
-
-        // Slow pacing — more crossfades and dissolves, fewer cuts
-        if (isSlow) {
-            const r = Math.random();
-            if (r < 0.15) {
-                scene.transition = { type: 'cut', duration: 0 };
-            } else if (r < 0.55) {
-                scene.transition = { type: 'crossfade', duration: dur.crossfade };
-            } else if (r < 0.75) {
-                scene.transition = { type: 'dissolve', duration: dur.dissolve };
-            } else if (r < 0.90) {
-                scene.transition = { type: 'blur', duration: dur.blur };
-            } else {
-                scene.transition = { type: 'fade_to_black', duration: dur.fade_to_black };
-            }
-            continue;
-        }
-
-        // Default (moderate): weighted random
-        const r = Math.random();
-        if (r < 0.45) {
+        // Very short scene — hard cut (transitions look bad on <2s scenes)
+        if (sceneDuration < 2) {
             scene.transition = { type: 'cut', duration: 0 };
-        } else if (r < 0.80) {
-            scene.transition = { type: 'crossfade', duration: dur.crossfade };
-        } else if (r < 0.93) {
-            scene.transition = { type: 'flash', duration: dur.flash };
-        } else {
-            scene.transition = { type: 'fade_to_black', duration: dur.fade_to_black };
+            continue;
         }
+
+        // Roll for cut vs themed transition
+        if (Math.random() < cutRatio) {
+            scene.transition = { type: 'cut', duration: 0 };
+            continue;
+        }
+
+        // Pick from theme pools, avoid repeating the same type 3x in a row
+        let type = pickThemeTransition();
+        let attempts = 0;
+        while (attempts < 5 && recentTypes.length >= 2 &&
+               recentTypes[recentTypes.length - 1] === type &&
+               recentTypes[recentTypes.length - 2] === type) {
+            type = pickThemeTransition();
+            attempts++;
+        }
+
+        // Safety: if somehow picked an avoided transition, re-pick
+        if (avoidSet.has(type)) {
+            type = primaryPool[Math.floor(Math.random() * primaryPool.length)];
+        }
+
+        scene.transition = { type, duration: getDuration(type) };
+        recentTypes.push(type);
+        if (recentTypes.length > 4) recentTypes.shift();
     }
 
     const counts = {};
@@ -1174,7 +1184,7 @@ function assignTransitions(scenes, scriptContext) {
         const t = s.transition?.type || 'cut';
         counts[t] = (counts[t] || 0) + 1;
     });
-    console.log(`   🎬 Transitions (pacing: ${pacing}, speed: ${durScale}x): ${Object.entries(counts).map(([k,v]) => `${k}=${v}`).join(', ')}`);
+    console.log(`   🎬 Transitions (theme: ${themeId}, pacing: ${pacing}, speed: ${durScale}x): ${Object.entries(counts).map(([k,v]) => `${k}=${v}`).join(', ')}`);
 }
 
 // ============================================================

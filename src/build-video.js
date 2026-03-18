@@ -78,9 +78,9 @@ async function buildDumbVideo(transcription, audioFile, directorsBrief) {
     }
     console.log(`   ✅ Keywords assigned\n`);
 
-    // Assign random transitions
-    console.log('🎬 Assigning random transitions...');
-    const defaultContext = { pacing: 'moderate' };
+    // Assign theme-driven transitions
+    console.log('🎬 Assigning transitions...');
+    const defaultContext = { pacing: 'moderate', themeId: 'standard' };
     assignTransitions(scenes, defaultContext);
     console.log('');
 
@@ -297,11 +297,10 @@ async function buildVideo() {
     // Merge recipe prompt with user instructions — flows to all downstream AI modules
     const aiInstructions = [directorsBrief.freeInstructions, recipeResult.promptText].filter(Boolean).join('\n\n');
 
-    // Step 4.7: Compositor Planner — plan V2 image overlays & explainer cards
-    log.step('🎭 Step 4.7: Compositor Planner (V2 Overlays & Explainers)');
+    // Step 4.7: Compositor Planner — DISABLED (V2 overlay system needs rework)
     const nicheId = scriptContext.nicheId || 'general';
-    const compositorPlan = await planCompositorOverlays(scenesWithKeywords, scriptContext, nicheId);
-    const { v2Scenes: plannedV2Scenes, explainerMGs: compositorExplainers } = compositorPlan;
+    const plannedV2Scenes = [];
+    const compositorExplainers = [];
 
     // Step 4.5: Perplexity Research (optional — enriches keywords with real-world sources)
     if (config.perplexity?.apiKey) {
@@ -315,9 +314,19 @@ async function buildVideo() {
         }
     }
 
-    // Step 5: Download media (videos + images from multiple providers)
+    // Separate fullscreenMG scenes (no footage needed) from footage scenes
+    const fullscreenMGScenes = scenesWithKeywords.filter(s => s.fullscreenMG);
+    const footageScenes = scenesWithKeywords.filter(s => !s.fullscreenMG);
+    if (fullscreenMGScenes.length > 0) {
+        log.ok(`${fullscreenMGScenes.length} scene(s) planned as fullscreen MGs — skipping footage download`);
+        for (const s of fullscreenMGScenes) {
+            log.dim(`   Scene ${s.index}: ${s.fullscreenMG}`);
+        }
+    }
+
+    // Step 5: Download media (only for footage scenes — fullscreenMG scenes skipped)
     log.step('🎥 Step 5: Downloading Media');
-    const downloadResult = await downloadAllMedia(scenesWithKeywords, scriptContext);
+    const downloadResult = await downloadAllMedia(footageScenes, scriptContext);
     let scenesWithMedia = downloadResult.scenes;
 
     // Step 5.05: Download V2 overlay images (from compositor planner)
@@ -363,8 +372,23 @@ async function buildVideo() {
 
     // Step 5.1: Auto-detect aspect ratios + apply AI framing decisions
     log.step('📐 Step 5.1: Aspect Ratio & Framing');
+
+    // Load custom background assets for this theme (auto-discovered from assets/backgrounds/)
+    let themeBgAssets = [];
+    let themeBgIndex = 0;
+    try {
+        const { getThemeBackgrounds } = require('./themes');
+        const bgThemeId = scriptContext?.themeId || 'standard';
+        themeBgAssets = getThemeBackgrounds(bgThemeId);
+        if (themeBgAssets.length > 0) {
+            log.dim(`🖼️ Theme "${bgThemeId}" has ${themeBgAssets.length} custom background assets`);
+        }
+    } catch (e) { /* themes.js not available */ }
+
     let autoContainCount = 0;
     let cinematicCount = 0;
+    let fullscreenCount = 0;
+    let customBgCount = 0;
     for (const scene of scenesWithMedia) {
         const w = scene.mediaWidth || 0;
         const h = scene.mediaHeight || 0;
@@ -372,34 +396,57 @@ async function buildVideo() {
         if (w > 0 && h > 0) {
             const ratio = w / h;
 
-            if (ratio < 1.2) {
-                // Clearly non-widescreen: vertical (9:16), square (1:1)
-                // These MUST use contain + blur — cover would crop too much
+            if (ratio < 0.7) {
+                // Vertical (9:16, portrait photos) — contain + blur, too tall to crop
                 scene.fitMode = 'contain';
                 scene.background = 'blur';
                 scene.scale = 1;
                 scene.posX = 0;
                 scene.posY = 0;
                 autoContainCount++;
-
-                const label = ratio < 0.7 ? 'vertical' : ratio < 1.1 ? 'square' : 'near-square';
-                log.dim(`📐 Scene ${scene.index}: ${w}x${h} (${label}, ratio ${ratio.toFixed(2)}) → contain + blur`);
-            } else if (scene.framing === 'cinematic') {
-                // AI recommended cinematic framing — pull back with styled background
-                const cinematicScale = parseFloat(process.env.CINEMATIC_SCALE) || 0.65;
+                log.dim(`📐 Scene ${scene.index}: ${w}x${h} (vertical, ratio ${ratio.toFixed(2)}) → contain + blur`);
+            } else if (ratio < 0.85) {
+                // Portrait (3:4, headshots) — contain + blur
+                scene.fitMode = 'contain';
+                scene.background = 'blur';
+                scene.scale = 1;
+                scene.posX = 0;
+                scene.posY = 0;
+                autoContainCount++;
+                log.dim(`📐 Scene ${scene.index}: ${w}x${h} (portrait, ratio ${ratio.toFixed(2)}) → contain + blur`);
+            } else if (ratio < 1.2) {
+                // Near-square / slightly wide (1:1 to 6:5) — cover with slight crop
+                // These are close enough to 16:9 that a moderate scale looks good
+                const nearScale = ratio < 0.95 ? 0.85 : ratio < 1.05 ? 0.9 : 0.95;
                 scene.fitMode = 'cover';
-                scene.scale = cinematicScale;
+                scene.scale = nearScale;
+                scene.background = 'blur';
+                scene.posX = 0;
+                scene.posY = 0;
+                autoContainCount++;
+                const label = ratio < 0.95 ? 'near-square' : ratio < 1.05 ? 'square' : 'near-wide';
+                log.dim(`📐 Scene ${scene.index}: ${w}x${h} (${label}, ratio ${ratio.toFixed(2)}) → scale ${nearScale} + blur`);
+            } else if (scene.framing === 'cinematic') {
+                // AI recommended cinematic framing — scale based on how wide the image is
+                // Wider images can fill more of the frame; narrower ones need more pullback
+                // Range: 0.75 (barely wide, ratio ~1.2) to 1.0 (very wide, ratio >= 1.78)
+                const targetRatio = 1920 / 1080; // 1.78
+                const fillFactor = Math.min(1, (ratio - 1.0) / (targetRatio - 1.0));
+                const cinematicScale = 0.75 + fillFactor * 0.25; // 0.75 → 1.0
+                scene.fitMode = 'cover';
+                scene.scale = Math.round(cinematicScale * 100) / 100;
                 // Keep AI's background choice (blur, gradient:id, or pattern:file)
                 if (!scene.background || scene.background === 'none') {
-                    scene.background = 'blur'; // Fallback if AI didn't set one
+                    scene.background = 'blur';
                 }
                 scene.posX = 0;
                 scene.posY = 0;
                 cinematicCount++;
-                log.dim(`🎬 Scene ${scene.index}: ${w}x${h} (cinematic) → scale ${cinematicScale} + ${scene.background}`);
+                log.dim(`🎬 Scene ${scene.index}: ${w}x${h} (cinematic) → scale ${scene.scale} + ${scene.background}`);
             } else {
                 // Fullscreen — media fills the frame completely
                 scene.fitMode = 'cover';
+                fullscreenCount++;
             }
         } else {
             // Unknown dimensions — default to cover
@@ -407,11 +454,28 @@ async function buildVideo() {
         }
     }
 
+    // Assign custom background assets to some non-widescreen scenes (variety)
+    // Every ~3rd blur scene gets a custom asset background instead
+    if (themeBgAssets.length > 0) {
+        const blurScenes = scenesWithMedia.filter(s => s.background === 'blur');
+        for (let i = 0; i < blurScenes.length; i++) {
+            if (i % 3 === 1) { // 2nd, 5th, 8th... — roughly 1 in 3
+                const bgFile = themeBgAssets[themeBgIndex % themeBgAssets.length];
+                blurScenes[i].background = `pattern:${bgFile}`;
+                themeBgIndex++;
+                customBgCount++;
+            }
+        }
+    }
+
     const framingTotal = autoContainCount + cinematicCount;
     if (framingTotal > 0) {
-        log.ok(`${autoContainCount} auto-contained (non-widescreen) + ${cinematicCount} cinematic (AI-descaled)`);
+        log.ok(`${autoContainCount} auto-framed (non-widescreen) + ${cinematicCount} cinematic + ${fullscreenCount} fullscreen`);
     } else {
         log.ok('All scenes fullscreen — no auto-framing needed');
+    }
+    if (customBgCount > 0) {
+        log.ok(`${customBgCount} scenes using custom background assets`);
     }
     log.br();
 

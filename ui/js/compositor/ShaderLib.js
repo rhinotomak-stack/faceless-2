@@ -11,9 +11,9 @@ in vec2 a_position;
 out vec2 v_texCoord;
 void main() {
     gl_Position = vec4(a_position, 0.0, 1.0);
-    // Map [-1,1] clip coords to [0,1] UV coords
-    // Flip Y so top-left = (0,0) matching video/image convention
-    v_texCoord = vec2(a_position.x * 0.5 + 0.5, 1.0 - (a_position.y * 0.5 + 0.5));
+    // Standard mapping: [-1,1] clip coords to [0,1] UV coords
+    // NO Y-flip here — FLIP_Y=true on texture upload handles orientation
+    v_texCoord = vec2(a_position.x * 0.5 + 0.5, a_position.y * 0.5 + 0.5);
 }`;
 
 // ============================================================================
@@ -130,10 +130,8 @@ in vec2 v_texCoord;
 out vec4 fragColor;
 
 void main() {
-    // FBO textures are Y-flipped compared to default framebuffer
-    vec2 tc = vec2(v_texCoord.x, 1.0 - v_texCoord.y);
-    vec4 colorA = texture(u_textureA, tc);
-    vec4 colorB = texture(u_textureB, tc);
+    vec4 colorA = texture(u_textureA, v_texCoord);
+    vec4 colorB = texture(u_textureB, v_texCoord);
     fragColor = mix(colorA, colorB, u_progress);
 }`;
 
@@ -153,18 +151,16 @@ in vec2 v_texCoord;
 out vec4 fragColor;
 
 void main() {
-    // FBO textures are Y-flipped compared to default framebuffer
-    vec2 tc = vec2(v_texCoord.x, 1.0 - v_texCoord.y);
     float edge;
-    if (u_direction == 0)      edge = tc.x;
-    else if (u_direction == 1) edge = 1.0 - tc.x;
-    else if (u_direction == 2) edge = tc.y;
-    else                       edge = 1.0 - tc.y;
+    if (u_direction == 0)      edge = v_texCoord.x;
+    else if (u_direction == 1) edge = 1.0 - v_texCoord.x;
+    else if (u_direction == 2) edge = v_texCoord.y;
+    else                       edge = 1.0 - v_texCoord.y;
 
     float t = smoothstep(u_progress - u_softness, u_progress + u_softness, edge);
 
-    vec4 colorA = texture(u_textureA, tc);
-    vec4 colorB = texture(u_textureB, tc);
+    vec4 colorA = texture(u_textureA, v_texCoord);
+    vec4 colorB = texture(u_textureB, v_texCoord);
     fragColor = mix(colorB, colorA, t);
 }`;
 

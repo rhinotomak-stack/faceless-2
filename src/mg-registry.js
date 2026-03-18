@@ -66,11 +66,11 @@ const MG_REGISTRY = {
         label: 'Stat Counter',
         group: 'overlay',
         types: {
-            standard:  { label: 'Standard',       animation: 'countUp' },
-            ticker:    { label: 'Ticker',         animation: 'slideLeft' },
-            ring:      { label: 'Ring Gauge',     animation: 'popUp' },
+            standard:  { label: 'Standard',       animation: 'countUp',  themeOverridable: true },
+            ticker:    { label: 'Ticker',         animation: 'countUp',  themeOverridable: true },
+            ring:      { label: 'Ring Gauge',     animation: 'countUp',  themeOverridable: true },
         },
-        animations: ['countUp', 'slideLeft', 'popUp', 'fadeSlide'],
+        animations: ['countUp'],
         defaultType: 'standard',
         fields: ['text', 'subtext', 'position'],
     },
@@ -197,6 +197,18 @@ const MG_REGISTRY = {
         animations: ['springScale'],
         defaultType: 'standard',
         fields: ['text'],
+    },
+
+    typewriter: {
+        label: 'Typewriter',
+        group: 'overlay',
+        types: {
+            standard:  { label: 'Standard',       animation: 'slideLeft', themeOverridable: true },
+            naked:     { label: 'Naked',          animation: 'slideLeft', themeOverridable: true },
+        },
+        animations: ['slideLeft', 'fadeSlide'],
+        defaultType: 'standard',
+        fields: ['text', 'subtext', 'position'],
     },
 
     subscribeCTA: {

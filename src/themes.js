@@ -391,6 +391,49 @@ const BACKGROUND_LIBRARY = {
     },
 };
 
+// ============================================================
+// THEME BACKGROUND ASSETS — Auto-discovered from assets/backgrounds/
+// Naming convention: "{themeId}--{name}.ext" → assigned to that theme.
+// Files without a theme prefix are universal (available to all themes).
+// Step 5.1 uses getThemeBackgrounds() to find assets for the active theme.
+// ============================================================
+
+const _fs = require('fs');
+const _path = require('path');
+const _bgDir = _path.join(__dirname, '..', 'assets', 'backgrounds');
+const _supportedBgExts = new Set(['.jpg', '.jpeg', '.png', '.gif', '.mp4', '.webm', '.mov']);
+const _validThemes = new Set(['crime', 'history', 'modern', 'minimal', 'standard']);
+
+/**
+ * Scan assets/backgrounds/ and return filenames for a given theme.
+ * Matches files starting with "{themeId}--". Caches results.
+ * @param {string} themeId
+ * @returns {string[]} Array of filenames (e.g. ['history--V1.jpg', 'history--V2.jpg'])
+ */
+let _bgScanCache = null;
+function getThemeBackgrounds(themeId) {
+    if (!_bgScanCache) {
+        _bgScanCache = {};
+        if (_fs.existsSync(_bgDir)) {
+            const files = _fs.readdirSync(_bgDir).filter(f => {
+                const ext = _path.extname(f).toLowerCase();
+                return _supportedBgExts.has(ext) && !f.startsWith('.');
+            });
+            for (const f of files) {
+                const dashIdx = f.indexOf('--');
+                if (dashIdx > 0) {
+                    const prefix = f.substring(0, dashIdx).toLowerCase();
+                    if (_validThemes.has(prefix)) {
+                        if (!_bgScanCache[prefix]) _bgScanCache[prefix] = [];
+                        _bgScanCache[prefix].push(f);
+                    }
+                }
+            }
+        }
+    }
+    return _bgScanCache[themeId] || [];
+}
+
 /**
  * Get backgrounds matching a theme and mood
  * @param {string} themeId - Theme identifier
@@ -982,19 +1025,34 @@ const MG_STYLE_PRESETS = {
 // Structure: MG_THEME_OVERRIDES[themeId][mgCategory] = { style, anim, colors }
 const MG_THEME_OVERRIDES = {
     crime: {
-        lowerThird: { style: 'banner',    anim: 'wipeRight', colors: { bgFill: '#cc0000', textFill: '#ffffff', accentFill: '#ffffff' } },
+        lowerThird:  { style: 'banner',   anim: 'wipeRight', colors: { bgFill: '#cc0000', textFill: '#ffffff', accentFill: '#ffffff' } },
+        callout:     { style: 'accent',   anim: 'slideLeft', colors: { bgFill: 'rgba(30,0,0,0.85)', textFill: '#ffffff', accentFill: '#cc0000' } },
+        statCounter: { style: 'standard', anim: 'countUp',   colors: { bgFill: 'rgba(30,0,0,0.8)', textFill: '#ffffff', accentFill: '#cc0000' } },
+        typewriter:  { style: 'standard', anim: 'slideLeft', colors: { bgFill: 'rgba(30,0,0,0.85)', textFill: '#ffffff', accentFill: '#cc0000' } },
     },
     history: {
-        lowerThird: { style: 'glass',     anim: 'fadeSlide', colors: { bgFill: 'rgba(20,10,5,0.7)', textFill: '#ffffff', accentFill: '#d4af37' } },
+        lowerThird:  { style: 'glass',    anim: 'fadeSlide', colors: { bgFill: 'rgba(20,10,5,0.7)', textFill: '#ffffff', accentFill: '#d4af37' } },
+        callout:     { style: 'standard', anim: 'fadeSlide', colors: { bgFill: 'rgba(20,10,5,0.75)', textFill: '#f5f0e0', accentFill: '#d4af37' } },
+        statCounter: { style: 'standard', anim: 'countUp',   colors: { bgFill: 'rgba(20,10,5,0.7)', textFill: '#f5f0e0', accentFill: '#d4af37' } },
+        typewriter:  { style: 'standard', anim: 'fadeSlide', colors: { bgFill: 'rgba(20,10,5,0.8)', textFill: '#f5f0e0', accentFill: '#d4af37' } },
     },
     modern: {
-        lowerThird: { style: 'split',     anim: 'popUp',     colors: { bgFill: '#00ccff', textFill: '#ffffff', accentFill: '#ff4500' } },
+        lowerThird:  { style: 'split',    anim: 'popUp',     colors: { bgFill: '#00ccff', textFill: '#ffffff', accentFill: '#ff4500' } },
+        callout:     { style: 'minimal',  anim: 'fadeSlide', colors: { bgFill: 'rgba(0,0,0,0.5)', textFill: '#ffffff', accentFill: '#00ccff' } },
+        statCounter: { style: 'ticker',   anim: 'countUp',   colors: { bgFill: 'rgba(0,10,20,0.85)', textFill: '#ffffff', accentFill: '#00ccff' } },
+        typewriter:  { style: 'naked',    anim: 'slideLeft', colors: { bgFill: null, textFill: '#ffffff', accentFill: '#00ccff' } },
     },
     minimal: {
-        lowerThird: { style: 'underline', anim: 'fadeSlide', colors: null },
+        lowerThird:  { style: 'underline', anim: 'fadeSlide', colors: null },
+        callout:     { style: 'minimal',  anim: 'fadeSlide', colors: null },
+        statCounter: { style: 'ticker',   anim: 'countUp',   colors: null },
+        typewriter:  { style: 'naked',    anim: 'fadeSlide', colors: null },
     },
     standard: {
-        lowerThird: { style: 'box',       anim: 'slideLeft', colors: { bgFill: '#0055aa', textFill: '#ffffff', accentFill: '#00cc66' } },
+        lowerThird:  { style: 'box',      anim: 'slideLeft', colors: { bgFill: '#0055aa', textFill: '#ffffff', accentFill: '#00cc66' } },
+        callout:     { style: 'standard', anim: 'springScale', colors: { bgFill: 'rgba(0,0,0,0.75)', textFill: '#ffffff', accentFill: '#0055aa' } },
+        statCounter: { style: 'standard', anim: 'countUp',   colors: { bgFill: 'rgba(0,0,0,0.75)', textFill: '#ffffff', accentFill: '#0055aa' } },
+        typewriter:  { style: 'standard', anim: 'slideLeft', colors: { bgFill: 'rgba(0,0,0,0.75)', textFill: '#ffffff', accentFill: '#0055aa' } },
     },
 };
 
@@ -1217,6 +1275,7 @@ module.exports = {
     THEMES,
     BACKGROUND_SOURCES,
     BACKGROUND_LIBRARY,
+    getThemeBackgrounds,
     TRANSITION_LIBRARY,
     TRANSITION_SFX_SOURCES,
     MG_STYLE_PRESETS,

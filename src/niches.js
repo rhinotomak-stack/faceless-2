@@ -35,7 +35,7 @@ const NICHES = {
         // Allowed MG types for this niche
         allowedMGs: [
             'kineticText', 'statCounter', 'barChart', 'focusWord',
-            'explainer', 'progressBar', 'headline', 'comparisonCard'
+            'explainer', 'progressBar', 'headline', 'comparisonCard', 'typewriter'
         ],
 
         // Footage provider priority
@@ -167,7 +167,7 @@ const NICHES = {
 
         allowedMGs: [
             'headline', 'lowerThird', 'callout', 'timeline', 'articleHighlight',
-            'focusWord', 'mapChart', 'kineticText'
+            'focusWord', 'mapChart', 'kineticText', 'typewriter'
         ],
 
         footagePriority: {
@@ -284,7 +284,7 @@ const NICHES = {
 
         allowedMGs: [
             'headline', 'lowerThird', 'focusWord', 'kineticText', 'callout',
-            'statCounter', 'donutChart', 'rankingList'
+            'statCounter', 'donutChart', 'rankingList', 'typewriter'
         ],
 
         footagePriority: {
@@ -343,7 +343,7 @@ const NICHES = {
 
         allowedMGs: [
             'statCounter', 'rankingList', 'comparisonCard', 'headline', 'focusWord',
-            'kineticText', 'progressBar', 'barChart', 'lowerThird'
+            'kineticText', 'progressBar', 'barChart', 'lowerThird', 'typewriter'
         ],
 
         footagePriority: {
@@ -520,7 +520,7 @@ const NICHES = {
 
         allowedMGs: [
             'headline', 'lowerThird', 'timeline', 'mapChart', 'callout',
-            'focusWord', 'articleHighlight', 'bulletList', 'statCounter', 'kineticText'
+            'focusWord', 'articleHighlight', 'bulletList', 'statCounter', 'kineticText', 'typewriter'
         ],
 
         footagePriority: {
@@ -581,7 +581,7 @@ const NICHES = {
 
         allowedMGs: [
             'focusWord', 'kineticText', 'headline', 'statCounter', 'callout',
-            'bulletList', 'progressBar', 'lowerThird'
+            'bulletList', 'progressBar', 'lowerThird', 'typewriter'
         ],
 
         footagePriority: {
@@ -823,7 +823,7 @@ const NICHES = {
             'headline', 'lowerThird', 'statCounter', 'callout', 'bulletList',
             'focusWord', 'progressBar', 'barChart', 'donutChart', 'comparisonCard',
             'timeline', 'rankingList', 'kineticText', 'mapChart', 'articleHighlight',
-            'explainer'
+            'explainer', 'typewriter'
         ],
 
         footagePriority: {

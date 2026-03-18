@@ -12,7 +12,7 @@ let aiInstructionsRef = '';
 
 // Classification: full-screen MGs go on V3, overlay MGs stay on MG track
 const FULLSCREEN_MG_TYPES = new Set([
-    'barChart', 'donutChart', 'rankingList', 'timeline', 'comparisonCard', 'bulletList', 'mapChart', 'articleHighlight'
+    'barChart', 'donutChart', 'rankingList', 'timeline', 'comparisonCard', 'bulletList', 'mapChart', 'articleHighlight', 'kineticText'
 ]);
 
 // Default positions by type
@@ -33,6 +33,7 @@ const POSITION_MAP = {
     mapChart: 'center',
     articleHighlight: 'center',
     explainer: 'bottom-right',
+    typewriter: 'center',
 };
 
 // Style themes — must match MotionGraphics.jsx STYLES
@@ -240,9 +241,9 @@ const PATTERN_TO_MG_TYPES = {
     enumeration: ['bulletList', 'rankingList', 'timeline'],
     timeline:    ['timeline', 'barChart'],
     identity:    ['lowerThird', 'callout'],
-    thesis:      ['headline', 'kineticText', 'focusWord'],
+    thesis:      ['headline', 'kineticText', 'focusWord', 'typewriter'],
     comparison:  ['comparisonCard', 'barChart'],
-    emphasis:    ['callout', 'kineticText', 'focusWord'],
+    emphasis:    ['callout', 'kineticText', 'focusWord', 'typewriter'],
     geographic:  ['mapChart', 'barChart', 'statCounter'],
     research:    ['articleHighlight', 'callout', 'statCounter'],
     conceptual:  ['explainer', 'bulletList', 'callout'],
@@ -268,6 +269,7 @@ function parseMgHint(mgHint) {
         rankinglist: 'rankingList', kinetictext: 'kineticText', mapchart: 'mapChart',
         articlehighlight: 'articleHighlight', progressbar: 'progressBar', bulletlist: 'bulletList',
         headline: 'headline', callout: 'callout', timeline: 'timeline', explainer: 'explainer',
+        typewriter: 'typewriter',
     };
     const type = TYPE_ALIASES[rawType] || null;
     return { type, content, isNone: false };
@@ -285,6 +287,7 @@ const TYPE_CAPS = {
     rankingList: 1,
     mapChart: 1,
     kineticText: 1,
+    typewriter: 2,
     articleHighlight: 1,
 };
 
@@ -525,6 +528,7 @@ function computeSmartDuration(type, text, subtext) {
         mapChart: 6.0,
         articleHighlight: 7.0,
         explainer: 5.0,
+        typewriter: 5.0,
     };
 
     let duration = readingTime + ANIM_OVERHEAD + HOLD_PADDING;
@@ -550,6 +554,12 @@ function computeSmartDuration(type, text, subtext) {
         const eventCount = (subtext || '').split(',').filter(s => s.includes(':')).length;
         const staggerTime = eventCount * 0.4;
         duration = Math.max(duration, staggerTime + ANIM_OVERHEAD + HOLD_PADDING);
+    }
+    if (type === 'typewriter') {
+        const charCount = (text || '').length;
+        const revealTime = charCount * 0.06; // ~60ms per character
+        duration = Math.max(duration, revealTime + ANIM_OVERHEAD + HOLD_PADDING);
+        duration = Math.min(duration, 8.0);
     }
     if (type === 'kineticText') {
         const kWordCount = (text || '').split(/\s+/).filter(Boolean).length;
@@ -708,6 +718,11 @@ function buildRuleMG(scene, sceneIndex, type) {
             triggerWord = words[Math.min(2, words.length - 1)];
             break;
         }
+        case 'typewriter': {
+            displayText = words.slice(0, Math.min(10, words.length)).join(' ');
+            triggerWord = words[0];
+            break;
+        }
         case 'kineticText': {
             displayText = words.slice(0, Math.min(6, words.length)).join(' ');
             triggerWord = words[0];
@@ -825,6 +840,7 @@ function buildPrompt(scene, sceneIndex, totalScenes, scriptContext, sceneVisual,
   Example: "Saudi Arabia: 12M bpd, United States: 11.3M bpd, Russia: 10.8M bpd, Canada: 5.3M bpd"
   Use real or approximate data from the narration. If no numbers mentioned, use ranking: "Canada: #4, Saudi Arabia: #1"`,
         kineticText: 'kineticText: Powerful short statement, word-by-word reveal (max 1 per video). E.g. "The Future Is Now"',
+        typewriter: 'typewriter: Character-by-character text reveal with blinking cursor (max 2 per video). Best for quotes, key facts, or dramatic statements. E.g. "He never performed again"',
         articleHighlight: `articleHighlight: News article, study, or report reference (max 1 per video).
   WHEN: narration mentions a study, report, article, research, or finding.
   text: the headline (max 8 words)
@@ -856,7 +872,7 @@ ${typeDescriptions}
 POSITION GUIDE:
 - bottom-left: lowerThird, callout
 - bottom-right: statCounter, progressBar
-- center: headline, focusWord, kineticText, comparisonCard, donutChart
+- center: headline, focusWord, kineticText, typewriter, comparisonCard, donutChart
 - center-left: bulletList, rankingList
 - center: barChart, timeline, mapChart — full width
 - If footage has on-screen text at center → prefer bottom-left or bottom-right
@@ -949,6 +965,9 @@ function parseResponse(text, scene, sceneIndex) {
         'article highlight': 'articleHighlight',
         'article': 'articleHighlight',
         'explainer': 'explainer',
+        'typewriter': 'typewriter',
+        'type_writer': 'typewriter',
+        'type writer': 'typewriter',
         'animatedicons': 'explainer',
         'animated_icons': 'explainer',
         'animated icons': 'explainer',
@@ -1137,7 +1156,7 @@ Only pick the most impactful scenes. Reply with ONLY the lines, nothing else.`;
                 'kinetic': 'kineticText', 'mapchart': 'mapChart',
                 'map': 'mapChart', 'articlehighlight': 'articleHighlight',
                 'article': 'articleHighlight',
-                'explainer': 'explainer',
+                'explainer': 'explainer', 'typewriter': 'typewriter',
                 'animatedicons': 'explainer',
                 'icons': 'explainer'
             };
@@ -1230,7 +1249,76 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
 
     const results = [];
 
+    // Pre-create fullscreen MGs from Visual Planner directives (these scenes have no footage)
+    const fullscreenMGSceneIndices = new Set();
     for (let i = 0; i < scenes.length; i++) {
+        const scene = scenes[i];
+        if (!scene.fullscreenMG) continue;
+
+        // Parse "type: content data"
+        const colonIdx = scene.fullscreenMG.indexOf(':');
+        const mgType = colonIdx > 0 ? scene.fullscreenMG.substring(0, colonIdx).trim() : scene.fullscreenMG.trim();
+        const mgContent = colonIdx > 0 ? scene.fullscreenMG.substring(colonIdx + 1).trim() : scene.text;
+
+        if (!FULLSCREEN_MG_TYPES.has(mgType)) {
+            console.log(`  Scene ${i}: [fullscreenMG] Unknown type "${mgType}" — skipping`);
+            continue;
+        }
+
+        const duration = scene.endTime - scene.startTime;
+        const mg = {
+            id: `mg-${i}`,
+            type: mgType,
+            category: 'fullscreen',
+            text: mgContent,
+            subtext: scene.text, // full scene narration as context for renderer
+            startTime: scene.startTime + 0.1,
+            duration: Math.max(duration - 0.2, 2),
+            position: POSITION_MAP[mgType] || 'center',
+            sceneIndex: i,
+            selectionMode: 'visual-planner',
+            style: mgStyle,
+            isPlannedFullscreen: true,
+        };
+
+        // Resolve subType from theme
+        const themeId = scriptContext?.themeId || 'standard';
+        const themeOverrides = MG_THEME_OVERRIDES[themeId] || {};
+        const catOverride = themeOverrides[mgType];
+        const reg = MG_REGISTRY[mgType];
+        if (reg) {
+            mg.subType = catOverride?.style || reg.defaultType;
+            if (catOverride?.anim) mg.animation = catOverride.anim;
+        }
+        if (mgType === 'mapChart') mg.mapStyle = mapStyle;
+
+        results.push(mg);
+        fullscreenMGSceneIndices.add(i);
+        placedTypes.push(mgType);
+        console.log(`  Scene ${i}: [PLANNED FULLSCREEN] ${mgType}: "${mgContent.substring(0, 60)}"`);
+    }
+    if (fullscreenMGSceneIndices.size > 0) {
+        console.log(`  → ${fullscreenMGSceneIndices.size} fullscreen MGs from Visual Planner\n`);
+    }
+
+    // Build set of listicle item start scenes — counter MGs handle these, skip in main loop
+    const listicleStartScenes = new Set();
+    if (scriptContext.format === 'listicle' && scriptContext.listicleItems) {
+        for (const item of scriptContext.listicleItems) {
+            listicleStartScenes.add(item.startSceneIndex);
+        }
+    }
+
+    for (let i = 0; i < scenes.length; i++) {
+        // Skip scenes that already have a planned fullscreen MG
+        if (fullscreenMGSceneIndices.has(i)) continue;
+
+        // Skip listicle item start scenes — counter MGs are added separately
+        if (listicleStartScenes.has(i)) {
+            console.log(`  Scene ${i}: [LISTICLE ITEM] — skipped (counter MG handles this)`);
+            continue;
+        }
+
         const scene = scenes[i];
         const sceneVisual = visualAnalysis ? visualAnalysis.find(v => v.sceneIndex === i) : null;
         console.log(`  Scene ${i}: "${scene.text.substring(0, 50)}..."`);
@@ -1429,6 +1517,8 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
                 counterMG.style = mgStyle;
                 results.push(counterMG);
                 counterCount++;
+                const syncSource = item.spokenTime ? 'word-sync' : 'scene-start';
+                console.log(`    #${item.itemNumber}: MG@${counterMG.startTime.toFixed(1)}s (scene@${item.startTime.toFixed(1)}s${item.spokenTime ? `, spoken@${item.spokenTime.toFixed(1)}s` : ', no word-sync'}) [${syncSource}]`);
             }
         }
         if (counterCount > 0) {
@@ -1437,7 +1527,7 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
     }
 
     // Log selection summary
-    const modeCounts = { ai: 0, rule: 0, 'rule-fallback': 0, 'listicle-counter': 0 };
+    const modeCounts = { ai: 0, rule: 0, 'rule-fallback': 0, 'listicle-counter': 0, 'visual-planner': 0 };
     const typeCounts = {};
     for (const mg of results) {
         modeCounts[mg.selectionMode || 'ai']++;
@@ -1445,7 +1535,7 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
     }
     console.log(`\n  Motion graphics placed: ${results.length}/${scenes.length} scenes (style: ${mgStyle})`);
     if (results.length > 0) {
-        console.log(`  📊 Selection: AI=${modeCounts.ai} | Rule=${modeCounts.rule} | Fallback=${modeCounts['rule-fallback']}`);
+        console.log(`  📊 Selection: AI=${modeCounts.ai} | Rule=${modeCounts.rule} | Fallback=${modeCounts['rule-fallback']}${modeCounts['visual-planner'] ? ` | Planned=${modeCounts['visual-planner']}` : ''}`);
         const typeBreakdown = Object.entries(typeCounts).sort((a, b) => b[1] - a[1]).map(([t, c]) => `${t}(${c})`).join(', ');
         console.log(`  📊 Types: ${typeBreakdown}`);
     }

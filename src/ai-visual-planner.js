@@ -179,7 +179,7 @@ function buildBatchPrompt(scenes, scriptContext, directorsBrief, options = {}) {
             topicBlock += `\n- Summary: ${summary}`;
         }
         if (webContext) {
-            topicBlock += `\n- Research: ${webContext.substring(0, 500)}`;
+            topicBlock += `\n- Research: ${webContext.substring(0, 1500)}`;
         }
         topicBlock += `\n`;
     }
@@ -366,6 +366,13 @@ ${tier.allowVideo
    - **GENERIC ACTIONS**: When NO specific entity mentioned → stock footage is OK
    - Be SPECIFIC, not generic! Use the entity names we found!
 
+   **VAGUE/ABSTRACT NARRATION (CRITICAL):**
+   - When a scene's narration is ABSTRACT or VAGUE (e.g., "sustained behaviors", "documented interviews", "contemporaries verified"), do NOT just keyword the narration literally.
+   - Instead, use the TOPIC CONTEXT and ENTITIES above to pick a CONCRETE, SEARCHABLE visual that relates to the story.
+   - Example: If the topic is about "Sammy Davis Jr naming racist stars" and the narration says "documented interviews" → keyword should be "Sammy Davis Jr interview 1960s", NOT "documented interviews".
+   - Example: If the topic is about a crime and narration says "the evidence was compelling" → keyword should be "courtroom evidence table", NOT "compelling evidence".
+   - ALWAYS ground abstract narration in the SPECIFIC topic, people, places, and era from the TOPIC CONTEXT.
+
 8. VISUAL INTENT:
    - Describe the EXACT shot you want
    - Include: camera angle, lighting, subject, action, mood
@@ -457,34 +464,46 @@ ${(() => {
    - Don't overuse effects — ~40-50% of scenes should be "none"
    - HOOK scenes benefit from subtle effects for visual impact
 
-14. MG HINT (motion graphic suggestion — CONTENT-DRIVEN, not decorative):
+14. MG HINT (OVERLAY motion graphic — appears ON TOP of footage):
    - Format: "<mgType>: <brief content description>" or "none"
-   - MGs exist to DISPLAY DATA the viewer needs to see. Default is "none".
-   - ONLY add an MG when the narration contains one of these CONTENT SIGNALS:
-     • A SPECIFIC NUMBER or STATISTIC is spoken → "statCounter: 5 million members" or "barChart: box office 1939-1943"
-     • A LISTICLE ITEM TRANSITION (e.g. "Number nine", "Number 1") → "headline: NUMBER NINE" or "focusWord: #1"
-     • A NEW PERSON is INTRODUCED BY NAME + TITLE for the FIRST time → "lowerThird: DW Griffith, Film Director"
-       (Do NOT repeat lowerThird for the same person in later scenes)
-     • A SPECIFIC DATE or SEQUENCE OF DATES → "timeline: 1915 → 1925 → 1999"
-     • A SPECIFIC LOCATION is central to the scene → "mapChart: Atlanta, Georgia — 1915"
-     • A DIRECT QUOTE is spoken verbatim → "callout: I believe in white supremacy"
-     • An explicit COMPARISON is made (X vs Y) → "comparisonCard: Public Image vs Private Reality"
-   - If the scene is just narration/storytelling with no data signal → "none"
+   - Overlay MGs appear over the footage. Default is "none".
+   - ONLY add when the narration has a clear CONTENT SIGNAL:
+     • A SPECIFIC NUMBER or STATISTIC → "statCounter: 5 million members"
+     • A NEW PERSON INTRODUCED BY NAME + TITLE → "lowerThird: DW Griffith, Film Director"
+       (Do NOT repeat for the same person in later scenes)
+     • A DIRECT QUOTE spoken verbatim → "callout: I believe in white supremacy"
+   - Overlay types: lowerThird, headline, statCounter, callout, focusWord, progressBar
    - Most scenes are pure storytelling — they should have NO MG
-   - NEVER add MGs just to fill space or make scenes "look interesting"
    - Do NOT cluster MGs — leave gaps of 2-4 scenes between MGs
-   - Fullscreen MGs (focusWord, kineticText) are RARE — only for truly pivotal moments
+
+15. FULLSCREEN MG (REPLACES footage — no download needed for this scene):
+   - Format: "<mgType>: <content data>" or "none"
+   - When set, this scene becomes a FULLSCREEN motion graphic — NO footage is downloaded.
+   - This is BETTER than footage when the scene's narration is data-heavy or abstract.
+   - USE fullscreenMG WHEN:
+     • Scene lists MULTIPLE data points, dates, or items → "bulletList: Point 1 | Point 2 | Point 3"
+     • Scene has a TIMELINE of events/dates → "timeline: 1915: Birth of a Nation | 1925: Rise of jazz | 1999: Legacy"
+     • Scene makes an explicit COMPARISON (X vs Y) → "comparisonCard: Public Image vs Private Reality"
+     • Scene has chart-worthy data → "barChart: Category1:Value1 | Category2:Value2 | Category3:Value3"
+     • Scene discusses an article/document/book → "articleHighlight: Title of Article"
+     • Scene describes a SPECIFIC LOCATION → "mapChart: Atlanta, Georgia — 1915"
+     • Scene has a RANKING or ordered list → "rankingList: #1 Item | #2 Item | #3 Item"
+   - Fullscreen MG types: articleHighlight, timeline, bulletList, barChart, donutChart, comparisonCard, rankingList, mapChart
+   - When fullscreenMG is set, keyword/stockQuery/webQuery are IGNORED (set to "none")
+   - Do NOT overuse — max ~15% of scenes. Most scenes should be footage.
+   - NEVER use on HOOK or CTA scenes — those need strong visual footage.
 
 OUTPUT FORMAT (one line per scene):
 
-SCENE 0: keyword: <3-6 word search term, entity name if applicable> | stockQuery: <2-3 word visual query> | webQuery: <4-8 word specific query> | mediaType: <video|image> | sourceHint: <stock|youtube|web-image> | framing: <fullscreen|cinematic> | backgroundId: <none|blur|gradient-id> | visualIntent: <detailed shot description> | effects: <comma-separated or none> | mgHint: <type: description or none>
-SCENE 1: keyword: <3-6 word search term, entity name if applicable> | stockQuery: <2-3 word visual query> | webQuery: <4-8 word specific query> | mediaType: <video|image> | sourceHint: <stock|youtube|web-image> | framing: <fullscreen|cinematic> | backgroundId: <none|blur|gradient-id> | visualIntent: <detailed shot description> | effects: <comma-separated or none> | mgHint: <type: description or none>
+SCENE 0: keyword: <search term or none> | stockQuery: <query or none> | webQuery: <query or none> | mediaType: <video|image> | sourceHint: <stock|youtube|web-image> | framing: <fullscreen|cinematic> | backgroundId: <none|blur|gradient-id> | visualIntent: <shot description> | effects: <comma-separated or none> | mgHint: <overlay type: desc or none> | fullscreenMG: <fullscreen type: data or none>
+SCENE 1: keyword: <search term or none> | stockQuery: <query or none> | webQuery: <query or none> | mediaType: <video|image> | sourceHint: <stock|youtube|web-image> | framing: <fullscreen|cinematic> | backgroundId: <none|blur|gradient-id> | visualIntent: <shot description> | effects: <comma-separated or none> | mgHint: <overlay type: desc or none> | fullscreenMG: <fullscreen type: data or none>
 ...
 
 CRITICAL: YOU MUST OUTPUT EXACTLY ${scenes.length} LINES (one per scene).
 Each keyword must be UNIQUE, SEARCHABLE, and SHORT (3-6 words). When a person is named in the scene, keyword = their name.
+When fullscreenMG is set, keyword/stockQuery/webQuery can be "none" (footage won't be downloaded).
 Do NOT put cinematic shot descriptions in keyword — that goes in visualIntent.
-stockQuery and webQuery must BOTH be provided for every scene.`;
+stockQuery and webQuery must BOTH be provided for every footage scene.`;
 
     return prompt;
 }
@@ -579,6 +598,14 @@ function parseBatchResponse(rawText, scenes) {
                         scene.mgHint = null;
                     } else {
                         scene.mgHint = val;
+                    }
+                }
+                if (lower.startsWith('fullscreenmg:') || lower.startsWith('fullscreen mg:')) {
+                    const val = part.substring(part.indexOf(':') + 1).trim();
+                    if (val.toLowerCase() === 'none' || val === '') {
+                        scene.fullscreenMG = null;
+                    } else {
+                        scene.fullscreenMG = val;
                     }
                 }
             }
@@ -712,7 +739,8 @@ async function planVisuals(scenes, scriptContext, directorsBrief) {
             const wq = scene.webQuery ? ` web:"${scene.webQuery}"` : '';
             const fx = scene.effects && scene.effects.length ? ` fx:[${scene.effects.join(',')}]` : '';
             const mg = scene.mgHint ? ` mg:"${scene.mgHint}"` : '';
-            console.log(`      Scene ${scene.index}: "${scene.keyword}" [${scene.mediaType}, ${scene.sourceHint}]${sq}${wq}${fx}${mg}`);
+            const fmg = scene.fullscreenMG ? ` ★FULLSCREEN:"${scene.fullscreenMG}"` : '';
+            console.log(`      Scene ${scene.index}: "${scene.keyword}" [${scene.mediaType}, ${scene.sourceHint}]${sq}${wq}${fx}${mg}${fmg}`);
         }
         if (enrichedScenes.length > 5) {
             console.log(`      ... and ${enrichedScenes.length - 5} more scenes`);

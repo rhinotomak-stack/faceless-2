@@ -75,10 +75,33 @@ function _showExplainerControls(show, mg) {
     }
 }
 
+// Filter Type dropdown to only show types in the same group (overlay↔overlay, fullscreen↔fullscreen)
+function _filterTypeDropdownByGroup(mgType) {
+    const typeEl = document.getElementById('mg-type');
+    if (!typeEl || !window._mgRegistry) return;
+    const reg = window._mgRegistry.registry[mgType];
+    const currentGroup = reg?.group || 'overlay';
+    for (const optgroup of typeEl.querySelectorAll('optgroup')) {
+        const groupLabel = optgroup.label.toLowerCase();
+        const isOverlay = groupLabel.includes('overlay');
+        const show = (currentGroup === 'overlay' && isOverlay) || (currentGroup === 'fullscreen' && !isOverlay);
+        for (const opt of optgroup.querySelectorAll('option')) {
+            opt.disabled = !show;
+            opt.style.display = show ? '' : 'none';
+        }
+    }
+}
+
+// Types with actual variant renderers implemented in MGRenderer._variantRenderers
+const MG_TYPES_WITH_VARIANTS = new Set(['headline', 'lowerThird', 'callout', 'statCounter', 'typewriter']);
+
 function _populateMgVariantDropdown(mgType, currentSubType) {
     const row = document.getElementById('mg-subtype-row');
     const sel = document.getElementById('mg-subtype');
     if (!row || !sel || !window._mgRegistry) { if (row) row.style.display = 'none'; return; }
+
+    // Only show variant dropdown for types that have actual variant renderers
+    if (!MG_TYPES_WITH_VARIANTS.has(mgType)) { row.style.display = 'none'; return; }
 
     const types = window._mgRegistry.getTypesForCategory(mgType);
     if (types.length <= 1) { row.style.display = 'none'; return; }
@@ -1647,6 +1670,7 @@ function updateMgProperties() {
     if (durVal) durVal.textContent = `${(mg.duration || 3).toFixed(1)}s`;
     if (typeEl) typeEl.value = mg.type || 'headline';
     if (styleEl) styleEl.value = mg.style || state.mgStyle || 'clean';
+    _filterTypeDropdownByGroup(mg.type || 'headline');
 
     // Animation speed slider
     const animSpeedEl = document.getElementById('mg-anim-speed');
@@ -1695,6 +1719,7 @@ function updateMgPropertiesForScene(scene) {
     if (durVal) durVal.textContent = `${(dur || 5).toFixed(1)}s`;
     if (typeEl) typeEl.value = mg.type || scene.type || 'barChart';
     if (styleEl) styleEl.value = mg.style || scene.style || state.mgStyle || 'clean';
+    _filterTypeDropdownByGroup(mg.type || scene.type || 'barChart');
 
     // Animation speed slider
     const animSpeedEl = document.getElementById('mg-anim-speed');
@@ -2003,19 +2028,27 @@ function populateBackgroundDropdown() {
         }
         sel.appendChild(grp);
     }
-    // Add pattern files from assets/backgrounds/
+    // Add pattern files from assets/backgrounds/ — filtered by active theme
     if (state.availableBackgrounds.length > 0) {
-        const grp = document.createElement('optgroup');
-        grp.label = 'Custom Files';
-        for (const bg of state.availableBackgrounds) {
-            const opt = document.createElement('option');
-            opt.value = `pattern:${bg.filename}`;
-            const icon = bg.mediaType === 'video' ? '🎬' : '🖼️';
-            const themeTag = bg.theme ? ` [${bg.theme}]` : '';
-            opt.textContent = `${icon} ${bg.name}${themeTag}`;
-            grp.appendChild(opt);
+        const activeTheme = _resolveActiveTheme();
+        // Show only backgrounds matching the current theme (or universal ones with no theme tag)
+        const filtered = state.availableBackgrounds.filter(bg => {
+            if (!bg.theme) return true;          // universal — always show
+            if (!activeTheme) return true;       // no theme resolved — show all
+            return bg.theme === activeTheme;     // theme-specific — must match
+        });
+        if (filtered.length > 0) {
+            const grp = document.createElement('optgroup');
+            grp.label = activeTheme ? `Custom (${activeTheme})` : 'Custom Files';
+            for (const bg of filtered) {
+                const opt = document.createElement('option');
+                opt.value = `pattern:${bg.filename}`;
+                const icon = bg.mediaType === 'video' ? '🎬' : '🖼️';
+                opt.textContent = `${icon} ${bg.name}`;
+                grp.appendChild(opt);
+            }
+            sel.appendChild(grp);
         }
-        sel.appendChild(grp);
     }
 }
 
@@ -3777,12 +3810,21 @@ async function cancelProcess() {
     elements.btnCancel.disabled = true;
     elements.btnCancel.textContent = 'Cancelling...';
     try {
-        // Cancel WebGL2 export pipeline if active
+        // Cancel WebGL2 export pipeline if active (direct-spawn FFmpeg in renderer)
         if (state.exportPipeline) {
+            console.log('[Cancel] Cancelling WebGL2 export pipeline...');
             state.exportPipeline.cancel();
+            // Pipeline cancel is synchronous (sets flag + kills process).
+            // The frame loop will throw on next iteration, which renderVideo() catches.
+            // Show feedback immediately — don't wait for IPC.
+            stopTimer();
+            updateProgress(0, '⛔ Export cancelled');
+            showToast('Export cancelled', 'info');
         }
+        // Also signal main process (for build processes, legacy exports)
         const result = await window.electronAPI?.cancelProcess();
-        if (result?.success) {
+        if (result?.success && !state.exportPipeline) {
+            // Only show IPC cancel feedback if there was no pipeline cancel above
             stopTimer();
             updateProgress(0, `⛔ ${result.message || 'Cancelled'}`);
             showToast('Process cancelled', 'error');
@@ -4300,6 +4342,7 @@ const MG_SFX_MAP = {
     timeline:       { file: 'sfx-mg-rise.mp3', duration: 0.5 },
     rankingList:    { file: 'sfx-mg-rise.mp3', duration: 0.5 },
     kineticText:    { file: 'sfx-mg-type.mp3', duration: 0.2 },
+    typewriter:     { file: 'sfx-mg-type.mp3', duration: 0.3 },
     subscribeCTA:   { file: 'sfx-mg-chime.mp3', duration: 0.5 },
     mapChart:       { file: 'sfx-mg-ding.mp3', duration: 0.4 },
 };
@@ -4408,10 +4451,9 @@ function renderScenes() {
     if (displayScenes.length === 0) { elements.sceneList.innerHTML = '<p class="empty-state">No scenes yet</p>'; return; }
     elements.sceneList.innerHTML = displayScenes.map((scene) => {
         const i = state.scenes.indexOf(scene);
-        const trType = scene.transitionType || (state.transition.style !== 'auto' ? state.transition.style : null) || scene.transition?.type || 'cut';
-        const trIcons = { cut: '✂️', crossfade: '🔀', fade: '🔀', wipe: '↔️', slide: '↔️', flash: '⚡', dissolve: '🔀', blur: '🔀', zoom: '🔎', fade_to_black: '⬛' };
-        const trLabels = { cut: 'Cut', crossfade: 'Crossfade', fade: 'Fade', wipe: 'Wipe', slide: 'Slide', flash: 'Flash', dissolve: 'Dissolve', blur: 'Blur', zoom: 'Zoom', fade_to_black: 'Fade to Black' };
-        const trBadge = i > 0 && !scene.isMGScene ? `<span class="scene-transition-badge" title="${trLabels[trType] || trType}">${trIcons[trType] || ''} ${trLabels[trType] || trType}</span>` : '';
+        const trType = scene.transitionType || (state.transition.style !== 'auto' ? state.transition.style : null) || scene.transition?.type || 'crossfade';
+        const trIcons = { cut: '✂️', crossfade: '🔀', fade: '🔀', dissolve: '🔀', blur: '🔀', crossBlur: '🔀', luma: '🌗', morph: '🔀', dreamFade: '💭', ripple: '🌊', wipe: '↔️', slide: '↔️', push: '↔️', swipe: '↔️', splitWipe: '↔️', zoom: '🔎', zoomBlur: '🔎', whip: '💨', bounce: '⬆️', shutterSlice: '📷', flash: '⚡', directionalBlur: '💨', colorFade: '🎨', spin: '🌀', cameraFlash: '📸', filmBurn: '🎞️', filmGrain: '🎞️', flare: '✨', lightLeak: '✨', shadowWipe: '🌑', vignetteBlink: '👁️', reveal: '🔀', ink: '🖋️', prismShift: '🔮', glitch: '⚡', pixelate: '🟦', mosaic: '🟦', dataMosh: '⚡', scanline: '📺', rgbSplit: '🌈', static: '📺', fade_to_black: '⬛' };
+        const trBadge = i > 0 && !scene.isMGScene ? `<span class="scene-transition-badge" title="${trType}">${trIcons[trType] || '🔀'} ${trType}</span>` : '';
         const mgBadge = scene.isMGScene ? `<span class="scene-mg-badge" title="Motion Graphic: ${scene.type || 'MG'}">🎨 ${scene.type || 'MG'}</span>` : '';
         const keyword = scene.isMGScene ? `🎨 MG: ${scene.type || 'motion-graphic'}` : `🔍 ${scene.keyword}`;
         return `<div class="scene-card ${scene.isMGScene ? 'scene-card-mg' : ''}" data-index="${i}">
@@ -4670,13 +4712,12 @@ function renderTracks() {
             const isDisabled = scene.disabled === true;
             const eyeIcon = isDisabled ? '👁️‍🗨️' : '👁️';
             // Transition icon between clips (per-scene override > global force > AI-assigned)
-            const trType = scene.transitionType || (state.transition.style !== 'auto' ? state.transition.style : null) || scene.transition?.type || 'cut';
-            const trIcons = { cut: '✂️', crossfade: '🔀', fade: '🔀', wipe: '↔️', slide: '↔️', flash: '⚡', dissolve: '🔀', blur: '🔀', zoom: '🔎', fade_to_black: '⬛' };
+            const trType = scene.transitionType || (state.transition.style !== 'auto' ? state.transition.style : null) || scene.transition?.type || 'crossfade';
+            const trIcons = { cut: '✂️', crossfade: '🔀', fade: '🔀', dissolve: '🔀', blur: '🔀', crossBlur: '🔀', luma: '🌗', morph: '🔀', dreamFade: '💭', ripple: '🌊', wipe: '↔️', slide: '↔️', push: '↔️', swipe: '↔️', splitWipe: '↔️', zoom: '🔎', zoomBlur: '🔎', whip: '💨', bounce: '⬆️', shutterSlice: '📷', flash: '⚡', directionalBlur: '💨', colorFade: '🎨', spin: '🌀', cameraFlash: '📸', filmBurn: '🎞️', filmGrain: '🎞️', flare: '✨', lightLeak: '✨', shadowWipe: '🌑', vignetteBlink: '👁️', reveal: '🔀', ink: '🖋️', prismShift: '🔮', glitch: '⚡', pixelate: '🟦', mosaic: '🟦', dataMosh: '⚡', scanline: '📺', rgbSplit: '🌈', static: '📺', fade_to_black: '⬛' };
             const trIcon = trIcons[trType] || '🔀';
-            const trLabel = { cut: 'Cut', crossfade: 'Crossfade', fade: 'Fade', wipe: 'Wipe', slide: 'Slide', flash: 'Flash', dissolve: 'Dissolve', blur: 'Blur', zoom: 'Zoom', fade_to_black: 'Fade to Black' }[trType] || trType;
             // Show transition marker between clips (skip first scene)
             if (i > 0 && trIcon) {
-                html += `<div class="transition-marker" style="left:${left - 8}px" title="${trLabel}">${trIcon}</div>`;
+                html += `<div class="transition-marker" style="left:${left - 8}px" title="${trType}">${trIcon}</div>`;
             }
             // Clip separator line for adjacent clips
             if (i > 0) {
@@ -6441,7 +6482,11 @@ function refreshCompositorMGs() {
     // Sync fullscreen MG scenes (_scenes that are isMGScene)
     const mgScenes = state.scenes.filter(s => s.isMGScene);
     for (const mgScene of mgScenes) {
-        const existing = sg._scenes.find(s => s.isMGScene && s.index === mgScene.index);
+        // Match by index first, then fall back to startTime for mgScenes missing index
+        const existing = sg._scenes.find(s => s.isMGScene && (
+            (s.index != null && mgScene.index != null && s.index === mgScene.index) ||
+            (s.index == null && Math.abs((s.startTime || 0) - (mgScene.startTime || 0)) < 0.01)
+        ));
         if (existing) {
             // Recompute frame range from seconds
             const startFrame = Math.round((mgScene.startTime || 0) * fps);
@@ -6507,7 +6552,7 @@ async function loadPlanIntoCompositor() {
                     const types = state.transition.types.length > 0 ? state.transition.types : ['crossfade'];
                     type = types[seed % types.length];
                 }
-                if (type === 'cut') continue;
+                if (type === 'cut' || type === 'none') continue;
                 // Use AI-assigned duration when in auto mode, else global slider
                 const dur = (globalStyle === 'auto' && curr.transition?.duration)
                     ? curr.transition.duration
@@ -6591,12 +6636,23 @@ async function renderVideoWebGL2() {
     const hashes = await pipeline.validate(testFrames);
     console.log('[WebGL2 Export] Validation hashes:', JSON.stringify(hashes));
 
+    // In/Out point support: convert seconds to frames
+    const { inSec, outSec } = getRenderRange();
+    const startFrame = Math.round(inSec * fps);
+    const endFrame = Math.round(outSec * fps);
+    const hasRange = state.inPoint !== null || state.outPoint !== null;
+    if (hasRange) {
+        console.log(`[WebGL2 Export] In/Out range: ${inSec.toFixed(2)}s-${outSec.toFixed(2)}s → frames ${startFrame}-${endFrame}`);
+    }
+
     try {
         const result = await pipeline.start({
             width: 1920,
             height: 1080,
             fps,
             legacy: useLegacy,
+            startFrame: hasRange ? startFrame : undefined,
+            endFrame: hasRange ? endFrame : undefined,
         });
         return result;
     } finally {
@@ -6679,7 +6735,7 @@ async function renderVideo() {
         } else {
             stopTimer();
             const errorMsg = result.error || 'Render failed';
-            if (errorMsg === 'Cancelled') {
+            if (errorMsg === 'Cancelled' || errorMsg.includes('cancelled') || errorMsg.includes('Cancelled')) {
                 updateProgress(0, '⛔ Render cancelled');
                 showToast('Render cancelled', 'info');
                 showNotification('Render Cancelled', `Stopped after ${getElapsedString()}`, 'cancel');
