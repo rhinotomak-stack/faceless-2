@@ -118,7 +118,7 @@ class BaseProvider {
         const ext = path.extname(filePath).toLowerCase();
         if (!['.jpg', '.jpeg', '.png', '.webp', '.bmp'].includes(ext)) return filePath;
 
-        const ffmpeg = process.env.FFMPEG_PATH || 'C:/ffmg/bin/ffmpeg.exe';
+        const ffmpeg = process.env.FFMPEG_PATH || (process.platform === 'win32' ? 'C:\\ffmg\\bin\\ffmpeg.exe' : 'ffmpeg');
         if (!fs.existsSync(ffmpeg)) return filePath;
 
         const tmpPath = filePath + '.sanitize.png';

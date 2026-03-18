@@ -1181,7 +1181,7 @@ ipcMain.handle('get-audio-path', async (event, filename) => {
 // WebGL2 Compositor Engine - Export IPC
 // ========================================
 
-const WEBGL_FFMPEG_PATH = process.env.FFMPEG_PATH || 'C:\\ffmg\\bin\\ffmpeg.exe';
+const WEBGL_FFMPEG_PATH = process.env.FFMPEG_PATH || (process.platform === 'win32' ? 'C:\\ffmg\\bin\\ffmpeg.exe' : 'ffmpeg');
 
 // NVENC availability cache (shared with ffmpeg-renderer if loaded)
 let _webglNvencAvailable = null;

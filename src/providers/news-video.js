@@ -65,12 +65,13 @@ class NewsVideoProvider extends BaseProvider {
             this._ytdlpAvailable = false;
 
             const projectRoot = path.join(__dirname, '..', '..');
+            const isWin = process.platform === 'win32';
+            const bin = isWin ? 'yt-dlp.exe' : 'yt-dlp';
             const candidates = [
                 config.youtube?.ytdlpPath || null,
-                path.join(projectRoot, 'yt-dlp', 'yt-dlp.exe'),
-                path.join(projectRoot, 'yt-dlp.exe'),
+                path.join(projectRoot, 'yt-dlp', bin),
+                path.join(projectRoot, bin),
                 'yt-dlp',
-                'yt-dlp.exe',
             ].filter(Boolean);
 
             for (const candidate of candidates) {

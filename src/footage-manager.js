@@ -174,7 +174,7 @@ async function _scoreDownloadedMedia(filePath, ext, keyword, context) {
             mimeType = ext.toLowerCase() === '.png' ? 'image/png' : 'image/jpeg';
         } else if (isVideo) {
             // Extract a frame at 1s (or middle of clip)
-            const ffmpegPath = config.paths?.ffmpeg || 'C:\\ffmg\\bin\\ffmpeg.exe';
+            const ffmpegPath = config.paths?.ffmpeg || (process.platform === 'win32' ? 'C:\\ffmg\\bin\\ffmpeg.exe' : 'ffmpeg');
             const framePath = filePath + '_vision_frame.jpg';
             await new Promise((resolve) => {
                 const { execFile } = require('child_process');

@@ -22,7 +22,7 @@ const _fs    = window._nodeFs;
 
 // FFmpeg executable — same path as main.js uses
 const FFMPEG_PATH = (typeof process !== 'undefined' && process.env && process.env.FFMPEG_PATH)
-    || 'C:\\ffmg\\bin\\ffmpeg.exe';
+    || ((typeof process !== 'undefined' && process.platform === 'win32') ? 'C:\\ffmg\\bin\\ffmpeg.exe' : 'ffmpeg');
 
 // Max PBO frames in-flight before draining. Independent of pboCount.
 const MAX_INFLIGHT_PBOS = 3;
