@@ -21,82 +21,7 @@
 // ============================================================
 
 const NICHES = {
-    tech: {
-        id: 'tech',
-        name: 'Tech/Cyberpunk',
-        description: 'Technology, AI, software, digital, cybersecurity',
-
-        // Default visual theme (can be overridden independently)
-        defaultTheme: 'modern',
-
-        // Shot style guidance — tells Visual Planner what kind of footage to prefer
-        shotStyle: 'Neon-lit close-ups of screens and hardware, dark rooms with monitor glow, data visualizations, smooth tracking shots of server rooms and labs, aerial shots of tech campuses.',
-
-        // Allowed MG types for this niche
-        allowedMGs: [
-            'kineticText', 'statCounter', 'barChart', 'focusWord',
-            'explainer', 'progressBar', 'headline', 'comparisonCard', 'typewriter'
-        ],
-
-        // Footage provider priority
-        footagePriority: {
-            video: ['youtube', 'pexels', 'pixabay', 'newsVideo'],
-            image: ['googleCSE', 'bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash']
-        },
-
-        // Pacing preference (fast/moderate/slow) — used as default if AI is ambiguous
-        defaultPacing: 'fast',
-
-        // Preferred media type balance — guides AI when choosing video vs image per scene
-        // 'video' = prefer video clips, 'image' = prefer still images, 'mixed' = no strong bias
-        preferredMediaType: 'mixed',   // tech: product shots (image) + demos (video)
-
-        // Keywords for auto-detection from AI Director's topic analysis
-        keywords: ['tech', 'ai', 'cyber', 'hack', 'digital', 'code', 'robot', 'future',
-                   'virtual', 'computer', 'software', 'data', 'algorithm', 'startup',
-                   'app', 'silicon', 'processor', 'cloud', 'blockchain', 'machine learning'],
-
-        // Search policy — query rewriting rules for footage providers
-        searchPolicy: {
-            // Context terms appended for web-image providers (Google, Bing, etc.)
-            contextTerms: ['technology', 'digital', 'futuristic'],
-            // Terms stripped from queries if present
-            avoidTerms: ['cartoon', 'anime', 'illustration', 'clipart', 'drawing'],
-            // Generic fallback keywords when all retries fail
-            fallbackKeywords: ['technology background', 'digital abstract', 'circuit board close up', 'server room'],
-            // Keep entity names (company/product) prominent in query
-            entityBoost: true,
-            // Max words for stock providers (Pexels/Pixabay/Unsplash) — shorter = better results
-            stockMaxWords: 3,
-        },
-
-        // Keyword formation rules — how Visual Planner builds the keyword field per scene
-        keywordRules: {
-            // Primary strategy for keyword formation
-            strategy: 'product-first',
-            // Rules injected into the Visual Planner prompt
-            rules: [
-                'Product/tool name mentioned → keyword = product name (e.g., "ChatGPT interface", "iPhone 16 Pro")',
-                'Company mentioned → keyword = company + context (e.g., "NVIDIA headquarters", "Apple keynote")',
-                'Abstract concept → keyword = concrete visual representation (e.g., "server rack data center" not "cloud computing")',
-                'Never use jargon-only keywords — always include a visual anchor word',
-            ],
-            // Examples of good vs bad keywords for this niche
-            examples: {
-                good: ['"ChatGPT interface screenshot"', '"NVIDIA GPU chip"', '"server room rows"', '"robot arm factory"'],
-                bad: ['"artificial intelligence"', '"machine learning algorithm"', '"cloud-native architecture"'],
-            }
-        },
-
-        // Compositor overlay preferences — controls V2 image overlays & explainer cards
-        overlayPrefs: {
-            v2Density: 'low',        // low/medium/high — how many V2 image overlays
-            explainerDensity: 'high', // low/medium/high — how many transparent PNG explainers
-            maxOverlays: 4,           // max total overlays per video
-            minGapSec: 12,            // min seconds between overlays
-            preferredTypes: ['explainer', 'v2'],  // priority order
-        }
-    },
+    // tech: MOVED to news.tech sub-niche (see below news sub-niches section)
 
     nature: {
         id: 'nature',
@@ -114,7 +39,7 @@ const NICHES = {
 
         footagePriority: {
             video: ['pexels', 'pixabay', 'youtube', 'newsVideo'],
-            image: ['pexels', 'pixabay', 'unsplash', 'googleScrape', 'googleCSE', 'bing']
+            image: ['pexels', 'pixabay', 'unsplash', 'googleScrape', 'bing']
         },
 
         defaultPacing: 'slow',
@@ -172,7 +97,7 @@ const NICHES = {
 
         footagePriority: {
             video: ['newsVideo', 'youtube', 'pexels', 'pixabay'],
-            image: ['googleScrape', 'googleCSE', 'bing', 'pexels', 'pixabay', 'unsplash']
+            image: ['googleScrape', 'bing', 'pexels', 'pixabay', 'unsplash']
         },
 
         defaultPacing: 'moderate',
@@ -231,7 +156,7 @@ const NICHES = {
 
         footagePriority: {
             video: ['youtube', 'newsVideo', 'pexels', 'pixabay'],
-            image: ['googleCSE', 'bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash']
+            image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash']
         },
 
         defaultPacing: 'moderate',
@@ -289,7 +214,7 @@ const NICHES = {
 
         footagePriority: {
             video: ['pexels', 'pixabay', 'youtube', 'newsVideo'],
-            image: ['pexels', 'unsplash', 'pixabay', 'googleScrape', 'googleCSE', 'bing']
+            image: ['pexels', 'unsplash', 'pixabay', 'googleScrape', 'bing']
         },
 
         defaultPacing: 'slow',
@@ -348,7 +273,7 @@ const NICHES = {
 
         footagePriority: {
             video: ['youtube', 'pexels', 'pixabay', 'newsVideo'],
-            image: ['googleScrape', 'googleCSE', 'bing', 'pexels', 'pixabay', 'unsplash']
+            image: ['googleScrape', 'bing', 'pexels', 'pixabay', 'unsplash']
         },
 
         defaultPacing: 'fast',
@@ -407,7 +332,7 @@ const NICHES = {
 
         footagePriority: {
             video: ['youtube', 'pexels', 'pixabay', 'newsVideo'],
-            image: ['googleCSE', 'bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash']
+            image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash']
         },
 
         defaultPacing: 'moderate',
@@ -461,17 +386,17 @@ const NICHES = {
 
         allowedMGs: [
             'headline', 'lowerThird', 'statCounter', 'articleHighlight', 'mapChart',
-            'timeline', 'barChart', 'bulletList', 'callout', 'focusWord'
+            'timeline', 'barChart', 'bulletList', 'callout', 'focusWord', 'typewriter'
         ],
 
         footagePriority: {
             video: ['newsVideo', 'youtube', 'pexels', 'pixabay'],
-            image: ['googleCSE', 'bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash']
+            image: ['bing', 'googleScrape', 'unsplash', 'pexels', 'pixabay']
         },
 
         defaultPacing: 'fast',
 
-        preferredMediaType: 'image',   // news: press photos, screenshots, headlines
+        preferredMediaType: 'video',   // news: real news footage from DW, RT, Al Jazeera, France24
 
         keywords: ['news', 'politics', 'government', 'election', 'president', 'congress',
                    'war', 'conflict', 'crisis', 'breaking', 'report', 'journalist',
@@ -509,6 +434,268 @@ const NICHES = {
         }
     },
 
+    // ────────────────────────────────────────────────────
+    // NEWS SUB-NICHES — inherit from 'news', override specific fields
+    // Format: 'news.subNiche' — resolved by getNiche() via deep merge
+    // ────────────────────────────────────────────────────
+    'news.politics': {
+        id: 'news.politics',
+        _parent: 'news',
+        name: 'News / Politics & Geopolitics',
+        description: 'Political news, elections, government, geopolitics, diplomacy, sanctions',
+
+        shotStyle: 'Press conferences, parliament/congress floor votes, diplomatic handshakes, protest marches, government building exteriors, official portraits, world leader summits, embassy exteriors.',
+
+        allowedMGs: [
+            'headline', 'lowerThird', 'statCounter', 'articleHighlight', 'mapChart',
+            'timeline', 'barChart', 'bulletList', 'callout', 'focusWord', 'comparisonCard', 'typewriter'
+        ],
+
+        footagePriority: {
+            video: ['newsVideo', 'youtube', 'pexels', 'pixabay'],
+            image: ['bing', 'googleScrape', 'unsplash', 'pexels', 'pixabay']
+        },
+
+        preferredMediaType: 'video',
+
+        keywords: ['politics', 'government', 'election', 'president', 'congress', 'senate',
+                   'parliament', 'prime minister', 'diplomat', 'sanctions', 'policy', 'legislation',
+                   'vote', 'campaign', 'geopolitics', 'summit', 'treaty', 'embassy', 'UN',
+                   'nato', 'G7', 'G20', 'tariff', 'trade war', 'executive order'],
+
+        searchPolicy: {
+            contextTerms: ['politics', 'government', 'official'],
+            avoidTerms: ['cartoon', 'meme', 'satire', 'parody', 'game'],
+            fallbackKeywords: ['press conference podium', 'government building capitol', 'world leaders summit', 'parliament session'],
+            entityBoost: true,
+            stockMaxWords: 3,
+        },
+
+        keywordRules: {
+            strategy: 'entity-first',
+            rules: [
+                'Politician/leader named → keyword = their name + context (e.g., "Biden press conference", "Putin Kremlin")',
+                'Government body → keyword = building/chamber (e.g., "US Capitol building", "European Parliament")',
+                'Geopolitical event → keyword = specific event (e.g., "G7 summit Italy", "UN General Assembly")',
+                'Policy/legislation → keyword = related visual (e.g., "Supreme Court building", "protest march signs")',
+                'Election → keyword = campaign event (e.g., "Trump rally", "ballot counting")',
+                'Always use real names and specific institutions — political news demands precision',
+            ],
+            examples: {
+                good: ['"Biden State of the Union"', '"EU sanctions Russia"', '"Congress vote floor"', '"NATO summit Brussels"'],
+                bad: ['"political situation"', '"government decision"', '"world leaders meeting"'],
+            }
+        },
+    },
+
+    'news.celebrity': {
+        id: 'news.celebrity',
+        _parent: 'news',
+        name: 'News / Celebrity & Entertainment',
+        description: 'Celebrity news, gossip, entertainment industry, sports celebrities, pop culture',
+
+        shotStyle: 'Red carpet photos, paparazzi shots, award ceremony stages, studio interviews, social media screenshots, magazine covers, concert/event footage, sports press conferences.',
+
+        allowedMGs: [
+            'headline', 'lowerThird', 'callout', 'focusWord',
+            'articleHighlight', 'statCounter', 'timeline', 'bulletList', 'typewriter'
+        ],
+
+        footagePriority: {
+            video: ['youtube', 'newsVideo', 'pixabay', 'pexels'],
+            image: ['bing', 'googleScrape', 'unsplash', 'pexels', 'pixabay']
+        },
+
+        preferredMediaType: 'video',
+
+        keywords: ['celebrity', 'actor', 'actress', 'singer', 'rapper', 'musician',
+                   'athlete', 'star', 'famous', 'hollywood', 'grammy', 'oscar', 'emmy',
+                   'red carpet', 'paparazzi', 'gossip', 'scandal', 'divorce', 'dating',
+                   'album', 'tour', 'box office', 'award', 'nomination', 'instagram',
+                   'tiktok', 'viral', 'nba', 'nfl', 'ufc', 'fifa', 'champion'],
+
+        searchPolicy: {
+            contextTerms: ['celebrity', 'star', 'entertainment'],
+            avoidTerms: ['cartoon', 'fan art', 'anime', 'cosplay', 'fictional'],
+            fallbackKeywords: ['red carpet celebrity event', 'Hollywood Walk of Fame', 'award ceremony stage', 'paparazzi photo'],
+            entityBoost: true,
+            stockMaxWords: 3,
+        },
+
+        keywordRules: {
+            strategy: 'entity-first',
+            rules: [
+                'Celebrity named → keyword = their name + "photo" or event (e.g., "Taylor Swift Grammy 2024", "LeBron James press conference")',
+                'Event/show → keyword = event name + visual (e.g., "Oscar ceremony stage", "Super Bowl halftime")',
+                'Scandal/gossip → keyword = person name + context (e.g., "Kanye West interview", "Britney Spears conservatorship")',
+                'Movie/album → keyword = title + release (e.g., "Oppenheimer movie poster", "Beyonce Renaissance tour")',
+                'ALWAYS use the celebrity\'s real name — fans search by name',
+            ],
+            examples: {
+                good: ['"Taylor Swift Eras Tour"', '"LeBron James Lakers"', '"Oscar Best Picture 2024"', '"Drake album cover"'],
+                bad: ['"famous person event"', '"celebrity news"', '"entertainment update"'],
+            }
+        },
+    },
+
+    'news.economy': {
+        id: 'news.economy',
+        _parent: 'news',
+        name: 'News / Economy & Markets',
+        description: 'Economic news, stock markets, trade, inflation, business news, central banks',
+
+        shotStyle: 'Stock market tickers, trading floor footage, central bank buildings, currency notes close-ups, oil rigs/pipelines, shipping containers, Wall Street exteriors, chart/graph overlays, factory/warehouse interiors.',
+
+        allowedMGs: [
+            'headline', 'lowerThird', 'statCounter', 'barChart',
+            'comparisonCard', 'callout', 'bulletList', 'timeline', 'focusWord', 'articleHighlight', 'typewriter'
+        ],
+
+        footagePriority: {
+            video: ['newsVideo', 'youtube', 'pixabay', 'pexels'],
+            image: ['bing', 'googleScrape', 'unsplash', 'pexels', 'pixabay']
+        },
+
+        preferredMediaType: 'video',
+
+        keywords: ['economy', 'market', 'stock', 'inflation', 'gdp', 'recession',
+                   'federal reserve', 'interest rate', 'wall street', 'nasdaq', 'dow jones',
+                   'oil price', 'trade', 'tariff', 'export', 'import', 'supply chain',
+                   'central bank', 'currency', 'dollar', 'euro', 'bitcoin', 'crypto',
+                   'debt', 'deficit', 'unemployment', 'jobs report', 'earnings'],
+
+        searchPolicy: {
+            contextTerms: ['economy', 'market', 'financial'],
+            avoidTerms: ['cartoon', 'meme', 'game', 'fiction', 'crypto scam'],
+            fallbackKeywords: ['stock market trading floor', 'Wall Street New York', 'oil refinery aerial', 'shipping port containers'],
+            entityBoost: true,
+            stockMaxWords: 3,
+        },
+
+        keywordRules: {
+            strategy: 'topic-visual',
+            rules: [
+                'Company named → keyword = company name + visual (e.g., "Tesla factory", "Apple headquarters Cupertino")',
+                'Market/index → keyword = trading visual (e.g., "stock market trading floor", "NASDAQ screen")',
+                'Commodity → keyword = commodity visual (e.g., "oil refinery aerial", "gold bars vault")',
+                'Central bank/policy → keyword = institution (e.g., "Federal Reserve building", "ECB Frankfurt")',
+                'Economic data → keyword = related visual (e.g., "factory assembly line", "shipping containers port")',
+                'Use specific company names and financial institutions — generic "economy" returns nothing useful',
+            ],
+            examples: {
+                good: ['"Tesla Gigafactory"', '"Federal Reserve building"', '"oil pipeline Saudi Arabia"', '"Wall Street bull statue"'],
+                bad: ['"economy situation"', '"financial market"', '"business news"'],
+            }
+        },
+    },
+
+    'news.military': {
+        id: 'news.military',
+        _parent: 'news',
+        name: 'News / Military & Geopolitics',
+        description: 'Military news, war, geopolitics, global conflicts, defense, arms deals',
+
+        defaultTheme: 'crime',
+
+        shotStyle: 'Satellite imagery, military vehicle footage, map animations with troop movements, night-vision style shots, naval fleet aerials, press conferences, border checkpoints, destroyed infrastructure.',
+
+        allowedMGs: [
+            'headline', 'lowerThird', 'mapChart', 'timeline', 'statCounter',
+            'comparisonCard', 'callout', 'focusWord', 'bulletList', 'barChart', 'typewriter'
+        ],
+
+        footagePriority: {
+            video: ['youtube', 'newsVideo', 'pixabay', 'pexels'],
+            image: ['bing', 'googleScrape', 'unsplash', 'pexels', 'pixabay']
+        },
+
+        defaultPacing: 'moderate',
+
+        preferredMediaType: 'video',
+
+        keywords: ['military', 'army', 'navy', 'war', 'conflict', 'geopolitics', 'geopolitical',
+                   'troops', 'missile', 'weapon', 'defense', 'nato', 'invasion', 'border',
+                   'sanctions', 'nuclear', 'submarine', 'drone', 'airforce', 'tank',
+                   'soldier', 'regiment', 'alliance', 'territory', 'occupation',
+                   'airstrike', 'strike', 'combat', 'radar', 'fighter', 'bomber',
+                   'warship', 'artillery', 'ammunition', 'air force', 'battleground',
+                   'squadron', 'fleet', 'pentagon', 'armed forces', 'warfare'],
+
+        searchPolicy: {
+            contextTerms: ['military', 'conflict', 'geopolitical'],
+            avoidTerms: ['cartoon', 'game', 'movie', 'fiction', 'call of duty', 'anime'],
+            fallbackKeywords: ['military operation', 'world map geopolitics', 'naval fleet ocean', 'satellite aerial view'],
+            entityBoost: true,
+            stockMaxWords: 3,
+        },
+
+        keywordRules: {
+            strategy: 'entity-first',
+            rules: [
+                'Military leader/figure → keyword = their name + context (e.g., "General Patton portrait", "Zelensky address")',
+                'Specific conflict → keyword = conflict name + visual (e.g., "Ukraine frontline trench", "Syria Aleppo ruins")',
+                'Military hardware → keyword = specific equipment (e.g., "F-35 fighter jet", "aircraft carrier deck")',
+                'Strategic location → keyword = place + military context (e.g., "Taiwan Strait naval", "NATO summit Brussels")',
+                'Use military terminology — accurate equipment names and conflict references',
+            ],
+            examples: {
+                good: ['"F-35 fighter jet takeoff"', '"Ukraine trench warfare"', '"aircraft carrier deck"', '"NATO summit leaders"'],
+                bad: ['"military operation"', '"war zone"', '"conflict area"'],
+            }
+        },
+    },
+
+    'news.tech': {
+        id: 'news.tech',
+        _parent: 'news',
+        name: 'News / Tech & Science',
+        description: 'Technology news, AI, cybersecurity, product launches, science breakthroughs',
+
+        defaultTheme: 'modern',
+
+        shotStyle: 'Neon-lit close-ups of screens and hardware, dark rooms with monitor glow, data visualizations, smooth tracking shots of server rooms and labs, aerial shots of tech campuses, product launch stages.',
+
+        allowedMGs: [
+            'headline', 'lowerThird', 'statCounter', 'barChart', 'focusWord',
+            'comparisonCard', 'callout', 'bulletList', 'kineticText', 'typewriter'
+        ],
+
+        footagePriority: {
+            video: ['youtube', 'newsVideo', 'pixabay', 'pexels'],
+            image: ['bing', 'googleScrape', 'unsplash', 'pexels', 'pixabay']
+        },
+
+        defaultPacing: 'fast',
+
+        preferredMediaType: 'video',
+
+        keywords: ['tech', 'ai', 'cyber', 'hack', 'digital', 'code', 'robot', 'future',
+                   'virtual', 'computer', 'software', 'data', 'algorithm', 'startup',
+                   'app', 'silicon', 'processor', 'cloud', 'blockchain', 'machine learning'],
+
+        searchPolicy: {
+            contextTerms: ['technology', 'digital', 'futuristic'],
+            avoidTerms: ['cartoon', 'anime', 'illustration', 'clipart', 'drawing'],
+            fallbackKeywords: ['technology background', 'digital abstract', 'circuit board close up', 'server room'],
+            entityBoost: true,
+            stockMaxWords: 3,
+        },
+
+        keywordRules: {
+            strategy: 'product-first',
+            rules: [
+                'Product/tool name mentioned → keyword = product name (e.g., "ChatGPT interface", "iPhone 16 Pro")',
+                'Company mentioned → keyword = company + context (e.g., "NVIDIA headquarters", "Apple keynote")',
+                'Abstract concept → keyword = concrete visual representation (e.g., "server rack data center" not "cloud computing")',
+                'Never use jargon-only keywords — always include a visual anchor word',
+            ],
+            examples: {
+                good: ['"ChatGPT interface screenshot"', '"NVIDIA GPU chip"', '"server room rows"', '"robot arm factory"'],
+                bad: ['"artificial intelligence"', '"machine learning algorithm"', '"cloud-native architecture"'],
+            }
+        },
+    },
+
     history: {
         id: 'history',
         name: 'History/Documentary',
@@ -525,7 +712,7 @@ const NICHES = {
 
         footagePriority: {
             video: ['youtube', 'pexels', 'pixabay', 'newsVideo'],
-            image: ['googleCSE', 'googleScrape', 'bing', 'pexels', 'pixabay', 'unsplash']
+            image: ['googleScrape', 'bing', 'pexels', 'pixabay', 'unsplash']
         },
 
         defaultPacing: 'slow',
@@ -586,7 +773,7 @@ const NICHES = {
 
         footagePriority: {
             video: ['pexels', 'pixabay', 'youtube', 'newsVideo'],
-            image: ['pexels', 'unsplash', 'pixabay', 'googleScrape', 'googleCSE', 'bing']
+            image: ['pexels', 'unsplash', 'pixabay', 'googleScrape', 'bing']
         },
 
         defaultPacing: 'moderate',
@@ -629,65 +816,7 @@ const NICHES = {
         }
     },
 
-    military: {
-        id: 'military',
-        name: 'Military/Geopolitics',
-        description: 'Military, war, geopolitics, global conflicts, defense',
-
-        defaultTheme: 'crime',
-
-        shotStyle: 'Satellite imagery, military vehicle footage, map animations with troop movements, night-vision style shots, naval fleet aerials, press conferences, border checkpoints, destroyed infrastructure.',
-
-        allowedMGs: [
-            'headline', 'lowerThird', 'mapChart', 'timeline', 'statCounter',
-            'comparisonCard', 'callout', 'focusWord', 'bulletList', 'barChart'
-        ],
-
-        footagePriority: {
-            video: ['newsVideo', 'youtube', 'pexels', 'pixabay'],
-            image: ['googleCSE', 'bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash']
-        },
-
-        defaultPacing: 'moderate',
-
-        preferredMediaType: 'mixed',   // military: maps (image) + action footage (video)
-
-        keywords: ['military', 'army', 'navy', 'war', 'conflict', 'geopolitics', 'geopolitical',
-                   'troops', 'missile', 'weapon', 'defense', 'nato', 'invasion', 'border',
-                   'sanctions', 'nuclear', 'submarine', 'drone', 'airforce', 'tank',
-                   'soldier', 'regiment', 'alliance', 'territory', 'occupation'],
-
-        searchPolicy: {
-            contextTerms: ['military', 'conflict', 'geopolitical'],
-            avoidTerms: ['cartoon', 'game', 'movie', 'fiction', 'call of duty', 'anime'],
-            fallbackKeywords: ['military operation', 'world map geopolitics', 'naval fleet ocean', 'satellite aerial view'],
-            entityBoost: true,
-            stockMaxWords: 3,
-        },
-
-        keywordRules: {
-            strategy: 'entity-first',
-            rules: [
-                'Military leader/figure → keyword = their name + context (e.g., "General Patton portrait", "Zelensky address")',
-                'Specific conflict → keyword = conflict name + visual (e.g., "Ukraine frontline trench", "Syria Aleppo ruins")',
-                'Military hardware → keyword = specific equipment (e.g., "F-35 fighter jet", "aircraft carrier deck")',
-                'Strategic location → keyword = place + military context (e.g., "Taiwan Strait naval", "NATO summit Brussels")',
-                'Use military terminology — accurate equipment names and conflict references',
-            ],
-            examples: {
-                good: ['"F-35 fighter jet takeoff"', '"Ukraine trench warfare"', '"aircraft carrier deck"', '"NATO summit leaders"'],
-                bad: ['"military operation"', '"war zone"', '"conflict area"'],
-            }
-        },
-
-        overlayPrefs: {
-            v2Density: 'high',
-            explainerDensity: 'medium',
-            maxOverlays: 5,
-            minGapSec: 8,
-            preferredTypes: ['v2', 'explainer'],
-        }
-    },
+    // military: MOVED to news.military sub-niche (see below news sub-niches section)
 
     food: {
         id: 'food',
@@ -705,7 +834,7 @@ const NICHES = {
 
         footagePriority: {
             video: ['pexels', 'pixabay', 'youtube', 'newsVideo'],
-            image: ['pexels', 'unsplash', 'pixabay', 'googleCSE', 'bing', 'googleScrape']
+            image: ['pexels', 'unsplash', 'pixabay', 'bing', 'googleScrape']
         },
 
         defaultPacing: 'moderate',
@@ -765,7 +894,7 @@ const NICHES = {
 
         footagePriority: {
             video: ['youtube', 'pexels', 'pixabay', 'newsVideo'],
-            image: ['googleCSE', 'bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash']
+            image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash']
         },
 
         defaultPacing: 'moderate',
@@ -828,7 +957,7 @@ const NICHES = {
 
         footagePriority: {
             video: ['pexels', 'pixabay', 'youtube', 'newsVideo'],
-            image: ['pexels', 'pixabay', 'unsplash', 'googleCSE', 'bing', 'googleScrape']
+            image: ['pexels', 'pixabay', 'unsplash', 'bing', 'googleScrape']
         },
 
         defaultPacing: 'moderate',
@@ -897,16 +1026,20 @@ function pickNicheFromContent(scriptContext) {
 
     // Direct mapping from AI theme → niche (strongest signal)
     const THEME_TO_NICHE = {
-        'technology': 'tech',
+        'technology': 'news',      // → sub-niche detection picks news.tech
         'science': 'education',
         'finance': 'business',
         'business': 'business',
-        'politics': 'news',
+        'economy': 'business',
+        'markets': 'business',
+        'politics': 'news',        // → sub-niche detection picks news.politics
+        'entertainment': 'news',   // → sub-niche detection picks news.celebrity
+        'celebrity': 'news',       // → sub-niche detection picks news.celebrity
+        'gossip': 'news',          // → sub-niche detection picks news.celebrity
         'crime': 'crime',
         'mystery': 'crime',
         'nature': 'nature',
         'sports': 'sport',
-        // 'entertainment' intentionally omitted — too broad, falls through to keyword scoring
         'education': 'education',
         'lifestyle': 'luxury',
         'travel': 'nature',
@@ -916,10 +1049,10 @@ function pickNicheFromContent(scriptContext) {
         'cooking': 'food',
         'motivation': 'motivation',
         'history': 'history',
-        'military': 'military',
-        'war': 'military',
-        'geopolitics': 'military',
-        'defense': 'military',
+        'military': 'news',        // → sub-niche detection picks news.military
+        'war': 'news',             // → sub-niche detection picks news.military
+        'geopolitics': 'news',     // → sub-niche detection picks news.military
+        'defense': 'news',         // → sub-niche detection picks news.military
         'diy': 'diy',
         'crafts': 'diy',
         'home improvement': 'diy',
@@ -928,10 +1061,12 @@ function pickNicheFromContent(scriptContext) {
     // If AI gave us a direct theme match, start with that as a strong candidate
     const directMatch = THEME_TO_NICHE[aiTheme];
 
-    // Score each niche based on keyword matches (word-boundary aware)
+    // Score each TOP-LEVEL niche based on keyword matches (word-boundary aware)
+    // Sub-niches (with _parent) are scored separately after parent is selected
     const scores = {};
     for (const [nicheId, niche] of Object.entries(NICHES)) {
         if (nicheId === 'general') continue;
+        if (niche._parent) continue; // Skip sub-niches — handled by _detectSubNiche
 
         let score = 0;
         for (const keyword of niche.keywords) {
@@ -957,7 +1092,76 @@ function pickNicheFromContent(scriptContext) {
         }
     }
 
+    // Sub-niche detection: if parent niche has sub-niches, pick the best one
+    const subNicheResult = _detectSubNiche(bestNiche, text, aiTheme);
+    if (subNicheResult) return subNicheResult;
+
     return bestNiche;
+}
+
+/**
+ * Detect sub-niche within a parent niche by scoring sub-niche keywords.
+ * @param {string} parentId - e.g., 'news'
+ * @param {string} text - lowercase text blob for matching
+ * @param {string} aiTheme - AI's explicit theme string
+ * @returns {string|null} Sub-niche ID (e.g., 'news.politics') or null to keep parent
+ */
+function _detectSubNiche(parentId, text, aiTheme) {
+    // Find all sub-niches for this parent
+    const subNiches = Object.entries(NICHES).filter(([_, n]) => n._parent === parentId);
+    if (subNiches.length === 0) return null;
+
+    // AI theme direct mapping to sub-niche
+    const SUB_NICHE_THEME_MAP = {
+        'politics': 'news.politics',
+        'geopolitics': 'news.politics',
+        'economy': 'news.economy',
+        'finance': 'news.economy',
+        'markets': 'news.economy',
+        'celebrity': 'news.celebrity',
+        'entertainment': 'news.celebrity',
+        'gossip': 'news.celebrity',
+        'military': 'news.military',
+        'war': 'news.military',
+        'defense': 'news.military',
+        'technology': 'news.tech',
+        'tech': 'news.tech',
+        'cyber': 'news.tech',
+    };
+    const directSub = SUB_NICHE_THEME_MAP[aiTheme];
+
+    // Always score ALL sub-niches by keyword matches — even if AI theme gave a direct hit.
+    // A strong keyword signal (e.g., 8 military terms) should override a weak AI theme tag.
+    const subScores = {};
+    let bestSub = null;
+    let bestScore = 2; // Minimum threshold — need at least 3 keyword hits to specialize
+    for (const [subId, sub] of subNiches) {
+        if (!sub.keywords) continue;
+        let score = 0;
+        for (const keyword of sub.keywords) {
+            const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const re = new RegExp(`\\b${escaped}\\b`, 'i');
+            if (re.test(text)) score += 1;
+        }
+        subScores[subId] = score;
+        if (score > bestScore) {
+            bestScore = score;
+            bestSub = subId;
+        }
+    }
+
+    // If keyword scoring found a clear winner, use it — even over AI theme
+    // But if keyword winner only barely beats the AI-theme sub-niche, trust the AI theme
+    if (directSub && NICHES[directSub]) {
+        const directScore = subScores[directSub] || 0;
+        // Keyword winner must beat AI-theme sub-niche by 3+ hits to override
+        if (!bestSub || bestSub === directSub || (bestScore - directScore) < 3) {
+            return directSub;
+        }
+        // Keyword winner is significantly stronger — override AI theme
+    }
+
+    return bestSub; // null if no sub-niche scored high enough
 }
 
 // ============================================================
@@ -968,7 +1172,7 @@ function pickNicheFromContent(scriptContext) {
 const STOCK_PROVIDERS = new Set(['pexels', 'pixabay', 'unsplash']);
 
 // Providers where context-enriched queries work better (web search)
-const WEB_PROVIDERS = new Set(['googleCSE', 'bing', 'googleScrape', 'duckduckgo', 'newsVideo']);
+const WEB_PROVIDERS = new Set(['bing', 'googleScrape', 'newsVideo']);
 
 // YouTube needs specific event/topic queries — not too short (stock-style) or too long (web-style)
 const YOUTUBE_PROVIDERS = new Set(['youtube']);
@@ -979,7 +1183,7 @@ const YOUTUBE_PROVIDERS = new Set(['youtube']);
  * @returns {Object} keywordRules
  */
 function getKeywordRules(nicheId) {
-    const niche = NICHES[nicheId] || NICHES.general;
+    const niche = getNiche(nicheId);
     return niche.keywordRules || NICHES.general.keywordRules;
 }
 
@@ -989,7 +1193,7 @@ function getKeywordRules(nicheId) {
  * @returns {Object} searchPolicy
  */
 function getSearchPolicy(nicheId) {
-    const niche = NICHES[nicheId] || NICHES.general;
+    const niche = getNiche(nicheId);
     return niche.searchPolicy || NICHES.general.searchPolicy;
 }
 
@@ -1007,7 +1211,7 @@ function getSearchPolicy(nicheId) {
  *
  * @param {string} keyword - Original keyword from AI visual planner
  * @param {string} nicheId - Active niche ID
- * @param {string} providerKey - Provider key (e.g., 'pexels', 'googleCSE')
+ * @param {string} providerKey - Provider key (e.g., 'pexels')
  * @param {Object} [scene] - Optional scene object for entity extraction
  * @returns {string} Rewritten query
  */
@@ -1130,12 +1334,42 @@ function getFallbackKeywords(nicheId) {
 // ============================================================
 
 /**
- * Get niche object by ID
- * @param {string} nicheId
- * @returns {Object} Niche config
+ * Get niche object by ID. Supports sub-niches (e.g., 'news.politics').
+ * Sub-niches merge: parent fields as base, sub-niche fields override.
+ * @param {string} nicheId - e.g., 'news', 'news.politics', 'crime'
+ * @returns {Object} Niche config (merged if sub-niche)
  */
 function getNiche(nicheId) {
-    return NICHES[nicheId] || NICHES.general;
+    // Direct match (including sub-niche entries like 'news.politics')
+    if (NICHES[nicheId]) {
+        const niche = NICHES[nicheId];
+        // If it has a _parent, merge with parent
+        if (niche._parent) {
+            const parent = NICHES[niche._parent] || NICHES.general;
+            return _mergeNiche(parent, niche);
+        }
+        return niche;
+    }
+    return NICHES.general;
+}
+
+/**
+ * Merge parent niche with sub-niche overrides.
+ * Sub-niche fields win; missing fields fall back to parent.
+ */
+function _mergeNiche(parent, sub) {
+    return {
+        ...parent,
+        ...sub,
+        // Keep parent's defaultTheme/defaultPacing unless sub explicitly overrides
+        defaultTheme: sub.defaultTheme || parent.defaultTheme,
+        defaultPacing: sub.defaultPacing || parent.defaultPacing,
+        // Sub-niche overlayPrefs merge with parent's
+        overlayPrefs: sub.overlayPrefs ? { ...parent.overlayPrefs, ...sub.overlayPrefs } : parent.overlayPrefs,
+        // Mark as resolved sub-niche
+        _resolved: true,
+        _parentId: parent.id,
+    };
 }
 
 /**
@@ -1177,15 +1411,19 @@ function getAllNiches() {
 const NICHE_PRESETS = {
     auto:         { nicheId: null, suggestedFormat: null, suggestedPacing: null, label: 'Auto-Detect', emoji: '🤖' },
     trueCrime:    { nicheId: 'crime', suggestedFormat: 'documentary', suggestedPacing: 'moderate', label: 'True Crime', emoji: '🔪' },
-    military:     { nicheId: 'military', suggestedFormat: 'documentary', suggestedPacing: 'moderate', label: 'Military / Geopolitics', emoji: '🎖️' },
+    military:     { nicheId: 'news.military', suggestedFormat: 'documentary', suggestedPacing: 'moderate', label: 'Military / Geopolitics', emoji: '🎖️' },
     documentary:  { nicheId: 'nature', suggestedFormat: 'documentary', suggestedPacing: 'slow', label: 'Nature Documentary', emoji: '🎬' },
     finance:      { nicheId: 'business', suggestedFormat: null, suggestedPacing: 'moderate', label: 'Finance / Business', emoji: '💰' },
     luxury:       { nicheId: 'luxury', suggestedFormat: null, suggestedPacing: 'slow', label: 'Luxury / Fashion', emoji: '💎' },
     sports:       { nicheId: 'sport', suggestedFormat: null, suggestedPacing: 'fast', label: 'Sports', emoji: '⚽' },
-    tech:         { nicheId: 'tech', suggestedFormat: null, suggestedPacing: 'fast', label: 'Tech', emoji: '💻' },
+    tech:         { nicheId: 'news.tech', suggestedFormat: null, suggestedPacing: 'fast', label: 'Tech / Science', emoji: '💻' },
     history:      { nicheId: 'history', suggestedFormat: 'documentary', suggestedPacing: 'slow', label: 'History', emoji: '📜' },
     motivation:   { nicheId: 'motivation', suggestedFormat: null, suggestedPacing: 'moderate', label: 'Motivation', emoji: '🔥' },
-    news:         { nicheId: 'news', suggestedFormat: null, suggestedPacing: 'fast', label: 'News Commentary', emoji: '📰' },
+    news:         { nicheId: 'news', suggestedFormat: null, suggestedPacing: 'fast', label: 'News (Auto)', emoji: '📰' },
+    newsPolitics: { nicheId: 'news.politics', suggestedFormat: null, suggestedPacing: 'fast', label: 'News / Politics', emoji: '🏛️' },
+    newsCelebrity:{ nicheId: 'news.celebrity', suggestedFormat: null, suggestedPacing: 'fast', label: 'News / Celebrity', emoji: '⭐' },
+    newsEconomy:  { nicheId: 'news.economy', suggestedFormat: null, suggestedPacing: 'fast', label: 'News / Economy', emoji: '📈' },
+    // newsMilitary and newsTech are aliases of military and tech presets above
     food:         { nicheId: 'food', suggestedFormat: null, suggestedPacing: 'moderate', label: 'Food / Health', emoji: '🍎' },
     diy:          { nicheId: 'diy', suggestedFormat: null, suggestedPacing: 'moderate', label: 'DIY / Lifehacks', emoji: '🔧' },
 };

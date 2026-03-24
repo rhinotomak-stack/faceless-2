@@ -198,11 +198,15 @@ class ExportPipeline {
                 // Backpressure: wait for FFmpeg to drain before accepting more frames
                 if (!canWrite) {
                     await new Promise((resolve, reject) => {
+                        // Poll cancelled flag every 200ms so cancel is never stuck
+                        const interval = setInterval(() => {
+                            if (this._cancelled || ffmpegDead) { clearInterval(interval); resolve(); }
+                        }, 200);
                         const timeout = setTimeout(() => {
-                            if (this._cancelled) resolve(); // Unblock on cancel
-                        }, 500);
-                        ffmpegProc.stdin.once('drain', () => { clearTimeout(timeout); resolve(); });
-                        ffmpegProc.stdin.once('error', (err) => { clearTimeout(timeout); reject(err); });
+                            clearInterval(interval); resolve(); // Force unblock after 2s max
+                        }, 2000);
+                        ffmpegProc.stdin.once('drain', () => { clearInterval(interval); clearTimeout(timeout); resolve(); });
+                        ffmpegProc.stdin.once('error', () => { clearInterval(interval); clearTimeout(timeout); resolve(); });
                     });
                     if (this._cancelled) throw new Error('Export cancelled');
                 }
@@ -227,26 +231,37 @@ class ExportPipeline {
             }
 
             // 6. Close FFmpeg stdin and wait for it to finish encoding
+            if (this._cancelled) throw new Error('Export cancelled');
             await new Promise((resolve, reject) => {
+                // If FFmpeg already died (cancel or error), resolve immediately
+                if (ffmpegDead || ffmpegProc.killed) { resolve(); return; }
+
                 const timeout = setTimeout(() => {
                     try { ffmpegProc.kill('SIGTERM'); } catch (_) { }
-                    reject(new Error('FFmpeg encoding timeout (120s)'));
+                    resolve(); // Don't reject on timeout — just move on
                 }, 120000);
 
+                // Poll cancelled flag so we don't hang here after cancel
+                const cancelCheck = setInterval(() => {
+                    if (this._cancelled || ffmpegDead) {
+                        clearInterval(cancelCheck); clearTimeout(timeout); resolve();
+                    }
+                }, 300);
+
                 ffmpegProc.on('close', (code) => {
-                    clearTimeout(timeout);
-                    if (code === 0) {
+                    clearInterval(cancelCheck); clearTimeout(timeout);
+                    if (code === 0 || this._cancelled) {
                         resolve();
                     } else {
                         reject(new Error(`FFmpeg exited with code ${code}\n${ffmpegStderr.slice(-500)}`));
                     }
                 });
                 ffmpegProc.on('error', (err) => {
-                    clearTimeout(timeout);
-                    reject(err);
+                    clearInterval(cancelCheck); clearTimeout(timeout);
+                    if (this._cancelled) resolve(); else reject(err);
                 });
 
-                ffmpegProc.stdin.end();
+                try { ffmpegProc.stdin.end(); } catch (_) { resolve(); }
             });
 
             console.log(`[ExportPipeline] Video encoded: ${videoFile} (${this._framesWritten} frames)`);

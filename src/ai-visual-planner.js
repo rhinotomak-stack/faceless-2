@@ -21,7 +21,7 @@
  *     • mediaType: "video" | "image"
  *     • sourceHint: "stock" | "youtube" | "web-image"
  *     • visualIntent: "Aerial establishing shot of large mansion surrounded by police vehicles"
- *     • effects: ["grain", "vignette"] — per-scene CSS effects from theme's allowed pool
+ *     • effects: ["grain", "vignette"] — expanded from effectPreset (preset-based, not individual picks)
  *     • mgHint: "lowerThird: Detective Smith, Lead Investigator" — MG suggestion from niche's allowed list (or null)
  *
  * Uses shared ai-provider.js for all AI calls.
@@ -232,30 +232,21 @@ ${searchPolicy.entityBoost ? '- Entity names (people, companies) work well in we
 QUALITY TIER: ${qualityTier}
 ${tier.allowVideo ? '- Can use VIDEO clips (preferred for motion and impact)' : '- IMAGES ONLY (no video allowed)'}
 
-AVAILABLE EFFECTS FOR THIS THEME (${theme || 'standard'}):
+AVAILABLE EFFECT PRESETS FOR THIS THEME (${scriptContext.themeId || 'standard'}):
 ${(() => {
-    const t = getTheme(theme || 'standard');
-    const fx = t.overlays.effects || [];
-    const params = t.effectParams || {};
-    if (fx.length === 0) return 'grain';
-    return fx.map(e => {
-        const p = params[e];
-        if (!p) return e;
-        const desc = Object.entries(p).map(([k, v]) => `${k}=${v}`).join(', ');
-        return `${e} (${desc})`;
-    }).join('\n');
+    const EFFECT_PRESETS = require('./effect-presets');
+    const activeTheme = scriptContext.themeId || 'standard';
+    const presets = Object.entries(EFFECT_PRESETS)
+        .filter(([k, p]) => k !== 'none' && p.themes && (p.themes.includes('*') || p.themes.includes(activeTheme)))
+        .map(([k, p]) => `${k}: ${p.description || p.label}`)
+        .join('\n');
+    return presets || 'none available';
 })()}
-- Pick 0-2 effects per scene from this list ONLY. Use "none" if the scene doesn't need effects.
-- The theme controls each effect's intensity/params — you just pick WHICH effects fit the scene mood.
-- Intense/dramatic scenes → more effects. Calm/simple scenes → none or one subtle effect.
-
-EFFECT DESCRIPTIONS:
-- grain: Film grain noise overlay — adds texture and grit
-- dust: Sparse bright dust particles — adds atmosphere, aged feel
-- vignette: Dark edges, bright center — draws focus, adds drama
-- blurVignette: Blurred edges, sharp center — cinematic depth-of-field feel
-- chromatic: RGB channel offset — tech/glitch aesthetic
-- lightLeak: Warm light bleed from edges — dreamy, vintage, elegant
+- Pick ONE effect preset per scene from the list above, or "none" for no effect.
+- These are pre-made combos (grain+scratches+color grading etc) — NOT individual effects.
+- ONLY use presets listed above — do NOT use presets not in the list.
+- Don't overuse effects — ~40-50% of scenes should be "none"
+- HOOK scenes benefit from subtle effects for visual impact
 
 ALLOWED MOTION GRAPHICS FOR THIS NICHE (${niche.name}):
 ${niche.allowedMGs.join(', ')}
@@ -363,6 +354,10 @@ ${tier.allowVideo
      • Example: "They found the body of John Smith" → keyword: "John Smith photo", mediaType: image, sourceHint: web-image
    - **LOCATIONS**: Use specific place names (e.g., "Santa Fe mansion" not "luxury house")
    - **COMPANIES**: Show their products/branding (e.g., "Tesla Model 3" not "electric car")
+   - **NEWS/CURRENT EVENTS**: When the scene describes a recent event, conflict, or political development:
+     • Use sourceHint: "news" — this searches news sites (BBC, Al Jazeera, Reuters) for real footage
+     • Use sourceHint: "news" for: wars, elections, political speeches, protests, sanctions, summits, disasters
+     • The keyword should be the EVENT or TOPIC (e.g., "Iran Saudi Arabia tensions", "NATO summit 2024")
    - **GENERIC ACTIONS**: When NO specific entity mentioned → stock footage is OK
    - Be SPECIFIC, not generic! Use the entity names we found!
 
@@ -372,6 +367,19 @@ ${tier.allowVideo
    - Example: If the topic is about "Sammy Davis Jr naming racist stars" and the narration says "documented interviews" → keyword should be "Sammy Davis Jr interview 1960s", NOT "documented interviews".
    - Example: If the topic is about a crime and narration says "the evidence was compelling" → keyword should be "courtroom evidence table", NOT "compelling evidence".
    - ALWAYS ground abstract narration in the SPECIFIC topic, people, places, and era from the TOPIC CONTEXT.
+
+   **NO SPOILERS — keyword must match what the VIEWER knows (CRITICAL):**
+   - The keyword must reflect what the NARRATION actually says in THIS scene, not what you know from context.
+   - If a scene is an INTRODUCTION/TEASER that says "the man who..." or "but first, we need to understand..." WITHOUT naming the person/topic yet → the keyword must be GENERIC (e.g., "Hollywood director 1910s", "old film projector"), NOT the person's name or specific work.
+   - The REVEAL should happen in the NEXT scene where the name/topic is actually spoken.
+   - Example: Scene says "But first, we need to understand how the man who led..." → keyword: "vintage Hollywood studio", NOT "D.W. Griffith" or "Birth of a Nation"
+   - Example: Scene says "Number nine, DW Griffith" → NOW use keyword: "D.W. Griffith portrait"
+   - This prevents showing the viewer WHO or WHAT is being discussed before the narrator reveals it.
+
+   **PERSON INTRODUCTION (listicle/ranked items):**
+   - When a scene FIRST NAMES a person (e.g., "Number nine, DW Griffith"), the keyword MUST be their name + "portrait" or "photo" for a clear face shot.
+   - Example: "Number nine, DW Griffith. Before there were racist..." → keyword: "D.W. Griffith portrait", NOT "Birth of a Nation poster"
+   - The PORTRAIT/PHOTO of the person should appear on the scene where they are NAMED, not on earlier teaser scenes or later detail scenes.
 
 8. VISUAL INTENT:
    - Describe the EXACT shot you want
@@ -453,16 +461,12 @@ ${(() => {
 
    The right stockQuery + webQuery combo is THE difference between good and bad footage!
 
-13. EFFECTS (per-scene CSS visual effects):
-   - Pick from the AVAILABLE EFFECTS list above (theme-specific)
-   - Use comma-separated values for multiple effects, or "none"
-   - Match effects to scene mood:
-     • Dark/tense scenes → vignette, grain
-     • Dreamy/elegant scenes → lightLeak, blurVignette
-     • High-energy scenes → chromatic, grain
-     • Clean/informational scenes → none
-   - Don't overuse effects — ~40-50% of scenes should be "none"
-   - HOOK scenes benefit from subtle effects for visual impact
+13. EFFECTS (per-scene effect preset):
+   - Pick ONE preset from the AVAILABLE EFFECT PRESETS list above, or "none"
+   - Each preset is a curated combo (grain, scratches, color grading, etc.) — DO NOT list individual effects
+   - Match preset to scene mood/tone (see descriptions above)
+   - ~40-50% of scenes should be "none" — don't overuse
+   - HOOK scenes benefit from subtle presets for visual impact
 
 14. MG HINT (OVERLAY motion graphic — appears ON TOP of footage):
    - Format: "<mgType>: <brief content description>" or "none"
@@ -475,6 +479,7 @@ ${(() => {
    - Overlay types: lowerThird, headline, statCounter, callout, focusWord, progressBar
    - Most scenes are pure storytelling — they should have NO MG
    - Do NOT cluster MGs — leave gaps of 2-4 scenes between MGs
+   - **NO SPOILER MGs**: A lowerThird must ONLY appear on the scene where the person is FIRST NAMED in the narration text. If a scene says "but first, the man who..." without naming anyone → NO lowerThird. The lowerThird goes on the NEXT scene where the name is actually spoken.
 
 15. FULLSCREEN MG (REPLACES footage — no download needed for this scene):
    - Format: "<mgType>: <content data>" or "none"
@@ -495,8 +500,8 @@ ${(() => {
 
 OUTPUT FORMAT (one line per scene):
 
-SCENE 0: keyword: <search term or none> | stockQuery: <query or none> | webQuery: <query or none> | mediaType: <video|image> | sourceHint: <stock|youtube|web-image> | framing: <fullscreen|cinematic> | backgroundId: <none|blur|gradient-id> | visualIntent: <shot description> | effects: <comma-separated or none> | mgHint: <overlay type: desc or none> | fullscreenMG: <fullscreen type: data or none>
-SCENE 1: keyword: <search term or none> | stockQuery: <query or none> | webQuery: <query or none> | mediaType: <video|image> | sourceHint: <stock|youtube|web-image> | framing: <fullscreen|cinematic> | backgroundId: <none|blur|gradient-id> | visualIntent: <shot description> | effects: <comma-separated or none> | mgHint: <overlay type: desc or none> | fullscreenMG: <fullscreen type: data or none>
+SCENE 0: keyword: <search term or none> | stockQuery: <query or none> | webQuery: <query or none> | mediaType: <video|image> | sourceHint: <stock|youtube|web-image|news> | framing: <fullscreen|cinematic> | backgroundId: <none|blur|gradient-id> | visualIntent: <shot description> | effects: <presetName or none> | mgHint: <overlay type: desc or none> | fullscreenMG: <fullscreen type: data or none>
+SCENE 1: keyword: <search term or none> | stockQuery: <query or none> | webQuery: <query or none> | mediaType: <video|image> | sourceHint: <stock|youtube|web-image|news> | framing: <fullscreen|cinematic> | backgroundId: <none|blur|gradient-id> | visualIntent: <shot description> | effects: <presetName or none> | mgHint: <overlay type: desc or none> | fullscreenMG: <fullscreen type: data or none>
 ...
 
 CRITICAL: YOU MUST OUTPUT EXACTLY ${scenes.length} LINES (one per scene).
@@ -516,7 +521,7 @@ stockQuery and webQuery must BOTH be provided for every footage scene.`;
  * Parse the batch visual plan response.
  * Extracts keyword, mediaType, sourceHint, visualIntent for each scene.
  */
-function parseBatchResponse(rawText, scenes) {
+function parseBatchResponse(rawText, scenes, nicheId, themeId) {
     const enrichedScenes = [];
     const lines = rawText.trim().split('\n').filter(line => {
         const lower = line.toLowerCase().trim();
@@ -561,7 +566,7 @@ function parseBatchResponse(rawText, scenes) {
                 }
                 if (lower.startsWith('sourcehint:') || lower.startsWith('source hint:')) {
                     const val = part.substring(part.indexOf(':') + 1).trim().toLowerCase();
-                    if (['stock', 'youtube', 'web-image'].includes(val)) {
+                    if (['stock', 'youtube', 'web-image', 'news'].includes(val)) {
                         scene.sourceHint = val;
                     }
                 }
@@ -588,8 +593,35 @@ function parseBatchResponse(rawText, scenes) {
                     const val = part.substring(part.indexOf(':') + 1).trim().toLowerCase();
                     if (val === 'none' || val === '') {
                         scene.effects = [];
+                        scene.effectPreset = 'none';
                     } else {
-                        scene.effects = val.split(',').map(e => e.trim()).filter(Boolean);
+                        // val is a preset name (e.g. "retroDV", "oldFilm")
+                        const EFFECT_PRESETS = require('./effect-presets');
+                        const presetKey = Object.keys(EFFECT_PRESETS).find(k => k.toLowerCase() === val) || val;
+                        const preset = EFFECT_PRESETS[presetKey];
+                        // Validate preset is allowed for this theme
+                        const activeThemeId = themeId || 'standard';
+                        const themeAllowed = preset && preset.themes &&
+                            (preset.themes.includes('*') || preset.themes.includes(activeThemeId));
+                        if (!themeAllowed && preset) {
+                            console.log(`      ⚠️ Preset "${presetKey}" not allowed for theme "${activeThemeId}", skipping`);
+                        }
+                        if (preset && themeAllowed) {
+                            scene.effectPreset = presetKey;
+                            scene.effects = preset.effects ? [...preset.effects] : [];
+                            scene.effectOverrides = {};
+                            if (preset.params) {
+                                for (const [fx, params] of Object.entries(preset.params)) {
+                                    scene.effectOverrides[fx] = { ...params, enabled: true };
+                                }
+                            }
+                            if (preset.mask) {
+                                scene.effectMask = { ...preset.mask };
+                            }
+                        } else {
+                            // Fallback: treat as comma-separated individual effects (backwards compat)
+                            scene.effects = val.split(',').map(e => e.trim()).filter(Boolean);
+                        }
                     }
                 }
                 if (lower.startsWith('mghint:') || lower.startsWith('mg hint:')) {
@@ -634,6 +666,13 @@ function parseBatchResponse(rawText, scenes) {
         // Default values
         scene.mediaType = scene.mediaType || 'video';
         scene.sourceHint = scene.sourceHint || 'stock';
+
+        // News niche override: upgrade video sourceHint to 'news' so newsVideo provider is tried first
+        if (nicheId && nicheId.startsWith('news') && scene.mediaType === 'video'
+            && (scene.sourceHint === 'stock' || scene.sourceHint === 'youtube')) {
+            scene.sourceHint = 'news';
+        }
+
         scene.framing = scene.framing || 'fullscreen';
         // Derive background from framing + backgroundId
         if (!scene.background) {
@@ -724,7 +763,7 @@ async function planVisuals(scenes, scriptContext, directorsBrief) {
 
         console.log(`   [AI Response Preview]:\n${rawText.substring(0, 400)}${rawText.length > 400 ? '...' : ''}\n`);
 
-        const enrichedScenes = parseBatchResponse(rawText, scenes);
+        const enrichedScenes = parseBatchResponse(rawText, scenes, scriptContext.nicheId, scriptContext.themeId);
 
         // Listicle keyword variety enforcement
         if (scriptContext.format === 'listicle' && scriptContext.listicleItems) {
@@ -737,7 +776,7 @@ async function planVisuals(scenes, scriptContext, directorsBrief) {
         for (const scene of enrichedScenes.slice(0, 5)) { // Show first 5
             const sq = scene.stockQuery ? ` stock:"${scene.stockQuery}"` : '';
             const wq = scene.webQuery ? ` web:"${scene.webQuery}"` : '';
-            const fx = scene.effects && scene.effects.length ? ` fx:[${scene.effects.join(',')}]` : '';
+            const fx = scene.effectPreset && scene.effectPreset !== 'none' ? ` fx:${scene.effectPreset}` : (scene.effects && scene.effects.length ? ` fx:[${scene.effects.join(',')}]` : '');
             const mg = scene.mgHint ? ` mg:"${scene.mgHint}"` : '';
             const fmg = scene.fullscreenMG ? ` ★FULLSCREEN:"${scene.fullscreenMG}"` : '';
             console.log(`      Scene ${scene.index}: "${scene.keyword}" [${scene.mediaType}, ${scene.sourceHint}]${sq}${wq}${fx}${mg}${fmg}`);
@@ -793,7 +832,7 @@ async function _planVisualsChunked(scenes, scriptContext, directorsBrief, chunkS
 
             if (!rawText) throw new Error('Empty AI response');
 
-            const enriched = parseBatchResponse(rawText, chunk);
+            const enriched = parseBatchResponse(rawText, chunk, scriptContext.nicheId, scriptContext.themeId);
             allEnriched.push(...enriched);
 
             // Collect keywords for next chunk's awareness
@@ -807,19 +846,26 @@ async function _planVisualsChunked(scenes, scriptContext, directorsBrief, chunkS
         } catch (error) {
             console.log(`      ⚠️ Batch ${c + 1} failed: ${error.message}, falling back to per-scene...`);
             // Fallback: do this chunk's scenes one by one
+            const nicheId = scriptContext.nicheId || '';
             for (const scene of chunk) {
                 try {
                     const prompt = buildSingleScenePrompt(scene, scriptContext, directorsBrief);
                     const rawText = await callAI(prompt, { maxTokens: 100 });
                     const parsed = parseSingleSceneResponse(rawText, scene);
+                    // News niche override
+                    if (nicheId.startsWith('news') && parsed.mediaType === 'video'
+                        && (parsed.sourceHint === 'stock' || parsed.sourceHint === 'youtube')) {
+                        parsed.sourceHint = 'news';
+                    }
                     allEnriched.push(parsed);
-                    console.log(`      Scene ${scene.index}: "${parsed.keyword}" [${parsed.mediaType}]`);
+                    console.log(`      Scene ${scene.index}: "${parsed.keyword}" [${parsed.mediaType}, ${parsed.sourceHint}]`);
                 } catch (err) {
+                    const fallbackHint = nicheId.startsWith('news') ? 'news' : 'stock';
                     allEnriched.push({
                         ...scene,
                         keyword: extractFallbackKeyword(scene.text),
                         mediaType: 'video',
-                        sourceHint: 'stock',
+                        sourceHint: fallbackHint,
                         visualIntent: scene.text,
                         effects: [],
                         mgHint: null
@@ -848,18 +894,25 @@ async function planVisualsPerScene(scenes, scriptContext, directorsBrief) {
     for (const scene of scenes) {
         const prompt = buildSingleScenePrompt(scene, scriptContext, directorsBrief);
 
+        const nicheId = scriptContext.nicheId || '';
         try {
             const rawText = await callAI(prompt, { maxTokens: 100 });
             const parsed = parseSingleSceneResponse(rawText, scene);
+            // News niche override: upgrade video sourceHint to 'news'
+            if (nicheId.startsWith('news') && parsed.mediaType === 'video'
+                && (parsed.sourceHint === 'stock' || parsed.sourceHint === 'youtube')) {
+                parsed.sourceHint = 'news';
+            }
             enrichedScenes.push(parsed);
-            console.log(`   Scene ${scene.index}: "${parsed.keyword}" [${parsed.mediaType}]`);
+            console.log(`   Scene ${scene.index}: "${parsed.keyword}" [${parsed.mediaType}, ${parsed.sourceHint}]`);
         } catch (error) {
             // Ultimate fallback: extract from text
+            const fallbackHint = nicheId.startsWith('news') ? 'news' : 'stock';
             enrichedScenes.push({
                 ...scene,
                 keyword: extractFallbackKeyword(scene.text),
                 mediaType: 'video',
-                sourceHint: 'stock',
+                sourceHint: fallbackHint,
                 visualIntent: scene.text,
                 effects: [],
                 mgHint: null
@@ -885,7 +938,7 @@ SCENE TEXT: "${scene.text}"
 ${entities.length > 0 ? `KEY ENTITIES: ${entities.join(', ')}` : ''}
 
 OUTPUT FORMAT (one line):
-keyword: <searchable keyword> | mediaType: <${tier.allowVideo ? 'video|image' : 'image'}> | sourceHint: <stock|youtube|web-image>`;
+keyword: <searchable keyword> | mediaType: <${tier.allowVideo ? 'video|image' : 'image'}> | sourceHint: <stock|youtube|web-image|news>`;
 }
 
 /**
@@ -905,7 +958,7 @@ function parseSingleSceneResponse(rawText, scene) {
         }
         if (lower.startsWith('sourcehint:')) {
             const val = part.substring(part.indexOf(':') + 1).trim().toLowerCase();
-            if (['stock', 'youtube', 'web-image'].includes(val)) enriched.sourceHint = val;
+            if (['stock', 'youtube', 'web-image', 'news'].includes(val)) enriched.sourceHint = val;
         }
     }
 

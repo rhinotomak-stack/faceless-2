@@ -187,14 +187,32 @@ function getStyledThemeColors(styleName) {
     const activeTheme = _resolveActiveTheme();
     if (!activeTheme) return null;
 
-    // Try token-based path first (pre-computed modifier-adjusted colors)
+    // Apply the REQUESTED style's modifier to theme colors (not the theme's default)
     if (window._themeTokens) {
         const tokens = window._themeTokens.getTokens(activeTheme);
+        const stylePreset = window._themeTokens.getStylePreset(styleName || 'clean');
+        const mod = stylePreset?.modifier;
+
+        // If the style has a modifier, re-apply it to the raw theme colors
+        // This makes different styles (bold, neon, minimal, etc.) produce visually distinct results
+        if (mod && window._themeTokens.applyModifier) {
+            const rawPrimary = tokens.colors.primary;
+            const rawAccent = tokens.colors.accent;
+            return {
+                primary: window._themeTokens.applyModifier(rawPrimary, mod),
+                accent: window._themeTokens.applyModifier(rawAccent, mod),
+                text: tokens.colors.textPrimary,
+                textSub: tokens.colors.textSecondary,
+                bg: stylePreset.bg,
+            };
+        }
+
         return {
             primary: tokens.colors.mgPrimary,
             accent: tokens.colors.mgAccent,
             text: tokens.colors.textPrimary,
             textSub: tokens.colors.textSecondary,
+            bg: stylePreset?.bg || tokens.colors.surface,
         };
     }
 
@@ -1093,6 +1111,34 @@ function injectTestMotionGraphics() {
 // Expose for DevTools console access
 window.injectTestMotionGraphics = injectTestMotionGraphics;
 
+/**
+ * Snap playhead to the next (+1) or previous (-1) clip edge.
+ * Collects all unique start/end times from scenes + motion graphics.
+ */
+function snapToClipEdge(direction) {
+    const edges = new Set();
+    for (const s of (state.scenes || [])) {
+        if (s.startTime != null) edges.add(+s.startTime.toFixed(3));
+        if (s.endTime != null) edges.add(+s.endTime.toFixed(3));
+    }
+    for (const mg of (state.motionGraphics || [])) {
+        if (mg.startTime != null) edges.add(+mg.startTime.toFixed(3));
+        if (mg.endTime != null) edges.add(+mg.endTime.toFixed(3));
+    }
+    const sorted = [...edges].sort((a, b) => a - b);
+    if (sorted.length === 0) return;
+
+    const now = +state.currentTime.toFixed(3);
+    const EPS = 0.005;
+    if (direction > 0) {
+        const next = sorted.find(t => t > now + EPS);
+        if (next != null) seekToTime(next);
+    } else {
+        const prev = sorted.slice().reverse().find(t => t < now - EPS);
+        if (prev != null) seekToTime(prev);
+    }
+}
+
 function setupKeyboardShortcuts() {
     document.addEventListener('keydown', (e) => {
         if (['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) return;
@@ -1129,6 +1175,8 @@ function setupKeyboardShortcuts() {
         if (e.code === 'Space') { e.preventDefault(); togglePlayback(); }
         else if (e.shiftKey && e.code === 'KeyF') { e.preventDefault(); zoomToFit(); }
         else if (e.code === 'KeyF') { e.preventDefault(); cutClipAtPlayhead(); }
+        else if (e.code === 'ArrowUp') { e.preventDefault(); snapToClipEdge(1); }
+        else if (e.code === 'ArrowDown') { e.preventDefault(); snapToClipEdge(-1); }
         else if (e.code === 'ArrowLeft') { e.preventDefault(); seekToTime(state.currentTime - 1); }
         else if (e.code === 'ArrowRight') { e.preventDefault(); seekToTime(state.currentTime + 1); }
         else if (e.code === 'Home') { e.preventDefault(); seekToTime(0); }
@@ -1183,11 +1231,13 @@ function getRenderRange() {
 /** Draw in/out markers + shaded work area on ruler */
 function renderInOutMarkers() {
     const ruler = document.getElementById('timeline-ruler');
+    const content = document.getElementById('timeline-content');
     if (!ruler) return;
     const zoom = state.timeline.zoom;
 
-    // Remove old markers
+    // Remove old markers from ruler and track content
     ruler.querySelectorAll('.in-out-marker, .in-out-shade, .in-out-workarea').forEach(el => el.remove());
+    if (content) content.querySelectorAll('.in-out-track-shade, .in-out-track-border').forEach(el => el.remove());
 
     const hasIn = state.inPoint !== null;
     const hasOut = state.outPoint !== null;
@@ -1196,7 +1246,7 @@ function renderInOutMarkers() {
     const inPx = hasIn ? state.inPoint * zoom : 0;
     const outPx = hasOut ? state.outPoint * zoom : state.totalDuration * zoom;
 
-    // Shaded area before in point (dimmed)
+    // Shaded area before in point (dimmed) — ruler
     if (hasIn && inPx > 0) {
         const shade = document.createElement('div');
         shade.className = 'in-out-shade';
@@ -1204,7 +1254,7 @@ function renderInOutMarkers() {
         ruler.appendChild(shade);
     }
 
-    // Shaded area after out point (dimmed)
+    // Shaded area after out point (dimmed) — ruler
     if (hasOut) {
         const shade = document.createElement('div');
         shade.className = 'in-out-shade';
@@ -1212,7 +1262,7 @@ function renderInOutMarkers() {
         ruler.appendChild(shade);
     }
 
-    // Work area bar (bright bar between in and out)
+    // Work area bar (bright bar between in and out) — ruler
     const workarea = document.createElement('div');
     workarea.className = 'in-out-workarea';
     workarea.style.cssText = `left:${inPx}px; width:${outPx - inPx}px;`;
@@ -1236,6 +1286,35 @@ function renderInOutMarkers() {
         marker.title = `Out: ${formatTime(state.outPoint)}`;
         marker.textContent = 'O';
         ruler.appendChild(marker);
+    }
+
+    // Track-level shading — dim areas outside work area on the tracks themselves
+    if (content) {
+        if (hasIn && inPx > 0) {
+            const shade = document.createElement('div');
+            shade.className = 'in-out-track-shade';
+            shade.style.cssText = `left:0; width:${inPx}px;`;
+            content.appendChild(shade);
+        }
+        if (hasOut) {
+            const shade = document.createElement('div');
+            shade.className = 'in-out-track-shade';
+            shade.style.cssText = `left:${outPx}px; right:0;`;
+            content.appendChild(shade);
+        }
+        // Vertical boundary lines at in/out points
+        if (hasIn) {
+            const line = document.createElement('div');
+            line.className = 'in-out-track-border';
+            line.style.left = `${inPx}px`;
+            content.appendChild(line);
+        }
+        if (hasOut) {
+            const line = document.createElement('div');
+            line.className = 'in-out-track-border';
+            line.style.left = `${outPx}px`;
+            content.appendChild(line);
+        }
     }
 }
 
@@ -1597,6 +1676,9 @@ function updateClipProperties() {
     if (elements.propBorderRadius) { elements.propBorderRadius.value = borderRadius; }
     if (elements.propBorderRadiusVal) { elements.propBorderRadiusVal.value = `${borderRadius}%`; }
 
+    // Effects controls
+    _populateEffectControls(scene);
+
     // Animate checkbox (only for images)
     if (elements.propAnimateRow) {
         const isImage = scene.mediaType === 'image';
@@ -1618,6 +1700,254 @@ function updateClipProperties() {
             }
         }
     }
+}
+
+// ── Effect Presets Registry ──
+// Each preset defines: effects[] (shader toggles), params (per-effect values),
+// mask (global mask), sliders[] (which UI sliders to show), themes[] (relevant themes)
+// To add a new preset: add an entry here — UI builds automatically
+// Load effect presets from shared module (via preload) — single source of truth
+const EFFECT_PRESETS = window._effectPresets || {
+    none: { label: 'None', description: 'No effect', effects: [], params: {}, mask: null, sliders: [], themes: ['*'] }
+};
+
+const MASK_TYPES = [
+    { value: 'none', label: 'No Mask' },
+    { value: 'radialCenter', label: 'Soft Center' },
+    { value: 'radialEdge', label: 'Soft Edges' },
+    { value: 'linearTB', label: 'Top → Bottom' }
+];
+
+function _populateEffectControls(scene) {
+    const section = document.getElementById('prop-effects-section');
+    const list = document.getElementById('prop-effects-list');
+    if (!section || !list) return;
+
+    section.style.display = '';
+    list.innerHTML = '';
+
+    if (!scene.effectOverrides) scene.effectOverrides = {};
+    if (!scene.effectMask) scene.effectMask = {};
+
+    const activeTheme = _resolveActiveTheme() || 'standard';
+    const currentPreset = scene.effectPreset || 'none';
+
+    // ── Preset dropdown ──
+    const presetRow = document.createElement('div');
+    presetRow.className = 'effect-control-row';
+    const presetLabel = document.createElement('span');
+    presetLabel.className = 'effect-label';
+    presetLabel.textContent = 'Effect';
+    const presetSelect = document.createElement('select');
+    presetSelect.className = 'property-select effect-preset-select';
+    presetSelect.style.cssText = 'flex:1; font-size:0.6rem; height:22px;';
+
+    // Order: 'none' first, then theme-relevant, then rest
+    const allKeys = Object.keys(EFFECT_PRESETS);
+    const themeFirst = allKeys.filter(k => {
+        const p = EFFECT_PRESETS[k];
+        return k !== 'none' && p.themes && (p.themes.includes('*') || p.themes.includes(activeTheme));
+    });
+    const rest = allKeys.filter(k => k !== 'none' && !themeFirst.includes(k));
+    const ordered = ['none', ...themeFirst, ...rest];
+
+    for (const key of ordered) {
+        const p = EFFECT_PRESETS[key];
+        if (!p) continue;
+        const opt = document.createElement('option');
+        opt.value = key;
+        opt.textContent = p.label;
+        // Mark theme-relevant with a star
+        if (key !== 'none' && p.themes && p.themes.includes(activeTheme)) {
+            opt.textContent = '★ ' + p.label;
+        }
+        if (key === currentPreset) opt.selected = true;
+        presetSelect.appendChild(opt);
+    }
+    presetSelect.addEventListener('change', () => {
+        if (state.selectedClipIndex < 0) return;
+        _applyEffectPreset(state.selectedClipIndex, presetSelect.value);
+        _populateEffectControls(state.scenes[state.selectedClipIndex]);
+        _syncEffectToCompositor(state.selectedClipIndex);
+    });
+    presetRow.appendChild(presetLabel);
+    presetRow.appendChild(presetSelect);
+    list.appendChild(presetRow);
+
+    // If none selected, stop here
+    if (currentPreset === 'none') return;
+
+    const preset = EFFECT_PRESETS[currentPreset];
+    if (!preset) return;
+
+    // ── Preset sliders (Intensity, Speed, Warmth etc) ──
+    if (preset.sliders) {
+        for (const sl of preset.sliders) {
+            if (!scene._presetSliders) scene._presetSliders = {};
+            const val = scene._presetSliders[sl.key] !== undefined ? scene._presetSliders[sl.key] : sl.def;
+
+            const row = document.createElement('div');
+            row.className = 'effect-control-row';
+            const lbl = document.createElement('span');
+            lbl.className = 'effect-label';
+            lbl.textContent = sl.label;
+            const slider = document.createElement('input');
+            slider.type = 'range'; slider.className = 'effect-slider';
+            slider.min = sl.min; slider.max = sl.max; slider.step = 1; slider.value = val;
+            const valSpan = document.createElement('span');
+            valSpan.className = 'effect-value';
+            valSpan.textContent = Math.round(val);
+
+            slider.addEventListener('input', () => {
+                if (state.selectedClipIndex < 0) return;
+                const s = state.scenes[state.selectedClipIndex];
+                if (!s._presetSliders) s._presetSliders = {};
+                const v = parseInt(slider.value);
+                s._presetSliders[sl.key] = v;
+                valSpan.textContent = v;
+                _applyPresetSliders(state.selectedClipIndex);
+                _syncEffectToCompositor(state.selectedClipIndex);
+            });
+
+            row.appendChild(lbl);
+            row.appendChild(slider);
+            row.appendChild(valSpan);
+            list.appendChild(row);
+        }
+    }
+
+    // ── Global mask row ──
+    const maskRow = document.createElement('div');
+    maskRow.className = 'effect-control-row effect-mask-row';
+    const maskLabel = document.createElement('span');
+    maskLabel.className = 'effect-label';
+    maskLabel.textContent = 'Mask';
+    const maskSelect = document.createElement('select');
+    maskSelect.className = 'property-select effect-mask-select';
+    maskSelect.style.cssText = 'flex:0 0 90px; font-size:0.6rem; height:22px;';
+    for (const mt of MASK_TYPES) {
+        const opt = document.createElement('option');
+        opt.value = mt.value;
+        opt.textContent = mt.label;
+        if (mt.value === (scene.effectMask.type || 'none')) opt.selected = true;
+        maskSelect.appendChild(opt);
+    }
+    const maskSlider = document.createElement('input');
+    maskSlider.type = 'range'; maskSlider.className = 'effect-slider';
+    maskSlider.min = 0; maskSlider.max = 1; maskSlider.step = 0.05;
+    maskSlider.value = scene.effectMask.strength !== undefined ? scene.effectMask.strength : 0.8;
+    const maskIsNone = (scene.effectMask.type || 'none') === 'none';
+    maskSlider.style.display = maskIsNone ? 'none' : '';
+    const maskVal = document.createElement('span');
+    maskVal.className = 'effect-value';
+    maskVal.textContent = maskIsNone ? '' : Math.round((scene.effectMask.strength || 0.8) * 100) + '%';
+
+    maskSelect.addEventListener('change', () => {
+        if (state.selectedClipIndex < 0) return;
+        const s = state.scenes[state.selectedClipIndex];
+        if (!s.effectMask) s.effectMask = {};
+        s.effectMask.type = maskSelect.value;
+        const isNone = maskSelect.value === 'none';
+        maskSlider.style.display = isNone ? 'none' : '';
+        maskVal.textContent = isNone ? '' : Math.round(parseFloat(maskSlider.value) * 100) + '%';
+        _syncEffectToCompositor(state.selectedClipIndex);
+    });
+    maskSlider.addEventListener('input', () => {
+        if (state.selectedClipIndex < 0) return;
+        const s = state.scenes[state.selectedClipIndex];
+        if (!s.effectMask) s.effectMask = {};
+        s.effectMask.strength = parseFloat(maskSlider.value);
+        maskVal.textContent = Math.round(parseFloat(maskSlider.value) * 100) + '%';
+        _syncEffectToCompositor(state.selectedClipIndex);
+    });
+    maskRow.appendChild(maskLabel);
+    maskRow.appendChild(maskSelect);
+    maskRow.appendChild(maskSlider);
+    maskRow.appendChild(maskVal);
+    list.appendChild(maskRow);
+}
+
+// Apply a preset — sets effects, params, mask from the preset definition
+function _applyEffectPreset(sceneIndex, presetKey) {
+    const s = state.scenes[sceneIndex];
+    if (!s) return;
+    s.effectPreset = presetKey;
+    const preset = EFFECT_PRESETS[presetKey];
+    if (!preset) return;
+
+    s.effects = preset.effects ? [...preset.effects] : [];
+    s.effectOverrides = {};
+    if (preset.params) {
+        for (const [fx, params] of Object.entries(preset.params)) {
+            s.effectOverrides[fx] = { ...params, enabled: true };
+        }
+    }
+    if (preset.mask) {
+        s.effectMask = { ...preset.mask };
+    } else {
+        s.effectMask = { type: 'none', strength: 0.8 };
+    }
+    // Reset slider values to defaults
+    s._presetSliders = {};
+    if (preset.sliders) {
+        for (const sl of preset.sliders) {
+            s._presetSliders[sl.key] = sl.def;
+        }
+    }
+}
+
+// Scale preset params based on slider values (Intensity/Speed/Warmth)
+function _applyPresetSliders(sceneIndex) {
+    const s = state.scenes[sceneIndex];
+    if (!s || !s.effectPreset) return;
+    const preset = EFFECT_PRESETS[s.effectPreset];
+    if (!preset || !preset.params) return;
+    const sliders = s._presetSliders || {};
+
+    // Intensity slider (0-100) scales all effect intensities
+    const intensityMul = (sliders.intensity !== undefined ? sliders.intensity : 50) / 50; // 1.0 at 50
+    // Speed slider (0-100) scales all speed/animation params
+    const speedMul = (sliders.speed !== undefined ? sliders.speed : 50) / 50;
+    // Warmth slider (0-100) scales tint strength and light leak warmth
+    const warmthMul = (sliders.warmth !== undefined ? sliders.warmth : 50) / 50;
+
+    // Rebuild overrides from preset base, scaled by sliders
+    s.effectOverrides = {};
+    for (const [fx, baseParams] of Object.entries(preset.params)) {
+        const scaled = { ...baseParams, enabled: true };
+        // Scale intensity-like params
+        if (scaled.intensity !== undefined) scaled.intensity = baseParams.intensity * intensityMul;
+        if (scaled.density !== undefined) scaled.density = baseParams.density * intensityMul;
+        if (scaled.desaturation !== undefined) scaled.desaturation = Math.min(1, baseParams.desaturation * intensityMul);
+        if (scaled.tintStrength !== undefined) scaled.tintStrength = Math.min(1, baseParams.tintStrength * (warmthMul !== undefined ? warmthMul : intensityMul));
+        if (scaled.warmth !== undefined) scaled.warmth = Math.min(1, baseParams.warmth * (warmthMul !== undefined ? warmthMul : 1));
+        // Scale speed-like params
+        if (scaled.speed !== undefined) scaled.speed = baseParams.speed * speedMul;
+        s.effectOverrides[fx] = scaled;
+    }
+}
+
+function _fmtEffectVal(fx, val) {
+    if (fx === 'chromatic') return val.toFixed(3);
+    if (val >= 1) return val.toFixed(1);
+    return val.toFixed(2);
+}
+
+function _syncEffectToCompositor(sceneIndex) {
+    if (!state.compositorActive || !state.compositor || !state.compositor.isInitialized) return;
+    const sg = state.compositor.sceneGraph;
+    if (!sg) return;
+    const srcScene = state.scenes[sceneIndex];
+    if (!srcScene) return;
+    const target = sg._scenes.find(s => s.index === srcScene.index);
+    if (!target) return;
+    target.effects = srcScene.effects;
+    target.effectOverrides = srcScene.effectOverrides;
+    target.effectMask = srcScene.effectMask;
+    // Re-render
+    const fps = state.compositor.fps;
+    const frame = Math.round((state.currentTime || 0) * fps);
+    state.compositor.renderFrame(frame);
 }
 
 function expandPropertiesSection() {
@@ -2841,10 +3171,10 @@ function startPlaybackLoop() {
 
         // Update time displays
         if (elements.currentTimeDisplay) {
-            elements.currentTimeDisplay.textContent = formatTime(state.currentTime);
+            elements.currentTimeDisplay.textContent = formatTime(state.currentTime, true);
         }
         if (elements.totalTimeDisplay) {
-            elements.totalTimeDisplay.textContent = formatTime(state.totalDuration);
+            elements.totalTimeDisplay.textContent = formatTime(state.totalDuration, true);
         }
 
         // Check if we've reached the end of the timeline
@@ -3834,6 +4164,23 @@ async function cancelProcess() {
     } finally {
         elements.btnCancel.disabled = false;
         elements.btnCancel.textContent = 'Cancel';
+        // Force-cleanup state after short delay if renderVideo() is stuck and never resolves
+        setTimeout(() => {
+            if (state.isProcessing) {
+                console.warn('[Cancel] Force cleanup — render loop did not exit cleanly');
+                state.isProcessing = false;
+                state.exportPipeline = null;
+                elements.btnRender.disabled = false;
+                elements.btnCancel.disabled = false;
+                elements.btnCancel.textContent = 'Cancel';
+                // Restore compositor preview mode
+                if (state.compositor) {
+                    state.compositor._exporting = false;
+                    state.compositor._restorePreviewResolution?.();
+                }
+                setTimeout(() => showProgress(false), 3000);
+            }
+        }, 2000);
     }
 }
 
@@ -4497,7 +4844,7 @@ function renderTimeline() {
                     <span id="timeline-zoom">${formatZoomLabel(state.timeline.zoom)}</span>
                 </div>
                 <span class="divider">|</span>
-                <span id="timeline-time">${formatTime(state.currentTime)} / ${formatTime(state.totalDuration)}</span>
+                <span id="timeline-time">${formatTime(state.currentTime, true)} / ${formatTime(state.totalDuration, true)}</span>
                 <span id="in-out-display" class="in-out-display"></span>
             </div>
         </div>
@@ -4558,7 +4905,9 @@ function renderRuler(duration) {
 
     // Adaptive step: ensure ticks are at least ~50px apart, labels ~100px apart
     let step;
-    if (zoom >= 50) step = 1;
+    let fractional = false;
+    if (zoom >= 200) { step = 0.5; fractional = true; }   // 0.5s ticks at high zoom
+    else if (zoom >= 50) step = 1;
     else if (zoom >= 20) step = 5;
     else if (zoom >= 5) step = 10;
     else if (zoom >= 2) step = 30;     // 30s steps
@@ -4566,16 +4915,18 @@ function renderRuler(duration) {
     else if (zoom >= 0.5) step = 120;  // 2min steps
     else step = 300;                   // 5min steps
 
-    const labelEvery = step <= 5 ? step * 2 : step;
-    const majorEvery = step <= 10 ? step * 5 : step * 2;
+    const labelEvery = fractional ? 1 : (step <= 5 ? step * 2 : step);
+    const majorEvery = fractional ? 1 : (step <= 10 ? step * 5 : step * 2);
 
     let html = '';
     for (let t = 0; t <= duration + step; t += step) {
+        t = Math.round(t * 100) / 100; // avoid float drift
         const left = t * zoom;
-        const isMajor = t % majorEvery === 0;
+        const isMajor = fractional ? (t % 1 === 0) : (t % majorEvery === 0);
         html += `<div class="ruler-tick ${isMajor ? 'major' : ''}" style="left:${left}px"></div>`;
-        if (t % labelEvery === 0) {
-            html += `<div class="ruler-label" style="left:${left}px">${formatTime(t)}</div>`;
+        const showLabel = fractional ? (t % 1 === 0) : (t % labelEvery === 0);
+        if (showLabel) {
+            html += `<div class="ruler-label" style="left:${left}px">${formatTime(t, fractional)}</div>`;
         }
     }
     ruler.innerHTML = html;
@@ -4651,7 +5002,7 @@ function renderTracks() {
                 const clampedW = Math.max(w, 20);
                 html += `<div class="timeline-clip mg-clip ${meta.colorClass} ${isDisabled ? 'clip-disabled' : ''} ${isSelected ? 'selected' : ''}" data-mg-index="${i}"
                     style="left:${left}px;width:${clampedW}px"
-                    title="${mg.type}: ${mg.text} (${mg.duration.toFixed(1)}s)${isDisabled ? ' [OFF]' : ''}">
+                    title="${mg.type}: ${mg.text} [${mg.startTime.toFixed(2)}s → ${(mg.startTime + mg.duration).toFixed(2)}s] (${mg.duration.toFixed(2)}s)${isDisabled ? ' [OFF]' : ''}">
                     <span class="clip-label">${meta.icon}</span>
                     <button class="clip-toggle-btn" data-toggle-mg="${i}" title="${isDisabled ? 'Enable' : 'Disable'} graphic">${eyeIcon}</button>
                 </div>`;
@@ -4698,7 +5049,7 @@ function renderTracks() {
                 const eyeIcon = isDisabled ? '👁️‍🗨️' : '👁️';
                 html += `<div class="timeline-clip clip-mg-scene ${meta.colorClass} ${isDisabled ? 'clip-disabled' : ''} ${state.selectedClipIndices.includes(idx) ? 'selected' : ''}"
                     data-index="${idx}" style="left:${left}px;width:${width}px"
-                    title="${clipName} (${(scene.endTime - scene.startTime).toFixed(1)}s)${isDisabled ? ' [OFF]' : ''}">
+                    title="${clipName} [${scene.startTime.toFixed(2)}s → ${scene.endTime.toFixed(2)}s] (${(scene.endTime - scene.startTime).toFixed(2)}s)${isDisabled ? ' [OFF]' : ''}">
                     <div class="clip-trim-handle clip-trim-handle-left" data-index="${idx}" data-edge="left"></div>
                     <span class="clip-label">${clipName}</span>
                     <button class="clip-toggle-btn" data-toggle-idx="${idx}" title="${isDisabled ? 'Enable' : 'Disable'} graphic">${eyeIcon}</button>
@@ -5232,7 +5583,7 @@ function updatePlayhead() {
 
 function updateTimeDisplay() {
     if (!_cachedTimelineTime) _cachedTimelineTime = document.getElementById('timeline-time');
-    if (_cachedTimelineTime) _cachedTimelineTime.textContent = `${formatTime(state.currentTime)} / ${formatTime(state.totalDuration)}`;
+    if (_cachedTimelineTime) _cachedTimelineTime.textContent = `${formatTime(state.currentTime, true)} / ${formatTime(state.totalDuration, true)}`;
 }
 
 async function scrubMedia(time) {
@@ -6285,12 +6636,37 @@ function setupVideoPlayback(scene) {
 }
 
 let _lastHighlightIndex = -1;
+let _lastAutoSelectIndex = -1;
 function updateSceneHighlight(index) {
     // Skip if highlight hasn't changed
     if (index === _lastHighlightIndex) return;
     _lastHighlightIndex = index;
     document.querySelectorAll('.scene-card').forEach((c, i) => c.classList.toggle('active', i === index));
     document.querySelectorAll('.timeline-clip[data-index]').forEach(c => c.classList.toggle('active', parseInt(c.dataset.index) === index));
+
+    // Auto-select the topmost track scene under playhead for properties panel
+    // Skip if user has a multi-selection active (Ctrl+click)
+    if (state.selectedClipIndices.length > 1) return;
+
+    // Find ALL active scenes at current time, pick topmost track (highest z-order)
+    const activeScenes = getActiveScenesAtTime(state.currentTime);
+    const activeMedia = activeScenes.filter(({ scene }) => !scene.isMGScene && !scene.disabled);
+    // Last in array = highest track number = topmost visual layer
+    const topScene = activeMedia.length > 0 ? activeMedia[activeMedia.length - 1] : null;
+    const autoIndex = topScene ? topScene.index : index;
+
+    if (autoIndex >= 0 && autoIndex !== _lastAutoSelectIndex) {
+        _lastAutoSelectIndex = autoIndex;
+        state.selectedClipIndex = autoIndex;
+        state.selectedClipIndices = [autoIndex];
+        state.selectedMgIndex = -1;
+        // Update visual selection on timeline
+        document.querySelectorAll('.timeline-clip').forEach(c => c.classList.remove('selected'));
+        document.querySelectorAll('.mg-clip').forEach(c => c.classList.remove('selected'));
+        const clip = document.querySelector(`.timeline-clip[data-index="${autoIndex}"]`);
+        if (clip) clip.classList.add('selected');
+        updateClipProperties();
+    }
 }
 
 // ========================================
@@ -6451,6 +6827,8 @@ function refreshCompositorScene(sceneIndex) {
     target.volume = srcScene.volume;
     target.kenBurnsEnabled = srcScene.kenBurnsEnabled;
     target.kenBurnsSpeed = srcScene.kenBurnsSpeed;
+    target.effectOverrides = srcScene.effectOverrides;
+    target.effectMask = srcScene.effectMask;
 
     // Re-render current frame
     const fps = state.compositor.fps;
@@ -6976,7 +7354,15 @@ function showToast(message, type = 'info') {
     setTimeout(() => toast.classList.add('show'), 10);
     setTimeout(() => { toast.classList.remove('show'); setTimeout(() => toast.remove(), 300); }, 3000);
 }
-function formatTime(s) { return `${Math.floor(s / 60)}:${Math.floor(s % 60).toString().padStart(2, '0')}`; }
+function formatTime(s, precise) {
+    const m = Math.floor(s / 60);
+    const sec = s % 60;
+    if (precise) {
+        // Show M:SS.ff (2 decimal places)
+        return `${m}:${sec.toFixed(2).padStart(5, '0')}`;
+    }
+    return `${m}:${Math.floor(sec).toString().padStart(2, '0')}`;
+}
 
 function clearScenes() {
     // Stop playback and clean up

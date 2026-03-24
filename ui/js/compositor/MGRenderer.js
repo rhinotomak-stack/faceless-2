@@ -1238,8 +1238,24 @@ class MGRenderer {
         const labelSpring = interpolate(enterLinear, [0.3, 0.8], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' });
         const scale = entScale * (isExiting ? interpolate(exitProgress, [0, 1], [0.95, 1]) : 1);
 
-        // Box dimensions
-        const boxW = variant === 'ticker' ? 500 : 400;
+        // Box dimensions — measure actual content for ticker variant
+        let boxW = 400;
+        if (variant === 'ticker') {
+            // Short prefix stays with number; long prefix moves to label
+            const shortPfx = prefix.length <= 3 ? prefix : '';
+            const numText = `${shortPfx}${targetNumber % 1 !== 0 ? targetNumber.toFixed(1) : Math.round(targetNumber).toLocaleString()}`;
+            // Build label same way as the ticker renderer
+            const extraLbl = prefix.length > 3 ? prefix.trim() : '';
+            const baseLbl = suffix || mg.subtext || '';
+            const tickerLbl = extraLbl ? (baseLbl ? `${extraLbl} ${baseLbl}` : extraLbl) : baseLbl;
+
+            MGRenderer._setFont(ctx, '900', 72, s.fontHeading);
+            const numW = ctx.measureText(numText).width;
+            MGRenderer._setFont(ctx, '600', 26, s.fontBody);
+            const lblW = tickerLbl ? ctx.measureText(tickerLbl).width : 0;
+            // padding(24) + numW + gap(20) + sep + gap(16) + lblW + padding(16)
+            boxW = Math.max(300, Math.min(900, numW + Math.min(lblW, 400) + 76));
+        }
         const boxH = variant === 'ring' ? 260 : 150;
         const pos = MGRenderer._getPosXY(mg.position || 'center', boxW, boxH);
 
@@ -1330,15 +1346,24 @@ class MGRenderer {
 
         ctx.filter = 'none';
 
+        // Ticker layout: big number on left, context label on right
+        // Short prefix (1-2 chars like "$", "~") stays with the number; long prefix goes to label
+        const shortPrefix = prefix.length <= 3 ? prefix : '';
+        const numDisplay = `${shortPrefix}${currentNumber}`;
+        // Build label: long prefix + suffix/subtext
+        const extraLabel = prefix.length > 3 ? prefix.trim() : '';
+        const baseLabel = label || '';
+        const tickerLabel = extraLabel ? (baseLabel ? `${extraLabel} ${baseLabel}` : extraLabel) : baseLabel;
+
         // Number on left
         MGRenderer._setFont(ctx, '900', 72, s.fontHeading);
         ctx.fillStyle = accentFill;
         ctx.textAlign = 'left';
         ctx.textBaseline = 'middle';
-        ctx.fillText(`${prefix}${currentNumber}`, -bw / 2 + 24, 0);
+        ctx.fillText(numDisplay, -bw / 2 + 24, 0);
 
         // Vertical separator
-        const numW = ctx.measureText(`${prefix}${currentNumber}`).width;
+        const numW = ctx.measureText(numDisplay).width;
         const sepX = -bw / 2 + 24 + numW + 20;
         ctx.strokeStyle = 'rgba(255,255,255,0.15)';
         ctx.lineWidth = 1;
@@ -1347,14 +1372,22 @@ class MGRenderer {
         ctx.lineTo(sepX, bh / 2 - 16);
         ctx.stroke();
 
-        // Label on right
-        if (label) {
+        // Label on right — truncate if too long for remaining space
+        if (tickerLabel) {
             ctx.globalAlpha = Math.min(1, opacity) * labelSpring;
             MGRenderer._setFont(ctx, '600', 26, s.fontBody);
             ctx.fillStyle = textFill;
             ctx.textAlign = 'left';
             ctx.textBaseline = 'middle';
-            ctx.fillText(label, sepX + 16, 0);
+            const maxLabelW = bw / 2 - (sepX + 16) + bw / 2 - 16;
+            let displayLabel = tickerLabel;
+            if (ctx.measureText(displayLabel).width > maxLabelW && maxLabelW > 40) {
+                while (displayLabel.length > 3 && ctx.measureText(displayLabel + '...').width > maxLabelW) {
+                    displayLabel = displayLabel.slice(0, -1);
+                }
+                displayLabel += '...';
+            }
+            ctx.fillText(displayLabel, sepX + 16, 0);
         }
     }
 

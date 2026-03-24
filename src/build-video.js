@@ -282,7 +282,7 @@ async function buildVideo() {
     if (process.env.STOP_AFTER === 'visual-planner') {
         log.ok('=== STOP_AFTER=visual-planner — dumping results ===');
         for (const s of scenesWithKeywords) {
-            log.info(`Scene ${s.index}: keyword="${s.keyword}" effects=[${(s.effects||[]).join(',')}] mgHint=${s.mgHint || 'null'}`);
+            log.info(`Scene ${s.index}: keyword="${s.keyword}" fx=${s.effectPreset || (s.effects||[]).join(',') || 'none'} mgHint=${s.mgHint || 'null'}`);
         }
         log.ok('Visual Planner test complete.');
         process.exit(0);

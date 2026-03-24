@@ -41,10 +41,12 @@ function _logModelsOnce() {
     } else if (p === 'groq') {
         console.log(`  🤖 Text model: ${config.groq?.model || 'llama-3.3-70b'}`);
     }
-    // Show vision provider override if set
-    const vp = config.visionProvider;
-    if (vp && vp !== p) {
-        console.log(`  👁️ Vision provider: ${vp} (override)`);
+    // Show vision provider chain
+    const visionChain = _getVisionChain();
+    if (visionChain.length > 1) {
+        console.log(`  👁️ Vision chain: ${visionChain[0]} → ${visionChain.slice(1).join(' → ')} (fallback)`);
+    } else {
+        console.log(`  👁️ Vision provider: ${visionChain[0]}`);
     }
 }
 
@@ -137,29 +139,40 @@ async function _dispatchText(provider, prompt, { maxTokens, temperature, systemP
  */
 async function callVisionAI(prompt, base64Image, mimeType = 'image/jpeg', options = {}) {
     const { maxTokens = 200 } = options;
-    const provider = config.visionProvider || config.aiProvider || 'ollama';
 
-    let attempt = 0;
-    const maxRetries = 1;
+    // Vision chain: qwen preferred → gemini fallback → others
+    const chain = _getVisionChain();
 
-    while (attempt <= maxRetries) {
+    for (let i = 0; i < chain.length; i++) {
+        const provider = chain[i];
+        const isFallback = i > 0;
+
         try {
             const text = await _dispatchVision(provider, prompt, base64Image, mimeType, maxTokens);
 
             if (!text || text.trim().length === 0) {
-                if (attempt < maxRetries) {
+                // Retry once on same provider before moving to fallback
+                try {
                     console.log(`  ⚠️ [${provider}] Empty vision response, retrying...`);
-                    attempt++;
+                    const retry = await _dispatchVision(provider, prompt, base64Image, mimeType, maxTokens);
+                    if (retry && retry.trim().length > 0) return retry;
+                } catch (e) { /* fall through to next provider */ }
+
+                if (i < chain.length - 1) {
+                    console.log(`  🔄 [${provider}] Vision failed, falling back to ${chain[i + 1]}...`);
                     continue;
                 }
                 return '';
             }
 
+            if (isFallback) {
+                console.log(`  ✅ [${provider}] Vision fallback succeeded`);
+            }
             return text;
         } catch (error) {
-            if (attempt < maxRetries) {
-                console.log(`  ⚠️ [${provider}] Vision error: ${error.message}, retrying...`);
-                attempt++;
+            console.log(`  ⚠️ [${provider}] Vision error: ${error.message}`);
+            if (i < chain.length - 1) {
+                console.log(`  🔄 Falling back to ${chain[i + 1]} for vision...`);
                 continue;
             }
             throw error;
@@ -167,6 +180,60 @@ async function callVisionAI(prompt, base64Image, mimeType = 'image/jpeg', option
     }
 
     return '';
+}
+
+/**
+ * Build fallback vision provider list based on available API keys.
+ * Avoids duplicating the primary provider.
+ */
+function _buildVisionFallbacks(primary) {
+    const fallbacks = [];
+
+    // Vision preference order: qwen first (best value), gemini second (reliable),
+    // then others. Primary is excluded from fallbacks.
+    const candidates = [
+        { id: 'qwen', hasKey: () => !!config.qwen?.apiKey },
+        { id: 'gemini', hasKey: () => !!config.gemini?.apiKey },
+        { id: 'openai', hasKey: () => !!config.openai?.apiKey },
+        { id: 'claude', hasKey: () => !!config.claude?.apiKey },
+        { id: 'nvidia', hasKey: () => !!config.nvidia?.apiKeys?.length },
+        { id: 'groq', hasKey: () => !!config.groq?.apiKey },
+    ];
+
+    for (const c of candidates) {
+        if (c.id !== primary && c.hasKey()) {
+            fallbacks.push(c.id);
+            if (fallbacks.length >= 2) break; // max 2 fallbacks
+        }
+    }
+
+    return fallbacks;
+}
+
+/**
+ * Get the vision provider chain: prefers qwen as primary if available,
+ * regardless of text provider. Falls back through gemini → others.
+ */
+function _getVisionChain() {
+    // If explicit VISION_PROVIDER is set, respect it
+    if (config.visionProvider) {
+        const primary = config.visionProvider;
+        return [primary, ..._buildVisionFallbacks(primary)];
+    }
+
+    // Default: prefer qwen for vision (best value), gemini as fallback
+    const hasQwen = !!config.qwen?.apiKey;
+    const hasGemini = !!config.gemini?.apiKey;
+
+    if (hasQwen) {
+        return ['qwen', ..._buildVisionFallbacks('qwen')];
+    } else if (hasGemini) {
+        return ['gemini', ..._buildVisionFallbacks('gemini')];
+    }
+
+    // Fall back to text provider
+    const primary = config.aiProvider || 'ollama';
+    return [primary, ..._buildVisionFallbacks(primary)];
 }
 
 async function _dispatchVision(provider, prompt, base64Image, mimeType, maxTokens) {

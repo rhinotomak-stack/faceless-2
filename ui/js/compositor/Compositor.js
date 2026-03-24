@@ -803,46 +803,84 @@ class Compositor {
         // Get theme effect params (passed via scriptContext)
         const themeParams = (this._scriptContext && this._scriptContext.effectParams) || {};
 
-        // Build effect set for quick lookup
-        const effectSet = new Set(effects);
+        // Per-scene overrides (from UI controls)
+        const ov = (scene && scene.effectOverrides) || {};
+
+        // Build effect set for quick lookup, respecting per-scene toggle
+        const effectSet = new Set(effects.filter(fx => {
+            const fxOv = ov[fx];
+            return !fxOv || fxOv.enabled !== false;
+        }));
+
+        // Helper: get param with per-scene override > theme > default fallback
+        const _p = (fx, param, def) => {
+            if (ov[fx] && ov[fx][param] !== undefined) return ov[fx][param];
+            if (themeParams[fx] && themeParams[fx][param] !== undefined) return themeParams[fx][param];
+            return def;
+        };
+
+        // Global effect mask (applies to all effects on this scene)
+        const MASK_MAP = { none: 0, radialCenter: 1, radialEdge: 2, linearTB: 3 };
+        const sceneMask = (scene && scene.effectMask) || {};
+        prog.set1f('u_effectMaskType', MASK_MAP[sceneMask.type || 'none'] || 0);
+        prog.set1f('u_effectMaskStr', sceneMask.strength !== undefined ? sceneMask.strength : 0.8);
 
         // -- Grain --
         prog.set1f('u_grainOn', effectSet.has('grain') ? 1.0 : 0.0);
-        const grain = themeParams.grain || {};
-        prog.set1f('u_grainIntensity', grain.intensity || 0.12);
-        prog.set1f('u_grainScale', grain.scale || 1.5);
+        prog.set1f('u_grainIntensity', _p('grain', 'intensity', 0.12));
+        prog.set1f('u_grainScale', _p('grain', 'scale', 1.5));
 
         // -- Dust --
         prog.set1f('u_dustOn', effectSet.has('dust') ? 1.0 : 0.0);
-        const dust = themeParams.dust || {};
-        prog.set1f('u_dustIntensity', dust.intensity || 0.10);
-        prog.set1f('u_dustDensity', dust.density || 0.3);
+        prog.set1f('u_dustIntensity', _p('dust', 'intensity', 0.10));
+        prog.set1f('u_dustDensity', _p('dust', 'density', 0.3));
 
         // -- Vignette --
         prog.set1f('u_vignetteOn', effectSet.has('vignette') ? 1.0 : 0.0);
-        const vig = themeParams.vignette || {};
-        prog.set1f('u_vignetteIntensity', vig.intensity || 0.6);
-        prog.set1f('u_vignetteRadius', vig.radius || 0.4);
-        prog.set1f('u_vignetteSoftness', vig.softness || 0.5);
+        prog.set1f('u_vignetteIntensity', _p('vignette', 'intensity', 0.6));
+        prog.set1f('u_vignetteRadius', _p('vignette', 'radius', 0.4));
+        prog.set1f('u_vignetteSoftness', _p('vignette', 'softness', 0.5));
 
         // -- BlurVignette --
         prog.set1f('u_blurVignetteOn', effectSet.has('blurVignette') ? 1.0 : 0.0);
-        const bv = themeParams.blurVignette || {};
-        prog.set1f('u_blurVigIntensity', bv.intensity || 0.4);
-        prog.set1f('u_blurVigRadius', bv.radius || 0.5);
-        prog.set1f('u_blurVigAmount', bv.blurAmount || 3.0);
+        prog.set1f('u_blurVigIntensity', _p('blurVignette', 'intensity', 0.4));
+        prog.set1f('u_blurVigRadius', _p('blurVignette', 'radius', 0.5));
+        prog.set1f('u_blurVigAmount', _p('blurVignette', 'blurAmount', 3.0));
 
         // -- Chromatic --
         prog.set1f('u_chromaticOn', effectSet.has('chromatic') ? 1.0 : 0.0);
-        const chrom = themeParams.chromatic || {};
-        prog.set1f('u_chromaticIntensity', chrom.intensity || 0.005);
-        prog.set1f('u_chromaticAngle', chrom.angle || 0.0);
+        prog.set1f('u_chromaticIntensity', _p('chromatic', 'intensity', 0.005));
+        prog.set1f('u_chromaticAngle', _p('chromatic', 'angle', 0.0));
 
         // -- Light Leak --
         prog.set1f('u_lightLeakOn', effectSet.has('lightLeak') ? 1.0 : 0.0);
-        const ll = themeParams.lightLeak || {};
-        prog.set1f('u_lightLeakIntensity', ll.intensity || 0.15);
-        prog.set1f('u_lightLeakWarmth', ll.warmth || 0.7);
+        prog.set1f('u_lightLeakIntensity', _p('lightLeak', 'intensity', 0.15));
+        prog.set1f('u_lightLeakWarmth', _p('lightLeak', 'warmth', 0.7));
+
+        // -- Scratches --
+        prog.set1f('u_scratchOn', effectSet.has('scratch') ? 1.0 : 0.0);
+        prog.set1f('u_scratchIntensity', _p('scratch', 'intensity', 0.3));
+        prog.set1f('u_scratchSpeed', _p('scratch', 'speed', 1.0));
+        prog.set1f('u_scratchDensity', _p('scratch', 'density', 0.4));
+
+        // -- Color Grade --
+        prog.set1f('u_colorGradeOn', effectSet.has('colorGrade') ? 1.0 : 0.0);
+        prog.set1f('u_desaturation', _p('colorGrade', 'desaturation', 0.0));
+        prog.set1f('u_tintR', _p('colorGrade', 'tintR', 1.0));
+        prog.set1f('u_tintG', _p('colorGrade', 'tintG', 1.0));
+        prog.set1f('u_tintB', _p('colorGrade', 'tintB', 1.0));
+        prog.set1f('u_tintStrength', _p('colorGrade', 'tintStrength', 0.0));
+
+        // -- Scan Lines --
+        prog.set1f('u_scanLineOn', effectSet.has('scanLine') ? 1.0 : 0.0);
+        prog.set1f('u_scanLineIntensity', _p('scanLine', 'intensity', 0.15));
+        prog.set1f('u_scanLineCount', _p('scanLine', 'count', 400.0));
+        prog.set1f('u_scanLineSpeed', _p('scanLine', 'speed', 5.0));
+
+        // -- Flicker --
+        prog.set1f('u_flickerOn', effectSet.has('flicker') ? 1.0 : 0.0);
+        prog.set1f('u_flickerIntensity', _p('flicker', 'intensity', 0.08));
+        prog.set1f('u_flickerSpeed', _p('flicker', 'speed', 1.0));
 
         this._drawQuad();
     }

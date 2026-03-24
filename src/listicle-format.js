@@ -19,9 +19,12 @@
 
 // Patterns that mark the START of a list item
 // These must be strict — only match when clearly used as a list item marker
+// "number one box office star" is NOT a list item — "number one, John Wayne" IS
 const ITEM_START_PATTERNS = [
     // "number 10", "number one", "number 1" — strongest signal
-    /\bnumber\s+(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|\d+)\b/i,
+    // Negative lookahead rejects: "number one box office", "number one reason", "number one thing"
+    // These indicate "number one" is used as an adjective, not a list marker
+    /\bnumber\s+(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|\d+)\b(?!\s+(?:box|reason|thing|cause|priority|fan|hit|song|album|movie|film|show|pick|choice|draft|seed|seed|contender|threat|target|suspect|source|supplier|producer|destination|export|import|spot|position|ranked|rating|rated|star|draw|earner|seller|grossing|trending))/i,
     // "at number 5", "coming in at number 3" — requires "number" keyword
     /\b(?:coming\s+in\s+)?at\s+number\s+(\d+)\b/i,
     // "#5", "#10" — explicit marker
@@ -120,52 +123,101 @@ function detectListicleHookEnd(scenes, scriptContext) {
  * @returns {Array<ListicleItem>}
  */
 function buildListicleItemMap(scenes, scriptContext) {
-    const items = [];
     const sectionTitles = (scriptContext.sections || []).map(s => typeof s === 'string' ? s : s.title || '');
 
+    // Pass 1: Collect ALL number mentions with scene index
+    const allMatches = [];
     for (let i = 0; i < scenes.length; i++) {
         const text = (scenes[i].text || '');
         const textLower = text.toLowerCase();
 
-        let itemNumber = null;
-        let displayLabel = '';
-
-        // Try each pattern to extract item number
         for (const pattern of ITEM_START_PATTERNS) {
             const match = textLower.match(pattern);
             if (match) {
                 const captured = match[1] || match[0];
                 const asWord = captured.toLowerCase().trim();
+                let itemNumber = WORD_TO_NUM[asWord] || parseInt(asWord);
+                if (isNaN(itemNumber)) break;
 
-                if (WORD_TO_NUM[asWord]) {
-                    itemNumber = WORD_TO_NUM[asWord];
-                } else {
-                    const parsed = parseInt(asWord);
-                    if (!isNaN(parsed)) itemNumber = parsed;
-                }
-
-                // Build display label from original case
                 const originalMatch = text.match(pattern);
-                displayLabel = originalMatch ? originalMatch[0].trim() : `#${itemNumber}`;
+                const displayLabel = originalMatch ? originalMatch[0].trim() : `#${itemNumber}`;
+
+                allMatches.push({ itemNumber, displayLabel, sceneIndex: i, startTime: scenes[i].startTime });
                 break;
             }
         }
+    }
 
-        if (itemNumber !== null && !items.some(it => it.itemNumber === itemNumber)) {
-            // Find exact spoken timestamp from word-level data
-            const spokenTime = _findSpokenTime(scenes[i], itemNumber);
+    if (allMatches.length < 2) {
+        // Not enough matches to build a meaningful map — return whatever we found
+        return _buildItemsFromMatches(allMatches, scenes, sectionTitles, scriptContext);
+    }
 
-            items.push({
-                itemNumber,
-                displayLabel,
-                title: sectionTitles[items.length] || '',
-                startSceneIndex: i,
-                endSceneIndex: -1, // filled below
-                startTime: scenes[i].startTime,
-                endTime: -1, // filled below
-                spokenTime, // word-level timestamp of when number is actually said
-            });
+    // Pass 2: Detect order direction from the first few sequential items
+    // Look at the first 3+ matches to determine if ascending (1,2,3) or descending (9,8,7)
+    const firstNums = allMatches.slice(0, Math.min(4, allMatches.length)).map(m => m.itemNumber);
+    let ascCount = 0, descCount = 0;
+    for (let i = 1; i < firstNums.length; i++) {
+        if (firstNums[i] > firstNums[i - 1]) ascCount++;
+        if (firstNums[i] < firstNums[i - 1]) descCount++;
+    }
+    const isDescending = descCount > ascCount;
+    const expectedMax = Math.max(...allMatches.map(m => m.itemNumber));
+
+    // Pass 3: Filter out false positives
+    // For descending lists (9→1): reject low numbers that appear before the high numbers start
+    // For ascending lists (1→9): reject high numbers that appear before the sequence starts
+    let filtered = [];
+    if (isDescending) {
+        // Find where the real list starts — first occurrence of the highest (or near-highest) number
+        const startIdx = allMatches.findIndex(m => m.itemNumber >= expectedMax - 1);
+        if (startIdx >= 0) {
+            // Only keep matches from the start of the real list onward
+            const realListMatches = allMatches.slice(startIdx);
+            // Deduplicate: keep first occurrence of each number (which is the real one now)
+            const seen = new Set();
+            for (const m of realListMatches) {
+                if (!seen.has(m.itemNumber)) {
+                    seen.add(m.itemNumber);
+                    filtered.push(m);
+                }
+            }
         }
+    } else {
+        // Ascending: first occurrence of each number is correct
+        const seen = new Set();
+        for (const m of allMatches) {
+            if (!seen.has(m.itemNumber)) {
+                seen.add(m.itemNumber);
+                filtered.push(m);
+            }
+        }
+    }
+
+    if (filtered.length === 0) filtered = allMatches;
+
+    console.log(`      [Listicle] Order: ${isDescending ? 'descending' : 'ascending'}, ${allMatches.length} raw matches → ${filtered.length} items`);
+
+    return _buildItemsFromMatches(filtered, scenes, sectionTitles, scriptContext);
+}
+
+/** Build final listicle items array from filtered matches */
+function _buildItemsFromMatches(matches, scenes, sectionTitles, scriptContext) {
+    const items = [];
+    for (const m of matches) {
+        const spokenTime = _findSpokenTime(scenes[m.sceneIndex], m.itemNumber);
+        const sceneText = (scenes[m.sceneIndex]?.text || '').substring(0, 60);
+        console.log(`      [Listicle] Item #${m.itemNumber}: scene ${m.sceneIndex} @${m.startTime.toFixed(1)}s, spoken@${spokenTime ? spokenTime.toFixed(1) + 's' : 'null'} "${sceneText}..."`);
+        items.push({
+            itemNumber: m.itemNumber,
+            displayLabel: m.displayLabel,
+            title: sectionTitles[items.length] || '',
+            startSceneIndex: m.sceneIndex,
+            endSceneIndex: -1,
+            startTime: m.startTime,
+            endTime: -1,
+            spokenTime,
+        });
     }
 
     // Fill endSceneIndex/endTime: each item ends where the next one starts
@@ -174,7 +226,6 @@ function buildListicleItemMap(scenes, scriptContext) {
             items[i].endSceneIndex = items[i + 1].startSceneIndex - 1;
             items[i].endTime = scenes[items[i].endSceneIndex]?.endTime || items[i + 1].startTime;
         } else {
-            // Last item: find CTA start or use last scene
             const ctaIdx = scriptContext.ctaStartTime
                 ? scenes.findIndex(s => s.startTime >= scriptContext.ctaStartTime)
                 : -1;
@@ -263,18 +314,35 @@ function _findSpokenTime(scene, itemNumber) {
     const numStr = String(itemNumber);
     const numWord = Object.keys(WORD_TO_NUM).find(w => WORD_TO_NUM[w] === itemNumber);
 
+    // Common words that are also number words — require "number X" phrase match only
+    const AMBIGUOUS_NUMBERS = new Set([1, 2, 3, 4, 5]);
+
+    // Pass 1: Look for "number X" phrase match first (highest confidence)
     for (let wi = 0; wi < words.length; wi++) {
         const clean = _cleanWord(words[wi].word || words[wi].text);
-
-        // Direct match: "nine", "9", "#9"
-        if (clean === numStr || clean === numWord || clean === `#${numStr}`) {
-            return words[wi].start || words[wi].startTime || null;
-        }
-
-        // Phrase match: "number" + "nine" as consecutive words
         if (clean === 'number' && wi + 1 < words.length) {
             const nextClean = _cleanWord(words[wi + 1].word || words[wi + 1].text);
             if (nextClean === numStr || nextClean === numWord) {
+                return words[wi].start || words[wi].startTime || null;
+            }
+        }
+    }
+
+    // Pass 2: Direct match for unambiguous numbers (6+) or "#N" for any number
+    // For ambiguous numbers (1-5), skip standalone word match to avoid false positives
+    // like "one of the", "two sides", "three times", etc.
+    if (!AMBIGUOUS_NUMBERS.has(itemNumber)) {
+        for (let wi = 0; wi < words.length; wi++) {
+            const clean = _cleanWord(words[wi].word || words[wi].text);
+            if (clean === numStr || clean === numWord || clean === `#${numStr}`) {
+                return words[wi].start || words[wi].startTime || null;
+            }
+        }
+    } else {
+        // Ambiguous numbers: only match digit or hashtag form, not the word form
+        for (let wi = 0; wi < words.length; wi++) {
+            const clean = _cleanWord(words[wi].word || words[wi].text);
+            if (clean === numStr || clean === `#${numStr}`) {
                 return words[wi].start || words[wi].startTime || null;
             }
         }
@@ -315,8 +383,9 @@ function generateItemCounterMG(item, scenes, mgStyle) {
     // Final fallback: scene start time
     if (!mgStartTime) mgStartTime = item.startTime;
 
-    // Small lead-in: show MG 0.3s before the word so visual cue leads audio
-    mgStartTime = Math.max(0, mgStartTime - 0.3);
+    // Start animation so MG is readable right as word is spoken
+    // Animation entrance takes ~0.4s, so start 0.4s before
+    mgStartTime = Math.max(0, mgStartTime - 0.4);
 
     // Pick overlay type based on MG style — consistent across all items in a video
     const STYLE_TO_COUNTER_TYPE = {

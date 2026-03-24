@@ -59,8 +59,8 @@ const config = {
     qwen: {
         apiKey: process.env.QWEN_API_KEY || '',
         baseUrl: process.env.QWEN_BASE_URL || 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
-        model: process.env.QWEN_MODEL || 'qwen3-omni-flash',
-        visionModel: process.env.QWEN_VISION_MODEL || 'qwen-vl-plus-2025-05-07'
+        model: process.env.QWEN_MODEL || 'qwen-omni-turbo',
+        visionModel: process.env.QWEN_VISION_MODEL || 'qwen-omni-turbo'
     },
 
     // Google Gemini API settings (free tier available, text + vision)

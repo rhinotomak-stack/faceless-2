@@ -1,26 +1,36 @@
 const fs = require('fs');
 const path = require('path');
+const { AsyncLocalStorage } = require('async_hooks');
 const config = require('./config');
 const { getBackgroundSource } = require('./themes');
 const { getNiche, rewriteQuery, getFallbackKeywords, getSearchPolicy } = require('./niches');
+const { scoreDownloadedVideo } = require('./smart-segment');
+
+// ─── Scene-scoped log buffering ──────────────────────────────────────
+// When downloading scenes in parallel, logs from different scenes interleave
+// making output unreadable. AsyncLocalStorage tracks which scene each async
+// call belongs to, buffering output per-scene and flushing as clean blocks.
+const _logStorage = new AsyncLocalStorage();
+const _originalConsoleLog = console.log.bind(console);
 
 // Import all providers
 const PexelsVideoProvider = require('./providers/pexels-video');
 const PexelsImageProvider = require('./providers/pexels-image');
 const PixabayVideoProvider = require('./providers/pixabay-video');
 const PixabayImageProvider = require('./providers/pixabay-image');
-const GoogleCSEProvider = require('./providers/google-cse');
 const BingImagesProvider = require('./providers/bing-images');
 const UnsplashProvider = require('./providers/unsplash');
-const DuckDuckGoImagesProvider = require('./providers/duckduckgo-images');
 const GoogleImagesProvider = require('./providers/google-images');
 const YouTubeVideoProvider = require('./providers/youtube-video');
 const NewsVideoProvider = require('./providers/news-video');
 
 // Provider type sets (mirrors niches.js for query routing)
 const STOCK_PROVIDERS = new Set(['pexels', 'pixabay', 'unsplash']);
-const WEB_PROVIDERS = new Set(['googleCSE', 'bing', 'googleScrape', 'duckduckgo', 'newsVideo']);
+const WEB_PROVIDERS = new Set(['bing', 'googleScrape', 'newsVideo']);
 const YOUTUBE_PROVIDERS = new Set(['youtube']);
+// Providers that do their own pre-download smart segment scoring (via smart-segment.js).
+// These skip the post-download segment quality check (but still get relevance scoring).
+const PRESCORE_PROVIDERS = new Set(['youtube', 'newsVideo']);
 
 // ============ MEDIA CACHE (CLIP REUSE) ============
 
@@ -157,7 +167,9 @@ function enableInlineVision() {
 }
 
 /**
- * Score a downloaded image or extract a frame from video and score it.
+ * Score a downloaded image or extract frames from video and score them.
+ * For videos: extracts 3 frames (at 20%, 50%, 80% of clip) and uses the
+ * MINIMUM score — if any frame shows an anchor/person/bad content, reject.
  * Returns { score, description } or null on failure.
  */
 async function _scoreDownloadedMedia(filePath, ext, keyword, context) {
@@ -173,22 +185,88 @@ async function _scoreDownloadedMedia(filePath, ext, keyword, context) {
             base64 = buf.toString('base64');
             mimeType = ext.toLowerCase() === '.png' ? 'image/png' : 'image/jpeg';
         } else if (isVideo) {
-            // Extract a frame at 1s (or middle of clip)
+            // Extract 3 frames from the downloaded clip to catch mid-clip cuts
+            // (e.g., scene starts with ships but cuts to anchor at second 4)
             const ffmpegPath = config.paths?.ffmpeg || (process.platform === 'win32' ? 'C:\\ffmg\\bin\\ffmpeg.exe' : 'ffmpeg');
-            const framePath = filePath + '_vision_frame.jpg';
-            await new Promise((resolve) => {
-                const { execFile } = require('child_process');
-                execFile(ffmpegPath, [
-                    '-ss', '1', '-i', filePath,
-                    '-vf', 'scale=512:-1', '-frames:v', '1', '-q:v', '3',
-                    '-y', framePath
-                ], { timeout: 10000, windowsHide: true }, () => resolve());
-            });
-            if (!fs.existsSync(framePath)) return null;
-            const buf = fs.readFileSync(framePath);
-            base64 = buf.toString('base64');
-            mimeType = 'image/jpeg';
-            try { fs.unlinkSync(framePath); } catch {}
+            const { execFile: _execFile } = require('child_process');
+            const { probeDuration: _probe } = require('./smart-segment');
+
+            // Get clip duration
+            const clipDuration = await _probe(ffmpegPath, filePath);
+            const dur = clipDuration || 8; // fallback 8s for short clips
+
+            // Sample 3 frames: 20%, 50%, 80% of clip
+            const sampleTimes = dur >= 4
+                ? [Math.floor(dur * 0.2), Math.floor(dur * 0.5), Math.floor(dur * 0.8)]
+                : [1]; // very short clip: just 1 frame
+
+            const framePaths = [];
+            for (let fi = 0; fi < sampleTimes.length; fi++) {
+                const framePath = filePath + `_vision_frame_${fi}.jpg`;
+                framePaths.push(framePath);
+                await new Promise((resolve) => {
+                    _execFile(ffmpegPath, [
+                        '-ss', String(sampleTimes[fi]), '-i', filePath,
+                        '-vf', 'scale=512:-1', '-frames:v', '1', '-q:v', '3',
+                        '-y', framePath
+                    ], { timeout: 10000, windowsHide: true }, () => resolve());
+                });
+            }
+
+            // Score each frame, track the worst one
+            let worstScore = 10;
+            let worstDesc = '';
+            let bestScore = 0;
+            let bestDesc = '';
+            let scoredCount = 0;
+
+            for (let fi = 0; fi < framePaths.length; fi++) {
+                const fp = framePaths[fi];
+                if (!fs.existsSync(fp)) continue;
+                try {
+                    const stat = fs.statSync(fp);
+                    if (stat.size < 500) continue;
+                    const buf = fs.readFileSync(fp);
+                    const b64 = buf.toString('base64');
+                    const result = await _scoreVideoFrame(b64, 'image/jpeg', keyword, context);
+                    scoredCount++;
+
+                    if (sampleTimes.length > 1) {
+                        console.log(`    👁️ Clip frame ${fi + 1}/${sampleTimes.length} (${sampleTimes[fi]}s): ${result.score}/10 → ${result.description || ''}`);
+                    }
+
+                    if (result.score < worstScore) {
+                        worstScore = result.score;
+                        worstDesc = result.description || '';
+                    }
+                    if (result.score > bestScore) {
+                        bestScore = result.score;
+                        bestDesc = result.description || '';
+                    }
+
+                    // Fast fail: if this frame scores 0, vision is broken
+                    if (fi === 0 && result.score === 0) break;
+                } catch (e) {}
+                finally {
+                    try { fs.unlinkSync(fp); } catch {}
+                }
+            }
+
+            // Cleanup any remaining frames
+            for (const fp of framePaths) {
+                try { if (fs.existsSync(fp)) fs.unlinkSync(fp); } catch {}
+            }
+
+            if (scoredCount === 0) return null;
+
+            // Use the WORST score — if any frame is bad, the clip is bad
+            // But report both so the caller can see what happened
+            return {
+                score: worstScore,
+                description: worstScore === bestScore
+                    ? worstDesc
+                    : `worst: ${worstDesc} (${worstScore}/10) | best: ${bestDesc} (${bestScore}/10)`,
+            };
         } else {
             return null;
         }
@@ -276,16 +354,14 @@ const VIDEO_SOURCE_MAP = {
 const IMAGE_SOURCE_MAP = {
     pexels: PexelsImageProvider,
     pixabay: PixabayImageProvider,
-    googleCSE: GoogleCSEProvider,
     bing: BingImagesProvider,
     unsplash: UnsplashProvider,
-    duckduckgo: DuckDuckGoImagesProvider,
     googleScrape: GoogleImagesProvider,
 };
 
 // Default provider priority order (when no smart hint available)
 const VIDEO_PRIORITY = ['pexels', 'pixabay', 'youtube', 'newsVideo'];
-const IMAGE_PRIORITY = ['pexels', 'pixabay', 'bing', 'unsplash', 'googleCSE', 'googleScrape'];
+const IMAGE_PRIORITY = ['pexels', 'pixabay', 'bing', 'unsplash', 'googleScrape'];
 
 // ============ SMART SOURCE PRIORITY ============
 
@@ -293,45 +369,45 @@ const IMAGE_PRIORITY = ['pexels', 'pixabay', 'bing', 'unsplash', 'googleCSE', 'g
 const SOURCE_PRIORITY_MAP = {
     'stock': {
         video: ['pexels', 'pixabay', 'youtube', 'newsVideo'],
-        image: ['pexels', 'pixabay', 'unsplash', 'bing', 'googleCSE', 'googleScrape']
+        image: ['pexels', 'pixabay', 'unsplash', 'bing', 'googleScrape']
     },
     'youtube': {
         video: ['youtube', 'pexels', 'pixabay', 'newsVideo'],
-        image: ['bing', 'googleCSE', 'googleScrape', 'pexels', 'pixabay', 'unsplash']
+        image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash']
     },
     'web-image': {
         video: ['pexels', 'pixabay', 'youtube', 'newsVideo'],
-        image: ['bing', 'googleCSE', 'googleScrape', 'pexels', 'pixabay', 'unsplash']
+        image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash']
     },
     'news': {
-        video: ['newsVideo', 'youtube', 'pexels', 'pixabay'],
-        image: ['bing', 'googleCSE', 'googleScrape', 'pexels', 'pixabay', 'unsplash']
+        video: ['newsVideo', 'youtube', 'pixabay', 'pexels'],
+        image: ['bing', 'googleScrape', 'unsplash', 'pexels', 'pixabay']
     },
 };
 
 // Theme-level fallback when AI source hint is missing
 const THEME_PRIORITY_MAP = {
     // Factual/news themes → prefer real footage (news sites, YouTube)
-    politics:      { video: ['newsVideo', 'youtube', 'pexels', 'pixabay'], image: ['bing', 'googleCSE', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
-    finance:       { video: ['newsVideo', 'youtube', 'pexels', 'pixabay'], image: ['bing', 'googleCSE', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
-    business:      { video: ['youtube', 'newsVideo', 'pexels', 'pixabay'], image: ['bing', 'googleCSE', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
-    technology:    { video: ['youtube', 'pexels', 'pixabay', 'newsVideo'], image: ['bing', 'googleCSE', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
-    crime:         { video: ['newsVideo', 'youtube', 'pexels', 'pixabay'], image: ['bing', 'googleCSE', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
-    documentary:   { video: ['youtube', 'newsVideo', 'pexels', 'pixabay'], image: ['bing', 'googleCSE', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
-    military:      { video: ['newsVideo', 'youtube', 'pexels', 'pixabay'], image: ['googleCSE', 'bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
-    war:           { video: ['newsVideo', 'youtube', 'pexels', 'pixabay'], image: ['googleCSE', 'bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
-    geopolitics:   { video: ['newsVideo', 'youtube', 'pexels', 'pixabay'], image: ['googleCSE', 'bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
+    politics:      { video: ['newsVideo', 'youtube', 'pexels', 'pixabay'], image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
+    finance:       { video: ['newsVideo', 'youtube', 'pexels', 'pixabay'], image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
+    business:      { video: ['youtube', 'newsVideo', 'pexels', 'pixabay'], image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
+    technology:    { video: ['youtube', 'pexels', 'pixabay', 'newsVideo'], image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
+    crime:         { video: ['newsVideo', 'youtube', 'pexels', 'pixabay'], image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
+    documentary:   { video: ['youtube', 'newsVideo', 'pexels', 'pixabay'], image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
+    military:      { video: ['newsVideo', 'youtube', 'pexels', 'pixabay'], image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
+    war:           { video: ['newsVideo', 'youtube', 'pexels', 'pixabay'], image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
+    geopolitics:   { video: ['newsVideo', 'youtube', 'pexels', 'pixabay'], image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
     // Aesthetic/organic themes → prefer stock footage
-    nature:        { video: ['pexels', 'pixabay', 'youtube', 'newsVideo'], image: ['pexels', 'pixabay', 'unsplash', 'bing', 'googleCSE', 'googleScrape'] },
-    travel:        { video: ['pexels', 'pixabay', 'youtube', 'newsVideo'], image: ['pexels', 'pixabay', 'unsplash', 'bing', 'googleCSE', 'googleScrape'] },
-    lifestyle:     { video: ['pexels', 'pixabay', 'youtube', 'newsVideo'], image: ['pexels', 'unsplash', 'pixabay', 'bing', 'googleCSE', 'googleScrape'] },
-    food:          { video: ['pexels', 'pixabay', 'youtube', 'newsVideo'], image: ['pexels', 'unsplash', 'pixabay', 'googleCSE', 'bing', 'googleScrape'] },
-    health:        { video: ['pexels', 'pixabay', 'youtube', 'newsVideo'], image: ['pexels', 'unsplash', 'pixabay', 'googleCSE', 'bing', 'googleScrape'] },
+    nature:        { video: ['pexels', 'pixabay', 'youtube', 'newsVideo'], image: ['pexels', 'pixabay', 'unsplash', 'bing', 'googleScrape'] },
+    travel:        { video: ['pexels', 'pixabay', 'youtube', 'newsVideo'], image: ['pexels', 'pixabay', 'unsplash', 'bing', 'googleScrape'] },
+    lifestyle:     { video: ['pexels', 'pixabay', 'youtube', 'newsVideo'], image: ['pexels', 'unsplash', 'pixabay', 'bing', 'googleScrape'] },
+    food:          { video: ['pexels', 'pixabay', 'youtube', 'newsVideo'], image: ['pexels', 'unsplash', 'pixabay', 'bing', 'googleScrape'] },
+    health:        { video: ['pexels', 'pixabay', 'youtube', 'newsVideo'], image: ['pexels', 'unsplash', 'pixabay', 'bing', 'googleScrape'] },
     // Other
-    history:       { video: ['youtube', 'newsVideo', 'pexels', 'pixabay'], image: ['bing', 'googleCSE', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
-    entertainment: { video: ['youtube', 'pexels', 'pixabay', 'newsVideo'], image: ['bing', 'googleCSE', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
-    sports:        { video: ['youtube', 'pexels', 'pixabay', 'newsVideo'], image: ['bing', 'googleCSE', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
-    diy:           { video: ['youtube', 'pexels', 'pixabay', 'newsVideo'], image: ['googleCSE', 'bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
+    history:       { video: ['youtube', 'newsVideo', 'pexels', 'pixabay'], image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
+    entertainment: { video: ['youtube', 'pexels', 'pixabay', 'newsVideo'], image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
+    sports:        { video: ['youtube', 'pexels', 'pixabay', 'newsVideo'], image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
+    diy:           { video: ['youtube', 'pexels', 'pixabay', 'newsVideo'], image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
 };
 
 /**
@@ -379,7 +455,7 @@ function getEnabledSources() {
         if (raw) return JSON.parse(raw);
     } catch (e) { }
     // Default: all on except API-key-only ones
-    return { pexels: true, pixabay: true, unsplash: true, googleCSE: false, bing: true, duckduckgo: false, googleScrape: true, youtube: true, newsVideo: false };
+    return { pexels: true, pixabay: true, unsplash: true, bing: true, googleScrape: true, youtube: true, newsVideo: false };
 }
 
 function initProviders(scriptContext) {
@@ -699,9 +775,36 @@ async function downloadMedia(keyword, mediaType, filenameBase, sceneDuration = 1
                     const finalExt = path.extname(finalPath);
                     console.log(`  ✅ [${provider.name}] Downloaded: ${path.basename(finalPath)}`);
 
-                    // Inline vision scoring — skip for YouTube (does its own internal scoring)
+                    // Post-download segment quality check for video files from providers
+                    // that DON'T do their own pre-download smart segment scoring.
+                    // YouTube & News already pick the best segment before downloading.
+                    const isVideo = ['.mp4', '.webm', '.mkv', '.mov'].includes(finalExt.toLowerCase());
+                    if (_visionEnabled && isVideo && !PRESCORE_PROVIDERS.has(providerKey) && fs.existsSync(finalPath)) {
+                        const segResult = await scoreDownloadedVideo(finalPath, {
+                            keyword,
+                            context: {
+                                sceneText: scene?.text || '',
+                                niche: nicheId || '',
+                                videoTopic: scriptContextRef?.summary || '',
+                                theme: scriptContextRef?.themeId || scriptContextRef?.theme || '',
+                                entities: scriptContextRef?.entities || [],
+                                tone: scriptContextRef?.tone || '',
+                                mood: scriptContextRef?.mood || '',
+                            },
+                            providerTag: provider.name,
+                        });
+                        if (segResult.shouldRetrim && attempt < maxTries - 1) {
+                            console.log(`  🎯 [${provider.name}] Video segment scored poorly — trying next result...`);
+                            visionRejections.push(`Poor video segment (score: ${segResult.bestScore}/10)`);
+                            try { fs.unlinkSync(finalPath); } catch {}
+                            continue;
+                        }
+                    }
+
+                    // Inline vision scoring — ALL providers get 3-frame post-download check
+                    // (YouTube does pre-download scoring too, but mid-clip cuts can still slip through)
                     let visionScore = 0;
-                    if (_visionEnabled && !isYouTube && fs.existsSync(finalPath)) {
+                    if (_visionEnabled && fs.existsSync(finalPath)) {
                         const visionResult = await _scoreDownloadedMedia(finalPath, finalExt, keyword, {
                             sceneText: scene?.text || '',
                             niche: nicheId || '',
@@ -808,121 +911,176 @@ async function downloadAllMedia(scenes, scriptContext, options = {}) {
     const hasImageProviders = imageProviders.some(p => p.isAvailable());
     const CONCURRENCY = 3;
 
-    const tasks = scenes.map((scene, i) => async () => {
-        let mediaType = scene.mediaType || 'video';
-        const sourceHint = scene.sourceHint || '';
+    // ─── Log buffering for clean scene-by-scene output ─────────────
+    // Scenes download in parallel (3 at a time) but their logs interleave,
+    // making output unreadable. We use AsyncLocalStorage to track which
+    // async context belongs to which scene, buffer logs per-scene, and
+    // flush each scene's logs as a clean block when it finishes.
 
-        // Auto-correct type if providers aren't available
-        if (mediaType === 'video' && !hasVideoProviders && hasImageProviders) {
-            mediaType = 'image';
-            scene.mediaType = 'image';
-        } else if (mediaType === 'image' && !hasImageProviders && hasVideoProviders) {
-            mediaType = 'video';
-            scene.mediaType = 'video';
+    const _sceneBuffers = new Map(); // sceneIndex → string[]
+    const _readyScenes = new Set();  // scenes that finished and are ready to flush
+    let _nextFlush = 0;              // next scene index to flush in order
+
+    function _flushSceneLog(sceneIdx) {
+        _readyScenes.add(sceneIdx);
+
+        // Flush in order: scene 0, 1, 2, 3... so output reads sequentially
+        // If scene 2 finishes before scene 0, it waits until 0 and 1 flush first
+        while (_readyScenes.has(_nextFlush)) {
+            const buf = _sceneBuffers.get(_nextFlush);
+            if (buf && buf.length > 0) {
+                _originalConsoleLog(buf.join('\n'));
+            }
+            _sceneBuffers.delete(_nextFlush);
+            _readyScenes.delete(_nextFlush);
+            _nextFlush++;
         }
+    }
 
-        let keyword = scene.researchKeyword || scene.keyword;
-        const sceneDuration = (scene.endTime || 0) - (scene.startTime || 0) || 10;
-        const nicheId = scriptContext?.nicheId || '';
-
-        // Validate and fix keyword before searching
-        keyword = validateKeyword(keyword, scene);
-
-        console.log(`\nScene ${i} (${mediaType}): "${keyword}"${sourceHint ? ` [hint: ${sourceHint}]` : ''}${nicheId ? ` [niche: ${nicheId}]` : ''}`);
-        if (scene.stockQuery || scene.webQuery) {
-            console.log(`  🎯 Optimized: stock="${scene.stockQuery || '-'}" web="${scene.webQuery || '-'}"`);
-        }
-
-        // Check media cache first (reuse previously downloaded clips)
-        // Listicles always check cache; documentaries check if keyword is very similar
-        if (isListicle || _mediaCache.size > 0) {
-            const cached = _checkMediaCache(keyword, mediaType, i, `scene-${i}`);
-            if (cached) {
-                console.log(`  ♻️ Cache hit! Reusing ${path.basename(cached.path)} (from ${cached.provider})`);
-                scene.mediaFile = cached.path;
-                scene.mediaExtension = cached.ext;
-                scene.sourceProvider = cached.provider;
-                scene.mediaWidth = cached.mediaWidth || 0;
-                scene.mediaHeight = cached.mediaHeight || 0;
-                scene.reusedFromCache = true;
+    // Hijack console.log — route to scene buffer via AsyncLocalStorage
+    const _prevLog = console.log;
+    console.log = function (...args) {
+        const store = _logStorage.getStore();
+        if (store && store.sceneIdx !== undefined) {
+            const line = args.map(a => typeof a === 'string' ? a : String(a)).join(' ');
+            const buf = _sceneBuffers.get(store.sceneIdx);
+            if (buf) {
+                buf.push(line);
                 return;
             }
         }
+        // Outside scene context — print immediately
+        _originalConsoleLog.apply(console, args);
+    };
 
-        // Log provider priority for first scene or when source hint changes per scene
-        const priorityOrder = getSmartPriority(sourceHint, mediaType, scriptContext);
-        const prioritySource = sourceHint && SOURCE_PRIORITY_MAP[sourceHint] ? 'hint' : nicheId ? 'niche' : 'default';
-        console.log(`  📦 Priority: ${priorityOrder.join(' → ')} (${prioritySource})`);
+    const tasks = scenes.map((scene, i) => async () => {
+        // Each scene task runs inside its own AsyncLocalStorage context
+        return _logStorage.run({ sceneIdx: i }, async () => {
+            _sceneBuffers.set(i, []);
 
-        let result = await downloadMedia(keyword, mediaType, `scene-${i}`, sceneDuration, sourceHint, nicheId, scene);
+            let mediaType = scene.mediaType || 'video';
+            const sourceHint = scene.sourceHint || '';
 
-        // If primary keyword failed, try simplified variants
-        if (!result) {
-            const variants = getKeywordVariants(keyword);
-            for (const variant of variants) {
-                console.log(`  🔄 Retrying with simplified keyword: "${variant}"`);
-                result = await downloadMedia(variant, mediaType, `scene-${i}`, sceneDuration, sourceHint, nicheId, scene);
-                if (result) break;
+            // Auto-correct type if providers aren't available
+            if (mediaType === 'video' && !hasVideoProviders && hasImageProviders) {
+                mediaType = 'image';
+                scene.mediaType = 'image';
+            } else if (mediaType === 'image' && !hasImageProviders && hasVideoProviders) {
+                mediaType = 'video';
+                scene.mediaType = 'video';
             }
-        }
 
-        // If still failed, try the other media type with all keyword variants
-        if (!result) {
-            const fallbackType = mediaType === 'video' ? 'image' : 'video';
-            const fallbackProviders = fallbackType === 'video' ? videoProviders : imageProviders;
-            if (fallbackProviders.some(p => p.isAvailable())) {
-                console.log(`  🔄 Trying fallback type: ${fallbackType}...`);
-                result = await downloadMedia(keyword, fallbackType, `scene-${i}`, sceneDuration, sourceHint, nicheId, scene);
+            let keyword = scene.researchKeyword || scene.keyword;
+            const sceneDuration = (scene.endTime || 0) - (scene.startTime || 0) || 10;
+            const nicheId = scriptContext?.nicheId || '';
 
-                if (!result) {
-                    const variants = getKeywordVariants(keyword);
-                    for (const variant of variants) {
-                        console.log(`  🔄 Retrying ${fallbackType} with: "${variant}"`);
-                        result = await downloadMedia(variant, fallbackType, `scene-${i}`, sceneDuration, sourceHint, nicheId, scene);
-                        if (result) break;
+            // Validate and fix keyword before searching
+            keyword = validateKeyword(keyword, scene);
+
+            console.log(`\n${'═'.repeat(70)}`);
+            console.log(`📌 Scene ${i}/${scenes.length - 1} (${mediaType}) — "${keyword}"${sourceHint ? `  [hint: ${sourceHint}]` : ''}${nicheId ? `  [niche: ${nicheId}]` : ''}`);
+            console.log(`${'─'.repeat(70)}`);
+            if (scene.stockQuery || scene.webQuery) {
+                console.log(`  🎯 Optimized: stock="${scene.stockQuery || '-'}" web="${scene.webQuery || '-'}"`);
+            }
+
+            // Check media cache first (reuse previously downloaded clips)
+            if (isListicle || _mediaCache.size > 0) {
+                const cached = _checkMediaCache(keyword, mediaType, i, `scene-${i}`);
+                if (cached) {
+                    console.log(`  ♻️ Cache hit! Reusing ${path.basename(cached.path)} (from ${cached.provider})`);
+                    console.log(`  ✅ Scene ${i} DONE (cached)`);
+                    scene.mediaFile = cached.path;
+                    scene.mediaExtension = cached.ext;
+                    scene.sourceProvider = cached.provider;
+                    scene.mediaWidth = cached.mediaWidth || 0;
+                    scene.mediaHeight = cached.mediaHeight || 0;
+                    scene.reusedFromCache = true;
+                    _flushSceneLog(i);
+                    return;
+                }
+            }
+
+            // Log provider priority
+            const priorityOrder = getSmartPriority(sourceHint, mediaType, scriptContext);
+            const prioritySource = sourceHint && SOURCE_PRIORITY_MAP[sourceHint] ? 'hint' : nicheId ? 'niche' : 'default';
+            console.log(`  📦 Priority: ${priorityOrder.join(' → ')} (${prioritySource})`);
+
+            let result = await downloadMedia(keyword, mediaType, `scene-${i}`, sceneDuration, sourceHint, nicheId, scene);
+
+            // If primary keyword failed, try simplified variants
+            if (!result) {
+                const variants = getKeywordVariants(keyword);
+                for (const variant of variants) {
+                    console.log(`  🔄 Retrying with simplified keyword: "${variant}"`);
+                    result = await downloadMedia(variant, mediaType, `scene-${i}`, sceneDuration, sourceHint, nicheId, scene);
+                    if (result) break;
+                }
+            }
+
+            // If still failed, try the other media type
+            if (!result) {
+                const fallbackType = mediaType === 'video' ? 'image' : 'video';
+                const fallbackProviders = fallbackType === 'video' ? videoProviders : imageProviders;
+                if (fallbackProviders.some(p => p.isAvailable())) {
+                    console.log(`  🔄 Trying fallback type: ${fallbackType}...`);
+                    result = await downloadMedia(keyword, fallbackType, `scene-${i}`, sceneDuration, sourceHint, nicheId, scene);
+
+                    if (!result) {
+                        const variants = getKeywordVariants(keyword);
+                        for (const variant of variants) {
+                            console.log(`  🔄 Retrying ${fallbackType} with: "${variant}"`);
+                            result = await downloadMedia(variant, fallbackType, `scene-${i}`, sceneDuration, sourceHint, nicheId, scene);
+                            if (result) break;
+                        }
+                    }
+
+                    if (result) {
+                        scene.mediaType = fallbackType;
                     }
                 }
+            }
 
-                if (result) {
-                    scene.mediaType = fallbackType;
+            // Last resort: niche fallback keywords
+            if (!result && nicheId) {
+                const fallbacks = getFallbackKeywords(nicheId);
+                console.log(`  🔄 Trying niche fallback keywords (${nicheId})...`);
+                for (const fbKeyword of fallbacks) {
+                    result = await downloadMedia(fbKeyword, mediaType, `scene-${i}`, sceneDuration, '', '', null);
+                    if (result) {
+                        console.log(`  ✅ Niche fallback worked: "${fbKeyword}"`);
+                        break;
+                    }
                 }
             }
-        }
 
-        // Last resort: try niche-specific fallback keywords
-        if (!result && nicheId) {
-            const fallbacks = getFallbackKeywords(nicheId);
-            console.log(`  🔄 Trying niche fallback keywords (${nicheId})...`);
-            for (const fbKeyword of fallbacks) {
-                result = await downloadMedia(fbKeyword, mediaType, `scene-${i}`, sceneDuration, '', '', null);
-                if (result) {
-                    console.log(`  ✅ Niche fallback worked: "${fbKeyword}"`);
-                    break;
-                }
+            if (result) {
+                scene.mediaFile = result.path;
+                scene.mediaExtension = result.ext;
+                scene.sourceProvider = result.provider;
+                scene.mediaWidth = result.mediaWidth || 0;
+                scene.mediaHeight = result.mediaHeight || 0;
+                console.log(`  ✅ Scene ${i} DONE → ${result.provider}: ${path.basename(result.path)}${result.visionScore ? ` (vision: ${result.visionScore}/10)` : ''}`);
+
+                _cacheMedia(keyword, result, result.visionScore || 0, i);
+            } else {
+                console.log(`  ❌ Scene ${i}: No media found after all retries`);
+                scene.mediaFile = null;
+                scene.mediaExtension = mediaType === 'image' ? '.jpg' : '.mp4';
+                scene.sourceProvider = null;
+                scene.mediaWidth = 0;
+                scene.mediaHeight = 0;
             }
-        }
 
-        if (result) {
-            scene.mediaFile = result.path;
-            scene.mediaExtension = result.ext;
-            scene.sourceProvider = result.provider;
-            scene.mediaWidth = result.mediaWidth || 0;
-            scene.mediaHeight = result.mediaHeight || 0;
-
-            // Cache the downloaded media for potential reuse by later scenes
-            _cacheMedia(keyword, result, result.visionScore || 0, i);
-        } else {
-            console.log(`  ❌ Scene ${i}: No media found after all retries`);
-            scene.mediaFile = null;
-            scene.mediaExtension = mediaType === 'image' ? '.jpg' : '.mp4';
-            scene.sourceProvider = null;
-            scene.mediaWidth = 0;
-            scene.mediaHeight = 0;
-        }
-
+            // Flush this scene's buffered logs as a clean block
+            _flushSceneLog(i);
+        });
     });
 
     await parallelWithLimit(tasks, CONCURRENCY);
+
+    // Restore console.log
+    console.log = _prevLog;
 
     // Post-download: Probe dimensions for scenes missing them (YouTube, some web-image providers)
     let probeCount = 0;

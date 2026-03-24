@@ -276,11 +276,19 @@ async function analyzeArticleHighlights(imagePath) {
 
 /**
  * Score how well a single video frame matches a keyword.
- * Used by YouTube provider to find the best segment of a video.
+ * Used by ALL video providers (YouTube, News, future) via smart-segment.js.
+ *
+ * Scoring Rules:
+ * - LITERAL visual matching only (not symbolic/metaphorical)
+ * - Penalize: news anchors, talking heads, studio desks, text-heavy screens
+ * - Penalize: channel logos, watermarks, AI-generated artifacts
+ * - Reward: real-world footage, specific subjects, clean visuals
+ *
  * @param {string} base64Image - base64-encoded frame image
  * @param {string} mimeType - image MIME type
  * @param {string} keyword - the search keyword to match against
- * @returns {number} score 1-10 (10 = perfect match), or 0 on failure
+ * @param {object} context - { sceneText, niche, videoTopic, theme, tone, entities }
+ * @returns {{ score: number, description: string }} score 1-10, or 0 on failure
  */
 async function scoreVideoFrame(base64Image, mimeType, keyword, context) {
     try {
@@ -293,13 +301,24 @@ async function scoreVideoFrame(base64Image, mimeType, keyword, context) {
 IMPORTANT: Score based on what is LITERALLY visible in the image, NOT symbolic or metaphorical interpretations.
 For example: a circuit board does NOT match "underwater drone" even if drones contain circuits. An actual underwater drone/submersible WOULD match.
 
-Describe what you LITERALLY see in ONE short sentence (10-15 words max). Note any problems (watermarks, text overlays, logos, low quality, AI-generated artifacts).
-Then score 1-10:
-- 9-10: Shows exactly what the topic describes, clean footage, no watermarks
-- 7-8: Closely related real footage, minor issues
-- 5-6: Loosely related or too generic (e.g. generic stock photo instead of specific subject)
-- 3-4: Wrong subject but same general category
-- 1-2: Completely unrelated, or heavy watermarks/logos/text/AI-generated
+Describe what you LITERALLY see in ONE short sentence (10-15 words max). Note any problems.
+
+PERSON KEYWORDS: If the keyword contains a person's name (leader, politician, celebrity, historical figure), a photo or portrait of that person IS the correct match — score it HIGH (7-9). You may not recognize every person, so if the keyword is a name and the image shows a person matching the described context (e.g. "King Khalid Saudi Arabia" → man in Saudi royal attire), give benefit of the doubt and score 7+. This is NOT a "talking head" penalty — talking head penalty only applies to NEWS ANCHORS/PRESENTERS reading from a teleprompter, not to photos of the actual subject.
+
+AUTOMATIC PENALTIES (subtract from score):
+- News anchor / presenter reading news at a studio desk → MAX score 3 (unusable for faceless video)
+- Studio set with desk, microphones, teleprompter → MAX score 3
+- Text-heavy screen (headlines, tickers, lower thirds filling >30% of frame) → MAX score 4
+- Channel logo or large watermark covering content → MAX score 3
+- Still photo with "Ken Burns" border/frame → -2 from base score
+- AI-generated or illustrated content when real footage is needed → MAX score 2
+
+SCORING RUBRIC:
+- 9-10: Shows exactly what the topic describes, clean real-world footage, no watermarks
+- 7-8: Closely related real footage, minor issues (small logo, slight mismatch). Person photo matching a person keyword.
+- 5-6: Loosely related or too generic (e.g. generic cityscape instead of specific building)
+- 3-4: Wrong subject but same general category, OR news anchor/studio shot
+- 1-2: Completely unrelated, heavy watermarks/logos, or AI-generated
 
 Reply format (exactly 2 lines):
 [your one-sentence description]

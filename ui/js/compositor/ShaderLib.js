@@ -291,6 +291,36 @@ uniform float u_chromaticAngle;     // direction angle in radians
 uniform float u_lightLeakIntensity; // 0-1
 uniform float u_lightLeakWarmth;    // 0-1 (0=neutral, 1=warm orange)
 
+// Scratch params (animated vertical film scratches)
+uniform float u_scratchOn;
+uniform float u_scratchIntensity;   // 0-1
+uniform float u_scratchSpeed;       // animation speed multiplier
+uniform float u_scratchDensity;     // 0-1 how many scratches
+
+// Color Grade params (desaturation + tint)
+uniform float u_colorGradeOn;
+uniform float u_desaturation;       // 0-1 (0=full color, 1=grayscale)
+uniform float u_tintR;              // tint color RGB (0-1)
+uniform float u_tintG;
+uniform float u_tintB;
+uniform float u_tintStrength;       // 0-1 how strong the tint
+
+// Scan Lines params
+uniform float u_scanLineOn;
+uniform float u_scanLineIntensity;  // 0-1 darkness of lines
+uniform float u_scanLineCount;      // number of lines across height
+uniform float u_scanLineSpeed;      // scroll speed (0 = static)
+
+// Flicker params (brightness variation per frame)
+uniform float u_flickerOn;
+uniform float u_flickerIntensity;   // 0-1
+uniform float u_flickerSpeed;       // speed of flicker
+
+// Global effect mask: applies to ALL effects on this scene
+// type: 0=none, 1=radialCenter (soft center), 2=radialEdge (soft edges), 3=linearTB (top→bottom)
+uniform float u_effectMaskType;
+uniform float u_effectMaskStr;
+
 in vec2 v_texCoord;
 out vec4 fragColor;
 
@@ -312,23 +342,46 @@ float valueNoise(vec2 p) {
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
+// ---- Global Effect Mask ----
+// Returns 0-1 multiplier applied to ALL effects on the scene
+float effectMask(vec2 uv) {
+    if (u_effectMaskType < 0.5) return 1.0; // none
+    float dist = length(uv - 0.5) * 2.0; // 0 at center, ~1.4 at corners
+    float m = 1.0;
+    if (u_effectMaskType < 1.5) {
+        // radialCenter: clean center, full effect at edges
+        // At str=1: center ~40% of frame is clean, effect kicks in toward edges
+        float d = clamp(dist / 1.4, 0.0, 1.0); // normalize so corners = 1.0
+        float edge = 0.25 + (1.0 - u_effectMaskStr) * 0.35; // inner radius: 0.25 (str=1) to 0.6 (str=0)
+        m = smoothstep(edge, edge + 0.45, d);
+    } else if (u_effectMaskType < 2.5) {
+        // radialEdge: full effect at center, clean edges
+        float d = clamp(dist / 1.4, 0.0, 1.0);
+        float outer = 0.7 + (1.0 - u_effectMaskStr) * 0.25; // outer radius: 0.7 (str=1) to 0.95 (str=0)
+        m = 1.0 - smoothstep(outer - 0.35, outer, d);
+    } else {
+        // linearTB: full at top, fades toward bottom
+        m = smoothstep(1.0, 0.15 + (1.0 - u_effectMaskStr) * 0.5, uv.y);
+    }
+    return m;
+}
+
 // ---- Grain ----
-vec3 applyGrain(vec3 color, vec2 uv) {
+vec3 applyGrain(vec3 color, vec2 uv, float mask) {
     vec2 grainUV = uv * u_resolution / u_grainScale;
     float noise = hash(grainUV + fract(u_time * 7.23)) * 2.0 - 1.0;
-    return color + noise * u_grainIntensity;
+    return color + noise * u_grainIntensity * mask;
 }
 
 // ---- Dust ----
-vec3 applyDust(vec3 color, vec2 uv) {
-    // Sparse bright specks — slow-moving over time
+vec3 applyDust(vec3 color, vec2 uv, float mask) {
     float t = u_time * 0.3;
     vec2 dustUV = uv * u_resolution * 0.08;
     float n1 = hash(floor(dustUV) + floor(t));
     float n2 = hash(floor(dustUV * 0.5 + 17.0) + floor(t * 0.7));
     float speck = step(1.0 - u_dustDensity * 0.02, n1) * n1;
     speck += step(1.0 - u_dustDensity * 0.015, n2) * n2 * 0.6;
-    return color + speck * u_dustIntensity;
+    return color + speck * u_dustIntensity * mask;
 }
 
 // ---- Vignette ----
@@ -364,38 +417,100 @@ vec3 applyBlurVignette(vec3 color, vec2 uv) {
 }
 
 // ---- Chromatic Aberration ----
-vec3 applyChromatic(vec3 color, vec2 uv) {
-    vec2 dir = vec2(cos(u_chromaticAngle), sin(u_chromaticAngle)) * u_chromaticIntensity;
+vec3 applyChromatic(vec3 color, vec2 uv, float mask) {
+    vec2 dir = vec2(cos(u_chromaticAngle), sin(u_chromaticAngle)) * u_chromaticIntensity * mask;
     float r = texture(u_texture, clamp(uv + dir, 0.0, 1.0)).r;
     float b = texture(u_texture, clamp(uv - dir, 0.0, 1.0)).b;
     return vec3(r, color.g, b);
 }
 
 // ---- Light Leak ----
-vec3 applyLightLeak(vec3 color, vec2 uv) {
-    // Animated warm gradient from edges
+vec3 applyLightLeak(vec3 color, vec2 uv, float mask) {
     float t = u_time * 0.15;
     float n = valueNoise(uv * 3.0 + t);
-    // Leak from top-right and bottom-left corners
     float leak1 = smoothstep(0.6, 0.0, length(uv - vec2(0.85, 0.15)));
     float leak2 = smoothstep(0.5, 0.0, length(uv - vec2(0.1, 0.9)));
     float leak = (leak1 + leak2 * 0.6) * n;
-    // Warm color: interpolate between white and warm orange based on warmth
     vec3 leakColor = mix(vec3(1.0), vec3(1.0, 0.7, 0.3), u_lightLeakWarmth);
-    return color + leakColor * leak * u_lightLeakIntensity;
+    return color + leakColor * leak * u_lightLeakIntensity * mask;
+}
+
+// ---- Film Scratches ----
+vec3 applyScratch(vec3 color, vec2 uv, float mask) {
+    float t = u_time * u_scratchSpeed;
+    // Multiple scratch layers at different speeds
+    float scratch = 0.0;
+    for (float i = 0.0; i < 3.0; i++) {
+        float seed = i * 17.3 + 5.7;
+        // Random X position that changes over time
+        float scratchX = fract(hash(vec2(floor(t * (2.0 + i)), seed)) + i * 0.3);
+        // Thin vertical line
+        float dist = abs(uv.x - scratchX);
+        float width = 0.001 + 0.001 * hash(vec2(floor(t * (1.5 + i)), seed + 3.0));
+        float line = smoothstep(width, 0.0, dist);
+        // Fade in/out over time
+        float life = fract(t * (0.8 + i * 0.3) + seed);
+        float fade = smoothstep(0.0, 0.1, life) * smoothstep(1.0, 0.7, life);
+        // Only show based on density threshold
+        float show = step(1.0 - u_scratchDensity, hash(vec2(floor(t * (1.0 + i * 0.5)), seed + 7.0)));
+        scratch += line * fade * show;
+    }
+    // Scratches are bright white lines
+    return color + vec3(scratch * u_scratchIntensity * mask);
+}
+
+// ---- Color Grade ----
+vec3 applyColorGrade(vec3 color, vec2 uv) {
+    // Desaturate
+    float luma = dot(color, vec3(0.299, 0.587, 0.114));
+    vec3 gray = vec3(luma);
+    color = mix(color, gray, u_desaturation);
+    // Apply tint
+    vec3 tint = vec3(u_tintR, u_tintG, u_tintB);
+    color = mix(color, color * tint, u_tintStrength);
+    return color;
+}
+
+// ---- Scan Lines ----
+vec3 applyScanLines(vec3 color, vec2 uv, float mask) {
+    float y = uv.y * u_scanLineCount + u_time * u_scanLineSpeed;
+    float line = sin(y * 3.14159) * 0.5 + 0.5;
+    line = pow(line, 3.0); // sharpen the lines
+    float darken = 1.0 - line * u_scanLineIntensity * mask;
+    return color * darken;
+}
+
+// ---- Flicker ----
+vec3 applyFlicker(vec3 color, vec2 uv) {
+    // Semi-random brightness variation per frame
+    float t = u_time * u_flickerSpeed;
+    float flick = hash(vec2(floor(t * 12.0), 0.0));
+    // Smooth it slightly
+    float flick2 = hash(vec2(floor(t * 12.0) + 1.0, 0.0));
+    float f = mix(flick, flick2, fract(t * 12.0));
+    // Center around 1.0, scale by intensity
+    float brightness = 1.0 + (f - 0.5) * u_flickerIntensity;
+    return color * brightness;
 }
 
 void main() {
     vec2 uv = v_texCoord;
     vec3 color = texture(u_texture, uv).rgb;
 
-    // Apply effects in order: chromatic first (re-samples texture), then color effects
-    if (u_chromaticOn > 0.5) color = applyChromatic(color, uv);
+    // Compute global mask once — applied to maskable effects
+    float mask = effectMask(uv);
+
+    // Apply effects in order
+    if (u_chromaticOn > 0.5) color = applyChromatic(color, uv, mask);
     if (u_blurVignetteOn > 0.5) color = applyBlurVignette(color, uv);
+    if (u_colorGradeOn > 0.5) color = applyColorGrade(color, uv);
+    if (u_flickerOn > 0.5) color = applyFlicker(color, uv);
     if (u_vignetteOn > 0.5) color = applyVignette(color, uv);
-    if (u_grainOn > 0.5) color = applyGrain(color, uv);
-    if (u_dustOn > 0.5) color = applyDust(color, uv);
-    if (u_lightLeakOn > 0.5) color = applyLightLeak(color, uv);
+    if (u_scanLineOn > 0.5) color = applyScanLines(color, uv, mask);
+    if (u_grainOn > 0.5) color = applyGrain(color, uv, mask);
+    if (u_dustOn > 0.5) color = applyDust(color, uv, mask);
+    if (u_scratchOn > 0.5) color = applyScratch(color, uv, mask);
+    if (u_lightLeakOn > 0.5) color = applyLightLeak(color, uv, mask);
 
     fragColor = vec4(clamp(color, 0.0, 1.0), 1.0);
 }`;

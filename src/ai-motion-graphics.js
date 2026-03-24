@@ -10,6 +10,122 @@ let placedTypes = [];
 let lastType = '';
 let aiInstructionsRef = '';
 
+// ============ MG CONTEXT TRACKER ============
+// Cross-scene awareness: tracks placed MGs to prevent duplicates, ensure variety,
+// and provide narrative arc context to downstream decisions.
+
+class MGContextTracker {
+    constructor(scenes, scriptContext) {
+        this.placed = [];           // { type, text, sceneIndex, startTime }
+        this.textHashes = new Set(); // normalized text fingerprints
+        this.typeLastSeen = {};      // type → sceneIndex of last placement
+
+        // Build narrative arc from scene positions
+        const total = scenes.length;
+        this.arcTags = scenes.map((_, i) => {
+            const pos = i / Math.max(1, total - 1);
+            if (pos <= 0.10) return 'hook';         // first 10%
+            if (pos <= 0.25) return 'setup';         // 10-25%
+            if (pos <= 0.75) return 'build';         // 25-75% (main body)
+            if (pos <= 0.90) return 'climax';        // 75-90%
+            return 'conclusion';                      // last 10%
+        });
+
+        // Store topic for context
+        this.topic = scriptContext?.summary || '';
+        this.format = scriptContext?.format || 'documentary';
+    }
+
+    /** Get narrative arc tag for a scene */
+    getArc(sceneIndex) {
+        return this.arcTags[sceneIndex] || 'build';
+    }
+
+    /** Record a placed MG */
+    record(mg) {
+        const entry = { type: mg.type, text: mg.text || '', sceneIndex: mg.sceneIndex, startTime: mg.startTime };
+        this.placed.push(entry);
+        this.typeLastSeen[mg.type] = mg.sceneIndex;
+        this.textHashes.add(this._fingerprint(mg.text));
+    }
+
+    /** Check if text is too similar to any recently placed MG */
+    isDuplicateText(text) {
+        return this.textHashes.has(this._fingerprint(text));
+    }
+
+    /** Get scene gap since this type was last used */
+    sceneGapSince(type, currentIndex) {
+        const last = this.typeLastSeen[type];
+        if (last === undefined) return Infinity;
+        return currentIndex - last;
+    }
+
+    /** Get types placed in the last N scenes */
+    recentTypes(currentIndex, window = 3) {
+        return this.placed
+            .filter(p => currentIndex - p.sceneIndex <= window)
+            .map(p => p.type);
+    }
+
+    /** Normalize text to a comparable fingerprint (lowercase, no stop words, sorted key words) */
+    _fingerprint(text) {
+        if (!text) return '';
+        const stop = new Set(['the','a','an','is','are','was','were','and','or','but','in','on','at','to','for','of','with','that','this','from','by','it','its','has','have','had','be','been','being','not','no','do','does','did']);
+        const words = text.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/)
+            .filter(w => w.length > 2 && !stop.has(w));
+        // Sort so "John won the race" and "the race John won" produce same fingerprint
+        return words.sort().join(' ');
+    }
+}
+
+// ============ SMART TEXT EXTRACTION ============
+// Extract the key phrase from scene text — not just first N words, but the most important clause.
+
+function extractKeyPhrase(text, maxWords = 8) {
+    if (!text) return '';
+    const words = text.split(/\s+/).filter(Boolean);
+    if (words.length <= maxWords) return text.trim();
+
+    // Strategy 1: Find a clause with a strong signal word
+    const signalPatterns = [
+        /(?:the\s+(?:truth|reality|fact|key|secret|answer|problem|solution)\s+(?:is|was)\s+).{5,60}/i,
+        /(?:this\s+(?:is|was|means|changed|proves)\s+).{5,60}/i,
+        /(?:known\s+(?:as|for)\s+).{5,60}/i,
+        /(?:called\s+).{5,40}/i,
+        /(?:because\s+).{5,60}/i,
+    ];
+    for (const pattern of signalPatterns) {
+        const match = text.match(pattern);
+        if (match) {
+            return match[0].split(/\s+/).slice(0, maxWords).join(' ');
+        }
+    }
+
+    // Strategy 2: Find a clause after a comma or dash (often the key insight)
+    const clauses = text.split(/[,\u2014\u2013—–]/).map(c => c.trim()).filter(c => c.length > 15);
+    if (clauses.length >= 2) {
+        // Pick the clause with the most "interesting" words (proper nouns, numbers)
+        const scored = clauses.map(c => {
+            const cWords = c.split(/\s+/);
+            let score = 0;
+            for (const w of cWords) {
+                if (/^\d/.test(w)) score += 3;       // numbers
+                if (/^[A-Z][a-z]/.test(w)) score += 2; // proper nouns
+                if (w.length > 6) score += 1;          // long words
+            }
+            return { clause: c, score };
+        });
+        scored.sort((a, b) => b.score - a.score);
+        return scored[0].clause.split(/\s+/).slice(0, maxWords).join(' ');
+    }
+
+    // Strategy 3: Fallback — skip common lead-in words and take from there
+    const leadIns = /^(?:and\s+|but\s+|so\s+|then\s+|however\s+|meanwhile\s+|in\s+fact\s+|actually\s+)/i;
+    const cleaned = text.replace(leadIns, '');
+    return cleaned.split(/\s+/).slice(0, maxWords).join(' ');
+}
+
 // Classification: full-screen MGs go on V3, overlay MGs stay on MG track
 const FULLSCREEN_MG_TYPES = new Set([
     'barChart', 'donutChart', 'rankingList', 'timeline', 'comparisonCard', 'bulletList', 'mapChart', 'articleHighlight', 'kineticText'
@@ -107,13 +223,66 @@ function pickStyle(scriptContext) {
 
 // Content pattern detectors — each returns a score (0-10) for how well a scene matches
 const CONTENT_PATTERNS = {
-    // Numbers, percentages, statistics
+    // Numbers, percentages, statistics — only when the number IS the point, not incidental
+    // Dates, event numbers, ordinals, and contextual numbers are NOT stats
+    // statCounter is ONLY for BIG numbers (100+) or numbers with scale words (million, %, etc.)
     statistic: (text) => {
-        const numMatches = text.match(/\d[\d,.]*\s*(%|percent|million|billion|trillion|thousand|hundred|times|x\b|fold)/gi);
-        if (numMatches && numMatches.length >= 1) return { score: 8, reason: 'has numeric stat' };
+        // Strong: number with unit/scale — "50 million", "3.2 billion", "47%"
+        // But NOT "X-time" patterns like "three-time winner" — those are descriptions, not stats
+        const scaledNum = text.match(/\d[\d,.]*\s*(%|percent|million|billion|trillion|thousand|hundred)/gi);
+        if (scaledNum && scaledNum.length >= 1) return { score: 8, reason: 'scaled number stat' };
+        // "X times" only counts if the number is large (100+), not "3 times" or "five times"
+        const timesMatch = text.match(/(\d[\d,.]*)\s*(?:times|x\b|fold)/gi);
+        if (timesMatch) {
+            const hasLargeMultiplier = timesMatch.some(m => {
+                const num = parseFloat(m.replace(/[^0-9.]/g, ''));
+                return num >= 100;
+            });
+            if (hasLargeMultiplier) return { score: 8, reason: 'large multiplier stat' };
+        }
+        // Strong: currency amounts — "$2,000", "€500" (only if >= 100)
+        const currMatch = text.match(/[\$€£]\s?(\d[\d,.]+)/);
+        if (currMatch) {
+            const val = parseFloat(currMatch[1].replace(/,/g, ''));
+            if (val >= 100) return { score: 8, reason: 'currency amount' };
+        }
+        // Medium: number in a stat-presenting context — "reached 500", "grew to 1.4"
+        const statCtx = text.match(/\b(?:reached|grew|rose|fell|dropped|cost|earned|spent|lost|gained|increased|decreased|doubled|tripled|totaled|averaged|surpassed|exceeded)\s+(?:to\s+)?[\$€£]?(\d[\d,.]*)\b/i);
+        if (statCtx) {
+            const val = parseFloat(statCtx[1].replace(/,/g, ''));
+            if (val >= 100) return { score: 7, reason: 'number in stat context' };
+        }
+
+        // Weak: bare numbers — heavily filtered to avoid false positives
+        // ONLY numbers >= 100 qualify (3+ digits = "big number")
         const bareNumbers = text.match(/\b\d[\d,.]+\b/g);
-        if (bareNumbers && bareNumbers.length >= 2) return { score: 5, reason: 'multiple numbers' };
-        if (bareNumbers && bareNumbers.length === 1) return { score: 3, reason: 'single number' };
+        if (bareNumbers) {
+            const significant = bareNumbers.filter(n => {
+                const val = parseFloat(n.replace(/,/g, ''));
+                const idx = text.indexOf(n);
+                const before = text.substring(Math.max(0, idx - 30), idx).toLowerCase();
+
+                // Must be 100+ (3-digit minimum for statCounter)
+                if (val < 100) return false;
+
+                // Skip years (1800-2099) and decades ("the 1940s", "1960s")
+                if (val >= 1800 && val <= 2099) return false;
+                if (/\d{4}s/.test(n)) return false;
+
+                // Skip date-adjacent: "in 1965", "by 1980", "since 1990", "around 1950"
+                if (/\b(?:in|by|since|around|during|from|after|before|until)\s*$/.test(before) && val >= 1000 && val <= 2099) return false;
+
+                // Skip ordinal event names: "World War 2", "Season 3", "Part 2", "Chapter 5"
+                if (/\b(?:war|season|part|chapter|volume|episode|phase|round|version|act|generation|grade|level)\s*$/i.test(before)) return false;
+
+                // Skip age/rank-like: "at age 15", "ranked 3rd"
+                if (/\b(?:age|aged|rank|ranked|number|no\.?)\s*$/i.test(before)) return false;
+
+                return true;
+            });
+            if (significant.length >= 2) return { score: 5, reason: 'multiple significant numbers' };
+            if (significant.length === 1) return { score: 3, reason: 'single significant number' };
+        }
         return { score: 0, reason: null };
     },
 
@@ -237,15 +406,15 @@ const CONTENT_PATTERNS = {
 const PATTERN_TO_MG_TYPES = {
     statistic:   ['statCounter', 'barChart', 'donutChart', 'progressBar'],
     percentage:  ['progressBar', 'donutChart', 'statCounter'],
-    ranking:     ['rankingList', 'barChart', 'statCounter'],
+    ranking:     ['rankingList', 'barChart', 'lowerThird'],
     enumeration: ['bulletList', 'rankingList', 'timeline'],
     timeline:    ['timeline', 'barChart'],
     identity:    ['lowerThird', 'callout'],
     thesis:      ['headline', 'kineticText', 'focusWord', 'typewriter'],
     comparison:  ['comparisonCard', 'barChart'],
     emphasis:    ['callout', 'kineticText', 'focusWord', 'typewriter'],
-    geographic:  ['mapChart', 'barChart', 'statCounter'],
-    research:    ['articleHighlight', 'callout', 'statCounter'],
+    geographic:  ['mapChart', 'barChart', 'callout'],
+    research:    ['articleHighlight', 'callout', 'typewriter'],
     conceptual:  ['explainer', 'bulletList', 'callout'],
     dramatic:    ['focusWord', 'kineticText', 'headline'],
 };
@@ -301,7 +470,7 @@ const TYPE_CAPS = {
  * @param {string[]} alreadyPlaced - Types already placed in the video
  * @returns {{ candidates: Array<{type: string, score: number, reason: string}>, patternHits: Array<{pattern: string, score: number, reason: string}>, skipped: Array<{type: string, reason: string}>, shouldSkip: boolean }}
  */
-function generateCandidates(scene, sceneIndex, totalScenes, allowedMGs, alreadyPlaced, mgHint) {
+function generateCandidates(scene, sceneIndex, totalScenes, allowedMGs, alreadyPlaced, mgHint, ctx) {
     const text = scene.text || '';
     const duration = (scene.endTime || 0) - (scene.startTime || 0);
 
@@ -353,20 +522,57 @@ function generateCandidates(scene, sceneIndex, totalScenes, allowedMGs, alreadyP
     // mgHint boost: if Visual Planner suggested a specific type, boost it significantly
     // This ensures the planner's scene-level context (which sees the full script) influences scoring
     if (hint.type && allowedMGs.includes(hint.type)) {
-        const HINT_BOOST = 6; // Strong signal — planner saw full script context
-        typeScores[hint.type] = (typeScores[hint.type] || 0) + HINT_BOOST;
-        if (!typeReasons[hint.type]) typeReasons[hint.type] = [];
-        typeReasons[hint.type].push(`mgHint:${hint.type}`);
+        // Guard: statCounter hint requires actual big number (100+) or % in the text
+        // Reject hints for small numbers like "3-time winner", "5 awards"
+        let hintValid = true;
+        if (hint.type === 'statCounter') {
+            const hasStatNum = CONTENT_PATTERNS.statistic(text);
+            if (!hasStatNum || hasStatNum.score < 3) {
+                hintValid = false;
+                if (!typeReasons['_rejected']) typeReasons['_rejected'] = [];
+                typeReasons['_rejected'].push(`mgHint:statCounter rejected (no qualifying 100+ number in text)`);
+            }
+            // Also reject date ranges like "1953 → 1999" — years are not stats
+            if (hintValid && hint.content) {
+                const contentClean = hint.content.replace(/[,\s]/g, '');
+                const yearRangeOnly = /^\d{4}\s*[→\-–—to]+\s*\d{4}$/.test(hint.content.trim());
+                if (yearRangeOnly) {
+                    hintValid = false;
+                    if (!typeReasons['_rejected']) typeReasons['_rejected'] = [];
+                    typeReasons['_rejected'].push(`mgHint:statCounter rejected (year range, not a stat)`);
+                }
+            }
+        }
+        if (hintValid) {
+            const HINT_BOOST = 6; // Strong signal — planner saw full script context
+            typeScores[hint.type] = (typeScores[hint.type] || 0) + HINT_BOOST;
+            if (!typeReasons[hint.type]) typeReasons[hint.type] = [];
+            typeReasons[hint.type].push(`mgHint:${hint.type}`);
+        }
     }
 
     // mgHint "none" penalty: reduce all candidates if planner says no MG needed
     const hintNonePenalty = hint.isNone ? 0.6 : 1.0; // 40% reduction
 
+    // Narrative arc bonus: boost certain types for climax/conclusion scenes
+    const arc = ctx ? ctx.getArc(sceneIndex) : 'build';
+
     // Filter: only allowed by niche + not over cap
     const candidates = [];
     const skipped = [];
 
+    // Global guard: statCounter requires the statistic pattern to have fired (score >= 3)
+    const statisticHit = patternHits.find(h => h.pattern === 'statistic');
+    const hasQualifyingStat = statisticHit && statisticHit.score >= 3;
+
     for (const [type, rawScore] of Object.entries(typeScores)) {
+        // statCounter MUST have a qualifying statistic pattern — no exceptions
+        // This prevents dates, rankings, geographic mentions from triggering statCounter
+        if (type === 'statCounter' && !hasQualifyingStat) {
+            skipped.push({ type, reason: 'no qualifying statistic (100+ number)' });
+            continue;
+        }
+
         // Not in niche allowed list
         if (!allowedMGs.includes(type)) {
             skipped.push({ type, reason: 'not in niche' });
@@ -382,10 +588,31 @@ function generateCandidates(scene, sceneIndex, totalScenes, allowedMGs, alreadyP
             }
         }
 
-        // Penalize if same as last placed type (avoid repetition)
         let score = rawScore * hintNonePenalty;
+
+        // Penalize if same as last placed type (avoid repetition)
         if (alreadyPlaced.length > 0 && alreadyPlaced[alreadyPlaced.length - 1] === type) {
             score *= 0.5; // halve score for consecutive same type
+        }
+
+        // Cross-scene proximity penalty: penalize types used in last 3 scenes
+        if (ctx) {
+            const gap = ctx.sceneGapSince(type, sceneIndex);
+            if (gap <= 1) score *= 0.3;       // same or adjacent scene — heavy penalty
+            else if (gap <= 2) score *= 0.6;   // 2 scenes ago
+            else if (gap <= 3) score *= 0.8;   // 3 scenes ago
+        }
+
+        // Arc-based scoring adjustments
+        if (arc === 'hook') {
+            // Hook: prefer impactful overlay types
+            if (type === 'headline' || type === 'focusWord') score *= 1.3;
+        } else if (arc === 'climax') {
+            // Climax: prefer dramatic types
+            if (type === 'focusWord' || type === 'kineticText' || type === 'statCounter') score *= 1.3;
+        } else if (arc === 'conclusion') {
+            // Conclusion: prefer summary types
+            if (type === 'callout' || type === 'headline') score *= 1.2;
         }
 
         candidates.push({
@@ -701,31 +928,32 @@ function buildRuleMG(scene, sceneIndex, type) {
             break;
         }
         case 'headline': {
-            // Use the strongest clause, max 8 words
-            displayText = words.slice(0, Math.min(8, words.length)).join(' ');
-            triggerWord = words[0];
+            // Extract the most meaningful phrase from the scene
+            displayText = extractKeyPhrase(text, 8);
+            triggerWord = displayText.split(/\s+/)[0];
             break;
         }
         case 'focusWord': {
-            // Find the most dramatic word
+            // Find the most dramatic/important word — prefer proper nouns, then long words
+            const properNouns = words.filter((w, i) => i > 0 && /^[A-Z][a-z]{2,}/.test(w));
             const dramatic = words.filter(w => /^[a-z]{5,}$/i.test(w)).sort((a, b) => b.length - a.length);
-            displayText = dramatic[0] || words[0];
+            displayText = properNouns[0] || dramatic[0] || words[0];
             triggerWord = displayText;
             break;
         }
         case 'callout': {
-            displayText = words.slice(0, Math.min(8, words.length)).join(' ');
-            triggerWord = words[Math.min(2, words.length - 1)];
+            displayText = extractKeyPhrase(text, 8);
+            triggerWord = displayText.split(/\s+/)[Math.min(2, displayText.split(/\s+/).length - 1)];
             break;
         }
         case 'typewriter': {
-            displayText = words.slice(0, Math.min(10, words.length)).join(' ');
-            triggerWord = words[0];
+            displayText = extractKeyPhrase(text, 10);
+            triggerWord = displayText.split(/\s+/)[0];
             break;
         }
         case 'kineticText': {
-            displayText = words.slice(0, Math.min(6, words.length)).join(' ');
-            triggerWord = words[0];
+            displayText = extractKeyPhrase(text, 6);
+            triggerWord = displayText.split(/\s+/)[0];
             break;
         }
         case 'comparisonCard': {
@@ -754,14 +982,21 @@ function buildRuleMG(scene, sceneIndex, type) {
         }
     }
 
-    // Find trigger word timestamp
-    let startTime = scene.startTime + 0.2;
+    // Find trigger word timestamp — sync MG appearance to when the word is spoken
+    let startTime = null;
     if (scene.words && scene.words.length > 0 && triggerWord) {
         const normalized = triggerWord.toLowerCase().replace(/[^a-z0-9]/g, '');
         const wordMatch = scene.words.find(w => w.word.toLowerCase().replace(/[^a-z0-9]/g, '').includes(normalized));
         if (wordMatch) {
-            startTime = Math.max(scene.startTime, wordMatch.start - 0.05);
+            // Start animation so MG is readable right as word is spoken
+            // Animation entrance takes ~0.4s, so start 0.4s before the word
+            startTime = Math.max(scene.startTime, wordMatch.start - 0.4);
         }
+    }
+    if (startTime === null) {
+        // No word match — place at ~25% into the scene (not at the very start)
+        const sceneDur = (scene.endTime || 0) - (scene.startTime || 0);
+        startTime = scene.startTime + Math.min(sceneDur * 0.25, 1.5);
     }
 
     const duration = computeSmartDuration(type, displayText, subtext);
@@ -787,7 +1022,7 @@ function buildRuleMG(scene, sceneIndex, type) {
     };
 }
 
-function buildPrompt(scene, sceneIndex, totalScenes, scriptContext, sceneVisual, candidateTypes, mgHintObj) {
+function buildPrompt(scene, sceneIndex, totalScenes, scriptContext, sceneVisual, candidateTypes, mgHintObj, ctx) {
     const sceneDuration = (scene.endTime - scene.startTime).toFixed(1);
 
     let prompt = '';
@@ -801,6 +1036,18 @@ function buildPrompt(scene, sceneIndex, totalScenes, scriptContext, sceneVisual,
     const nicheId = scriptContext?.nicheId || 'general';
     const niche = getNiche(nicheId);
     prompt += `NICHE: "${niche.name}" — You MUST pick from the candidate types listed below. Do NOT use or invent any other types.\n`;
+
+    // Narrative arc context
+    if (ctx) {
+        const arc = ctx.getArc(sceneIndex);
+        prompt += `NARRATIVE POSITION: ${arc} (${arc === 'hook' ? 'grab attention' : arc === 'setup' ? 'establish context' : arc === 'climax' ? 'peak moment, be dramatic' : arc === 'conclusion' ? 'wrap up, summarize' : 'develop the story'})\n`;
+
+        // Tell AI what was recently placed to avoid repetition
+        const recent = ctx.recentTypes(sceneIndex, 4);
+        if (recent.length > 0) {
+            prompt += `RECENT MGs (avoid repeating): ${recent.join(', ')}\n`;
+        }
+    }
 
     // Visual context
     if (sceneVisual && sceneVisual.description !== 'No visual analysis available') {
@@ -822,9 +1069,9 @@ function buildPrompt(scene, sceneIndex, totalScenes, scriptContext, sceneVisual,
 
     // Build type descriptions dynamically based on CANDIDATE types (pre-narrowed)
     const TYPE_DESCRIPTIONS = {
-        statCounter: 'statCounter: A specific number/percentage is spoken. E.g. "grew by 340%", "5 million users"',
+        statCounter: 'statCounter: A BIG number (100+) or percentage is the main point. E.g. "grew by 340%", "5 million users", "$2,500". NOT for small numbers like "3-time winner", "5 awards", "top 10" — those are descriptions, not statistics.',
         progressBar: 'progressBar: A percentage or completion stat. E.g. "78% of people", "nearly half"',
-        lowerThird: 'lowerThird: First mention of a person, place, or organization. E.g. "CEO John Smith", "at MIT"',
+        lowerThird: 'lowerThird: First mention of a person, place, or organization. CRITICAL: The name/entity MUST appear explicitly in the NARRATION text — do NOT use names from context or hints if the narration hasn\'t spoken them yet. The viewer should hear the name BEFORE or AS the lowerThird appears. E.g. "CEO John Smith announced" → text: "John Smith"',
         headline: 'headline: Key thesis or main topic (max 2-3 per video). E.g. opening statement, conclusion',
         bulletList: 'bulletList: 2+ items enumerated. E.g. "first... second... third..."',
         callout: 'callout: Important fact, quote, or insight. E.g. "the key takeaway is..."',
@@ -881,7 +1128,8 @@ TIMING — triggerWord:
 - Pick the EXACT word from the narration that triggers the MG appearance
 - Pick the most meaningful word: the number, the name, the key term
 - Example: "revenue grew by 340 percent" + statCounter → triggerWord: 340
-- Example: "CEO John Smith announced" + lowerThird → triggerWord: John`;
+- Example: "CEO John Smith announced" + lowerThird → triggerWord: John
+- IMPORTANT for lowerThird: text/name MUST be words that appear in the NARRATION. If the narration says "we need to understand how the man who led..." but hasn't named the person yet, do NOT put the person's name as lowerThird text — use "none" instead or pick a different type.`;
 
     if (placedTypes.length > 0) {
         prompt += `\n\nALREADY PLACED: ${placedTypes.join(', ')}`;
@@ -1035,6 +1283,19 @@ function parseResponse(text, scene, sceneIndex) {
         subtext = fixArticleSubtext(subtext, scene.text, displayText);
     }
 
+    // Validate lowerThird: displayed name must actually appear in the scene narration text.
+    // Prevents spoiling names from broader context before they're spoken.
+    if (type === 'lowerThird' && displayText) {
+        const sceneTextLower = scene.text.toLowerCase();
+        // Check if the main name words appear in scene text
+        const nameWords = displayText.split(/\s+/).filter(w => w.length > 2 && /^[A-Z]/.test(w));
+        const nameInText = nameWords.length === 0 || nameWords.some(w => sceneTextLower.includes(w.toLowerCase()));
+        if (!nameInText) {
+            console.log(`[MG] lowerThird rejected: "${displayText}" not found in scene text "${scene.text.substring(0, 60)}..."`);
+            return null;
+        }
+    }
+
     const finalText = displayText || scene.text.substring(0, 40);
     const sceneDuration = scene.endTime - scene.startTime;
     const isOverlay = !FULLSCREEN_MG_TYPES.has(type);
@@ -1073,11 +1334,13 @@ function parseResponse(text, scene, sceneIndex) {
     let startTime;
     let finalDuration = mgDuration;
     if (wordStart !== null) {
-        // Appear right when the word is spoken (tiny 0.05s anticipation)
-        startTime = Math.max(scene.startTime, wordStart - 0.05);
+        // Start animation early so MG is readable right when word is spoken
+        // Animation entrance takes ~0.4s
+        startTime = Math.max(scene.startTime, wordStart - 0.4);
     } else {
-        // No word match — start near beginning of the scene
-        startTime = scene.startTime + 0.2;
+        // No word match — place at ~25% into the scene (not at the very start)
+        const sceneDur = scene.endTime - scene.startTime;
+        startTime = scene.startTime + Math.min(sceneDur * 0.25, 1.5);
     }
 
     // === POSITION: Use AI's choice, fall back to type defaults ===
@@ -1247,6 +1510,9 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
     console.log(`  MG Style: ${mgStyle} | Niche: ${niche.name}`);
     console.log(`  Allowed MGs: ${allowedMGs.join(', ')}\n`);
 
+    // Initialize context tracker for cross-scene awareness
+    const ctx = new MGContextTracker(scenes, scriptContext);
+
     const results = [];
 
     // Pre-create fullscreen MGs from Visual Planner directives (these scenes have no footage)
@@ -1295,6 +1561,7 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
         results.push(mg);
         fullscreenMGSceneIndices.add(i);
         placedTypes.push(mgType);
+        ctx.record(mg);
         console.log(`  Scene ${i}: [PLANNED FULLSCREEN] ${mgType}: "${mgContent.substring(0, 60)}"`);
     }
     if (fullscreenMGSceneIndices.size > 0) {
@@ -1321,10 +1588,11 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
 
         const scene = scenes[i];
         const sceneVisual = visualAnalysis ? visualAnalysis.find(v => v.sceneIndex === i) : null;
-        console.log(`  Scene ${i}: "${scene.text.substring(0, 50)}..."`);
+        const arcTag = ctx.getArc(i);
+        console.log(`  Scene ${i} [${arcTag}]: "${scene.text.substring(0, 50)}..."`);
 
-        // ---- HYBRID STEP 1: Rule-based candidate generation (with mgHint from Visual Planner) ----
-        const candidateResult = generateCandidates(scene, i, scenes.length, allowedMGs, placedTypes, scene.mgHint);
+        // ---- HYBRID STEP 1: Rule-based candidate generation (with mgHint from Visual Planner + context tracker) ----
+        const candidateResult = generateCandidates(scene, i, scenes.length, allowedMGs, placedTypes, scene.mgHint, ctx);
 
         // Debug: log mgHint + candidate analysis
         if (candidateResult.hint && (candidateResult.hint.type || candidateResult.hint.isNone)) {
@@ -1366,7 +1634,7 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
         try {
             if (selectionMode === 'ai') {
                 // ---- HYBRID STEP 3: AI picks from narrowed candidates ----
-                const prompt = buildPrompt(scene, i, scenes.length, scriptContext, sceneVisual, candidateTypes, candidateResult.hint);
+                const prompt = buildPrompt(scene, i, scenes.length, scriptContext, sceneVisual, candidateTypes, candidateResult.hint, ctx);
                 const rawText = await callAI(prompt);
                 console.log(`    [AI raw]: ${rawText.substring(0, 80).replace(/\n/g, ' | ')}`);
                 mg = parseResponse(rawText, scene, i);
@@ -1388,6 +1656,14 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
                     // Visual Planner provided display text for this exact type — use it
                     mg.text = candidateResult.hint.content;
                     mg.hintSource = true;
+                }
+            }
+
+            if (mg) {
+                // Duplicate text rejection — skip if text is too similar to a recent MG
+                if (ctx.isDuplicateText(mg.text)) {
+                    console.log(`    -> Rejected (duplicate text): "${mg.text.substring(0, 40)}"`);
+                    mg = null;
                 }
             }
 
@@ -1427,6 +1703,7 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
                 console.log(`    -> [${modeTag}] ${mg.type}${subTag}: "${mg.text}" @${mg.startTime.toFixed(2)}s pos:${mg.position} ${wordAligned ? '(word-synced)' : '(centered)'}`);
                 placedTypes.push(mg.type);
                 lastType = mg.type;
+                ctx.record(mg);
                 results.push(mg);
             } else {
                 console.log(`    -> No motion graphic`);

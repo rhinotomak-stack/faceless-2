@@ -1289,4 +1289,5 @@ module.exports = {
     getThemeTokens,
     getMGStylePreset,
     getMGStylePresetNames,
+    applyModifier: _applyModifier,
 };

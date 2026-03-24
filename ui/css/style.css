@@ -2234,6 +2234,63 @@ select:focus {
     color: var(--primary);
 }
 
+/* Effect control rows */
+.effect-control-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 0;
+}
+.effect-control-row .effect-toggle {
+    width: 14px;
+    height: 14px;
+    accent-color: var(--primary);
+    cursor: pointer;
+    flex-shrink: 0;
+}
+.effect-control-row .effect-label {
+    font-size: 0.65rem;
+    color: var(--text-secondary);
+    min-width: 54px;
+    flex-shrink: 0;
+}
+.effect-control-row .effect-slider {
+    flex: 1;
+    height: 3px;
+    accent-color: var(--primary);
+    cursor: pointer;
+}
+.effect-control-row .effect-value {
+    font-size: 0.6rem;
+    color: #888;
+    min-width: 28px;
+    text-align: right;
+}
+.effect-control-row.disabled .effect-label,
+.effect-control-row.disabled .effect-value {
+    opacity: 0.4;
+}
+.effect-control-row.disabled .effect-slider {
+    opacity: 0.3;
+    pointer-events: none;
+}
+.effect-mask-row .effect-mask-select {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: var(--text-secondary);
+}
+.effect-mask-row.disabled .effect-mask-select {
+    opacity: 0.4;
+    pointer-events: none;
+}
+.effect-preset-select {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: var(--text-primary);
+}
+
 /* ========================================
    TIMELINE - FIXED
    ======================================== */
@@ -2463,6 +2520,28 @@ select:focus {
     background: #4a9eff;
     border-radius: 3px 0 0 3px;
     margin-left: -13px;
+}
+
+/* Track-level in/out shading — dims clips outside work area */
+.in-out-track-shade {
+    position: absolute;
+    top: 0;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.5);
+    pointer-events: none;
+    z-index: 20;
+}
+
+.in-out-track-border {
+    position: absolute;
+    top: 0;
+    height: 100%;
+    width: 2px;
+    margin-left: -1px;
+    background: #4a9eff;
+    pointer-events: none;
+    z-index: 21;
+    box-shadow: 0 0 6px rgba(74, 158, 255, 0.5);
 }
 
 /* In/Out Display in timeline header */

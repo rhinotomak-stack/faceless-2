@@ -22,6 +22,7 @@ try {
         getStylePreset: (styleName) => themes.getMGStylePreset(styleName),
         stylePresetNames: themes.getMGStylePresetNames(),
         themeIds: themes.getThemeIds(),
+        applyModifier: (hexColor, mod) => themes.applyModifier(hexColor, mod),
     };
 } catch (e) {
     console.warn('Theme tokens not available:', e.message);
@@ -39,6 +40,13 @@ try {
     };
 } catch (e) {
     console.warn('MG Registry not available:', e.message);
+}
+
+// Expose Effect Presets to renderer (pre-made effect combos)
+try {
+    window._effectPresets = require('./src/effect-presets');
+} catch (e) {
+    console.warn('Effect presets not available:', e.message);
 }
 
 // Expose Electron IPC methods to the renderer process

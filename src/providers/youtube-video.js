@@ -4,6 +4,7 @@ const path = require('path');
 const fs = require('fs');
 const config = require('../config');
 const BaseProvider = require('./base-provider');
+const { selectBestSegment } = require('../smart-segment');
 
 // Chapter titles that indicate intro/outro segments to skip
 const SKIP_CHAPTER_PATTERNS = [
@@ -306,151 +307,35 @@ class YouTubeVideoProvider extends BaseProvider {
     }
 
     /**
-     * Extract a single frame from a stream URL at a given timestamp using ffmpeg.
-     * Seeks directly into the HTTP stream — no full download needed.
-     */
-    _extractFrameFromStream(ffmpegPath, streamUrl, timestamp, outputPath) {
-        return new Promise((resolve) => {
-            execFile(ffmpegPath, [
-                '-ss', String(timestamp),  // seek BEFORE input = fast keyframe seek
-                '-i', streamUrl,
-                '-vf', 'scale=512:-1',
-                '-frames:v', '1',
-                '-q:v', '3',
-                '-y', outputPath
-            ], { timeout: 15000, windowsHide: true }, (err) => {
-                resolve(err ? null : outputPath);
-            });
-        });
-    }
-
-    /**
      * Find the best segment of a video by sampling frames and scoring with vision AI.
-     * Extracts frames directly from the YouTube stream URL (no full video download).
+     * Resolves YouTube stream URL first, then delegates to shared smart-segment module.
      * @returns {number|null} best start time in seconds, or null if analysis fails
      */
     async _findBestSegment(url, keyword, metadata, neededDuration, context = {}) {
-        const { scoreVideoFrame, isVisionAvailable, checkFfmpegAvailable } = require('../ai-vision');
-
-        if (!isVisionAvailable()) {
-            console.log(`  [YouTube] Vision AI not available, using heuristic`);
-            return null;
-        }
-
-        const ffmpegPath = checkFfmpegAvailable();
-        if (!ffmpegPath) {
-            console.log(`  [YouTube] ffmpeg not available for frame extraction`);
-            return null;
-        }
-
         const totalDuration = metadata.duration;
         if (totalDuration < 60) return null; // Too short, heuristic is fine
 
-        const tempDir = config.paths?.temp || path.join(__dirname, '..', '..', 'temp');
-        if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
-
-        const uid = Date.now();
-        const framePaths = [];
-
+        // Resolve direct stream URL so smart-segment can seek without full download
+        let streamUrl;
         try {
-            // Step 1: Resolve direct stream URL (fast, no download)
             console.log(`  [YouTube] Resolving stream URL for frame sampling...`);
-            let streamUrl;
-            try {
-                streamUrl = await this._resolveStreamUrl(url);
-            } catch (e) {
-                console.log(`  [YouTube] Could not resolve stream URL: ${e.message}, using heuristic`);
-                return null;
-            }
-
-            // Step 2: Calculate 6 sample timestamps (spread across 8%-90% of video)
-            const startAt = Math.floor(totalDuration * 0.08);
-            const endAt = Math.floor(totalDuration * 0.90);
-            const range = endAt - startAt;
-            const numSamples = 6;
-            const timestamps = [];
-            for (let i = 0; i < numSamples; i++) {
-                timestamps.push(Math.floor(startAt + (range * i) / (numSamples - 1)));
-            }
-
-            // Step 3: Extract frames directly from stream (parallel, 3 at a time)
-            console.log(`  [YouTube] Extracting ${numSamples} frames from stream at: ${timestamps.map(t => t + 's').join(', ')}`);
-            for (let batch = 0; batch < numSamples; batch += 3) {
-                const batchPromises = [];
-                for (let j = batch; j < Math.min(batch + 3, numSamples); j++) {
-                    const framePath = path.join(tempDir, `_yt_frame_${uid}_${j}.jpg`);
-                    framePaths.push(framePath);
-                    batchPromises.push(this._extractFrameFromStream(ffmpegPath, streamUrl, timestamps[j], framePath));
-                }
-                await Promise.all(batchPromises);
-            }
-
-            // Step 4: Score each frame sequentially (bail fast on API errors)
-            const validFrames = [];
-            for (let i = 0; i < framePaths.length; i++) {
-                if (!framePaths[i] || !fs.existsSync(framePaths[i])) continue;
-                try {
-                    const stat = fs.statSync(framePaths[i]);
-                    if (stat.size < 500) continue; // empty/corrupt frame
-                    const imageBuffer = fs.readFileSync(framePaths[i]);
-                    validFrames.push({ idx: i, base64: imageBuffer.toString('base64') });
-                } catch (e) {}
-            }
-
-            if (validFrames.length < 2) {
-                console.log(`  [YouTube] Too few frames extracted, using heuristic`);
-                return null;
-            }
-
-            const visionProvider = require('../config').visionProvider || require('../config').aiProvider || 'ollama';
-            console.log(`  [YouTube] Scoring ${validFrames.length} frames with Vision AI (${visionProvider})...`);
-            const scores = [];
-            const validIndices = [];
-            for (const frame of validFrames) {
-                const result = await scoreVideoFrame(frame.base64, 'image/jpeg', keyword, context);
-                scores.push(result.score);
-                validIndices.push(frame.idx);
-                const desc = result.description ? ` → ${result.description}` : '';
-                console.log(`    Frame ${frame.idx + 1} (${timestamps[frame.idx]}s): score ${result.score}/10${desc}`);
-                // Fast fail: if first frame scores 0, Vision AI is likely broken — skip rest
-                if (scores.length === 1 && result.score === 0) {
-                    console.log(`  [YouTube] Vision AI returned 0 on first frame — skipping rest, using heuristic`);
-                    return null;
-                }
-            }
-
-            // Step 5: Pick the highest-scoring frame
-            let bestIdx = 0;
-            let bestScore = 0;
-            for (let i = 0; i < scores.length; i++) {
-                const frameNum = validIndices[i];
-                if (scores[i] > bestScore) {
-                    bestScore = scores[i];
-                    bestIdx = frameNum;
-                }
-            }
-
-            if (bestScore <= 2) {
-                console.log(`  [YouTube] All frames scored poorly, using heuristic`);
-                return null;
-            }
-
-            const bestTimestamp = timestamps[bestIdx];
-            console.log(`  [YouTube] 🎯 Best frame: #${bestIdx + 1} at ${bestTimestamp}s (score: ${bestScore}/10)`);
-
-            // Ensure we don't overshoot the video
-            const maxStart = totalDuration - neededDuration - 2;
-            return Math.min(bestTimestamp, Math.max(0, maxStart));
-
-        } catch (err) {
-            console.log(`  [YouTube] Smart segment analysis failed: ${err.message}`);
+            streamUrl = await this._resolveStreamUrl(url);
+        } catch (e) {
+            console.log(`  [YouTube] Could not resolve stream URL: ${e.message}, using heuristic`);
             return null;
-        } finally {
-            // Clean up frame temp files (no video file to clean up anymore)
-            for (const f of framePaths.filter(Boolean)) {
-                try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch (e) {}
-            }
         }
+
+        // Delegate to shared smart-segment module
+        return selectBestSegment(streamUrl, {
+            neededDuration,
+            keyword,
+            context,
+            totalDuration,
+            numSamples: 6,       // YouTube: more samples (longer videos)
+            batchSize: 3,
+            minDuration: 60,     // YouTube: only score 60s+ videos
+            providerTag: 'YouTube',
+        });
     }
 
     async search(keyword) {
