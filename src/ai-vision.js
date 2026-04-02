@@ -303,22 +303,46 @@ For example: a circuit board does NOT match "underwater drone" even if drones co
 
 Describe what you LITERALLY see in ONE short sentence (10-15 words max). Note any problems.
 
-PERSON KEYWORDS: If the keyword contains a person's name (leader, politician, celebrity, historical figure), a photo or portrait of that person IS the correct match — score it HIGH (7-9). You may not recognize every person, so if the keyword is a name and the image shows a person matching the described context (e.g. "King Khalid Saudi Arabia" → man in Saudi royal attire), give benefit of the doubt and score 7+. This is NOT a "talking head" penalty — talking head penalty only applies to NEWS ANCHORS/PRESENTERS reading from a teleprompter, not to photos of the actual subject.
+CONTEXT-AWARE SCORING: Consider the FULL context (keyword + scene narration + video topic) together.
+The image does NOT need to match the keyword literally — it needs to be USABLE as B-roll footage while the narration plays.
+Ask yourself: "Would a video editor use this clip in a video about THIS SPECIFIC TOPIC?" If yes, score 6+.
 
-AUTOMATIC PENALTIES (subtract from score):
+VIDEO TOPIC RELEVANCE (CRITICAL): The footage must make sense within the VIDEO'S TOPIC, not just the keyword in isolation.
+If the video topic is "monolithic dome homes" and the keyword is "wind tunnel aerodynamics", a dome or building in a wind tunnel = 8, but a spaceship or airplane in a wind tunnel = 2 (wrong subject entirely).
+If the video topic is "oil pipeline crisis" and the keyword is "explosion aftermath", an oil facility explosion = 8, but a war zone explosion = 3 (different context).
+ALWAYS ask: "Does this footage belong in a video about [video topic]?" If NO → MAX score 3 regardless of keyword match.
+
+Examples of GOOD contextual matches (score 6-8):
+- Video topic "Iran oil conflict", keyword "Strait of Hormuz" → cargo ship or oil tanker at sea = 7 (relevant maritime footage)
+- Video topic "Saudi energy", keyword "oil pipeline" → oil refinery or desert industrial facility = 7 (relevant energy infrastructure)
+- Video topic "global trade war", keyword "economic sanctions" → busy trading floor or currency exchange = 6 (contextually relevant)
+- Video topic "9/11 attacks", keyword "Twin Towers" → actual Twin Towers footage or Ground Zero = 10 (exact event match)
+
+Examples of BAD matches (score 1-4):
+- Video topic "dome construction", keyword "wind tunnel test" → airplane wind tunnel = 2 (wrong subject for the video)
+- Video topic "oil crisis", keyword "explosion" → fireworks display = 2 (wrong context)
+- Keyword "Iran Strait of Hormuz" → a cat video = 1 (completely unrelated)
+- Keyword "economic policy" → news anchor at desk reading teleprompter = 3 (studio talking head)
+
+SPECIFIC EVENT/PERSON RULE: When the keyword references a SPECIFIC identifiable event (e.g. "9/11 towers attack", "Fukushima explosion", "Capitol riot") or a SPECIFIC person (leader, politician, celebrity), demand footage of THAT actual event/person — score 9-10 for exact match, 4-5 for generic related footage.
+
+PERSON KEYWORDS: If the keyword contains a person's name, a photo or portrait of that person IS the correct match — score 7-9. If the keyword is a name and the image shows a person matching the described context (e.g. "King Khalid Saudi Arabia" → man in Saudi royal attire), give benefit of the doubt and score 7+. This is NOT a "talking head" penalty — talking head penalty only applies to NEWS ANCHORS/PRESENTERS.
+
+AUTOMATIC PENALTIES (hard caps, override all other scoring):
 - News anchor / presenter reading news at a studio desk → MAX score 3 (unusable for faceless video)
 - Studio set with desk, microphones, teleprompter → MAX score 3
-- Text-heavy screen (headlines, tickers, lower thirds filling >30% of frame) → MAX score 4
-- Channel logo or large watermark covering content → MAX score 3
+- Text-heavy screen (headlines, tickers, lower thirds filling >30% of frame) → MAX score 3
+- Any visible watermark, channel logo, or agency stamp (e.g., IRNA, AFP, Getty, Reuters logo) → MAX score 3
+- Foreign-language text overlay or subtitle burned into the image → MAX score 3
 - Still photo with "Ken Burns" border/frame → -2 from base score
 - AI-generated or illustrated content when real footage is needed → MAX score 2
 
 SCORING RUBRIC:
-- 9-10: Shows exactly what the topic describes, clean real-world footage, no watermarks
-- 7-8: Closely related real footage, minor issues (small logo, slight mismatch). Person photo matching a person keyword.
-- 5-6: Loosely related or too generic (e.g. generic cityscape instead of specific building)
-- 3-4: Wrong subject but same general category, OR news anchor/studio shot
-- 1-2: Completely unrelated, heavy watermarks/logos, or AI-generated
+- 9-10: Shows exactly what the keyword/event describes OR the specific person named. Clean real-world footage. Clearly belongs in this video.
+- 7-8: Real footage that directly fits BOTH the keyword AND the video topic (e.g. ships for maritime topic, domes for construction topic). Person photo matching a person keyword.
+- 5-6: Real footage related to the video topic but not a strong keyword match. Usable as B-roll. Minor issues.
+- 3-4: News anchor/studio shot, OR footage that matches the keyword superficially but NOT the video topic (wrong subject/context).
+- 1-2: Completely unrelated to video topic, heavy watermarks/logos, or AI-generated.
 
 Reply format (exactly 2 lines):
 [your one-sentence description]

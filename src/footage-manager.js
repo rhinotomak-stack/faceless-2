@@ -5,6 +5,7 @@ const config = require('./config');
 const { getBackgroundSource } = require('./themes');
 const { getNiche, rewriteQuery, getFallbackKeywords, getSearchPolicy } = require('./niches');
 const { scoreDownloadedVideo } = require('./smart-segment');
+const clipAnalyzer = require('./clip-analyzer');
 
 // ─── Scene-scoped log buffering ──────────────────────────────────────
 // When downloading scenes in parallel, logs from different scenes interleave
@@ -22,15 +23,17 @@ const BingImagesProvider = require('./providers/bing-images');
 const UnsplashProvider = require('./providers/unsplash');
 const GoogleImagesProvider = require('./providers/google-images');
 const YouTubeVideoProvider = require('./providers/youtube-video');
-const NewsVideoProvider = require('./providers/news-video');
+const TelegramVideoProvider = require('./providers/telegram-video');
+const VKVideoProvider = require('./providers/vk-video');
+const RedditVideoProvider = require('./providers/reddit-video');
 
 // Provider type sets (mirrors niches.js for query routing)
 const STOCK_PROVIDERS = new Set(['pexels', 'pixabay', 'unsplash']);
-const WEB_PROVIDERS = new Set(['bing', 'googleScrape', 'newsVideo']);
+const WEB_PROVIDERS = new Set(['bing', 'googleScrape', 'telegram', 'vkVideo', 'reddit']);
 const YOUTUBE_PROVIDERS = new Set(['youtube']);
 // Providers that do their own pre-download smart segment scoring (via smart-segment.js).
 // These skip the post-download segment quality check (but still get relevance scoring).
-const PRESCORE_PROVIDERS = new Set(['youtube', 'newsVideo']);
+const PRESCORE_PROVIDERS = new Set(['youtube']);
 
 // ============ MEDIA CACHE (CLIP REUSE) ============
 
@@ -148,6 +151,43 @@ function _checkMediaCache(keyword, mediaType, sceneIndex, filenameBase) {
 function _clearMediaCache() {
     _mediaCache.clear();
     _lastCacheHitSceneIndex = -999;
+    _urlBlacklist.clear();
+    _urlUseCount.clear();
+}
+
+// ============ URL BLACKLIST ============
+// Remembers URLs that scored poorly so we don't re-download and re-score them
+// across different scenes. Key: URL string, Value: { score, description }
+const _urlBlacklist = new Map();
+
+function _blacklistUrl(url, score, description) {
+    if (!url) return;
+    // Normalize: strip query params for HLS manifests, keep base URL
+    const key = url.split('?')[0];
+    _urlBlacklist.set(key, { score, description });
+}
+
+function _isBlacklisted(url) {
+    if (!url) return null;
+    const key = url.split('?')[0];
+    return _urlBlacklist.get(key) || null;
+}
+
+// ============ URL REUSE LIMITER ============
+// Tracks how many scenes used each base URL. Doesn't block — signals to try others first.
+const MAX_URL_REUSE = 2; // after this many uses, URL is "overused" (deprioritized, not blocked)
+const _urlUseCount = new Map(); // key (base URL) → number of scenes it was used in
+
+function _trackUrlUse(url) {
+    if (!url) return;
+    const key = url.split('?')[0];
+    _urlUseCount.set(key, (_urlUseCount.get(key) || 0) + 1);
+}
+
+function _getUrlUseCount(url) {
+    if (!url) return 0;
+    const key = url.split('?')[0];
+    return _urlUseCount.get(key) || 0;
 }
 
 // ============ INLINE VISION SCORING ============
@@ -213,12 +253,13 @@ async function _scoreDownloadedMedia(filePath, ext, keyword, context) {
                 });
             }
 
-            // Score each frame, track the worst one
+            // Score each frame
             let worstScore = 10;
             let worstDesc = '';
             let bestScore = 0;
             let bestDesc = '';
             let scoredCount = 0;
+            const allFrameScores = [];
 
             for (let fi = 0; fi < framePaths.length; fi++) {
                 const fp = framePaths[fi];
@@ -230,6 +271,7 @@ async function _scoreDownloadedMedia(filePath, ext, keyword, context) {
                     const b64 = buf.toString('base64');
                     const result = await _scoreVideoFrame(b64, 'image/jpeg', keyword, context);
                     scoredCount++;
+                    allFrameScores.push(result.score);
 
                     if (sampleTimes.length > 1) {
                         console.log(`    👁️ Clip frame ${fi + 1}/${sampleTimes.length} (${sampleTimes[fi]}s): ${result.score}/10 → ${result.description || ''}`);
@@ -259,13 +301,25 @@ async function _scoreDownloadedMedia(filePath, ext, keyword, context) {
 
             if (scoredCount === 0) return null;
 
-            // Use the WORST score — if any frame is bad, the clip is bad
-            // But report both so the caller can see what happened
+            // Scoring strategy: use MEDIAN instead of minimum.
+            // One bad frame (e.g., a text overlay or transition) shouldn't kill a good clip.
+            // If 2 of 3 frames score well, the clip is usable.
+            let finalScore;
+            if (allFrameScores.length >= 3) {
+                const sorted = [...allFrameScores].sort((a, b) => a - b);
+                finalScore = sorted[Math.floor(sorted.length / 2)]; // median
+            } else if (allFrameScores.length === 2) {
+                // 2 frames: use lower of the two (conservative)
+                finalScore = Math.min(...allFrameScores);
+            } else {
+                finalScore = worstScore;
+            }
+
             return {
-                score: worstScore,
+                score: finalScore,
                 description: worstScore === bestScore
                     ? worstDesc
-                    : `worst: ${worstDesc} (${worstScore}/10) | best: ${bestDesc} (${bestScore}/10)`,
+                    : `worst: ${worstDesc} (${worstScore}/10) | best: ${bestDesc} (${bestScore}/10) → median: ${finalScore}/10`,
             };
         } else {
             return null;
@@ -286,20 +340,43 @@ async function _visionSuggestKeyword(failedDescriptions, originalKeyword, contex
         const { callAI } = require('./ai-provider');
         const descList = failedDescriptions.map((d, i) => `  ${i + 1}. ${d}`).join('\n');
 
+        // Build rich context so AI can suggest a DIFFERENT angle, not a synonym
+        let contextBlock = '';
+        if (context.videoTopic) contextBlock += `Video topic: "${context.videoTopic}"\n`;
+        if (context.sceneText) contextBlock += `Scene narration: "${context.sceneText}"\n`;
+        if (context.eventAnchor) contextBlock += `Specific event: "${context.eventAnchor}"\n`;
+        if (context.entities && context.entities.length > 0) contextBlock += `Key entities: ${context.entities.join(', ')}\n`;
+        if (context.niche) contextBlock += `Content niche: ${context.niche}\n`;
+
+        // Include previously tried keywords so AI avoids them
+        const triedList = context.triedKeywords && context.triedKeywords.length > 0
+            ? `\nKeywords already tried (DO NOT repeat or rephrase these): ${context.triedKeywords.map(k => `"${k}"`).join(', ')}`
+            : '';
+
         const response = await callAI(
-            `I searched for images using the keyword "${originalKeyword}" but all results were wrong:
+            `I'm searching for B-roll footage for a scene but ALL results were wrong.
+
+Failed keyword: "${originalKeyword}"
+What the search returned:
 ${descList}
+${triedList}
 
-${context.videoTopic ? `Video topic: "${context.videoTopic}"` : ''}
-${context.sceneText ? `Scene narration: "${context.sceneText}"` : ''}
+CONTEXT:
+${contextBlock}
+TASK: Think about what DIFFERENT visual could represent this scene. Don't just rephrase the same concept — suggest a COMPLETELY DIFFERENT ANGLE or RELATED VISUAL.
 
-The search results don't match what I need. Suggest a BETTER 3-5 word search keyword that would find the RIGHT image.
-Also say VIDEO if this topic would work better as a video clip instead of a still image.
+Examples of good lateral thinking:
+- "stressed military personnel ship" fails → try "aircraft carrier crew quarters" or "navy sailors on deck"
+- "explosion damage building" fails → try "firefighters rubble rescue" or "aerial destroyed city"
+- "economic crisis graph" fails → try "stock market trading floor" or "empty factory warehouse"
 
-Reply format (exactly 1-2 lines):
+Suggest a 3-5 word search keyword that approaches the scene from a DIFFERENT visual angle.
+Also say VIDEO if this would work better as a video clip, or IMAGE for a still.
+
+Reply format (exactly 2 lines):
 [new search keyword]
 [VIDEO or IMAGE]`,
-            { maxTokens: 30, systemPrompt: 'You suggest image search keywords. Be specific and literal. Output ONLY the keyword and media type.' }
+            { maxTokens: 40, systemPrompt: 'You suggest creative alternative search keywords for B-roll footage. Think laterally — find a DIFFERENT visual that still fits the scene context. Be specific and literal. Output ONLY the keyword and media type.' }
         );
 
         const lines = response.trim().split('\n').filter(l => l.trim());
@@ -348,7 +425,9 @@ const VIDEO_SOURCE_MAP = {
     pexels: PexelsVideoProvider,
     pixabay: PixabayVideoProvider,
     youtube: YouTubeVideoProvider,
-    newsVideo: NewsVideoProvider,
+    telegram: TelegramVideoProvider,
+    vkVideo: VKVideoProvider,
+    reddit: RedditVideoProvider,
 };
 
 const IMAGE_SOURCE_MAP = {
@@ -360,7 +439,7 @@ const IMAGE_SOURCE_MAP = {
 };
 
 // Default provider priority order (when no smart hint available)
-const VIDEO_PRIORITY = ['pexels', 'pixabay', 'youtube', 'newsVideo'];
+const VIDEO_PRIORITY = ['pexels', 'pixabay', 'youtube', 'telegram', 'vkVideo', 'reddit'];
 const IMAGE_PRIORITY = ['pexels', 'pixabay', 'bing', 'unsplash', 'googleScrape'];
 
 // ============ SMART SOURCE PRIORITY ============
@@ -368,46 +447,56 @@ const IMAGE_PRIORITY = ['pexels', 'pixabay', 'bing', 'unsplash', 'googleScrape']
 // AI source hint → provider order (reorders, never adds unchecked sources)
 const SOURCE_PRIORITY_MAP = {
     'stock': {
-        video: ['pexels', 'pixabay', 'youtube', 'newsVideo'],
+        video: ['pexels', 'pixabay', 'youtube', 'reddit', 'telegram', 'vkVideo'],
         image: ['pexels', 'pixabay', 'unsplash', 'bing', 'googleScrape']
     },
     'youtube': {
-        video: ['youtube', 'pexels', 'pixabay', 'newsVideo'],
+        video: ['youtube', 'reddit', 'telegram', 'vkVideo', 'pexels', 'pixabay'],
         image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash']
     },
     'web-image': {
-        video: ['pexels', 'pixabay', 'youtube', 'newsVideo'],
+        video: ['pexels', 'pixabay', 'youtube', 'reddit', 'telegram', 'vkVideo'],
         image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash']
     },
-    'news': {
-        video: ['newsVideo', 'youtube', 'pixabay', 'pexels'],
+    'news': { // legacy alias — same as telegram
+        video: ['telegram', 'reddit', 'youtube', 'vkVideo', 'pexels', 'pixabay'],
         image: ['bing', 'googleScrape', 'unsplash', 'pexels', 'pixabay']
+    },
+    'telegram': {
+        video: ['telegram', 'reddit', 'youtube', 'vkVideo', 'pexels', 'pixabay'],
+        image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash']
+    },
+    'reddit': {
+        video: ['reddit', 'youtube', 'telegram', 'vkVideo', 'pexels', 'pixabay'],
+        image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash']
     },
 };
 
 // Theme-level fallback when AI source hint is missing
 const THEME_PRIORITY_MAP = {
-    // Factual/news themes → prefer real footage (news sites, YouTube)
-    politics:      { video: ['newsVideo', 'youtube', 'pexels', 'pixabay'], image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
-    finance:       { video: ['newsVideo', 'youtube', 'pexels', 'pixabay'], image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
-    business:      { video: ['youtube', 'newsVideo', 'pexels', 'pixabay'], image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
-    technology:    { video: ['youtube', 'pexels', 'pixabay', 'newsVideo'], image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
-    crime:         { video: ['newsVideo', 'youtube', 'pexels', 'pixabay'], image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
-    documentary:   { video: ['youtube', 'newsVideo', 'pexels', 'pixabay'], image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
-    military:      { video: ['newsVideo', 'youtube', 'pexels', 'pixabay'], image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
-    war:           { video: ['newsVideo', 'youtube', 'pexels', 'pixabay'], image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
-    geopolitics:   { video: ['newsVideo', 'youtube', 'pexels', 'pixabay'], image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
-    // Aesthetic/organic themes → prefer stock footage
-    nature:        { video: ['pexels', 'pixabay', 'youtube', 'newsVideo'], image: ['pexels', 'pixabay', 'unsplash', 'bing', 'googleScrape'] },
-    travel:        { video: ['pexels', 'pixabay', 'youtube', 'newsVideo'], image: ['pexels', 'pixabay', 'unsplash', 'bing', 'googleScrape'] },
-    lifestyle:     { video: ['pexels', 'pixabay', 'youtube', 'newsVideo'], image: ['pexels', 'unsplash', 'pixabay', 'bing', 'googleScrape'] },
-    food:          { video: ['pexels', 'pixabay', 'youtube', 'newsVideo'], image: ['pexels', 'unsplash', 'pixabay', 'bing', 'googleScrape'] },
-    health:        { video: ['pexels', 'pixabay', 'youtube', 'newsVideo'], image: ['pexels', 'unsplash', 'pixabay', 'bing', 'googleScrape'] },
+    // Factual/news themes → prefer real footage (Telegram, VK, Reddit, YouTube)
+    politics:      { video: ['youtube', 'reddit', 'telegram', 'vkVideo', 'pexels', 'pixabay'], image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
+    finance:       { video: ['youtube', 'reddit', 'telegram', 'vkVideo', 'pexels', 'pixabay'], image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
+    business:      { video: ['youtube', 'reddit', 'telegram', 'vkVideo', 'pexels', 'pixabay'], image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
+    technology:    { video: ['youtube', 'telegram', 'vkVideo', 'reddit', 'pexels', 'pixabay'], image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
+    crime:         { video: ['youtube', 'reddit', 'telegram', 'vkVideo', 'pexels', 'pixabay'], image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
+    documentary:   { video: ['youtube', 'reddit', 'telegram', 'vkVideo', 'pexels', 'pixabay'], image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
+    military:      { video: ['telegram', 'reddit', 'youtube', 'vkVideo', 'pexels', 'pixabay'], image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
+    war:           { video: ['telegram', 'reddit', 'youtube', 'vkVideo', 'pexels', 'pixabay'], image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
+    geopolitics:   { video: ['telegram', 'reddit', 'youtube', 'vkVideo', 'pexels', 'pixabay'], image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
+    // Celebrity/entertainment → Reddit has few hosted videos, use as fallback
+    celebrity:     { video: ['youtube', 'telegram', 'vkVideo', 'reddit', 'pexels', 'pixabay'], image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
+    // Aesthetic/organic themes → prefer stock footage, Reddit as fallback
+    nature:        { video: ['pexels', 'pixabay', 'youtube', 'reddit', 'telegram', 'vkVideo'], image: ['pexels', 'pixabay', 'unsplash', 'bing', 'googleScrape'] },
+    travel:        { video: ['pexels', 'pixabay', 'youtube', 'reddit', 'telegram', 'vkVideo'], image: ['pexels', 'pixabay', 'unsplash', 'bing', 'googleScrape'] },
+    lifestyle:     { video: ['pexels', 'pixabay', 'youtube', 'reddit', 'telegram', 'vkVideo'], image: ['pexels', 'unsplash', 'pixabay', 'bing', 'googleScrape'] },
+    food:          { video: ['pexels', 'pixabay', 'youtube', 'reddit', 'telegram', 'vkVideo'], image: ['pexels', 'unsplash', 'pixabay', 'bing', 'googleScrape'] },
+    health:        { video: ['pexels', 'pixabay', 'youtube', 'reddit', 'telegram', 'vkVideo'], image: ['pexels', 'unsplash', 'pixabay', 'bing', 'googleScrape'] },
     // Other
-    history:       { video: ['youtube', 'newsVideo', 'pexels', 'pixabay'], image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
-    entertainment: { video: ['youtube', 'pexels', 'pixabay', 'newsVideo'], image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
-    sports:        { video: ['youtube', 'pexels', 'pixabay', 'newsVideo'], image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
-    diy:           { video: ['youtube', 'pexels', 'pixabay', 'newsVideo'], image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
+    history:       { video: ['youtube', 'reddit', 'telegram', 'vkVideo', 'pexels', 'pixabay'], image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
+    entertainment: { video: ['youtube', 'telegram', 'vkVideo', 'reddit', 'pexels', 'pixabay'], image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
+    sports:        { video: ['reddit', 'youtube', 'vkVideo', 'pexels', 'pixabay'], image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
+    diy:           { video: ['youtube', 'reddit', 'telegram', 'vkVideo', 'pexels', 'pixabay'], image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash'] },
 };
 
 /**
@@ -416,30 +505,58 @@ const THEME_PRIORITY_MAP = {
  * Only reorders — never adds providers that weren't enabled.
  */
 function getSmartPriority(sourceHint, mediaType, scriptContext) {
+    let order;
+    const nicheId = scriptContext?.nicheId;
+
     // Priority 1: AI per-scene source hint
     if (sourceHint && SOURCE_PRIORITY_MAP[sourceHint]) {
-        const order = SOURCE_PRIORITY_MAP[sourceHint][mediaType];
-        if (order) return order;
+        order = SOURCE_PRIORITY_MAP[sourceHint][mediaType];
     }
 
     // Priority 2: Niche-based provider priority
-    const nicheId = scriptContext?.nicheId;
-    if (nicheId) {
-        const niche = getNiche(nicheId);
-        if (niche.footagePriority && niche.footagePriority[mediaType]) {
-            return niche.footagePriority[mediaType];
+    if (!order) {
+        if (nicheId) {
+            const niche = getNiche(nicheId);
+            if (niche.footagePriority && niche.footagePriority[mediaType]) {
+                order = niche.footagePriority[mediaType];
+            }
         }
     }
 
     // Priority 3: Legacy theme-based fallback
-    const theme = (scriptContext?.theme || '').toLowerCase();
-    if (theme && THEME_PRIORITY_MAP[theme]) {
-        const order = THEME_PRIORITY_MAP[theme][mediaType];
-        if (order) return order;
+    if (!order) {
+        const theme = (scriptContext?.theme || '').toLowerCase();
+        if (theme && THEME_PRIORITY_MAP[theme]) {
+            order = THEME_PRIORITY_MAP[theme][mediaType];
+        }
     }
 
     // Priority 4: Default hardcoded order
-    return mediaType === 'video' ? VIDEO_PRIORITY : IMAGE_PRIORITY;
+    if (!order) {
+        order = mediaType === 'video' ? VIDEO_PRIORITY : IMAGE_PRIORITY;
+    }
+
+    // Make a copy so we don't mutate source arrays
+    order = [...order];
+
+    // === POST-FILTERS ===
+
+    // Niche exclusions: remove providers the niche explicitly bans
+    // (e.g., sport bans telegram for video — irrelevant military/political results)
+    if (nicheId && mediaType === 'video') {
+        const niche = getNiche(nicheId);
+        if (niche.excludeVideoProviders && niche.excludeVideoProviders.length > 0) {
+            const excluded = new Set(niche.excludeVideoProviders);
+            order = order.filter(p => !excluded.has(p));
+        }
+    }
+
+    // Global rule: Bing always first for images (best real-world image results)
+    if (mediaType === 'image' && order.includes('bing')) {
+        order = ['bing', ...order.filter(p => p !== 'bing')];
+    }
+
+    return order;
 }
 
 // ============ PROVIDER MANAGEMENT ============
@@ -455,7 +572,7 @@ function getEnabledSources() {
         if (raw) return JSON.parse(raw);
     } catch (e) { }
     // Default: all on except API-key-only ones
-    return { pexels: true, pixabay: true, unsplash: true, bing: true, googleScrape: true, youtube: true, newsVideo: false };
+    return { pexels: true, pixabay: true, unsplash: true, bing: true, googleScrape: true, youtube: true, telegram: true, vkVideo: true, reddit: true };
 }
 
 function initProviders(scriptContext) {
@@ -735,6 +852,13 @@ async function downloadMedia(keyword, mediaType, filenameBase, sceneDuration = 1
             if (scene) {
                 if (isStock && scene.stockQuery) {
                     baseQuery = scene.stockQuery;
+                    // Safety: if stock query lost specificity (e.g. "Abqaiq oil field" → "oil field"),
+                    // fall back to original keyword to avoid garbage results like flowers for "oil field"
+                    const stockWords = scene.stockQuery.toLowerCase().split(/\s+/).length;
+                    const kwWords = keyword.toLowerCase().split(/\s+/).length;
+                    if (stockWords <= 2 && kwWords > stockWords) {
+                        baseQuery = keyword; // original keyword is more specific
+                    }
                 } else if ((isWeb || isYouTube) && scene.webQuery) {
                     baseQuery = scene.webQuery;
                 }
@@ -762,16 +886,86 @@ async function downloadMedia(keyword, mediaType, filenameBase, sceneDuration = 1
             const maxTries = Math.min(results.length, _visionEnabled ? 5 : 3);
             const visionRejections = []; // track what vision saw for keyword rewrite
             for (let attempt = 0; attempt < maxTries; attempt++) {
+                const isOverused = (url) => _getUrlUseCount(url) >= MAX_URL_REUSE;
                 const selected = attempt === 0
-                    ? provider.pickUnused(results)
+                    ? provider.pickUnused(results, isOverused)
                     : results[attempt]; // fallback to next results if first download fails
 
                 if (!selected) continue;
 
+                // Check URL blacklist — skip URLs that scored poorly in previous scenes.
+                // PRESCORE_PROVIDERS (YouTube) do per-scene segment selection
+                // so the same URL can yield different content at different timestamps — don't blacklist them.
+                const dlUrl = selected._directVideoUrl || selected.url;
+                if (!PRESCORE_PROVIDERS.has(providerKey)) {
+                    const blacklisted = _isBlacklisted(dlUrl);
+                    if (blacklisted) {
+                        console.log(`  ⛔ [${provider.name}] Skipping blacklisted URL (scored ${blacklisted.score}/10 before): ${dlUrl.substring(0, 80)}...`);
+                        continue;
+                    }
+                    // Deprioritize overused URLs — skip them on early attempts,
+                    // but allow as last resort (last attempt)
+                    const urlUses = _getUrlUseCount(dlUrl);
+                    if (urlUses >= MAX_URL_REUSE && attempt < maxTries - 1) {
+                        console.log(`  ⏭️ [${provider.name}] URL used ${urlUses}x already, trying fresh clips first...`);
+                        continue;
+                    }
+                }
+
                 try {
                     const outputPath = path.join(config.paths.temp, filenameBase + ext);
+
+                    // ── Smart Trimming: Omni pre-download segment selection ──
+                    // If video is long enough and clip analyzer has budget,
+                    // extract frames from URL → Omni picks best segment → pass startTime to download
+                    let smartStartTime = null;
+                    const videoDuration = selected._cachedMeta?.duration || selected._meta?.duration || selected.duration || 0;
+                    const smartTrimEligible = videoDuration > sceneDuration + 15 && mediaType === 'video' && !PRESCORE_PROVIDERS.has(providerKey);
+                    const omniAvailable = clipAnalyzer.isAvailable();
+                    // Only use Omni on first attempt per provider — retries use single-frame vision instead
+                    const useOmni = omniAvailable && attempt === 0;
+                    console.log(`  🔍 [Smart Trim] provider=${provider.name} | videoDur=${Math.round(videoDuration)}s | sceneDur=${Math.round(sceneDuration)}s | eligible=${smartTrimEligible} | omniAvailable=${omniAvailable}${attempt > 0 ? ' (retry→skip)' : ''} | prescore=${PRESCORE_PROVIDERS.has(providerKey)}`);
+
+                    if (smartTrimEligible && useOmni) {
+                        try {
+                            // Prefer direct stream URLs that ffmpeg can seek into
+                            // (Reddit permalinks need yt-dlp, but fallback_url is a direct DASH stream)
+                            // For VK/Telegram: resolve via yt-dlp --get-url since web URLs aren't seekable
+                            let segUrl = selected._directVideoUrl || selected._fallbackUrl || null;
+                            if (!segUrl && provider.getStreamUrl) {
+                                console.log(`  🔍 [Smart Trim] Resolving stream URL via ${provider.name}...`);
+                                segUrl = await provider.getStreamUrl(selected.url);
+                            }
+                            if (!segUrl) segUrl = selected.url;
+                            console.log(`  🔍 [Smart Trim] Sending ${clipAnalyzer.getFramesBudgetInfo ? clipAnalyzer.getFramesBudgetInfo() : '?'} frames to Omni for segment selection | URL: ${segUrl.substring(0, 80)}...`);
+                            const segResult = await clipAnalyzer.findBestSegment(
+                                segUrl,
+                                videoDuration,
+                                sceneDuration,
+                                keyword,
+                                {
+                                    sceneText: scene?.text || '',
+                                    niche: nicheId || '',
+                                    videoTopic: scriptContextRef?.summary || '',
+                                    entities: scriptContextRef?.entities || [],
+                                }
+                            );
+                            if (segResult && segResult.startTime !== null) {
+                                smartStartTime = segResult.startTime;
+                                console.log(`  🎯 [Smart Trim] Omni picked START=${Math.round(smartStartTime)}s (reason: ${segResult.reason || 'best segment'}) | keyword="${keyword}"`);
+                            } else {
+                                console.log(`  ⚠️ [Smart Trim] Omni returned no segment — falling back to dumb trim`);
+                            }
+                        } catch (e) {
+                            console.log(`  ⚠️ [Smart Trim] Failed: ${e.message} — falling back to dumb trim`);
+                        }
+                    } else if (smartTrimEligible && !useOmni) {
+                        const reason = attempt > 0 ? 'retry attempt (saving budget)' : 'no Qwen/Gemini key or budget exhausted';
+                        console.log(`  ⏭️ [Smart Trim] Skipped — ${reason}`);
+                    }
+
                     console.log(`  ⬇️  [${provider.name}] Downloading${attempt > 0 ? ` (attempt ${attempt + 1})` : ''}...`);
-                    const finalPath = await provider.download(selected.url, outputPath, { duration: sceneDuration, keyword: keyword, _directVideoUrl: selected._directVideoUrl || null, sceneText: scene?.text || '', niche: nicheId || '', videoTopic: scriptContextRef?.summary || '' });
+                    const finalPath = await provider.download(selected.url, outputPath, { duration: sceneDuration, keyword: keyword, _directVideoUrl: selected._directVideoUrl || null, _cachedMeta: selected._cachedMeta || selected._meta || null, _fallbackUrl: selected._fallbackUrl || null, _smartStartTime: smartStartTime, sceneText: scene?.text || '', niche: nicheId || '', videoTopic: scriptContextRef?.summary || '' });
                     const finalExt = path.extname(finalPath);
                     console.log(`  ✅ [${provider.name}] Downloaded: ${path.basename(finalPath)}`);
 
@@ -795,6 +989,7 @@ async function downloadMedia(keyword, mediaType, filenameBase, sceneDuration = 1
                         });
                         if (segResult.shouldRetrim && attempt < maxTries - 1) {
                             console.log(`  🎯 [${provider.name}] Video segment scored poorly — trying next result...`);
+                            _blacklistUrl(dlUrl, segResult.bestScore || 0, 'Poor video segment');
                             visionRejections.push(`Poor video segment (score: ${segResult.bestScore}/10)`);
                             try { fs.unlinkSync(finalPath); } catch {}
                             continue;
@@ -818,14 +1013,62 @@ async function downloadMedia(keyword, mediaType, filenameBase, sceneDuration = 1
                             const { score, description } = visionResult;
                             visionScore = score;
                             console.log(`  👁️ Vision: ${score}/10 → ${description}`);
-                            if (score <= 3 && attempt < maxTries - 1) {
-                                console.log(`  ❌ Score too low, trying next result...`);
+                            if (score <= 4) {
+                                console.log(`  ❌ Score too low (${score}/10), trying next result...`);
+                                if (!PRESCORE_PROVIDERS.has(providerKey)) {
+                                    _blacklistUrl(dlUrl, score, description);
+                                }
                                 visionRejections.push(description);
                                 try { fs.unlinkSync(finalPath); } catch {}
                                 continue;
                             }
                         }
                     }
+
+                    // Deep clip analysis — Omni multimodal video understanding (optional)
+                    // Runs AFTER basic vision pass. Sends 8 frames to Qwen Omni for holistic
+                    // clip understanding: watermark detection, motion quality, content relevance.
+                    // Only for video files, only if within frame budget.
+                    let clipAnalysis = null;
+                    const isVideoForAnalysis = ['.mp4', '.webm', '.mkv', '.mov'].includes(finalExt.toLowerCase());
+                    if (isVideoForAnalysis && clipAnalyzer.isAvailable() && fs.existsSync(finalPath)) {
+                        try {
+                            const { probeDuration: _probeDur } = require('./smart-segment');
+                            const ffmpegPath = config.paths?.ffmpeg || (process.platform === 'win32' ? 'C:\\ffmg\\bin\\ffmpeg.exe' : 'ffmpeg');
+                            const clipDur = await _probeDur(ffmpegPath, finalPath) || sceneDuration;
+                            clipAnalysis = await clipAnalyzer.analyzeClip(finalPath, clipDur, keyword, {
+                                sceneText: scene?.text || '',
+                                niche: nicheId || '',
+                                videoTopic: scriptContextRef?.summary || '',
+                                entities: scriptContextRef?.entities || [],
+                            });
+                            if (clipAnalysis) {
+                                console.log(`  🎬 Clip Analysis: ${clipAnalysis.score}/10 | ${clipAnalysis.motion} motion | ${clipAnalysis.issues.length ? 'Issues: ' + clipAnalysis.issues.join(', ') : 'Clean'}`);
+                                console.log(`     ${clipAnalysis.description}`);
+                                const rejectThreshold = config.clipAnalyzer?.rejectThreshold || 3;
+                                if (clipAnalysis.score <= rejectThreshold) {
+                                    console.log(`  ❌ Deep analysis too low (${clipAnalysis.score}/10 ≤ ${rejectThreshold}), trying next result...`);
+                                    _blacklistUrl(dlUrl, clipAnalysis.score, clipAnalysis.description);
+                                    visionRejections.push(`Deep: ${clipAnalysis.description}`);
+                                    try { fs.unlinkSync(finalPath); } catch {}
+                                    continue;
+                                }
+                                // Upgrade or downgrade visionScore based on deep analysis
+                                // Weighted blend: 40% basic vision + 60% deep analysis
+                                if (visionScore > 0) {
+                                    visionScore = Math.round(visionScore * 0.4 + clipAnalysis.score * 0.6);
+                                } else {
+                                    visionScore = clipAnalysis.score;
+                                }
+                            }
+                        } catch (err) {
+                            // Non-fatal — deep analysis is optional
+                            console.log(`  ⚠️ Clip analysis skipped: ${err.message}`);
+                        }
+                    }
+
+                    // Track URL reuse count
+                    _trackUrlUse(dlUrl);
 
                     return {
                         path: finalPath,
@@ -835,13 +1078,14 @@ async function downloadMedia(keyword, mediaType, filenameBase, sceneDuration = 1
                         mediaWidth: selected.width || 0,
                         mediaHeight: selected.height || 0,
                         visionScore: visionScore,
+                        clipAnalysis: clipAnalysis,
                     };
                 } catch (dlError) {
                     console.log(`  ⚠️ [${provider.name}] Download failed: ${dlError.message}${attempt < maxTries - 1 ? ', trying next result...' : ''}`);
                 }
             }
 
-            // Vision rejected all attempts — ask AI to suggest a better keyword
+            // Vision rejected all attempts — ask AI to suggest a DIFFERENT keyword angle
             if (visionRejections.length >= 3) {
                 const suggestion = await _visionSuggestKeyword(visionRejections, keyword, {
                     sceneText: scene?.text || '',
@@ -850,20 +1094,26 @@ async function downloadMedia(keyword, mediaType, filenameBase, sceneDuration = 1
                     theme: scriptContextRef?.themeId || scriptContextRef?.theme || '',
                     entities: scriptContextRef?.entities || [],
                     tone: scriptContextRef?.tone || '',
+                    eventAnchor: scriptContextRef?.eventAnchor || '',
+                    triedKeywords: [keyword, ...(scene?.stockQuery ? [scene.stockQuery] : []), ...(scene?.webQuery ? [scene.webQuery] : [])],
                 });
                 if (suggestion) {
-                    console.log(`  🧠 Vision AI suggests: "${suggestion.keyword}"${suggestion.switchToVideo ? ' (as VIDEO)' : ''}`);
-                    // Retry with AI-suggested keyword on same provider
+                    console.log(`  🧠 Vision AI suggests different angle: "${suggestion.keyword}"${suggestion.switchToVideo ? ' (as VIDEO)' : ''}`);
+                    // Retry with AI-suggested keyword using ALL providers in smart priority order
+                    // (not just the current provider — if YouTube failed 5x, try Telegram/VK too)
                     const retryType = suggestion.switchToVideo ? 'video' : mediaType;
                     const retryExt = retryType === 'video' ? '.mp4' : '.jpg';
-                    const retryProviders = retryType === 'video' ? videoProviders : [provider];
-                    for (const retryProvider of retryProviders) {
+                    const retryAllProviders = retryType === 'video'
+                        ? reorderProviders(videoProviders, getSmartPriority(sourceHint, 'video', scriptContextRef), VIDEO_SOURCE_MAP)
+                        : reorderProviders(imageProviders, getSmartPriority(sourceHint, 'image', scriptContextRef), IMAGE_SOURCE_MAP);
+                    for (const retryProvider of retryAllProviders) {
                         if (!retryProvider.isAvailable()) continue;
                         try {
                             const retryResults = await retryProvider.search(suggestion.keyword);
                             const filtered = retryProvider.filterResults(retryResults);
                             if (filtered.length === 0) continue;
-                            const picked = retryProvider.pickUnused(filtered);
+                            const isOverused = (url) => _getUrlUseCount(url) >= MAX_URL_REUSE;
+                            const picked = retryProvider.pickUnused(filtered, isOverused);
                             if (!picked) continue;
 
                             const outputPath = path.join(config.paths.temp, filenameBase + retryExt);
@@ -872,13 +1122,74 @@ async function downloadMedia(keyword, mediaType, filenameBase, sceneDuration = 1
                             const finalExt = path.extname(finalPath);
                             console.log(`  ✅ [${retryProvider.name}] Downloaded: ${path.basename(finalPath)}`);
 
+                            // Vision scoring on AI-retry clips (same as primary path)
+                            let retryVisionScore = 0;
+                            const retryContext = {
+                                sceneText: scene?.text || '',
+                                niche: nicheId || '',
+                                videoTopic: scriptContextRef?.summary || '',
+                                theme: scriptContextRef?.themeId || scriptContextRef?.theme || '',
+                                entities: scriptContextRef?.entities || [],
+                                tone: scriptContextRef?.tone || '',
+                                mood: scriptContextRef?.mood || '',
+                            };
+                            if (_visionEnabled && fs.existsSync(finalPath)) {
+                                const retryVision = await _scoreDownloadedMedia(finalPath, finalExt, suggestion.keyword, retryContext);
+                                if (retryVision) {
+                                    retryVisionScore = retryVision.score;
+                                    console.log(`  👁️ Vision (retry): ${retryVision.score}/10 → ${retryVision.description}`);
+                                    if (retryVision.score <= 4) {
+                                        console.log(`  ❌ Retry score too low (${retryVision.score}/10), trying next provider...`);
+                                        try { fs.unlinkSync(finalPath); } catch {}
+                                        continue;
+                                    }
+                                }
+                            }
+
+                            // Deep clip analysis on AI-retry clips
+                            let retryClipAnalysis = null;
+                            const retryIsVideo = ['.mp4', '.webm', '.mkv', '.mov'].includes(finalExt.toLowerCase());
+                            if (retryIsVideo && clipAnalyzer.isAvailable() && fs.existsSync(finalPath)) {
+                                try {
+                                    const { probeDuration: _probeDur } = require('./smart-segment');
+                                    const ffmpegPath = config.paths?.ffmpeg || (process.platform === 'win32' ? 'C:\\ffmg\\bin\\ffmpeg.exe' : 'ffmpeg');
+                                    const clipDur = await _probeDur(ffmpegPath, finalPath) || sceneDuration;
+                                    retryClipAnalysis = await clipAnalyzer.analyzeClip(finalPath, clipDur, suggestion.keyword, {
+                                        sceneText: scene?.text || '',
+                                        niche: nicheId || '',
+                                        videoTopic: scriptContextRef?.summary || '',
+                                        entities: scriptContextRef?.entities || [],
+                                    });
+                                    if (retryClipAnalysis) {
+                                        console.log(`  🎬 Clip Analysis (retry): ${retryClipAnalysis.score}/10 | ${retryClipAnalysis.motion} motion | ${retryClipAnalysis.issues.length ? 'Issues: ' + retryClipAnalysis.issues.join(', ') : 'Clean'}`);
+                                        console.log(`     ${retryClipAnalysis.description}`);
+                                        const rejectThreshold = config.clipAnalyzer?.rejectThreshold || 3;
+                                        if (retryClipAnalysis.score <= rejectThreshold) {
+                                            console.log(`  ❌ Deep analysis too low (${retryClipAnalysis.score}/10), trying next provider...`);
+                                            try { fs.unlinkSync(finalPath); } catch {}
+                                            continue;
+                                        }
+                                        if (retryVisionScore > 0) {
+                                            retryVisionScore = Math.round(retryVisionScore * 0.4 + retryClipAnalysis.score * 0.6);
+                                        } else {
+                                            retryVisionScore = retryClipAnalysis.score;
+                                        }
+                                    }
+                                } catch (err) {
+                                    console.log(`  ⚠️ Clip analysis skipped: ${err.message}`);
+                                }
+                            }
+
+                            _trackUrlUse(picked._directVideoUrl || picked.url);
                             return {
                                 path: finalPath,
                                 ext: finalExt,
                                 provider: retryProvider.name,
                                 mediaType: retryType,
                                 mediaWidth: picked.width || 0,
-                                mediaHeight: picked.height || 0
+                                mediaHeight: picked.height || 0,
+                                visionScore: retryVisionScore,
+                                clipAnalysis: retryClipAnalysis,
                             };
                         } catch (e) {
                             console.log(`  ⚠️ [${retryProvider.name}] AI keyword retry failed: ${e.message}`);
@@ -954,6 +1265,8 @@ async function downloadAllMedia(scenes, scriptContext, options = {}) {
     };
 
     const tasks = scenes.map((scene, i) => async () => {
+        // Use scene's original index for filenames/logs (preserves alignment with fullscreen MG scenes)
+        const si = scene.index !== undefined ? scene.index : i;
         // Each scene task runs inside its own AsyncLocalStorage context
         return _logStorage.run({ sceneIdx: i }, async () => {
             _sceneBuffers.set(i, []);
@@ -978,7 +1291,7 @@ async function downloadAllMedia(scenes, scriptContext, options = {}) {
             keyword = validateKeyword(keyword, scene);
 
             console.log(`\n${'═'.repeat(70)}`);
-            console.log(`📌 Scene ${i}/${scenes.length - 1} (${mediaType}) — "${keyword}"${sourceHint ? `  [hint: ${sourceHint}]` : ''}${nicheId ? `  [niche: ${nicheId}]` : ''}`);
+            console.log(`📌 Scene ${si}/${scenes.length - 1} (${mediaType}) — "${keyword}"${sourceHint ? `  [hint: ${sourceHint}]` : ''}${nicheId ? `  [niche: ${nicheId}]` : ''}`);
             console.log(`${'─'.repeat(70)}`);
             if (scene.stockQuery || scene.webQuery) {
                 console.log(`  🎯 Optimized: stock="${scene.stockQuery || '-'}" web="${scene.webQuery || '-'}"`);
@@ -986,10 +1299,10 @@ async function downloadAllMedia(scenes, scriptContext, options = {}) {
 
             // Check media cache first (reuse previously downloaded clips)
             if (isListicle || _mediaCache.size > 0) {
-                const cached = _checkMediaCache(keyword, mediaType, i, `scene-${i}`);
+                const cached = _checkMediaCache(keyword, mediaType, si, `scene-${si}`);
                 if (cached) {
                     console.log(`  ♻️ Cache hit! Reusing ${path.basename(cached.path)} (from ${cached.provider})`);
-                    console.log(`  ✅ Scene ${i} DONE (cached)`);
+                    console.log(`  ✅ Scene ${si} DONE (cached)`);
                     scene.mediaFile = cached.path;
                     scene.mediaExtension = cached.ext;
                     scene.sourceProvider = cached.provider;
@@ -1006,14 +1319,14 @@ async function downloadAllMedia(scenes, scriptContext, options = {}) {
             const prioritySource = sourceHint && SOURCE_PRIORITY_MAP[sourceHint] ? 'hint' : nicheId ? 'niche' : 'default';
             console.log(`  📦 Priority: ${priorityOrder.join(' → ')} (${prioritySource})`);
 
-            let result = await downloadMedia(keyword, mediaType, `scene-${i}`, sceneDuration, sourceHint, nicheId, scene);
+            let result = await downloadMedia(keyword, mediaType, `scene-${si}`, sceneDuration, sourceHint, nicheId, scene);
 
             // If primary keyword failed, try simplified variants
             if (!result) {
                 const variants = getKeywordVariants(keyword);
                 for (const variant of variants) {
                     console.log(`  🔄 Retrying with simplified keyword: "${variant}"`);
-                    result = await downloadMedia(variant, mediaType, `scene-${i}`, sceneDuration, sourceHint, nicheId, scene);
+                    result = await downloadMedia(variant, mediaType, `scene-${si}`, sceneDuration, sourceHint, nicheId, scene);
                     if (result) break;
                 }
             }
@@ -1024,13 +1337,13 @@ async function downloadAllMedia(scenes, scriptContext, options = {}) {
                 const fallbackProviders = fallbackType === 'video' ? videoProviders : imageProviders;
                 if (fallbackProviders.some(p => p.isAvailable())) {
                     console.log(`  🔄 Trying fallback type: ${fallbackType}...`);
-                    result = await downloadMedia(keyword, fallbackType, `scene-${i}`, sceneDuration, sourceHint, nicheId, scene);
+                    result = await downloadMedia(keyword, fallbackType, `scene-${si}`, sceneDuration, sourceHint, nicheId, scene);
 
                     if (!result) {
                         const variants = getKeywordVariants(keyword);
                         for (const variant of variants) {
                             console.log(`  🔄 Retrying ${fallbackType} with: "${variant}"`);
-                            result = await downloadMedia(variant, fallbackType, `scene-${i}`, sceneDuration, sourceHint, nicheId, scene);
+                            result = await downloadMedia(variant, fallbackType, `scene-${si}`, sceneDuration, sourceHint, nicheId, scene);
                             if (result) break;
                         }
                     }
@@ -1046,7 +1359,7 @@ async function downloadAllMedia(scenes, scriptContext, options = {}) {
                 const fallbacks = getFallbackKeywords(nicheId);
                 console.log(`  🔄 Trying niche fallback keywords (${nicheId})...`);
                 for (const fbKeyword of fallbacks) {
-                    result = await downloadMedia(fbKeyword, mediaType, `scene-${i}`, sceneDuration, '', '', null);
+                    result = await downloadMedia(fbKeyword, mediaType, `scene-${si}`, sceneDuration, '', '', null);
                     if (result) {
                         console.log(`  ✅ Niche fallback worked: "${fbKeyword}"`);
                         break;
@@ -1060,11 +1373,11 @@ async function downloadAllMedia(scenes, scriptContext, options = {}) {
                 scene.sourceProvider = result.provider;
                 scene.mediaWidth = result.mediaWidth || 0;
                 scene.mediaHeight = result.mediaHeight || 0;
-                console.log(`  ✅ Scene ${i} DONE → ${result.provider}: ${path.basename(result.path)}${result.visionScore ? ` (vision: ${result.visionScore}/10)` : ''}`);
+                console.log(`  ✅ Scene ${si} DONE → ${result.provider}: ${path.basename(result.path)}${result.visionScore ? ` (vision: ${result.visionScore}/10)` : ''}`);
 
-                _cacheMedia(keyword, result, result.visionScore || 0, i);
+                _cacheMedia(keyword, result, result.visionScore || 0, si);
             } else {
-                console.log(`  ❌ Scene ${i}: No media found after all retries`);
+                console.log(`  ❌ Scene ${si}: No media found after all retries`);
                 scene.mediaFile = null;
                 scene.mediaExtension = mediaType === 'image' ? '.jpg' : '.mp4';
                 scene.sourceProvider = null;

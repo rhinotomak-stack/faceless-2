@@ -9,11 +9,14 @@ const { analyzeAndCreateScenes } = require('./ai-director');
 const { planVisuals } = require('./ai-visual-planner');
 const { planCompositorOverlays } = require('./ai-compositor-planner');
 // Existing modules
-const { createDefaultAnalysis, analyzeArticleHighlights } = require('./ai-vision');
+const { analyzeArticleHighlights } = require('./ai-vision');
 const { processArticleImages } = require('./article-image');
 const { processMotionGraphics, FULLSCREEN_MG_TYPES } = require('./ai-motion-graphics');
+const { processTemplates, downloadTemplateBackgrounds, downloadTemplateItemImages, TEMPLATE_TYPES } = require('./ai-templates');
 const { downloadAllMedia } = require('./footage-manager');
-const { loadRecipe } = require('./recipe-loader');
+const clipAnalyzer = require('./clip-analyzer');
+// const { loadRecipe } = require('./recipe-loader'); // Disabled — recipes caused wrong genre detection
+const { preBuildReview, midBuildValidation, postBuildReview } = require('./build-orchestrator');
 const log = require('./logger');
 
 // Clean a folder of old build artifacts — removes ALL media and plan files
@@ -123,9 +126,6 @@ async function buildDumbVideo(transcription, audioFile, directorsBrief) {
     }
     console.log(`   ✅ Placed ${motionGraphics.length} random MGs\n`);
 
-    // Create default visual analysis
-    const visualAnalysis = scenes.map((_, i) => createDefaultAnalysis(i));
-
     // Assign final indices
     scenesWithMedia.forEach((scene, i) => { scene._fileIndex = i; scene.index = i; });
 
@@ -151,8 +151,7 @@ async function buildDumbVideo(transcription, audioFile, directorsBrief) {
         motionGraphics,
         mgStyle: 'clean',
         mapStyle: 'dark',
-        scriptContext,
-        visualAnalysis
+        scriptContext
     };
 
     const PROJECT_DIR = process.env.PROJECT_DIR || path.join(__dirname, '..');
@@ -193,6 +192,20 @@ async function buildDumbVideo(transcription, audioFile, directorsBrief) {
             fs.copyFileSync(path.join(sfxDir, sfxFile), path.join(publicDir, sfxFile));
         }
         if (sfxFiles.length > 0) log.dim(`🔊 Copied ${sfxFiles.length} SFX files`);
+    }
+
+    // Re-link listicle grid thumbnails to updated public scene paths
+    // Check both mgScenes (legacy) and templateScenes (new system)
+    for (const container of [videoPlan.mgScenes, videoPlan.templateScenes]) {
+        if (!container) continue;
+        for (const mg of container) {
+            if (mg.type === 'listicleGrid' && videoPlan.scriptContext?.listicleItems) {
+                mg._itemThumbnails = videoPlan.scriptContext.listicleItems.map(item => {
+                    const scene = scenesWithMedia[item.startSceneIndex];
+                    return scene?.mediaFile || null;
+                });
+            }
+        }
     }
 
     // Re-save plan with updated paths
@@ -269,10 +282,13 @@ async function buildVideo() {
 
     // Step 3: AI Director — Scene creation + context analysis + format detection
     log.step('🎬 Step 3: AI Director (Scene Creation + Context Analysis)');
-    const { scenes, scriptContext } = await analyzeAndCreateScenes(transcription, directorsBrief);
+    let { scenes, scriptContext } = await analyzeAndCreateScenes(transcription, directorsBrief);
     log.ok(`Created ${scenes.length} scenes with rich context`);
     log.br();
     const actualAudioDuration = transcription.duration || (transcription.segments.length > 0 ? transcription.segments[transcription.segments.length - 1].end : 0);
+
+    // Phase 0 (scene splitting) REMOVED — Director handles scene boundaries with full narrative context.
+    // Blind duration-based splitting destroyed story beats and created unfindable keyword fragments.
 
     // Step 4: Visual Planning — Batch keywords + media type + source hints
     log.step('🎨 Step 4: Visual Planner (Batch Keyword Generation)');
@@ -288,14 +304,8 @@ async function buildVideo() {
         process.exit(0);
     }
 
-    // Load genre recipe if available (auto-detects from content or BUILD_RECIPE env var)
-    const recipeResult = loadRecipe(scriptContext, directorsBrief.freeInstructions);
-    if (recipeResult.recipe) {
-        log.ok(`Genre recipe loaded: ${recipeResult.recipe.niche}`);
-    }
-
-    // Merge recipe prompt with user instructions — flows to all downstream AI modules
-    const aiInstructions = [directorsBrief.freeInstructions, recipeResult.promptText].filter(Boolean).join('\n\n');
+    // Recipe system disabled — was mis-detecting genres (e.g. "listicle-history" for business videos)
+    const aiInstructions = directorsBrief.freeInstructions || '';
 
     // Step 4.7: Compositor Planner — DISABLED (V2 overlay system needs rework)
     const nicheId = scriptContext.nicheId || 'general';
@@ -314,6 +324,90 @@ async function buildVideo() {
         }
     }
 
+    // Promote mgHint → fullscreenMG when the hint is a fullscreen MG type
+    // This prevents wasted footage downloads for scenes the MG engine will cover entirely
+    const { FULLSCREEN_MG_TYPES: _FSMG } = require('./ai-motion-graphics');
+    for (const s of scenesWithKeywords) {
+        if (s.fullscreenMG) continue; // already set by VP
+        if (!s.mgHint) continue;
+
+        // Parse mgHint — format: "type: content" or just "type"
+        const hintStr = String(s.mgHint).trim();
+        const colonIdx = hintStr.indexOf(':');
+        const hintType = colonIdx > 0 ? hintStr.substring(0, colonIdx).trim() : hintStr;
+
+        if (_FSMG.has(hintType)) {
+            s.fullscreenMG = s.mgHint;
+            s.mgHint = null; // consumed — don't double-place
+            // Clear download fields — this scene is now a fullscreen MG
+            s.keyword = null;
+            s.stockQuery = null;
+            s.webQuery = null;
+            s.mediaType = null;
+            s.sourceHint = null;
+            log.info(`   Scene ${s.index}: promoted mgHint "${hintType}" → fullscreenMG (saves a download)`);
+        }
+    }
+
+    // Mark listicle overview scene as template early — saves a wasted footage download
+    // The overview scene (scene before first item) will get a listicleGrid template in Step 6.5
+    if (scriptContext.format === 'listicle' && scriptContext.listicleItems?.length > 0) {
+        const firstItem = scriptContext.listicleItems.find(it => it.startSceneIndex != null);
+        if (firstItem) {
+            const overviewIdx = Math.max(0, firstItem.startSceneIndex - 1);
+            const overviewScene = scenesWithKeywords.find(s => s.index === overviewIdx);
+            if (overviewScene && !overviewScene.fullscreenMG) {
+                overviewScene.fullscreenMG = 'listicleGrid'; // keeps scene excluded from footage download
+                overviewScene.templateType = 'listicleGrid'; // signals ai-templates.js ownership
+                overviewScene.isListicleOverview = true;
+                overviewScene.keyword = null;
+                overviewScene.stockQuery = null;
+                overviewScene.webQuery = null;
+                overviewScene.mediaType = null;
+                overviewScene.sourceHint = null;
+                log.info(`   Scene ${overviewIdx}: marked as listicleGrid template — skipping footage download`);
+            }
+        }
+    }
+
+    // Pre-filter: clear fullscreenMG if the type isn't allowed in this niche
+    // (prevents scenes from being skipped for footage download when the MG won't be rendered)
+    const { getNiche } = require('./niches');
+    const nicheConfig = getNiche(nicheId);
+    const nicheAllowedMGs = nicheConfig.allowedMGs || [];
+    for (const s of scenesWithKeywords) {
+        if (!s.fullscreenMG) continue;
+        const colonIdx = s.fullscreenMG.indexOf(':');
+        const mgType = colonIdx > 0 ? s.fullscreenMG.substring(0, colonIdx).trim() : s.fullscreenMG.trim();
+        if (nicheAllowedMGs.length > 0 && !nicheAllowedMGs.includes(mgType)) {
+            log.warn(`Scene ${s.index}: fullscreenMG "${mgType}" not allowed in "${nicheConfig.name}" niche — will download footage instead`);
+            s.fullscreenMG = null;
+            // Restore download fields so footage manager can handle this scene
+            if (!s.keyword || s.keyword === 'none') {
+                s.keyword = s.visualIntent || s.text?.substring(0, 40) || 'abstract background';
+            }
+            if (!s.mediaType) s.mediaType = 'video';
+            if (!s.sourceHint) s.sourceHint = 'stock';
+        }
+    }
+
+    // ── Orchestrator Phase 1: Pre-Build AI Review ──
+    log.step('🧠 Step 4.8: Orchestrator — Pre-Build Review');
+    let buildManifest = null;
+    try {
+        const orchResult = await preBuildReview(scenesWithKeywords, scriptContext);
+        buildManifest = orchResult.manifest;
+        if (orchResult.changes.length > 0) {
+            log.ok(`Orchestrator applied ${orchResult.changes.length} optimization(s)`);
+        }
+        if (orchResult.warnings.length > 0) {
+            log.warn(`${orchResult.warnings.length} warning(s) — check log for details`);
+        }
+    } catch (error) {
+        log.warn(`Orchestrator Phase 1 failed: ${error.message} — continuing without`);
+    }
+    log.br();
+
     // Separate fullscreenMG scenes (no footage needed) from footage scenes
     const fullscreenMGScenes = scenesWithKeywords.filter(s => s.fullscreenMG);
     const footageScenes = scenesWithKeywords.filter(s => !s.fullscreenMG);
@@ -326,8 +420,18 @@ async function buildVideo() {
 
     // Step 5: Download media (only for footage scenes — fullscreenMG scenes skipped)
     log.step('🎥 Step 5: Downloading Media');
+    // Scale Omni frame budget with scene count: 6 frames per scene (one Omni call each)
+    const scaledBudget = Math.max(config.clipAnalyzer?.maxFramesPerBuild || 200, footageScenes.length * 6);
+    clipAnalyzer.resetBudget(scaledBudget);
+    log.info(`   🎯 Omni budget: ${scaledBudget} frames (${footageScenes.length} scenes × 6)`);
     const downloadResult = await downloadAllMedia(footageScenes, scriptContext);
     let scenesWithMedia = downloadResult.scenes;
+
+    // Log clip analyzer usage stats
+    const caStats = clipAnalyzer.getStats();
+    if (caStats.totalFramesSent > 0) {
+        console.log(`  🎬 Clip Analyzer: ${caStats.totalFramesSent} frames sent (${caStats.remaining} remaining in budget)`);
+    }
 
     // Step 5.05: Download V2 overlay images (from compositor planner)
     if (plannedV2Scenes.length > 0) {
@@ -426,6 +530,29 @@ async function buildVideo() {
                 autoContainCount++;
                 const label = ratio < 0.95 ? 'near-square' : ratio < 1.05 ? 'square' : 'near-wide';
                 log.dim(`📐 Scene ${scene.index}: ${w}x${h} (${label}, ratio ${ratio.toFixed(2)}) → scale ${nearScale} + blur`);
+            } else if (scene.framing === 'floating') {
+                // AI recommended floating frame — smaller scale, rounded corners, shadow, styled bg
+                const targetRatio = 1920 / 1080;
+                const fillFactor = Math.min(1, (ratio - 1.0) / (targetRatio - 1.0));
+                const floatingScale = 0.45 + fillFactor * 0.10; // 0.45 → 0.55
+                scene.fitMode = 'cover';
+                scene.scale = Math.round(floatingScale * 100) / 100;
+                scene.borderRadius = scene.borderRadius || 4; // visible rounded corners
+                scene.shadow = scene.shadow !== undefined ? scene.shadow : 0.5;
+                scene.floatingAnim = scene.floatingAnim || 'slideRight'; // slideRight, slideLeft, slideUp, fadeScale
+                // Animation duration driven by pacing (AI Director) + scene length
+                const pacing = scriptContext.pacing || 'moderate';
+                const sceneDur = (scene.endTime || 0) - (scene.startTime || 0);
+                const pacingBase = pacing === 'fast' ? 0.3 : pacing === 'slow' ? 0.7 : 0.5;
+                const durationAdj = sceneDur < 4 ? -0.1 : sceneDur > 7 ? 0.15 : 0;
+                scene.floatingAnimDuration = scene.floatingAnimDuration || Math.round((pacingBase + durationAdj) * 100) / 100;
+                if (!scene.background || scene.background === 'none') {
+                    scene.background = 'blur'; // default to blur, AI can override with gradient
+                }
+                scene.posX = scene.posX || 0;
+                scene.posY = scene.posY || 0;
+                cinematicCount++;
+                log.dim(`🖼️ Scene ${scene.index}: ${w}x${h} (floating) → scale ${scene.scale} + ${scene.floatingAnim} ${scene.floatingAnimDuration}s + shadow ${scene.shadow} + ${scene.background}`);
             } else if (scene.framing === 'cinematic') {
                 // AI recommended cinematic framing — scale based on how wide the image is
                 // Wider images can fill more of the frame; narrower ones need more pullback
@@ -479,12 +606,51 @@ async function buildVideo() {
     }
     log.br();
 
-    // Visual analysis — inline scoring already happened during downloads
-    let visualAnalysis = scenes.map((_, i) => createDefaultAnalysis(i));
+    // ── Orchestrator Phase 2: Mid-Build Validation + MG Instructions ──
+    let midBuildStats = { footageDownloaded: scenesWithMedia.length, footagePlanned: footageScenes.length, footageFailed: 0, lowVisionScores: 0, providerBreakdown: {} };
+    let mgInstructions = null;
+    if (buildManifest) {
+        try {
+            const midResult = midBuildValidation(scenesWithMedia, buildManifest, scriptContext);
+            midBuildStats = midResult.stats;
+            mgInstructions = midResult.mgInstructions || null;
+        } catch (error) {
+            log.warn(`Orchestrator Phase 2 failed: ${error.message}`);
+        }
+    }
 
-    // Step 6: AI Motion Graphics (now with both script context AND visual analysis)
+    // Step 6: AI Motion Graphics
     log.step('✨ Step 6: AI Motion Graphics');
-    const mgResult = await processMotionGraphics(scenesWithKeywords, scriptContext, visualAnalysis, aiInstructions);
+
+    // Build combined instructions: user AI instructions + orchestrator MG instructions
+    let combinedInstructions = aiInstructions || '';
+    if (mgInstructions) {
+        const instrParts = [];
+        instrParts.push(`\n[ORCHESTRATOR MG DIRECTIVES — niche: ${mgInstructions.nicheName}]`);
+        instrParts.push(`Target overlay MG count: ~${mgInstructions.targetMGCount} (density: ${mgInstructions.overlayDensity})`);
+        instrParts.push(`Maximum gap without MG: ${mgInstructions.maxGapSec}s`);
+        if (mgInstructions.longScenes.length > 0) {
+            instrParts.push(`PRIORITY: Scenes ${mgInstructions.longScenes.join(', ')} are >7s — strongly prefer adding overlay MGs to these`);
+        }
+        if (mgInstructions.shortScenes.length > 0) {
+            instrParts.push(`SKIP: Scenes ${mgInstructions.shortScenes.join(', ')} are <2.5s — do NOT add MGs to these`);
+        }
+        if (mgInstructions.listicleItemScenes && mgInstructions.listicleItemScenes.length > 0) {
+            instrParts.push(`LISTICLE ITEM SCENES: ${mgInstructions.listicleItemScenes.join(', ')} — already have auto-generated listicleCounter, DO NOT add any overlay MGs to these scenes`);
+        }
+        if (mgInstructions.listicleOverviewScene >= 0) {
+            instrParts.push(`LISTICLE OVERVIEW SCENE: ${mgInstructions.listicleOverviewScene} — this is a fullscreen listicleGrid, DO NOT add any MGs to this scene`);
+        }
+        if (mgInstructions.listicleProtectedScenes && mgInstructions.listicleProtectedScenes.length > 0) {
+            instrParts.push(`PROTECTED SCENES (no overlay MGs): ${mgInstructions.listicleProtectedScenes.join(', ')}`);
+        }
+        for (const hint of mgInstructions.formatHints) {
+            instrParts.push(hint);
+        }
+        combinedInstructions += instrParts.join('\n');
+    }
+
+    const mgResult = await processMotionGraphics(scenesWithKeywords, scriptContext, null, combinedInstructions);
     let allMGs = mgResult.motionGraphics || mgResult;
     const mgStyle = mgResult.mgStyle || 'clean';
     const mapStyle = mgResult.mapStyle || 'dark';
@@ -503,8 +669,29 @@ async function buildVideo() {
     }
 
     // Split MGs: overlay types stay in motionGraphics, full-screen types become V3 scenes
-    const motionGraphics = allMGs.filter(mg => mg.category !== 'fullscreen');
+    let motionGraphics = allMGs.filter(mg => mg.category !== 'fullscreen');
     const fullscreenMGs = allMGs.filter(mg => mg.category === 'fullscreen');
+
+    // Remove overlay MGs that overlap with fullscreen MG time windows
+    // (fullscreen MGs cover the entire screen — stacking overlays on top looks broken)
+    if (fullscreenMGs.length > 0) {
+        const fsMGRanges = fullscreenMGs.map(mg => ({
+            start: mg.startTime,
+            end: mg.startTime + (mg.duration || 3)
+        }));
+        const before = motionGraphics.length;
+        // Listicle counters/trackers are designed to overlay on footage, not on the grid —
+        // they should NOT be removed even if they slightly overlap the listicleGrid on V3
+        const LISTICLE_OVERLAY_TYPES = new Set(['listicleCounter']);
+        motionGraphics = motionGraphics.filter(mg => {
+            if (LISTICLE_OVERLAY_TYPES.has(mg.type)) return true;
+            const mStart = mg.startTime;
+            const mEnd = mStart + (mg.duration || 3);
+            return !fsMGRanges.some(r => mStart < r.end && mEnd > r.start);
+        });
+        const removed = before - motionGraphics.length;
+        if (removed > 0) log.info(`🚫 Removed ${removed} overlay MG(s) that overlap fullscreen MGs`);
+    }
 
     // Convert full-screen MGs into scene-like objects for V3
     const mgScenes = fullscreenMGs.map((mg, i) => ({
@@ -516,8 +703,8 @@ async function buildVideo() {
         keyword: `MG: ${mg.type}`,
     }));
 
-    // Tag each scene with its original download index (for file copying after carving)
-    scenesWithMedia.forEach((scene, i) => { scene._fileIndex = i; });
+    // Tag each scene with its original index (footage-manager uses scene.index for filenames)
+    scenesWithMedia.forEach((scene) => { scene._fileIndex = scene.index; });
 
     // Carve out gaps in V2 scenes where full-screen MGs exist
     // Full-screen MGs ARE the visual — no footage should play underneath
@@ -626,6 +813,115 @@ async function buildVideo() {
         }
     }
 
+    // Step 6.5: AI Templates (fullscreen template cards on V3)
+    log.step('🎴 Step 6.5: AI Templates');
+    let templateScenes = [];
+    try {
+        const templateResult = await processTemplates(scenesWithKeywords, scriptContext, mgScenes, combinedInstructions);
+        templateScenes = templateResult.templateScenes || [];
+        if (templateScenes.length > 0) {
+            log.ok(`Placed ${templateScenes.length} template(s)`);
+            for (const tpl of templateScenes) {
+                log.dim(`🎴 [${tpl.type}] "${tpl.text || ''}" @ ${tpl.startTime.toFixed(1)}s-${tpl.endTime.toFixed(1)}s`);
+            }
+
+            // Download background images for templates that need them (locationCard, chapterCard)
+            try {
+                const bgCount = await downloadTemplateBackgrounds(templateScenes, config.paths.temp, scriptContext);
+                if (bgCount > 0) log.ok(`Downloaded ${bgCount} template background(s)`);
+            } catch (bgErr) {
+                log.warn(`Template backgrounds failed: ${bgErr.message} — continuing without`);
+            }
+
+            // Download item images for templates that need them (imageShowcase)
+            try {
+                const itemImgCount = await downloadTemplateItemImages(templateScenes, config.paths.temp, scriptContext);
+                if (itemImgCount > 0) log.ok(`Downloaded ${itemImgCount} template item image(s)`);
+            } catch (itemErr) {
+                log.warn(`Template item images failed: ${itemErr.message} — continuing without`);
+            }
+
+            // Copy the underlying V1 scene's media file to each template
+            // (the scene already had footage downloaded in Step 5 — reuse it as template background)
+            for (const tpl of templateScenes) {
+                const srcScene = scenesWithMedia.find(s =>
+                    s.startTime <= tpl.startTime && s.endTime >= tpl.endTime
+                ) || scenesWithMedia.find(s =>
+                    s.startTime < tpl.endTime && s.endTime > tpl.startTime
+                );
+                if (srcScene && srcScene.mediaFile) {
+                    tpl.templateMediaFile = srcScene.mediaFile;
+                    // mediaOffset into the clip for the template's start time
+                    const offsetInScene = tpl.startTime - srcScene.startTime;
+                    tpl.templateMediaOffset = (srcScene.mediaOffset || 0) + Math.max(0, offsetInScene);
+                    log.dim(`   🎬 [${tpl.type}] using scene footage: ${path.basename(srcScene.mediaFile)}`);
+                }
+            }
+
+            // Carve V1 scenes for template scenes (same logic as fullscreen MG carving)
+            if (templateScenes.length > 0) {
+                const tplRanges = templateScenes.map(tpl => ({ start: tpl.startTime, end: tpl.endTime }));
+                let carved = [];
+                for (const scene of scenesWithMedia) {
+                    let parts = [{ startTime: scene.startTime, endTime: scene.endTime }];
+                    for (const range of tplRanges) {
+                        const newParts = [];
+                        for (const part of parts) {
+                            if (range.start >= part.endTime || range.end <= part.startTime) {
+                                newParts.push(part);
+                            } else if (range.start <= part.startTime && range.end >= part.endTime) {
+                                // Fully covered — remove
+                            } else if (range.start > part.startTime && range.end < part.endTime) {
+                                newParts.push({ startTime: part.startTime, endTime: range.start });
+                                newParts.push({ startTime: range.end, endTime: part.endTime });
+                            } else if (range.start <= part.startTime) {
+                                newParts.push({ startTime: range.end, endTime: part.endTime });
+                            } else {
+                                newParts.push({ startTime: part.startTime, endTime: range.start });
+                            }
+                        }
+                        parts = newParts;
+                    }
+                    for (const part of parts) {
+                        if (part.endTime - part.startTime < 0.3) continue;
+                        const trimmedScene = { ...scene };
+                        const offsetFromOriginal = part.startTime - scene.startTime;
+                        trimmedScene.startTime = part.startTime;
+                        trimmedScene.endTime = part.endTime;
+                        trimmedScene.duration = part.endTime - part.startTime;
+                        if (offsetFromOriginal > 0) {
+                            trimmedScene.mediaOffset = (scene.mediaOffset || 0) + offsetFromOriginal;
+                        }
+                        carved.push(trimmedScene);
+                    }
+                }
+                const tplRemoved = scenesWithMedia.length - carved.length;
+                scenesWithMedia = carved;
+                if (tplRemoved > 0) log.info(`🔪 Carved ${tplRemoved} scene(s) to make room for templates`);
+            }
+
+            // Remove overlay MGs that overlap with template time windows
+            if (templateScenes.length > 0) {
+                const tplRanges = templateScenes.map(tpl => ({ start: tpl.startTime, end: tpl.endTime }));
+                const LISTICLE_OVERLAY_TYPES = new Set(['listicleCounter']);
+                const beforeCount = motionGraphics.length;
+                motionGraphics = motionGraphics.filter(mg => {
+                    if (LISTICLE_OVERLAY_TYPES.has(mg.type)) return true;
+                    const mStart = mg.startTime;
+                    const mEnd = mStart + (mg.duration || 3);
+                    return !tplRanges.some(r => mStart < r.end && mEnd > r.start);
+                });
+                const tplOverlapRemoved = beforeCount - motionGraphics.length;
+                if (tplOverlapRemoved > 0) log.info(`🚫 Removed ${tplOverlapRemoved} overlay MG(s) that overlap templates`);
+            }
+        } else {
+            log.dim('No templates placed');
+        }
+    } catch (error) {
+        log.warn(`Template step failed: ${error.message} — continuing without templates`);
+    }
+    log.br();
+
     // Step 6.9: Search for article images (if articleHighlight MG exists)
     const hasArticleMG = mgScenes.some(mg => mg.type === 'articleHighlight');
     if (hasArticleMG) {
@@ -690,11 +986,11 @@ async function buildVideo() {
         height: config.video.height,
         scenes: allScenes,
         mgScenes: mgScenes,
+        templateScenes: templateScenes,
         motionGraphics: motionGraphics,
         mgStyle: mgStyle,
         mapStyle: mapStyle,
         scriptContext: scriptContext,
-        visualAnalysis: visualAnalysis,
         themeId: resolvedThemeId
     };
 
@@ -702,6 +998,21 @@ async function buildVideo() {
     fs.writeFileSync(planPath, JSON.stringify(videoPlan, (k, v) => k === '_fileIndex' ? undefined : v, 2));
     log.ok('Plan saved');
     log.br();
+
+    // ── Orchestrator Phase 3: Post-Build Review + Gap-Filling ──
+    if (buildManifest) {
+        try {
+            const reviewResult = await postBuildReview(videoPlan, buildManifest, midBuildStats);
+            videoPlan.buildReport = reviewResult.report;
+            if (reviewResult.injectedMGs && reviewResult.injectedMGs.length > 0) {
+                log.ok(`Orchestrator injected ${reviewResult.injectedMGs.length} overlay MG(s) to fill gaps`);
+            }
+            // Re-save plan with build report + any injected MGs
+            fs.writeFileSync(planPath, JSON.stringify(videoPlan, (k, v) => k === '_fileIndex' ? undefined : v, 2));
+        } catch (error) {
+            log.warn(`Orchestrator Phase 3 failed: ${error.message}`);
+        }
+    }
 
     // Step 8: Copy files to public folder
     log.step('📂 Step 8: Copying files to public folder');
@@ -773,6 +1084,29 @@ async function buildVideo() {
             }
         }
     }
+    // Copy template background images
+    for (const tpl of templateScenes) {
+        if (tpl.templateBgFile) {
+            const srcBg = path.join(config.paths.temp, tpl.templateBgFile);
+            const destBg = path.join(publicDir, tpl.templateBgFile);
+            if (fs.existsSync(srcBg)) {
+                fs.copyFileSync(srcBg, destBg);
+                log.dim(`🖼️ Copied template bg: ${tpl.templateBgFile}`);
+            }
+        }
+        // Copy item thumbnail images (imageShowcase etc.)
+        if (tpl._itemThumbnails && tpl._itemThumbnails.length > 0) {
+            for (const thumb of tpl._itemThumbnails) {
+                if (!thumb) continue;
+                const srcThumb = path.join(config.paths.temp, thumb);
+                const destThumb = path.join(publicDir, thumb);
+                if (fs.existsSync(srcThumb)) {
+                    fs.copyFileSync(srcThumb, destThumb);
+                    log.dim(`🖼️ Copied template item image: ${thumb}`);
+                }
+            }
+        }
+    }
     // Also check overlay MGs for map images
     for (const mg of motionGraphics) {
         if (mg.mapImageFile) {
@@ -828,6 +1162,20 @@ async function buildVideo() {
     if (explainersCopied > 0) log.dim(`🖼️ Copied ${explainersCopied} explainer images`);
 
     log.ok('Files copied to public folder');
+
+    // Re-link listicle grid thumbnails to updated public scene paths
+    // Check both mgScenes (legacy) and templateScenes (new system)
+    for (const container of [videoPlan.mgScenes, videoPlan.templateScenes]) {
+        if (!container) continue;
+        for (const mg of container) {
+            if (mg.type === 'listicleGrid' && videoPlan.scriptContext?.listicleItems) {
+                mg._itemThumbnails = videoPlan.scriptContext.listicleItems.map(item => {
+                    const scene = scenesWithMedia[item.startSceneIndex];
+                    return scene?.mediaFile || null;
+                });
+            }
+        }
+    }
 
     // Re-save video plan with updated public mediaFile paths
     fs.writeFileSync(

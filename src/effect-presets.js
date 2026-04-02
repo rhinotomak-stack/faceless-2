@@ -18,7 +18,7 @@
  *
  * Available shader effects:
  *   grain, dust, vignette, blurVignette, chromatic, lightLeak,
- *   scratch, colorGrade, scanLine, flicker
+ *   scratch, colorGrade, scanLine, flicker, filmFrame
  */
 
 const EFFECT_PRESETS = {
@@ -180,6 +180,46 @@ const EFFECT_PRESETS = {
             { key: 'speed', label: 'Speed', min: 0, max: 100, def: 50 }
         ],
         themes: ['crime', 'modern']
+    },
+
+    // ─── Film Frame / Vintage ───
+    vintageFrame: {
+        label: 'Vintage Frame',
+        description: 'Vintage film projector look — black border with rounded inner frame, subtle grain, warm vignette. Gives footage an old-school projected feel. Great for documentary, archival, or artistic scenes.',
+        effects: ['filmFrame', 'grain', 'vignette', 'colorGrade'],
+        params: {
+            filmFrame:  { border: 0.04, radius: 0.03, softness: 0.012, darken: 1.0 },
+            grain:      { intensity: 0.10, scale: 1.2 },
+            vignette:   { intensity: 0.5, radius: 0.3, softness: 0.45 },
+            colorGrade: { desaturation: 0.12, tintR: 1.0, tintG: 0.95, tintB: 0.88, tintStrength: 0.25 }
+        },
+        mask: null,
+        sliders: [
+            { key: 'intensity', label: 'Intensity', min: 0, max: 100, def: 30 },
+            { key: 'border', label: 'Border Size', min: 0, max: 100, def: 40 }
+        ],
+        themes: ['history', 'crime', 'standard']
+    },
+
+    filmProjector: {
+        label: 'Film Projector',
+        description: 'Full old projector effect — thick black frame with rounded corners, heavy grain, dust, scratches, flicker, sepia tone. Maximum retro film authenticity.',
+        effects: ['filmFrame', 'grain', 'dust', 'scratch', 'flicker', 'vignette', 'colorGrade'],
+        params: {
+            filmFrame:  { border: 0.055, radius: 0.04, softness: 0.015, darken: 1.0 },
+            grain:      { intensity: 0.22, scale: 1.0 },
+            dust:       { intensity: 0.16, density: 0.4 },
+            scratch:    { intensity: 0.28, speed: 0.7, density: 0.5 },
+            flicker:    { intensity: 0.08, speed: 0.9 },
+            vignette:   { intensity: 0.65, radius: 0.25, softness: 0.4 },
+            colorGrade: { desaturation: 0.55, tintR: 1.0, tintG: 0.88, tintB: 0.7, tintStrength: 0.45 }
+        },
+        mask: null,
+        sliders: [
+            { key: 'intensity', label: 'Intensity', min: 0, max: 100, def: 35 },
+            { key: 'border', label: 'Border Size', min: 0, max: 100, def: 55 }
+        ],
+        themes: ['history']
     }
 };
 

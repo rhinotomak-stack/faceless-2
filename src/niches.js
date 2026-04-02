@@ -38,7 +38,7 @@ const NICHES = {
         ],
 
         footagePriority: {
-            video: ['pexels', 'pixabay', 'youtube', 'newsVideo'],
+            video: ['youtube', 'vkVideo', 'reddit', 'pexels', 'pixabay'],
             image: ['pexels', 'pixabay', 'unsplash', 'googleScrape', 'bing']
         },
 
@@ -96,7 +96,7 @@ const NICHES = {
         ],
 
         footagePriority: {
-            video: ['newsVideo', 'youtube', 'pexels', 'pixabay'],
+            video: ['youtube', 'vkVideo', 'reddit', 'pexels', 'pixabay'],
             image: ['googleScrape', 'bing', 'pexels', 'pixabay', 'unsplash']
         },
 
@@ -155,13 +155,16 @@ const NICHES = {
         ],
 
         footagePriority: {
-            video: ['youtube', 'newsVideo', 'pexels', 'pixabay'],
+            video: ['youtube', 'reddit', 'vkVideo', 'pexels', 'pixabay'],
             image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash']
         },
 
+        // Telegram returns irrelevant content for business topics — permanently excluded
+        excludeVideoProviders: ['telegram'],
+
         defaultPacing: 'moderate',
 
-        preferredMediaType: 'mixed',   // business: charts (image) + office/city (video)
+        preferredMediaType: 'mixed',   // business: real product footage (video) + generic office/charts (stock)
 
         keywords: ['business', 'corporate', 'professional', 'company', 'startup', 'market',
                    'finance', 'economy', 'stock', 'revenue', 'profit', 'investment',
@@ -213,7 +216,7 @@ const NICHES = {
         ],
 
         footagePriority: {
-            video: ['pexels', 'pixabay', 'youtube', 'newsVideo'],
+            video: ['youtube', 'vkVideo', 'reddit', 'pexels', 'pixabay'],
             image: ['pexels', 'unsplash', 'pixabay', 'googleScrape', 'bing']
         },
 
@@ -267,14 +270,16 @@ const NICHES = {
         shotStyle: 'Fast tracking shots, dynamic wide angles, high contrast, slow-motion replays, stadium crowd shots, close-ups of athletes in action, overhead tactical views.',
 
         allowedMGs: [
-            'statCounter', 'rankingList', 'comparisonCard', 'headline', 'focusWord',
-            'kineticText', 'progressBar', 'barChart', 'lowerThird', 'typewriter'
+            'headline', 'lowerThird', 'statCounter', 'focusWord', 'typewriter'
         ],
 
         footagePriority: {
-            video: ['youtube', 'pexels', 'pixabay', 'newsVideo'],
-            image: ['googleScrape', 'bing', 'pexels', 'pixabay', 'unsplash']
+            video: ['reddit', 'youtube', 'vkVideo', 'pexels', 'pixabay'],
+            image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash']
         },
+
+        // Telegram returns irrelevant military/political clips for sport — permanently excluded
+        excludeVideoProviders: ['telegram'],
 
         defaultPacing: 'fast',
 
@@ -331,7 +336,7 @@ const NICHES = {
         ],
 
         footagePriority: {
-            video: ['youtube', 'pexels', 'pixabay', 'newsVideo'],
+            video: ['youtube', 'vkVideo', 'reddit', 'pexels', 'pixabay'],
             image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash']
         },
 
@@ -390,7 +395,7 @@ const NICHES = {
         ],
 
         footagePriority: {
-            video: ['newsVideo', 'youtube', 'pexels', 'pixabay'],
+            video: ['youtube', 'vkVideo', 'reddit', 'pexels', 'pixabay'],
             image: ['bing', 'googleScrape', 'unsplash', 'pexels', 'pixabay']
         },
 
@@ -452,7 +457,7 @@ const NICHES = {
         ],
 
         footagePriority: {
-            video: ['newsVideo', 'youtube', 'pexels', 'pixabay'],
+            video: ['telegram', 'vkVideo', 'youtube', 'reddit', 'pexels', 'pixabay'],
             image: ['bing', 'googleScrape', 'unsplash', 'pexels', 'pixabay']
         },
 
@@ -502,7 +507,7 @@ const NICHES = {
         ],
 
         footagePriority: {
-            video: ['youtube', 'newsVideo', 'pixabay', 'pexels'],
+            video: ['youtube', 'vkVideo', 'reddit', 'pixabay', 'pexels'],
             image: ['bing', 'googleScrape', 'unsplash', 'pexels', 'pixabay']
         },
 
@@ -552,7 +557,7 @@ const NICHES = {
         ],
 
         footagePriority: {
-            video: ['newsVideo', 'youtube', 'pixabay', 'pexels'],
+            video: ['youtube', 'reddit', 'vkVideo', 'pexels', 'pixabay'],
             image: ['bing', 'googleScrape', 'unsplash', 'pexels', 'pixabay']
         },
 
@@ -605,7 +610,7 @@ const NICHES = {
         ],
 
         footagePriority: {
-            video: ['youtube', 'newsVideo', 'pixabay', 'pexels'],
+            video: ['telegram', 'reddit', 'youtube', 'vkVideo', 'pexels', 'pixabay'],
             image: ['bing', 'googleScrape', 'unsplash', 'pexels', 'pixabay']
         },
 
@@ -613,13 +618,16 @@ const NICHES = {
 
         preferredMediaType: 'video',
 
-        keywords: ['military', 'army', 'navy', 'war', 'conflict', 'geopolitics', 'geopolitical',
+        keywords: ['military', 'army', 'navy', 'naval', 'war', 'conflict', 'geopolitics', 'geopolitical',
                    'troops', 'missile', 'weapon', 'defense', 'nato', 'invasion', 'border',
                    'sanctions', 'nuclear', 'submarine', 'drone', 'airforce', 'tank',
                    'soldier', 'regiment', 'alliance', 'territory', 'occupation',
                    'airstrike', 'strike', 'combat', 'radar', 'fighter', 'bomber',
                    'warship', 'artillery', 'ammunition', 'air force', 'battleground',
-                   'squadron', 'fleet', 'pentagon', 'armed forces', 'warfare'],
+                   'squadron', 'fleet', 'pentagon', 'armed forces', 'warfare',
+                   'carrier', 'sailor', 'deployment', 'propulsion', 'sabotage',
+                   'arson', 'admiral', 'destroyer', 'frigate', 'cruiser',
+                   'reconnaissance', 'amphibious', 'battleship'],
 
         searchPolicy: {
             contextTerms: ['military', 'conflict', 'geopolitical'],
@@ -661,7 +669,7 @@ const NICHES = {
         ],
 
         footagePriority: {
-            video: ['youtube', 'newsVideo', 'pixabay', 'pexels'],
+            video: ['youtube', 'vkVideo', 'reddit', 'pixabay', 'pexels'],
             image: ['bing', 'googleScrape', 'unsplash', 'pexels', 'pixabay']
         },
 
@@ -711,7 +719,7 @@ const NICHES = {
         ],
 
         footagePriority: {
-            video: ['youtube', 'pexels', 'pixabay', 'newsVideo'],
+            video: ['youtube', 'vkVideo', 'reddit', 'pexels', 'pixabay'],
             image: ['googleScrape', 'bing', 'pexels', 'pixabay', 'unsplash']
         },
 
@@ -772,7 +780,7 @@ const NICHES = {
         ],
 
         footagePriority: {
-            video: ['pexels', 'pixabay', 'youtube', 'newsVideo'],
+            video: ['youtube', 'vkVideo', 'reddit', 'pexels', 'pixabay'],
             image: ['pexels', 'unsplash', 'pixabay', 'googleScrape', 'bing']
         },
 
@@ -833,7 +841,7 @@ const NICHES = {
         ],
 
         footagePriority: {
-            video: ['pexels', 'pixabay', 'youtube', 'newsVideo'],
+            video: ['youtube', 'vkVideo', 'reddit', 'pexels', 'pixabay'],
             image: ['pexels', 'unsplash', 'pixabay', 'bing', 'googleScrape']
         },
 
@@ -893,7 +901,7 @@ const NICHES = {
         ],
 
         footagePriority: {
-            video: ['youtube', 'pexels', 'pixabay', 'newsVideo'],
+            video: ['youtube', 'vkVideo', 'reddit', 'pexels', 'pixabay'],
             image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash']
         },
 
@@ -956,7 +964,7 @@ const NICHES = {
         ],
 
         footagePriority: {
-            video: ['pexels', 'pixabay', 'youtube', 'newsVideo'],
+            video: ['youtube', 'vkVideo', 'reddit', 'pexels', 'pixabay'],
             image: ['pexels', 'pixabay', 'unsplash', 'bing', 'googleScrape']
         },
 
@@ -1071,8 +1079,9 @@ function pickNicheFromContent(scriptContext) {
         let score = 0;
         for (const keyword of niche.keywords) {
             // Use word boundary regex to avoid partial matches (e.g. 'ai' inside 'raid')
+            // Allow optional plural suffix (s, es, ed, ing) to match "missiles" for "missile" etc.
             const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            const re = new RegExp(`\\b${escaped}\\b`);
+            const re = new RegExp(`\\b${escaped}(?:s|es|ed|ing)?\\b`, 'i');
             if (re.test(text)) {
                 score += 1;
             }
@@ -1134,13 +1143,14 @@ function _detectSubNiche(parentId, text, aiTheme) {
     // A strong keyword signal (e.g., 8 military terms) should override a weak AI theme tag.
     const subScores = {};
     let bestSub = null;
-    let bestScore = 2; // Minimum threshold — need at least 3 keyword hits to specialize
+    let bestScore = 1; // Minimum threshold — need at least 2 keyword hits to specialize
     for (const [subId, sub] of subNiches) {
         if (!sub.keywords) continue;
         let score = 0;
         for (const keyword of sub.keywords) {
             const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            const re = new RegExp(`\\b${escaped}\\b`, 'i');
+            // Match keyword + optional plural suffix (s, es, ed, ing)
+            const re = new RegExp(`\\b${escaped}(?:s|es|ed|ing)?\\b`, 'i');
             if (re.test(text)) score += 1;
         }
         subScores[subId] = score;
@@ -1150,15 +1160,38 @@ function _detectSubNiche(parentId, text, aiTheme) {
         }
     }
 
+    // Log sub-niche scores for debugging
+    const scoresSummary = Object.entries(subScores)
+        .filter(([_, s]) => s > 0)
+        .sort((a, b) => b[1] - a[1])
+        .map(([id, s]) => `${id}(${s})`)
+        .join(', ');
+    if (scoresSummary) {
+        console.log(`      [Sub-niche scores]: ${scoresSummary}${directSub ? ` | AI-theme→${directSub}` : ''}`);
+    }
+
     // If keyword scoring found a clear winner, use it — even over AI theme
-    // But if keyword winner only barely beats the AI-theme sub-niche, trust the AI theme
+    // Override AI theme if keyword winner beats it significantly
     if (directSub && NICHES[directSub]) {
         const directScore = subScores[directSub] || 0;
-        // Keyword winner must beat AI-theme sub-niche by 3+ hits to override
-        if (!bestSub || bestSub === directSub || (bestScore - directScore) < 3) {
+        const diff = bestScore - directScore;
+        const ratio = directScore > 0 ? bestScore / directScore : bestScore;
+
+        // If AI theme's sub-niche scored 0 keywords and a keyword winner exists,
+        // the keyword evidence should win — the AI theme was likely wrong
+        if (directScore === 0 && bestSub && bestSub !== directSub) {
+            console.log(`      [Sub-niche override]: ${bestSub}(${bestScore}) wins — AI-theme ${directSub} scored 0 keywords`);
+            return bestSub;
+        }
+
+        if (!bestSub || bestSub === directSub || (diff < 2 && ratio < 2)) {
+            if (bestSub && bestSub !== directSub) {
+                console.log(`      [Sub-niche]: keyword winner ${bestSub}(${bestScore}) not strong enough to override AI-theme ${directSub}(${directScore}) — need higher ratio or gap`);
+            }
             return directSub;
         }
         // Keyword winner is significantly stronger — override AI theme
+        console.log(`      [Sub-niche override]: ${bestSub}(${bestScore}) beats AI-theme ${directSub}(${directScore}) [diff=${diff}, ratio=${ratio.toFixed(1)}x]`);
     }
 
     return bestSub; // null if no sub-niche scored high enough
@@ -1172,7 +1205,7 @@ function _detectSubNiche(parentId, text, aiTheme) {
 const STOCK_PROVIDERS = new Set(['pexels', 'pixabay', 'unsplash']);
 
 // Providers where context-enriched queries work better (web search)
-const WEB_PROVIDERS = new Set(['bing', 'googleScrape', 'newsVideo']);
+const WEB_PROVIDERS = new Set(['bing', 'googleScrape']);
 
 // YouTube needs specific event/topic queries — not too short (stock-style) or too long (web-style)
 const YOUTUBE_PROVIDERS = new Set(['youtube']);
@@ -1248,6 +1281,7 @@ function rewriteQuery(keyword, nicheId, providerKey, scene) {
                 'press', 'conference', 'report', 'event', 'moment', 'latest',
                 'new', 'old', 'big', 'small', 'very', 'more', 'most', 'just',
                 'about', 'like', 'near', 'around', 'during', 'after', 'before',
+                'diagram', 'chart', 'infographic', 'illustration', 'schematic', 'portrait', 'picture',
             ]);
 
             if (policy.entityBoost && scene && scene.entities && scene.entities.length > 0) {
@@ -1299,7 +1333,15 @@ function rewriteQuery(keyword, nicheId, providerKey, scene) {
             query = query + ' footage';
         }
     } else if (WEB_PROVIDERS.has(providerKey)) {
-        // Web providers: only add context term if query is short/generic (≤3 words)
+        // Web/news providers: strip image-only words that hurt video search
+        const WEB_STRIP = new Set([
+            'diagram', 'chart', 'infographic', 'illustration', 'schematic',
+            'photo', 'photos', 'image', 'images', 'portrait', 'picture',
+        ]);
+        const webWords = query.split(/\s+/).filter(w => !WEB_STRIP.has(w.toLowerCase()));
+        if (webWords.length > 0) query = webWords.join(' ');
+
+        // Only add context term if query is short/generic (≤3 words)
         // The Visual Planner already generates 4-8 word specific queries — don't bloat them
         const wordCount = query.split(/\s+/).length;
         if (wordCount <= 3 && policy.contextTerms && policy.contextTerms.length > 0) {
@@ -1457,6 +1499,43 @@ function resolvePreset(presetKey) {
         suggestedFormat: preset.suggestedFormat,
         suggestedPacing: preset.suggestedPacing
     };
+}
+
+// NOTE: listicleGrid removed from MG system — now handled by ai-templates.js (Step 6.5)
+// listicleCounter is added dynamically only when format is 'listicle' (see build-video.js)
+// Do NOT force-inject listicle MG types into all niches — they're format-specific.
+
+// ── Default template settings for all niches ──
+// Per-niche template type allowlist and density (max count).
+// Niches can override these by defining allowedTemplates/templateDensity explicitly.
+const DEFAULT_ALLOWED_TEMPLATES = ['chapterCard', 'locationCard', 'quoteCard', 'keyTakeaway', 'comparisonCard', 'timelineCard', 'factCard', 'imageShowcase'];
+const NICHE_TEMPLATE_CONFIG = {
+    nature:          { allowed: ['chapterCard', 'locationCard', 'quoteCard', 'keyTakeaway', 'factCard', 'imageShowcase'],                          density: 'low' },
+    crime:           { allowed: ['chapterCard', 'locationCard', 'quoteCard', 'keyTakeaway', 'timelineCard', 'factCard', 'imageShowcase'],          density: 'medium' },
+    business:        { allowed: ['chapterCard', 'quoteCard', 'keyTakeaway', 'comparisonCard', 'factCard', 'imageShowcase'],                        density: 'low' },
+    luxury:          { allowed: ['chapterCard', 'locationCard', 'quoteCard', 'keyTakeaway', 'imageShowcase'],                                      density: 'low' },
+    sport:           { allowed: ['chapterCard', 'quoteCard', 'keyTakeaway', 'comparisonCard', 'factCard', 'imageShowcase'],                        density: 'low' },
+    education:       { allowed: ['chapterCard', 'quoteCard', 'keyTakeaway', 'comparisonCard', 'timelineCard', 'factCard', 'imageShowcase'],        density: 'medium' },
+    news:            { allowed: ['chapterCard', 'locationCard', 'quoteCard', 'keyTakeaway', 'timelineCard', 'factCard', 'imageShowcase'],          density: 'medium' },
+    'news.politics': { allowed: ['chapterCard', 'locationCard', 'quoteCard', 'keyTakeaway', 'timelineCard', 'factCard', 'imageShowcase'],          density: 'medium' },
+    'news.celebrity':{ allowed: ['chapterCard', 'quoteCard', 'keyTakeaway', 'imageShowcase'],                                                      density: 'low' },
+    'news.economy':  { allowed: ['chapterCard', 'quoteCard', 'keyTakeaway', 'comparisonCard', 'factCard', 'imageShowcase'],                        density: 'low' },
+    'news.military': { allowed: ['chapterCard', 'locationCard', 'quoteCard', 'keyTakeaway', 'timelineCard', 'factCard', 'imageShowcase'],          density: 'medium' },
+    'news.tech':     { allowed: ['chapterCard', 'quoteCard', 'keyTakeaway', 'comparisonCard', 'factCard', 'imageShowcase'],                        density: 'low' },
+    history:         { allowed: ['chapterCard', 'locationCard', 'quoteCard', 'keyTakeaway', 'timelineCard', 'factCard', 'imageShowcase'],          density: 'medium' },
+    motivation:      { allowed: ['chapterCard', 'quoteCard', 'keyTakeaway', 'imageShowcase'],                                                      density: 'low' },
+    food:            { allowed: ['chapterCard', 'locationCard', 'keyTakeaway', 'factCard', 'imageShowcase'],                                       density: 'low' },
+    diy:             { allowed: ['chapterCard', 'keyTakeaway', 'comparisonCard', 'factCard', 'imageShowcase'],                                     density: 'low' },
+    general:         { allowed: DEFAULT_ALLOWED_TEMPLATES,                                                                                         density: 'low' },
+};
+for (const niche of Object.values(NICHES)) {
+    const cfg = NICHE_TEMPLATE_CONFIG[niche.id];
+    if (!niche.allowedTemplates) {
+        niche.allowedTemplates = cfg ? cfg.allowed : DEFAULT_ALLOWED_TEMPLATES;
+    }
+    if (!niche.templateDensity) {
+        niche.templateDensity = cfg ? cfg.density : 'low';
+    }
 }
 
 // ============================================================

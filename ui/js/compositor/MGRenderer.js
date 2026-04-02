@@ -25,6 +25,11 @@ class MGRenderer {
         // Cache for loaded article images (articleImageFile → HTMLImageElement)
         this._articleImages = {};
         this._articleImageLoading = {};
+        // Cache for listicle grid thumbnails (mediaFile → HTMLCanvasElement with extracted frame)
+        this._gridThumbs = {};
+        this._gridThumbLoading = {};
+        // Underlying V1 media element (video/image) — set by Compositor before renderMG for templates
+        this._underlyingMedia = null;
 
         // ── Registry-driven rendering ──
         // Category renderers: 'mgType' → function(ctx, frame, fps, mg, s, anim, scriptContext)
@@ -48,6 +53,19 @@ class MGRenderer {
             mapChart:       (ctx, f, fps, mg, s, a, sc) => { this._ensureMapImage(mg); this._renderMapChart(ctx, f, fps, mg, s, a, sc); },
             explainer:      (ctx, f, fps, mg, s, a, sc) => { this._ensureExplainerImage(mg); this._renderExplainer(ctx, f, fps, mg, s, a, sc); },
             articleHighlight: (ctx, f, fps, mg, s, a, sc) => { this._ensureArticleImage(mg); this._renderArticleHighlight(ctx, f, fps, mg, s, a); },
+            listicleCounter: (ctx, f, fps, mg, s, a, sc) => this._renderListicleCounter(ctx, f, fps, mg, s, a),
+            progressTracker: (ctx, f, fps, mg, s, a, sc) => this._renderProgressTracker(ctx, f, fps, mg, s, a),
+            listicleGrid:    (ctx, f, fps, mg, s, a, sc) => { this._ensureGridThumbnails(mg); this._renderListicleGrid(ctx, f, fps, mg, s, a); },
+            // Template types (from ai-templates.js)
+            // _ensureTemplateMedia loads the scene's video/image for template background (universal)
+            // _ensureTemplateBgImage loads the static downloaded bg image (fallback)
+            chapterCard:     (ctx, f, fps, mg, s, a, sc) => { this._ensureTemplateMedia(mg); this._ensureTemplateBgImage(mg); this._renderChapterCard(ctx, f, fps, mg, s, a); },
+            locationCard:    (ctx, f, fps, mg, s, a, sc) => { this._ensureTemplateMedia(mg); this._ensureTemplateBgImage(mg); this._renderLocationCard(ctx, f, fps, mg, s, a); },
+            quoteCard:       (ctx, f, fps, mg, s, a, sc) => { this._ensureTemplateMedia(mg); this._renderQuoteCard(ctx, f, fps, mg, s, a); },
+            keyTakeaway:     (ctx, f, fps, mg, s, a, sc) => { this._ensureTemplateMedia(mg); this._renderKeyTakeaway(ctx, f, fps, mg, s, a); },
+            timelineCard:    (ctx, f, fps, mg, s, a, sc) => { this._ensureTemplateMedia(mg); this._renderTimelineCard(ctx, f, fps, mg, s, a); },
+            factCard:        (ctx, f, fps, mg, s, a, sc) => { this._ensureTemplateMedia(mg); this._ensureTemplateBgImage(mg); this._renderFactCard(ctx, f, fps, mg, s, a); },
+            imageShowcase:   (ctx, f, fps, mg, s, a, sc) => { this._ensureTemplateMedia(mg); this._ensureGridThumbnails(mg); this._renderImageShowcase(ctx, f, fps, mg, s, a); },
         };
 
         // Variant renderers: 'category:variant' → function(ctx, mg, s, anim, a, setup)
@@ -58,12 +76,12 @@ class MGRenderer {
             'headline:stamp':       (ctx, mg, s, anim, a, p) => this._renderHL_Stamp(ctx, mg, s, anim, a, p),
             'headline:typewriter':  (ctx, mg, s, anim, a, p) => this._renderHL_Typewriter(ctx, mg, s, anim, a, p),
             // LowerThird variants
-            'lowerThird:bar':       (ctx, mg, s, anim, a, p) => this._renderLT_Bar(ctx, mg, s, anim, a, p.bx, p.by, p.bw, p.bh, p.colors),
-            'lowerThird:box':       (ctx, mg, s, anim, a, p) => this._renderLT_Box(ctx, mg, s, anim, a, p.bx, p.by, p.bw, p.bh, p.colors),
-            'lowerThird:underline': (ctx, mg, s, anim, a, p) => this._renderLT_Underline(ctx, mg, s, anim, a, p.bx, p.by, p.bw, p.bh, p.colors),
-            'lowerThird:banner':    (ctx, mg, s, anim, a, p) => this._renderLT_Banner(ctx, mg, s, anim, a, p.by, p.colors),
-            'lowerThird:glass':     (ctx, mg, s, anim, a, p) => this._renderLT_Glass(ctx, mg, s, anim, a, p.bx, p.by, p.bw, p.bh, p.colors),
-            'lowerThird:split':     (ctx, mg, s, anim, a, p) => this._renderLT_Split(ctx, mg, s, anim, a, p.bx, p.by, p.bw, p.bh, p.colors),
+            'lowerThird:bar':       (ctx, mg, s, anim, a, p) => this._renderLT_Bar(ctx, mg, s, anim, a, p.bx, p.by, p.bw, p.bh, p.ls),
+            'lowerThird:box':       (ctx, mg, s, anim, a, p) => this._renderLT_Box(ctx, mg, s, anim, a, p.bx, p.by, p.bw, p.bh, p.ls),
+            'lowerThird:underline': (ctx, mg, s, anim, a, p) => this._renderLT_Underline(ctx, mg, s, anim, a, p.bx, p.by, p.bw, p.bh, p.ls),
+            'lowerThird:banner':    (ctx, mg, s, anim, a, p) => this._renderLT_Banner(ctx, mg, s, anim, a, p.by, p.bw, p.ls),
+            'lowerThird:glass':     (ctx, mg, s, anim, a, p) => this._renderLT_Glass(ctx, mg, s, anim, a, p.bx, p.by, p.bw, p.bh, p.ls),
+            'lowerThird:split':     (ctx, mg, s, anim, a, p) => this._renderLT_Split(ctx, mg, s, anim, a, p.bx, p.by, p.bw, p.bh, p.ls),
             // Callout variants
             'callout:standard':     (ctx, mg, s, anim, a, p) => this._renderCO_Standard(ctx, mg, s, anim, a, p),
             'callout:minimal':      (ctx, mg, s, anim, a, p) => this._renderCO_Minimal(ctx, mg, s, anim, a, p),
@@ -75,6 +93,19 @@ class MGRenderer {
             // Typewriter variants
             'typewriter:standard':  (ctx, mg, s, anim, a, p) => this._renderTW_Standard(ctx, mg, s, anim, a, p),
             'typewriter:naked':     (ctx, mg, s, anim, a, p) => this._renderTW_Naked(ctx, mg, s, anim, a, p),
+            // ListicleCounter variants
+            'listicleCounter:badge':   (ctx, mg, s, anim, a, p) => this._renderLC_Badge(ctx, mg, s, anim, a, p),
+            'listicleCounter:pill':    (ctx, mg, s, anim, a, p) => this._renderLC_Pill(ctx, mg, s, anim, a, p),
+            'listicleCounter:ribbon':  (ctx, mg, s, anim, a, p) => this._renderLC_Ribbon(ctx, mg, s, anim, a, p),
+            'listicleCounter:minimal': (ctx, mg, s, anim, a, p) => this._renderLC_Minimal(ctx, mg, s, anim, a, p),
+            // ProgressTracker variants
+            'progressTracker:bar':      (ctx, mg, s, anim, a, p) => this._renderPT_Bar(ctx, mg, s, anim, a, p),
+            'progressTracker:dots':     (ctx, mg, s, anim, a, p) => this._renderPT_Dots(ctx, mg, s, anim, a, p),
+            'progressTracker:fraction': (ctx, mg, s, anim, a, p) => this._renderPT_Fraction(ctx, mg, s, anim, a, p),
+            // ListicleGrid variants
+            'listicleGrid:grid':        (ctx, mg, s, anim, a, p) => this._renderLG_Grid(ctx, mg, s, anim, a, p),
+            'listicleGrid:strip':       (ctx, mg, s, anim, a, p) => this._renderLG_Strip(ctx, mg, s, anim, a, p),
+            'listicleGrid:stack':       (ctx, mg, s, anim, a, p) => this._renderLG_Stack(ctx, mg, s, anim, a, p),
         };
 
         // Animation computers: 'animType' → function(frame, fps, anim, mg) → state object
@@ -180,6 +211,227 @@ class MGRenderer {
     }
 
     /**
+     * Lazily load a template background image. Non-blocking.
+     */
+    _ensureTemplateBgImage(mg) {
+        const file = mg.templateBgFile;
+        const url = mg._templateBgUrl;
+        if (!file || !url) return;
+        if (!this._templateBgImages) this._templateBgImages = {};
+        if (!this._templateBgLoading) this._templateBgLoading = {};
+        if (this._templateBgImages[file] || this._templateBgLoading[file]) return;
+        this._templateBgLoading[file] = true;
+        const img = new Image();
+        img.onload = () => {
+            this._templateBgImages[file] = img;
+            delete this._templateBgLoading[file];
+            console.log(`[MGRenderer] Template bg loaded: ${file}`);
+        };
+        img.onerror = () => {
+            delete this._templateBgLoading[file];
+            console.warn(`[MGRenderer] Failed to load template bg: ${file}`);
+        };
+        img.src = url;
+    }
+
+    /**
+     * Lazily load a template's scene media (video or image). Non-blocking.
+     * This is the footage clip that was downloaded for the scene before it was carved for the template.
+     */
+    _ensureTemplateMedia(mg) {
+        const file = mg.templateMediaFile;
+        const url = mg._templateMediaUrl;
+        if (!file || !url) return;
+        if (!this._templateMedia) this._templateMedia = {};
+        if (!this._templateMediaLoading) this._templateMediaLoading = {};
+        if (this._templateMedia[file] || this._templateMediaLoading[file]) return;
+        this._templateMediaLoading[file] = true;
+
+        const isVideo = /\.(mp4|webm|mov|mkv)$/i.test(file);
+        if (isVideo) {
+            const video = document.createElement('video');
+            video.crossOrigin = 'anonymous';
+            video.muted = true;
+            video.playsInline = true;
+            video.preload = 'auto';
+            video.style.display = 'none';
+            document.body.appendChild(video);
+            video.onloadeddata = () => {
+                this._templateMedia[file] = video;
+                delete this._templateMediaLoading[file];
+                console.log(`[MGRenderer] Template media loaded (video): ${file.split(/[/\\]/).pop()}`);
+            };
+            video.onerror = () => {
+                delete this._templateMediaLoading[file];
+                console.warn(`[MGRenderer] Failed to load template media: ${file.split(/[/\\]/).pop()}`);
+                if (video.parentNode) video.parentNode.removeChild(video);
+            };
+            video.src = url;
+        } else {
+            const img = new Image();
+            img.crossOrigin = 'anonymous';
+            img.onload = () => {
+                this._templateMedia[file] = img;
+                delete this._templateMediaLoading[file];
+                console.log(`[MGRenderer] Template media loaded (image): ${file.split(/[/\\]/).pop()}`);
+            };
+            img.onerror = () => {
+                delete this._templateMediaLoading[file];
+                console.warn(`[MGRenderer] Failed to load template media: ${file.split(/[/\\]/).pop()}`);
+            };
+            img.src = url;
+        }
+    }
+
+    /**
+     * Draw a template background with cover-fit + scrim overlay.
+     * Priority: underlying V1 video/image → static template bg image → false.
+     * Returns true if drawn, false if no source available.
+     */
+    _drawTemplateBg(ctx, mg, W, H, alpha) {
+        // Source priority: template scene media (video/image) → downloaded static bg → false
+        let source = null;
+        let srcW = 0, srcH = 0;
+
+        // 1. Try template's own scene media (video clip or image downloaded for this scene)
+        if (this._templateMedia && mg.templateMediaFile) {
+            const media = this._templateMedia[mg.templateMediaFile];
+            if (media instanceof HTMLVideoElement && media.videoWidth > 0) {
+                // Seek video to correct time for this template frame
+                // Only seek if not already seeking and delta is large enough
+                const offset = mg.templateMediaOffset || 0;
+                const localTime = (this._currentRenderFrame || 0) / this.fps;
+                const targetTime = offset + localTime;
+                if (!media.seeking && Math.abs(media.currentTime - targetTime) > 0.15) {
+                    media.currentTime = Math.min(targetTime, media.duration || targetTime);
+                }
+                // Use video as source even while seeking (shows last decoded frame)
+                source = media;
+                srcW = media.videoWidth;
+                srcH = media.videoHeight;
+            } else if (media instanceof HTMLImageElement && media.complete && media.naturalWidth > 0) {
+                source = media;
+                srcW = media.naturalWidth;
+                srcH = media.naturalHeight;
+            }
+        }
+
+        // 2. Fallback: downloaded static template bg image
+        if (!source && this._templateBgImages) {
+            const img = this._templateBgImages[mg.templateBgFile];
+            if (img) {
+                source = img;
+                srcW = img.naturalWidth || img.width;
+                srcH = img.naturalHeight || img.height;
+            }
+        }
+
+        if (!source) {
+            // If templateMediaFile exists but isn't loaded yet, fill with neutral dark
+            // to avoid a harsh flash from the caller's solid fill
+            if (mg.templateMediaFile) {
+                ctx.save();
+                ctx.globalAlpha = alpha;
+                ctx.fillStyle = '#1a1a1a';
+                ctx.fillRect(0, 0, W, H);
+                ctx.restore();
+                return true; // tell caller we handled the bg
+            }
+            return false;
+        }
+
+        ctx.save();
+        ctx.globalAlpha = alpha;
+
+        // Cover-fit
+        const scale = Math.max(W / srcW, H / srcH);
+        const sw = W / scale;
+        const sh = H / scale;
+        const sx = (srcW - sw) / 2;
+        const sy = (srcH - sh) / 2;
+        ctx.drawImage(source, sx, sy, sw, sh, 0, 0, W, H);
+
+        // Cinematic scrim overlay for text readability
+        const scrim = ctx.createRadialGradient(W / 2, H / 2, W * 0.2, W / 2, H / 2, W * 0.75);
+        scrim.addColorStop(0, 'rgba(0,0,0,0.3)');
+        scrim.addColorStop(1, 'rgba(0,0,0,0.65)');
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = scrim;
+        ctx.fillRect(0, 0, W, H);
+
+        ctx.restore();
+        return true;
+    }
+
+    /**
+     * Lazily load thumbnails for listicle grid items.
+     * Handles both images (jpg/png/webp) and videos (mp4 — extracts frame at 1s).
+     */
+    _ensureGridThumbnails(mg) {
+        const thumbs = mg._itemThumbnails;
+        if (!thumbs || !Array.isArray(thumbs)) return;
+        const resolvedUrls = mg._itemThumbnailUrls; // Pre-resolved file:// URLs from app.js
+
+        for (let i = 0; i < thumbs.length; i++) {
+            const raw = thumbs[i];
+            if (!raw) continue;
+            // Strip to just filename for cache key
+            const file = raw.replace(/^.*[/\\]/, '');
+            if (this._gridThumbs[file] || this._gridThumbLoading[file]) continue;
+
+            this._gridThumbLoading[file] = true;
+            // Use pre-resolved file:// URL if available, fallback to media/ prefix
+            const url = (resolvedUrls && resolvedUrls[i]) || `media/${file}`;
+            const isVideo = /\.(mp4|webm|mkv|mov)$/i.test(file);
+
+            if (isVideo) {
+                // Extract frame from video at 1s
+                const video = document.createElement('video');
+                video.crossOrigin = 'anonymous';
+                video.muted = true;
+                video.preload = 'auto';
+                video.onloadeddata = () => {
+                    video.currentTime = Math.min(1, video.duration * 0.2);
+                };
+                video.onseeked = () => {
+                    try {
+                        const c = document.createElement('canvas');
+                        c.width = 320; c.height = 180;
+                        const cx = c.getContext('2d');
+                        cx.drawImage(video, 0, 0, 320, 180);
+                        this._gridThumbs[file] = c;
+                        delete this._gridThumbLoading[file];
+                        video.src = ''; // release
+                    } catch (e) {
+                        delete this._gridThumbLoading[file];
+                    }
+                };
+                video.onerror = () => { delete this._gridThumbLoading[file]; };
+                video.src = url;
+            } else {
+                // Load image directly
+                const img = new Image();
+                img.onload = () => {
+                    this._gridThumbs[file] = img;
+                    delete this._gridThumbLoading[file];
+                };
+                img.onerror = () => { delete this._gridThumbLoading[file]; };
+                img.src = url;
+            }
+        }
+    }
+
+    /**
+     * Get a loaded thumbnail for a media file, or null if not ready yet.
+     */
+    _getGridThumb(file) {
+        if (!file) return null;
+        // Look up by stripped filename (thumbnails cached by filename, not full path)
+        const name = file.replace(/^.*[/\\]/, '');
+        return this._gridThumbs[name] || null;
+    }
+
+    /**
      * Lazily load an explainer transparent PNG. Non-blocking.
      */
     _ensureExplainerImage(mg) {
@@ -206,6 +458,7 @@ class MGRenderer {
      * Returns a TextureManager entry { texture, width, height } or null.
      */
     renderMG(mg, localFrame, scriptContext) {
+        this._currentRenderFrame = localFrame;
         const ctx = this._ctx;
         const s_ = this._previewScale;
         // Scale canvas context so all drawing code uses 1920x1080 coordinates
@@ -326,9 +579,51 @@ class MGRenderer {
                 ctx.globalAlpha = alpha;
                 this._drawCSSGradientOnCanvas(ctx, css, W, H);
             }
+        } else if (bg.startsWith('image:')) {
+            const filename = bg.replace('image:', '');
+            ctx.globalAlpha = alpha;
+            this._drawBgImage(ctx, filename, W, H);
         }
 
         ctx.restore();
+    }
+
+    /**
+     * Lazily load and draw a background image from assets/backgrounds/.
+     * Uses electronAPI.getBackgroundUrl() to resolve file:// URL.
+     */
+    _drawBgImage(ctx, filename, W, H) {
+        // Check cache
+        if (this._bgImages && this._bgImages[filename]) {
+            const img = this._bgImages[filename];
+            // Cover-fit the image
+            const srcA = img.naturalWidth / img.naturalHeight;
+            const dstA = W / H;
+            let sx = 0, sy = 0, sw = img.naturalWidth, sh = img.naturalHeight;
+            if (srcA > dstA) { sw = sh * dstA; sx = (img.naturalWidth - sw) / 2; }
+            else { sh = sw / dstA; sy = (img.naturalHeight - sh) / 2; }
+            ctx.drawImage(img, sx, sy, sw, sh, 0, 0, W, H);
+            return;
+        }
+
+        // Start loading
+        if (!this._bgImages) this._bgImages = {};
+        if (!this._bgImageLoading) this._bgImageLoading = {};
+        if (this._bgImageLoading[filename]) return;
+
+        this._bgImageLoading[filename] = true;
+        if (window.electronAPI?.getBackgroundUrl) {
+            window.electronAPI.getBackgroundUrl(filename).then(url => {
+                if (!url) { delete this._bgImageLoading[filename]; return; }
+                const img = new Image();
+                img.onload = () => {
+                    this._bgImages[filename] = img;
+                    delete this._bgImageLoading[filename];
+                };
+                img.onerror = () => { delete this._bgImageLoading[filename]; };
+                img.src = url;
+            }).catch(() => { delete this._bgImageLoading[filename]; });
+        }
     }
 
     /**
@@ -442,8 +737,14 @@ class MGRenderer {
         'bottom-left':  { anchorX: 0, anchorY: 1, padX: 77, padY: -86 },
         'bottom-right': { anchorX: 1, anchorY: 1, padX: -77, padY: -86 },
         'top':          { anchorX: 0.5, anchorY: 0, padX: 0, padY: 54 },
+        'top-right':    { anchorX: 1, anchorY: 0, padX: -77, padY: 54 },
         'center-left':  { anchorX: 0, anchorY: 0.5, padX: 96, padY: 0 },
         'top-left':     { anchorX: 0, anchorY: 0, padX: 77, padY: 54 },
+        // camelCase aliases (from UI dropdowns)
+        'bottomLeft':   { anchorX: 0, anchorY: 1, padX: 77, padY: -86 },
+        'bottomRight':  { anchorX: 1, anchorY: 1, padX: -77, padY: -86 },
+        'topLeft':      { anchorX: 0, anchorY: 0, padX: 77, padY: 54 },
+        'topRight':     { anchorX: 1, anchorY: 0, padX: -77, padY: 54 },
     };
 
     static _getPosXY(position, contentW, contentH) {
@@ -786,21 +1087,22 @@ class MGRenderer {
     _renderLowerThird(ctx, frame, fps, mg, s, anim) {
         const variant = this._resolveVariant(mg, s, 'lowerThird');
         const animType = this._resolveAnimation(mg, s, 'lowerThird');
-        const colors = this._resolveColors(s, 'lowerThird');
+        const ls = this._getLowerThirdStyle(mg);
 
         // Measure text to compute dynamic box width
         const padding = 48;
         const minW = 250, maxW = 900;
-        MGRenderer._setFont(ctx, '700', 36, s.fontHeading);
+        MGRenderer._setFont(ctx, ls.titleWeight, ls.titleSize, s.fontHeading);
         const titleW = ctx.measureText(mg.text || '').width;
-        MGRenderer._setFont(ctx, '500', 22, s.fontBody);
+        MGRenderer._setFont(ctx, ls.subWeight, ls.subSize, s.fontBody);
         const subW = mg.subtext ? ctx.measureText(mg.subtext).width : 0;
         const contentW = Math.max(titleW, subW);
         const boxW = Math.max(minW, Math.min(maxW, contentW + padding));
         const boxH = mg.subtext ? 100 : 70;
         const margin = 60;
 
-        const pos = (mg.position || 'bottom-left').toLowerCase().replace(/\s+/g, '-');
+        const rawPos = typeof mg.position === 'string' ? mg.position : 'bottom-left';
+        const pos = rawPos.toLowerCase().replace(/\s+/g, '-');
         let baseX, baseY;
         if (pos.includes('top')) { baseY = margin + 20; }
         else { baseY = 1080 - boxH - margin; }
@@ -814,7 +1116,7 @@ class MGRenderer {
         ctx.globalAlpha = Math.min(1, anim.isExiting ? anim.exitProgress : anim.opacity);
 
         this._dispatchVariant(ctx, 'lowerThird', variant, mg, s, anim, a,
-            { bx: baseX, by: baseY, bw: boxW, bh: boxH, colors });
+            { bx: baseX, by: baseY, bw: boxW, bh: boxH, ls });
 
         ctx.restore();
     }
@@ -848,10 +1150,12 @@ class MGRenderer {
         const speed = anim.speed;
         const r = {};
         r.wipeProgress = interpolate(anim.enterSpring, [0, 1], [0, 1]);
-        const td = Math.round((0.25 / speed) * fps);
+        r.clipAmount = interpolate(anim.enterSpring, [0, 1], [0, 100]); // for bar/box clip
+        const td = Math.round((0.2 / speed) * fps);
         r.textSpring = springValue(Math.max(0, frame - td), fps, { damping: 16, stiffness: 90, durationInFrames: Math.round((0.3 / speed) * fps) });
-        r.textSlideX = interpolate(r.textSpring, [0, 1], [-20, 0]);
-        r.subSpring = springValue(Math.max(0, frame - Math.round((0.4 / speed) * fps)), fps, { damping: 18, stiffness: 100 });
+        r.textSlideX = interpolate(r.textSpring, [0, 1], [-30, 0]); // more visible slide
+        r.barScaleY = springValue(Math.max(0, frame - Math.round((0.1 / speed) * fps)), fps, { damping: 18, stiffness: 120 });
+        r.subSpring = springValue(Math.max(0, frame - Math.round((0.35 / speed) * fps)), fps, { damping: 18, stiffness: 100 });
         // Headline compat
         r.scale = interpolate(anim.enterSpring, [0, 1], [0.95, 1]);
         r.slideY = 0;
@@ -866,32 +1170,37 @@ class MGRenderer {
         const { springValue, interpolate } = AnimationUtils;
         const speed = anim.speed;
         const r = {};
-        r.scaleY = springValue(frame, fps, { damping: 12, stiffness: 150, durationInFrames: Math.round((0.4 / speed) * fps) });
-        r.scale = r.scaleY; // alias for headline variants
+        r.scaleY = springValue(frame, fps, { damping: 10, stiffness: 160, durationInFrames: Math.round((0.45 / speed) * fps) });
+        r.scale = r.scaleY;
         r.stampScale = r.scaleY;
         r.stampAlpha = interpolate(anim.enterLinear, [0, 0.1], [0, 1], { extrapolateRight: 'clamp' });
-        r.slideY = interpolate(r.scaleY, [0, 1], [40, 0]);
-        const td = Math.round((0.15 / speed) * fps);
-        r.textSpring = springValue(Math.max(0, frame - td), fps, { damping: 18, stiffness: 100, durationInFrames: Math.round((0.3 / speed) * fps) });
+        r.slideY = interpolate(r.scaleY, [0, 1], [80, 0]); // bigger Y travel
+        r.clipAmount = 100; // no clip, full reveal
+        r.barScaleY = r.scaleY;
+        const td = Math.round((0.12 / speed) * fps);
+        r.textSpring = springValue(Math.max(0, frame - td), fps, { damping: 16, stiffness: 120, durationInFrames: Math.round((0.3 / speed) * fps) });
         r.textSlideX = 0;
-        r.subSpring = springValue(Math.max(0, frame - Math.round((0.3 / speed) * fps)), fps, { damping: 18, stiffness: 100 });
+        r.subSpring = springValue(Math.max(0, frame - Math.round((0.25 / speed) * fps)), fps, { damping: 18, stiffness: 100 });
         r.revealProgress = interpolate(anim.enterLinear, [0, 1], [0, 1.1]);
         r.barSpring = r.textSpring;
         return r;
     }
 
     _computeAnim_fadeSlide(frame, fps, anim, mg) {
-        const { interpolate } = AnimationUtils;
+        const { interpolate, springValue } = AnimationUtils;
+        const speed = anim.speed;
         const r = {};
-        r.fadeIn = interpolate(anim.enterLinear, [0, 0.6], [0, 1], { extrapolateRight: 'clamp' });
-        r.slideY = interpolate(anim.enterSpring, [0, 1], [20, 0]);
-        r.textSpring = r.fadeIn;
-        r.textSlideX = 0;
-        r.subSpring = interpolate(anim.enterLinear, [0.2, 0.8], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' });
+        r.fadeIn = interpolate(anim.enterLinear, [0, 0.5], [0, 1], { extrapolateRight: 'clamp' });
+        r.slideY = interpolate(anim.enterSpring, [0, 1], [60, 0]); // larger slide for visibility
+        r.textSpring = springValue(Math.max(0, frame - Math.round((0.15 / speed) * fps)), fps, { damping: 16, stiffness: 100 });
+        r.textSlideX = interpolate(r.textSpring, [0, 1], [30, 0]); // text slides right as it fades in
+        r.subSpring = interpolate(anim.enterLinear, [0.3, 0.9], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' });
+        r.barScaleY = r.textSpring; // for bar variant
+        r.clipAmount = interpolate(anim.enterSpring, [0, 1], [0, 100]); // clip reveal too
         // Headline compat
-        r.scale = 1;
+        r.scale = interpolate(anim.enterSpring, [0, 1], [0.92, 1]);
         r.barSpring = r.textSpring;
-        r.stampScale = 1;
+        r.stampScale = r.scale;
         r.stampAlpha = r.fadeIn;
         r.revealProgress = interpolate(anim.enterLinear, [0, 1], [0, 1.1]);
         return r;
@@ -931,120 +1240,179 @@ class MGRenderer {
 
     // ── Variant: BAR (thin vertical gradient bar + text) ──
     // Used by: tech, neutral
-    _renderLT_Bar(ctx, mg, s, anim, a, bx, by, bw, bh, colors) {
+    _renderLT_Bar(ctx, mg, s, anim, a, bx, by, bw, bh, ls) {
         const { opacity, isExiting, exitProgress } = anim;
+        const slideY = a.slideY || 0;
+        by = by + slideY;
 
+        // Clip reveal animation
+        const clipW = bw * ((a.clipAmount || 100) / 100);
         ctx.beginPath();
-        ctx.rect(bx, by - 20, bw * ((a.clipAmount || 100) / 100), bh + 40);
+        ctx.rect(bx, by - 20, clipW, bh + 40);
         ctx.clip();
 
-        // Accent bar
-        const accentH = 120 * (a.barScaleY || 1);
-        const barColor1 = colors?.accentFill || s.primary;
-        const barColor2 = colors?.accentFill || s.accent;
-        MGRenderer._drawGradientRect(ctx, bx, by + bh / 2 - accentH / 2, 4, accentH, barColor1, barColor2, 'vertical');
+        // Shadow behind everything
+        if (ls.shadowBlur > 0) { ctx.shadowColor = ls.shadowColor; ctx.shadowBlur = ls.shadowBlur; ctx.shadowOffsetY = 3; }
+
+        // Dark backing scrim
+        ctx.beginPath();
+        MGRenderer._roundRect(ctx, bx + ls.barWidth + 4, by - 4, bw - ls.barWidth, bh + 8, [0, ls.radius, ls.radius, 0]);
+        ctx.fillStyle = ls.bgFill;
+        ctx.fill();
+        ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+
+        // Border
+        if (ls.borderWidth > 0) {
+            ctx.strokeStyle = ls.borderColor;
+            ctx.lineWidth = ls.borderWidth;
+            ctx.stroke();
+        }
+
+        // Accent bar (left edge)
+        const accentH = (bh + 8) * (a.barScaleY || 1);
+        if (ls.glow) { ctx.shadowColor = ls.accentFill; ctx.shadowBlur = 14; }
+        MGRenderer._drawGradientRect(ctx, bx, by + bh / 2 - accentH / 2 - 4, ls.barWidth, accentH, ls.accentFill, ls.accentFill, 'vertical');
+        ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
 
         // Main text
-        MGRenderer._setFont(ctx, '700', 36, s.fontHeading);
-        ctx.fillStyle = colors?.textFill || s.text;
+        MGRenderer._setFont(ctx, ls.titleWeight, ls.titleSize, s.fontHeading);
+        ctx.fillStyle = ls.textFill;
         ctx.textAlign = 'left';
         ctx.textBaseline = 'top';
         ctx.globalAlpha = Math.min(1, opacity) * (a.textSpring || 1);
-        MGRenderer._drawTextShadowed(ctx, mg.text || '', bx + 20 + (a.textSlideX || 0), by + 10, s, true);
+        if (ls.glow) {
+            ctx.shadowColor = ls.accentFill; ctx.shadowBlur = 10;
+            ctx.fillText(mg.text || '', bx + ls.barWidth + 20 + (a.textSlideX || 0), by + 10);
+            ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+        } else {
+            ctx.shadowColor = 'rgba(0,0,0,0.7)'; ctx.shadowBlur = 8; ctx.shadowOffsetY = 2;
+            ctx.fillText(mg.text || '', bx + ls.barWidth + 20 + (a.textSlideX || 0), by + 10);
+            ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+        }
 
         // Subtext
         if (mg.subtext) {
             ctx.globalAlpha = Math.min(1, opacity) * (isExiting ? exitProgress : (a.subSpring || 0));
-            MGRenderer._setFont(ctx, '500', 22, s.fontBody);
-            ctx.fillStyle = colors?.accentFill || s.accent;
-            MGRenderer._drawTextShadowed(ctx, mg.subtext, bx + 20, by + 55, s, false);
+            MGRenderer._setFont(ctx, ls.subWeight, ls.subSize, s.fontBody);
+            ctx.fillStyle = ls.subFill;
+            ctx.fillText(mg.subtext, bx + ls.barWidth + 20, by + 55);
         }
     }
 
     // ── Variant: BOX (solid colored background rectangle) ──
     // Used by: corporate
-    _renderLT_Box(ctx, mg, s, anim, a, bx, by, bw, bh, colors) {
+    _renderLT_Box(ctx, mg, s, anim, a, bx, by, bw, bh, ls) {
         const { opacity, isExiting, exitProgress } = anim;
         const hasSub = !!mg.subtext;
         const totalH = hasSub ? bh + 15 : bh - 10;
+        const slideY = a.slideY || 0;
+        const scaleY = a.scaleY !== undefined ? a.scaleY : 1;
 
         // Clip for slideLeft entrance
-        if (a.clipAmount !== undefined) {
+        if (a.clipAmount !== undefined && a.clipAmount < 100) {
             ctx.beginPath();
             ctx.rect(bx - 5, by - 5, (bw + 10) * (a.clipAmount / 100), totalH + 10);
             ctx.clip();
         }
 
+        // Box shadow
+        if (ls.shadowBlur > 0) {
+            ctx.shadowColor = ls.shadowColor;
+            ctx.shadowBlur = ls.shadowBlur;
+            ctx.shadowOffsetY = 4;
+        }
+
         // Background box
-        const bgColor = colors?.bgFill || s.primary;
-        const radius = s.borderRadius || 8;
-        MGRenderer._roundRect(ctx, bx, by, bw, totalH, radius);
-        ctx.fillStyle = bgColor;
-        ctx.shadowColor = 'rgba(0,0,0,0.5)';
-        ctx.shadowBlur = 16;
-        ctx.shadowOffsetY = 4;
+        ctx.beginPath();
+        MGRenderer._roundRect(ctx, bx, by + slideY, bw, totalH * scaleY, ls.radius);
+        ctx.fillStyle = ls.bgFill;
         ctx.fill();
         ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
 
+        // Border
+        if (ls.borderWidth > 0) {
+            ctx.strokeStyle = ls.borderColor;
+            ctx.lineWidth = ls.borderWidth;
+            ctx.stroke();
+        }
+
+        // Left accent stripe
+        if (ls.glow) { ctx.shadowColor = ls.accentFill; ctx.shadowBlur = 10; }
+        ctx.fillStyle = ls.accentFill;
+        ctx.fillRect(bx, by + slideY, ls.barWidth, totalH * scaleY);
+        ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+
         // Main text
-        MGRenderer._setFont(ctx, '700', 36, s.fontHeading);
-        ctx.fillStyle = colors?.textFill || '#ffffff';
+        MGRenderer._setFont(ctx, ls.titleWeight, ls.titleSize, s.fontHeading);
+        ctx.fillStyle = ls.textFill;
         ctx.textAlign = 'left';
         ctx.textBaseline = 'top';
         ctx.globalAlpha = Math.min(1, opacity) * (a.textSpring || 1);
-        ctx.fillText(mg.text || '', bx + 24 + (a.textSlideX || 0), by + 18);
+        ctx.fillText(mg.text || '', bx + ls.barWidth + 20 + (a.textSlideX || 0), by + slideY + 18);
 
         // Subtext
         if (mg.subtext) {
             ctx.globalAlpha = Math.min(1, opacity) * (isExiting ? exitProgress : (a.subSpring || 0));
-            MGRenderer._setFont(ctx, '500', 20, s.fontBody);
-            ctx.fillStyle = (colors?.accentFill || s.accent);
-            ctx.fillText(mg.subtext, bx + 24, by + 62);
+            MGRenderer._setFont(ctx, ls.subWeight, ls.subSize, s.fontBody);
+            ctx.fillStyle = ls.subFill;
+            ctx.fillText(mg.subtext, bx + ls.barWidth + 20, by + slideY + 62);
         }
     }
 
     // ── Variant: UNDERLINE (text with animated gradient underline) ──
     // Used by: nature
-    _renderLT_Underline(ctx, mg, s, anim, a, bx, by, bw, bh, colors) {
+    _renderLT_Underline(ctx, mg, s, anim, a, bx, by, bw, bh, ls) {
         const { opacity, isExiting, exitProgress } = anim;
         const slideY = a.slideY || 0;
         const fadeIn = a.fadeIn !== undefined ? a.fadeIn : 1;
 
         ctx.globalAlpha = Math.min(1, opacity) * fadeIn;
 
+        // Subtle backing scrim for readability
+        const textY = by + 10 + slideY;
+        ctx.beginPath();
+        MGRenderer._roundRect(ctx, bx - 12, textY - 8, bw + 24, bh + 16, ls.radius);
+        ctx.fillStyle = 'rgba(0,0,0,0.3)';
+        ctx.fill();
+
         // Main text
-        MGRenderer._setFont(ctx, '700', 36, s.fontHeading);
-        ctx.fillStyle = colors?.textFill || s.text;
+        MGRenderer._setFont(ctx, ls.titleWeight, ls.titleSize, s.fontHeading);
+        ctx.fillStyle = ls.textFill;
         ctx.textAlign = 'left';
         ctx.textBaseline = 'top';
-        const textY = by + 10 + slideY;
-        MGRenderer._drawTextShadowed(ctx, mg.text || '', bx, textY, s, true);
+        if (ls.glow) {
+            ctx.shadowColor = ls.accentFill; ctx.shadowBlur = 12;
+        } else {
+            ctx.shadowColor = 'rgba(0,0,0,0.8)'; ctx.shadowBlur = 10; ctx.shadowOffsetY = 2;
+        }
+        ctx.fillText(mg.text || '', bx, textY);
+        ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
 
-        // Measure text for underline width
+        // Animated underline
         const textW = ctx.measureText(mg.text || '').width;
         const underlineW = Math.min(textW + 10, bw) * (a.textSpring || 0);
         if (underlineW > 1) {
-            const c1 = colors?.accentFill || s.primary;
-            const c2 = colors?.accentFill || s.accent;
-            MGRenderer._drawGradientRect(ctx, bx, textY + 44, underlineW, 3, c1, c2);
+            if (ls.glow) { ctx.shadowColor = ls.accentFill; ctx.shadowBlur = 8; }
+            MGRenderer._drawGradientRect(ctx, bx, textY + ls.titleSize + 8, underlineW, ls.barWidth, ls.accentFill, ls.subFill);
+            ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
         }
 
         // Subtext
         if (mg.subtext) {
             ctx.globalAlpha = Math.min(1, opacity) * (isExiting ? exitProgress : (a.subSpring || 0));
-            MGRenderer._setFont(ctx, '500', 22, s.fontBody);
-            ctx.fillStyle = colors?.accentFill || s.accent;
-            MGRenderer._drawTextShadowed(ctx, mg.subtext, bx, textY + 54, s, false);
+            MGRenderer._setFont(ctx, ls.subWeight, ls.subSize, s.fontBody);
+            ctx.fillStyle = ls.subFill;
+            ctx.fillText(mg.subtext, bx, textY + ls.titleSize + 16);
         }
     }
 
     // ── Variant: BANNER (full-width broadcast bar with accent stripe) ──
     // Used by: crime (red bg, white text)
-    _renderLT_Banner(ctx, mg, s, anim, a, baseY, colors) {
+    _renderLT_Banner(ctx, mg, s, anim, a, baseY, bw, ls) {
         const { opacity, isExiting, exitProgress } = anim;
         const hasSub = !!mg.subtext;
         const bannerH = hasSub ? 80 : 60;
-        const stripeH = 4;
+        const stripeH = ls.barWidth;
 
         // Wipe entrance: clip from left
         const wipe = a.wipeProgress !== undefined ? a.wipeProgress : 1;
@@ -1054,148 +1422,176 @@ class MGRenderer {
             ctx.clip();
         }
 
+        // Shadow
+        if (ls.shadowBlur > 0) { ctx.shadowColor = ls.shadowColor; ctx.shadowBlur = ls.shadowBlur; }
+
         // Main banner fill
-        const bgColor = colors?.bgFill || s.primary;
-        ctx.fillStyle = bgColor;
+        ctx.fillStyle = ls.bgFill;
         ctx.fillRect(0, baseY, 1920, bannerH);
+        ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
 
         // Top accent stripe
-        const stripeColor = colors?.accentFill || s.accent;
-        ctx.fillStyle = stripeColor;
+        if (ls.glow) { ctx.shadowColor = ls.accentFill; ctx.shadowBlur = 10; }
+        ctx.fillStyle = ls.accentFill;
         ctx.fillRect(0, baseY - stripeH, 1920, stripeH);
+        ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
 
-        // Main text (left-aligned)
+        // Bottom accent line
+        ctx.fillStyle = ls.accentFill + '40';
+        ctx.fillRect(0, baseY + bannerH - 1, 1920, 1);
+
+        // Main text
         ctx.globalAlpha = Math.min(1, opacity) * (a.textSpring || 1);
-        MGRenderer._setFont(ctx, '700', hasSub ? 30 : 34, s.fontHeading);
-        ctx.fillStyle = colors?.textFill || '#ffffff';
+        MGRenderer._setFont(ctx, ls.titleWeight, hasSub ? ls.titleSize - 4 : ls.titleSize, s.fontHeading);
+        ctx.fillStyle = ls.textFill;
         ctx.textAlign = 'left';
         ctx.textBaseline = 'top';
         ctx.fillText(mg.text || '', 50 + (a.textSlideX || 0), baseY + (hasSub ? 8 : 14));
 
-        // Subtext (below main text or right-aligned)
+        // Subtext
         if (mg.subtext) {
             ctx.globalAlpha = Math.min(1, opacity) * (isExiting ? exitProgress : (a.subSpring || 0));
-            MGRenderer._setFont(ctx, '500', 20, s.fontBody);
-            ctx.fillStyle = (colors?.textFill || '#ffffff') + 'cc';
+            MGRenderer._setFont(ctx, ls.subWeight, ls.subSize, s.fontBody);
+            ctx.fillStyle = ls.subFill;
             ctx.fillText(mg.subtext, 50, baseY + 44);
         }
     }
 
     // ── Variant: GLASS (frosted semi-transparent box with border) ──
     // Used by: luxury
-    _renderLT_Glass(ctx, mg, s, anim, a, bx, by, bw, bh, colors) {
+    _renderLT_Glass(ctx, mg, s, anim, a, bx, by, bw, bh, ls) {
         const { opacity, isExiting, exitProgress } = anim;
         const slideY = a.slideY || 0;
         const fadeIn = a.fadeIn !== undefined ? a.fadeIn : 1;
         const hasSub = !!mg.subtext;
         const totalH = hasSub ? bh + 15 : bh - 10;
-        const radius = s.borderRadius || 14;
 
         ctx.globalAlpha = Math.min(1, opacity) * fadeIn;
 
+        // Outer glow
+        if (ls.glow) { ctx.shadowColor = ls.accentFill + '40'; ctx.shadowBlur = 30; }
+        else if (ls.shadowBlur > 0) { ctx.shadowColor = ls.shadowColor; ctx.shadowBlur = ls.shadowBlur; }
+
         // Glass background
-        MGRenderer._roundRect(ctx, bx, by + slideY, bw, totalH, radius);
-        ctx.fillStyle = colors?.bgFill || 'rgba(10,10,20,0.6)';
-        ctx.shadowColor = (colors?.accentFill || s.primary) + '30';
-        ctx.shadowBlur = 20;
+        ctx.beginPath();
+        MGRenderer._roundRect(ctx, bx, by + slideY, bw, totalH, ls.radius);
+        ctx.fillStyle = ls.bgFill;
         ctx.fill();
         ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
 
         // Border
-        MGRenderer._roundRect(ctx, bx, by + slideY, bw, totalH, radius);
-        ctx.strokeStyle = (colors?.accentFill || s.primary) + '50';
-        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        MGRenderer._roundRect(ctx, bx, by + slideY, bw, totalH, ls.radius);
+        ctx.strokeStyle = ls.borderColor;
+        ctx.lineWidth = ls.borderWidth;
         ctx.stroke();
 
-        // Inner highlight line at top
+        // Inner highlight line at top (frosted glass effect)
         ctx.beginPath();
-        ctx.moveTo(bx + radius, by + slideY + 1);
-        ctx.lineTo(bx + bw - radius, by + slideY + 1);
-        ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+        ctx.moveTo(bx + ls.radius, by + slideY + 1);
+        ctx.lineTo(bx + bw - ls.radius, by + slideY + 1);
+        ctx.strokeStyle = 'rgba(255,255,255,0.1)';
         ctx.lineWidth = 1;
         ctx.stroke();
 
+        // Left accent dot/indicator
+        if (ls.glow) { ctx.shadowColor = ls.accentFill; ctx.shadowBlur = 12; }
+        ctx.beginPath();
+        ctx.arc(bx + 20, by + slideY + totalH / 2, 5, 0, Math.PI * 2);
+        ctx.fillStyle = ls.accentFill;
+        ctx.fill();
+        ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+
         // Main text
-        MGRenderer._setFont(ctx, '600', 34, s.fontHeading);
-        ctx.fillStyle = colors?.textFill || s.text;
+        MGRenderer._setFont(ctx, ls.titleWeight, ls.titleSize - 2, s.fontHeading);
+        ctx.fillStyle = ls.textFill;
         ctx.textAlign = 'left';
         ctx.textBaseline = 'top';
         ctx.globalAlpha = Math.min(1, opacity) * (a.textSpring || fadeIn);
-        MGRenderer._drawTextShadowed(ctx, mg.text || '', bx + 24, by + slideY + 16, s, true);
+        if (ls.glow) { ctx.shadowColor = ls.accentFill; ctx.shadowBlur = 8; }
+        else { ctx.shadowColor = 'rgba(0,0,0,0.6)'; ctx.shadowBlur = 8; }
+        ctx.fillText(mg.text || '', bx + 36 + (a.textSlideX || 0), by + slideY + 16);
+        ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
 
         // Subtext
         if (mg.subtext) {
             ctx.globalAlpha = Math.min(1, opacity) * (isExiting ? exitProgress : (a.subSpring || 0));
-            MGRenderer._setFont(ctx, '400', 20, s.fontBody);
-            ctx.fillStyle = colors?.accentFill || s.accent;
-            ctx.fillText(mg.subtext, bx + 24, by + slideY + 58);
+            MGRenderer._setFont(ctx, ls.subWeight, ls.subSize, s.fontBody);
+            ctx.fillStyle = ls.subFill;
+            ctx.fillText(mg.subtext, bx + 36, by + slideY + 58);
         }
     }
 
     // ── Variant: SPLIT (two-tone: colored left label + dark right name) ──
     // Used by: sport
-    _renderLT_Split(ctx, mg, s, anim, a, bx, by, bw, bh, colors) {
+    _renderLT_Split(ctx, mg, s, anim, a, bx, by, bw, bh, ls) {
         const { opacity, isExiting, exitProgress } = anim;
         const slideY = a.slideY || 0;
         const scaleY = a.scaleY !== undefined ? a.scaleY : 1;
-        // Measure left label to size it dynamically
-        MGRenderer._setFont(ctx, '800', 16, s.fontHeading);
+
+        // Measure left label
+        MGRenderer._setFont(ctx, ls.titleWeight, 16, s.fontHeading);
         const labelText = (mg.subtext || 'INFO').toUpperCase();
         const labelW = ctx.measureText(labelText).width;
         const leftW = Math.max(80, labelW + 40);
+
         // Measure right name text
-        MGRenderer._setFont(ctx, '700', 32, s.fontHeading);
+        MGRenderer._setFont(ctx, ls.titleWeight, ls.titleSize - 4, s.fontHeading);
         const nameW = ctx.measureText(mg.text || '').width;
         const rightW = Math.max(120, nameW + 44);
         const totalH = bh - 15;
-        const radius = s.borderRadius || 8;
         const drawY = by + slideY;
 
         ctx.globalAlpha = Math.min(1, opacity) * scaleY;
 
         // Shadow
-        ctx.shadowColor = 'rgba(0,0,0,0.5)';
-        ctx.shadowBlur = 16;
-        ctx.shadowOffsetY = 4;
+        if (ls.shadowBlur > 0) { ctx.shadowColor = ls.shadowColor; ctx.shadowBlur = ls.shadowBlur; ctx.shadowOffsetY = 4; }
 
         // Left colored section (rounded left corners)
         ctx.beginPath();
-        ctx.moveTo(bx + radius, drawY);
+        ctx.moveTo(bx + ls.radius, drawY);
         ctx.lineTo(bx + leftW, drawY);
         ctx.lineTo(bx + leftW, drawY + totalH);
-        ctx.lineTo(bx + radius, drawY + totalH);
-        ctx.arcTo(bx, drawY + totalH, bx, drawY + totalH - radius, radius);
-        ctx.lineTo(bx, drawY + radius);
-        ctx.arcTo(bx, drawY, bx + radius, drawY, radius);
+        ctx.lineTo(bx + ls.radius, drawY + totalH);
+        ctx.arcTo(bx, drawY + totalH, bx, drawY + totalH - ls.radius, ls.radius);
+        ctx.lineTo(bx, drawY + ls.radius);
+        ctx.arcTo(bx, drawY, bx + ls.radius, drawY, ls.radius);
         ctx.closePath();
-        ctx.fillStyle = colors?.bgFill || s.primary;
+        if (ls.glow) { ctx.shadowColor = ls.accentFill; ctx.shadowBlur = 14; }
+        ctx.fillStyle = ls.accentFill;
         ctx.fill();
-
         ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
 
         // Right dark section (rounded right corners)
         ctx.beginPath();
         ctx.moveTo(bx + leftW, drawY);
-        ctx.lineTo(bx + leftW + rightW - radius, drawY);
-        ctx.arcTo(bx + leftW + rightW, drawY, bx + leftW + rightW, drawY + radius, radius);
-        ctx.lineTo(bx + leftW + rightW, drawY + totalH - radius);
-        ctx.arcTo(bx + leftW + rightW, drawY + totalH, bx + leftW + rightW - radius, drawY + totalH, radius);
+        ctx.lineTo(bx + leftW + rightW - ls.radius, drawY);
+        ctx.arcTo(bx + leftW + rightW, drawY, bx + leftW + rightW, drawY + ls.radius, ls.radius);
+        ctx.lineTo(bx + leftW + rightW, drawY + totalH - ls.radius);
+        ctx.arcTo(bx + leftW + rightW, drawY + totalH, bx + leftW + rightW - ls.radius, drawY + totalH, ls.radius);
         ctx.lineTo(bx + leftW, drawY + totalH);
         ctx.closePath();
-        ctx.fillStyle = 'rgba(0,0,0,0.85)';
+        ctx.fillStyle = ls.bgFill;
         ctx.fill();
 
-        // Left label text (subtext or category, uppercase) — labelText already measured above
+        // Border on right section
+        if (ls.borderWidth > 0) {
+            ctx.strokeStyle = ls.borderColor;
+            ctx.lineWidth = ls.borderWidth;
+            ctx.stroke();
+        }
+
+        // Left label text (uppercase)
         ctx.globalAlpha = Math.min(1, opacity) * (a.textSpring || scaleY);
         MGRenderer._setFont(ctx, '800', 16, s.fontHeading);
-        ctx.fillStyle = colors?.textFill || '#ffffff';
+        ctx.fillStyle = ls.textFill;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillText(labelText, bx + leftW / 2, drawY + totalH / 2);
 
         // Right name text
-        MGRenderer._setFont(ctx, '700', 32, s.fontHeading);
-        ctx.fillStyle = s.text;
+        MGRenderer._setFont(ctx, ls.titleWeight, ls.titleSize - 4, s.fontHeading);
+        ctx.fillStyle = ls.textFill;
         ctx.textAlign = 'left';
         ctx.textBaseline = 'middle';
         ctx.fillText(mg.text || '', bx + leftW + 20 + (a.textSlideX || 0), drawY + totalH / 2);
@@ -3643,6 +4039,2504 @@ class MGRenderer {
         const g = parseInt(h.substring(2, 4), 16);
         const b = parseInt(h.substring(4, 6), 16);
         return `rgba(${r},${g},${b},${alpha})`;
+    }
+
+    // ========================================================================
+    // LISTICLE COUNTER — 4 variants (badge, pill, ribbon, minimal)
+    // ========================================================================
+
+    _renderListicleCounter(ctx, frame, fps, mg, s, anim) {
+        const { interpolate, springValue } = AnimationUtils;
+        const { isExiting, exitProgress, opacity, idleScale, enterFrames, enterSpring, enterLinear } = anim;
+
+        const variant = this._resolveVariant(mg, s, 'listicleCounter');
+        const colors = this._resolveColors(s, 'listicleCounter');
+        const cs = this._getCounterStyle(mg);
+
+        // Parse "#3 Title" → number="3", title="Title"
+        const match = (mg.text || '').match(/^#?(\d+)\s*(.*)/);
+        const number = match ? match[1] : (mg.text || '?');
+        const title = match ? match[2].trim() : (mg.subtext || '');
+
+        // Animation type from dropdown
+        const animationType = mg.animation || 'popUp';
+
+        // Compute entrance based on animation type
+        let entScale = 1, entSlideX = 0, entSlideY = 0, entRotation = 0;
+        const titleReveal = interpolate(enterLinear, [0.3, 0.8], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' });
+
+        switch (animationType) {
+            case 'popUp':
+                entScale = interpolate(enterSpring, [0, 1], [0.5, 1]);
+                entSlideY = interpolate(enterSpring, [0, 1], [40, 0]);
+                break;
+            case 'slideLeft':
+                entScale = interpolate(enterSpring, [0, 1], [0.9, 1]);
+                entSlideX = interpolate(enterSpring, [0, 1], [-300, 0]);
+                break;
+            case 'wipeRight':
+                entScale = interpolate(enterSpring, [0, 1], [0.95, 1]);
+                entSlideX = interpolate(enterSpring, [0, 1], [300, 0]);
+                break;
+            case 'fadeSlide':
+                entSlideY = interpolate(enterSpring, [0, 1], [-50, 0]);
+                break;
+            case 'springScale':
+                entScale = interpolate(enterSpring, [0, 1], [0.0, 1]);
+                entRotation = interpolate(enterSpring, [0, 1], [-10, 0]) * Math.PI / 180;
+                break;
+            default:
+                entScale = interpolate(enterSpring, [0, 1], [0.5, 1]);
+                entSlideY = interpolate(enterSpring, [0, 1], [40, 0]);
+        }
+
+        const userScale = mg.scale || 1.3; // default 1.3 — bigger than before
+        const scale = entScale * userScale * (isExiting ? interpolate(exitProgress, [0, 1], [0.9, 1]) : 1);
+
+        // Measure for sizing — use actual render font sizes
+        MGRenderer._setFont(ctx, '900', 48, s.fontHeading);
+        const numW = ctx.measureText(number).width;
+        MGRenderer._setFont(ctx, '700', 32, s.fontBody);
+        const titleW = title ? ctx.measureText(title).width : 0;
+
+        // Bigger boxes — readable on 1920x1080
+        const badgeSize = 80; // circle/square for number
+        const padding = 24;
+        const titlePad = title ? titleW + 40 : 0;
+        const boxW = variant === 'ribbon' ? Math.max(320, badgeSize + titlePad + 60) :
+                     variant === 'pill' ? Math.max(300, 90 + titlePad + 30) :
+                     variant === 'minimal' ? Math.max(260, numW + titlePad + 50) :
+                     /* badge */ Math.max(280, badgeSize + titlePad + 30);
+        const boxH = variant === 'ribbon' ? 90 : variant === 'minimal' ? 80 : 100;
+
+        const pos = MGRenderer._getPosXY(mg.position || 'bottomLeft', boxW, boxH);
+
+        ctx.save();
+        ctx.globalAlpha = Math.min(1, isExiting ? exitProgress : opacity);
+
+        this._dispatchVariant(ctx, 'listicleCounter', variant, mg, s, anim, null, {
+            bx: pos.x, by: pos.y, bw: boxW, bh: boxH, colors, cs,
+            number, title, scale, entSlideX, entSlideY, entRotation, titleReveal, idleScale,
+        });
+
+        ctx.restore();
+    }
+
+    // ── Badge: Circle with number + dark panel with title ──
+    _renderLC_Badge(ctx, mg, s, anim, _a, setup) {
+        const { bx, by, bw, bh, cs, number, title, scale, entSlideX, entSlideY, entRotation, titleReveal, idleScale } = setup;
+
+        const cx = bx + bw / 2;
+        const cy = by + bh / 2;
+
+        ctx.translate(cx + (entSlideX || 0), cy + (entSlideY || 0));
+        if (entRotation) ctx.rotate(entRotation);
+        ctx.scale(scale * idleScale, scale * idleScale);
+
+        // Shadow
+        if (cs.shadowBlur > 0) { ctx.shadowColor = cs.shadowColor; ctx.shadowBlur = cs.shadowBlur; ctx.shadowOffsetY = 3; }
+
+        // Dark backing panel
+        ctx.beginPath();
+        MGRenderer._roundRect(ctx, -bw / 2, -bh / 2, bw, bh, cs.radius);
+        ctx.fillStyle = cs.bgFill;
+        ctx.fill();
+        ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+
+        // Border
+        if (cs.borderWidth > 0) {
+            ctx.strokeStyle = cs.borderColor;
+            ctx.lineWidth = cs.borderWidth;
+            ctx.stroke();
+        }
+
+        // Badge circle
+        const badgeR = 36;
+        const badgeCX = -bw / 2 + 52;
+        if (cs.glow) { ctx.shadowColor = cs.accentFill; ctx.shadowBlur = 14; }
+        ctx.beginPath();
+        ctx.arc(badgeCX, 0, badgeR, 0, Math.PI * 2);
+        ctx.fillStyle = cs.accentFill;
+        ctx.fill();
+        ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+
+        // Accent ring
+        ctx.lineWidth = cs.borderWidth + 1;
+        ctx.strokeStyle = cs.accentFill;
+        ctx.stroke();
+
+        // Number inside badge
+        MGRenderer._setFont(ctx, cs.numberWeight, cs.numberSize, s.fontHeading);
+        ctx.fillStyle = cs.numberFill;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.shadowColor = 'rgba(0,0,0,0.5)'; ctx.shadowBlur = 6;
+        ctx.fillText(number, badgeCX, 2);
+        ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+
+        // Title beside badge (clip reveal)
+        if (title && titleReveal > 0) {
+            ctx.save();
+            const titleX = badgeCX + badgeR + 18;
+            ctx.beginPath();
+            ctx.rect(titleX, -bh / 2, (bw / 2 - badgeR - 18 + bw / 2 - 52) * titleReveal, bh);
+            ctx.clip();
+            MGRenderer._setFont(ctx, cs.titleWeight, cs.titleSize, s.fontBody);
+            ctx.fillStyle = cs.textFill;
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'middle';
+            if (cs.glow) { ctx.shadowColor = cs.accentFill; ctx.shadowBlur = 8; }
+            ctx.fillText(title, titleX, 2);
+            ctx.restore();
+        }
+
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+    }
+
+    // ── Pill: Rounded capsule with accent number section + title ──
+    _renderLC_Pill(ctx, mg, s, anim, _a, setup) {
+        const { bx, by, bw, bh, cs, number, title, scale, entSlideX, entSlideY, entRotation, titleReveal, idleScale } = setup;
+
+        const cx = bx + bw / 2;
+        const cy = by + bh / 2;
+
+        ctx.translate(cx + (entSlideX || 0), cy + (entSlideY || 0));
+        if (entRotation) ctx.rotate(entRotation);
+        ctx.scale(scale * idleScale, scale * idleScale);
+
+        const r = bh / 2;
+
+        // Shadow
+        if (cs.shadowBlur > 0) { ctx.shadowColor = cs.shadowColor; ctx.shadowBlur = cs.shadowBlur; ctx.shadowOffsetY = 3; }
+
+        // Pill background
+        ctx.beginPath();
+        MGRenderer._roundRect(ctx, -bw / 2, -bh / 2, bw, bh, r);
+        ctx.fillStyle = cs.bgFill;
+        ctx.fill();
+        ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+
+        // Border
+        if (cs.borderWidth > 0) {
+            ctx.strokeStyle = cs.borderColor;
+            ctx.lineWidth = cs.borderWidth;
+            ctx.stroke();
+        }
+
+        // Number section (left, accent bg)
+        const numSectionW = 80;
+        ctx.save();
+        ctx.beginPath();
+        MGRenderer._roundRect(ctx, -bw / 2, -bh / 2, numSectionW, bh, [r, 0, 0, r]);
+        ctx.clip();
+        if (cs.glow) { ctx.shadowColor = cs.accentFill; ctx.shadowBlur = 10; }
+        ctx.fillStyle = cs.accentFill;
+        ctx.fillRect(-bw / 2, -bh / 2, numSectionW, bh);
+        ctx.restore();
+        ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+
+        // Number
+        MGRenderer._setFont(ctx, cs.numberWeight, cs.numberSize, s.fontHeading);
+        ctx.fillStyle = cs.numberFill;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(number, -bw / 2 + numSectionW / 2, 2);
+
+        // Title (clip reveal)
+        if (title && titleReveal > 0) {
+            ctx.save();
+            const titleX = -bw / 2 + numSectionW + 16;
+            ctx.beginPath();
+            ctx.rect(titleX, -bh / 2, (bw - numSectionW - 16) * titleReveal, bh);
+            ctx.clip();
+            MGRenderer._setFont(ctx, cs.titleWeight, cs.titleSize, s.fontBody);
+            ctx.fillStyle = cs.textFill;
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'middle';
+            if (cs.glow) { ctx.shadowColor = cs.accentFill; ctx.shadowBlur = 8; }
+            ctx.fillText(title, titleX, 2);
+            ctx.restore();
+        }
+
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+    }
+
+    // ── Ribbon: Flag shape with dark backing + accent stripe ──
+    _renderLC_Ribbon(ctx, mg, s, anim, _a, setup) {
+        const { bx, by, bw, bh, cs, number, title, scale, entSlideX, entSlideY, entRotation, titleReveal, idleScale } = setup;
+
+        const cx = bx + bw / 2;
+        const cy = by + bh / 2;
+
+        ctx.translate(cx + (entSlideX || 0), cy + (entSlideY || 0));
+        if (entRotation) ctx.rotate(entRotation);
+        ctx.scale(scale * idleScale, scale * idleScale);
+
+        const hw = bw / 2;
+        const hh = bh / 2;
+
+        // Shadow
+        if (cs.shadowBlur > 0) { ctx.shadowColor = cs.shadowColor; ctx.shadowBlur = cs.shadowBlur; ctx.shadowOffsetY = 3; }
+
+        // Ribbon shape (trapezoid with notch on right)
+        ctx.beginPath();
+        ctx.moveTo(-hw, -hh);
+        ctx.lineTo(hw - 18, -hh);
+        ctx.lineTo(hw, 0);
+        ctx.lineTo(hw - 18, hh);
+        ctx.lineTo(-hw, hh);
+        ctx.closePath();
+        ctx.fillStyle = cs.bgFill;
+        ctx.fill();
+        ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+
+        // Border
+        if (cs.borderWidth > 0) {
+            ctx.strokeStyle = cs.borderColor;
+            ctx.lineWidth = cs.borderWidth;
+            ctx.stroke();
+        }
+
+        // Top accent stripe
+        if (cs.glow) { ctx.shadowColor = cs.accentFill; ctx.shadowBlur = 10; }
+        ctx.fillStyle = cs.accentFill;
+        ctx.fillRect(-hw, -hh, bw, 5);
+        ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+
+        // Number
+        MGRenderer._setFont(ctx, cs.numberWeight, cs.numberSize, s.fontHeading);
+        ctx.fillStyle = cs.accentFill;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(`#${number}`, -hw + 20, 2);
+
+        // Title
+        if (title && titleReveal > 0) {
+            ctx.save();
+            const numEndX = -hw + 20 + ctx.measureText(`#${number}`).width + 16;
+            ctx.beginPath();
+            ctx.rect(numEndX, -hh, (hw - 18 - numEndX + hw) * titleReveal, bh);
+            ctx.clip();
+            MGRenderer._setFont(ctx, cs.titleWeight, cs.titleSize, s.fontBody);
+            ctx.fillStyle = cs.textFill;
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'middle';
+            if (cs.glow) { ctx.shadowColor = cs.accentFill; ctx.shadowBlur = 8; }
+            ctx.fillText(title, numEndX, 2);
+            ctx.restore();
+        }
+
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+    }
+
+    // ── Minimal: Number + underline + title, with subtle dark backing ──
+    _renderLC_Minimal(ctx, mg, s, anim, _a, setup) {
+        const { bx, by, bw, bh, cs, number, title, scale, entSlideX, entSlideY, entRotation, titleReveal, idleScale } = setup;
+
+        const cx = bx + bw / 2;
+        const cy = by + bh / 2;
+
+        ctx.translate(cx + (entSlideX || 0), cy + (entSlideY || 0));
+        if (entRotation) ctx.rotate(entRotation);
+        ctx.scale(scale * idleScale, scale * idleScale);
+
+        // Shadow
+        if (cs.shadowBlur > 0) { ctx.shadowColor = cs.shadowColor; ctx.shadowBlur = cs.shadowBlur; ctx.shadowOffsetY = 2; }
+
+        // Subtle dark backing
+        ctx.beginPath();
+        MGRenderer._roundRect(ctx, -bw / 2 - 8, -bh / 2, bw + 16, bh, cs.radius);
+        ctx.fillStyle = cs.bgFill;
+        ctx.fill();
+        ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+
+        // Border
+        if (cs.borderWidth > 0) {
+            ctx.strokeStyle = cs.borderColor;
+            ctx.lineWidth = cs.borderWidth;
+            ctx.stroke();
+        }
+
+        // Number
+        MGRenderer._setFont(ctx, cs.numberWeight, cs.numberSize, s.fontHeading);
+        ctx.fillStyle = cs.accentFill;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        if (cs.glow) { ctx.shadowColor = cs.accentFill; ctx.shadowBlur = 12; }
+        else { ctx.shadowColor = 'rgba(0,0,0,0.6)'; ctx.shadowBlur = 8; }
+        const numText = `#${number}`;
+        const numW = ctx.measureText(numText).width;
+        ctx.fillText(numText, -bw / 2 + 8, -2);
+        ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+
+        // Accent underline
+        if (cs.glow) { ctx.shadowColor = cs.accentFill; ctx.shadowBlur = 6; }
+        ctx.fillStyle = cs.accentFill;
+        ctx.fillRect(-bw / 2 + 8, 22, (numW + 4) * titleReveal, 3);
+        ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+
+        // Title
+        if (title && titleReveal > 0) {
+            ctx.save();
+            const titleX = -bw / 2 + 8 + numW + 16;
+            ctx.beginPath();
+            ctx.rect(titleX, -bh / 2, (bw - numW - 16) * titleReveal, bh);
+            ctx.clip();
+            MGRenderer._setFont(ctx, cs.titleWeight, cs.titleSize, s.fontBody);
+            ctx.fillStyle = cs.textFill;
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'middle';
+            if (cs.glow) { ctx.shadowColor = cs.accentFill; ctx.shadowBlur = 8; }
+            ctx.fillText(title, titleX, -2);
+            ctx.restore();
+        }
+
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+    }
+
+    // ========================================================================
+    // PROGRESS TRACKER — 3 variants (bar, dots, fraction)
+    // ========================================================================
+
+    _renderProgressTracker(ctx, frame, fps, mg, s, anim) {
+        const { interpolate } = AnimationUtils;
+        const { isExiting, exitProgress, opacity, idleScale, enterSpring, enterLinear } = anim;
+
+        const variant = this._resolveVariant(mg, s, 'progressTracker');
+        const colors = this._resolveColors(s, 'progressTracker');
+
+        // Parse "2/5" or "Item 2 of 5" → current=2, total=5
+        const fracMatch = (mg.text || '').match(/(\d+)\s*(?:\/|of)\s*(\d+)/i);
+        const current = fracMatch ? parseInt(fracMatch[1]) : 1;
+        const total = fracMatch ? parseInt(fracMatch[2]) : 5;
+        const progress = total > 0 ? current / total : 0;
+
+        // Entrance animation
+        const entScale = interpolate(enterSpring, [0, 1], [0.8, 1]);
+        const entSlideY = interpolate(enterSpring, [0, 1], [20, 0]);
+        const fillReveal = interpolate(enterLinear, [0.2, 0.9], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' });
+
+        const scale = entScale * (isExiting ? interpolate(exitProgress, [0, 1], [0.9, 1]) : 1);
+
+        const boxW = variant === 'dots' ? Math.max(280, total * 44 + 60) :
+                     variant === 'fraction' ? 220 : 340;
+        const boxH = variant === 'dots' ? 64 : variant === 'fraction' ? 72 : 56;
+
+        const pos = MGRenderer._getPosXY(mg.position || 'topRight', boxW, boxH);
+
+        ctx.save();
+        ctx.globalAlpha = Math.min(1, isExiting ? exitProgress : opacity);
+
+        this._dispatchVariant(ctx, 'progressTracker', variant, mg, s, anim, null, {
+            bx: pos.x, by: pos.y, bw: boxW, bh: boxH, colors,
+            current, total, progress, scale, entSlideY, fillReveal, idleScale,
+        });
+
+        ctx.restore();
+    }
+
+    // ── Bar: Horizontal progress bar with segments ──
+    _renderPT_Bar(ctx, mg, s, anim, _a, setup) {
+        const { bx, by, bw, bh, colors, current, total, progress, scale, entSlideY, fillReveal, idleScale } = setup;
+        const accentFill = colors?.accentFill || s.primary;
+        const trackFill = colors?.trackFill || 'rgba(255,255,255,0.2)';
+        const textFill = colors?.textFill || '#ffffff';
+
+        const cx = bx + bw / 2;
+        const cy = by + bh / 2;
+
+        ctx.translate(cx, cy + entSlideY);
+        ctx.scale(scale * idleScale, scale * idleScale);
+
+        // Dark backing panel
+        ctx.beginPath();
+        MGRenderer._roundRect(ctx, -bw / 2 - 6, -bh / 2, bw + 12, bh, 12);
+        ctx.fillStyle = 'rgba(0,0,0,0.7)';
+        ctx.fill();
+
+        const barW = bw - 30;
+        const barH = 12;
+
+        // Track background
+        ctx.beginPath();
+        MGRenderer._roundRect(ctx, -barW / 2, -4, barW, barH, 6);
+        ctx.fillStyle = trackFill;
+        ctx.fill();
+
+        // Filled portion (animated reveal)
+        const fillW = barW * progress * fillReveal;
+        if (fillW > 0) {
+            ctx.beginPath();
+            MGRenderer._roundRect(ctx, -barW / 2, -4, fillW, barH, 6);
+            ctx.fillStyle = accentFill;
+            ctx.fill();
+        }
+
+        // Segment markers
+        if (total > 1 && total <= 20) {
+            for (let i = 1; i < total; i++) {
+                const segX = -barW / 2 + (barW * i / total);
+                ctx.fillStyle = 'rgba(0,0,0,0.5)';
+                ctx.fillRect(segX - 0.5, -4, 1, barH);
+            }
+        }
+
+        // Label below bar
+        MGRenderer._setFont(ctx, '700', 20, s.fontBody);
+        ctx.fillStyle = textFill;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        ctx.fillText(`${current} / ${total}`, 0, barH / 2 + 6);
+
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+    }
+
+    // ── Dots: Row of circles, filled up to current ──
+    _renderPT_Dots(ctx, mg, s, anim, _a, setup) {
+        const { bx, by, bw, bh, colors, current, total, scale, entSlideY, fillReveal, idleScale } = setup;
+        const accentFill = colors?.accentFill || s.primary;
+        const trackFill = colors?.trackFill || 'rgba(255,255,255,0.25)';
+
+        const cx = bx + bw / 2;
+        const cy = by + bh / 2;
+
+        ctx.translate(cx, cy + entSlideY);
+        ctx.scale(scale * idleScale, scale * idleScale);
+
+        // Dark backing pill
+        ctx.beginPath();
+        MGRenderer._roundRect(ctx, -bw / 2 - 6, -bh / 2, bw + 12, bh, bh / 2);
+        ctx.fillStyle = 'rgba(0,0,0,0.7)';
+        ctx.fill();
+
+        const dotR = 13;
+        const gap = 38;
+        const totalW = (total - 1) * gap;
+        const startX = -totalW / 2;
+
+        const revealedCount = Math.round(total * fillReveal);
+
+        for (let i = 0; i < total; i++) {
+            const dx = startX + i * gap;
+            const filled = i < current && i < revealedCount;
+
+            ctx.beginPath();
+            ctx.arc(dx, 0, filled ? dotR : dotR - 3, 0, Math.PI * 2);
+            ctx.fillStyle = filled ? accentFill : trackFill;
+            ctx.fill();
+
+            // Current dot gets ring
+            if (i === current - 1 && i < revealedCount) {
+                ctx.lineWidth = 3;
+                ctx.strokeStyle = accentFill;
+                ctx.beginPath();
+                ctx.arc(dx, 0, dotR + 4, 0, Math.PI * 2);
+                ctx.stroke();
+            }
+        }
+
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+    }
+
+    // ── Fraction: Large "2/5" display ──
+    _renderPT_Fraction(ctx, mg, s, anim, _a, setup) {
+        const { bx, by, bw, bh, colors, current, total, scale, entSlideY, fillReveal, idleScale } = setup;
+        const accentFill = colors?.accentFill || s.primary;
+        const textFill = colors?.textFill || '#ffffff';
+
+        const cx = bx + bw / 2;
+        const cy = by + bh / 2;
+
+        ctx.translate(cx, cy + entSlideY);
+        ctx.scale(scale * idleScale, scale * idleScale);
+
+        // Dark backing circle/pill
+        ctx.beginPath();
+        MGRenderer._roundRect(ctx, -bw / 2, -bh / 2, bw, bh, bh / 2);
+        ctx.fillStyle = 'rgba(0,0,0,0.7)';
+        ctx.fill();
+
+        // Current number (large, accent color)
+        MGRenderer._setFont(ctx, '900', 48, s.fontHeading);
+        ctx.fillStyle = accentFill;
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'middle';
+        ctx.shadowColor = 'rgba(0,0,0,0.5)'; ctx.shadowBlur = 6;
+        ctx.fillText(String(current), -8, 2);
+        ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+
+        // Slash
+        MGRenderer._setFont(ctx, '700', 38, s.fontHeading);
+        ctx.fillStyle = 'rgba(255,255,255,0.4)';
+        ctx.textAlign = 'center';
+        ctx.fillText('/', 0, 2);
+
+        // Total number (smaller, dimmer)
+        MGRenderer._setFont(ctx, '700', 36, s.fontHeading);
+        ctx.fillStyle = textFill;
+        const prevAlpha = ctx.globalAlpha;
+        ctx.globalAlpha = Math.min(prevAlpha, 0.6);
+        ctx.textAlign = 'left';
+        ctx.fillText(String(total), 8, 3);
+        ctx.globalAlpha = prevAlpha;
+
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+    }
+
+    // ========================================================================
+    // LISTICLE GRID — 3 variants (grid, strip, stack)
+    // Fullscreen overview showing all list items at once
+    // ========================================================================
+
+    // ========================================================================
+    // LOWER THIRD STYLE TOKENS — Controls visual look per style dropdown.
+    // ========================================================================
+    static _LOWER_THIRD_STYLES = {
+        clean: {
+            bgFill: 'rgba(12,20,40,0.82)', accentFill: '#3b82f6', textFill: '#ffffff',
+            subFill: '#93c5fd', borderColor: 'rgba(59,130,246,0.2)', borderWidth: 1.5,
+            shadowColor: 'rgba(0,0,0,0.4)', shadowBlur: 12, radius: 10,
+            titleWeight: '700', titleSize: 36, subWeight: '500', subSize: 22,
+            glow: false, barWidth: 4,
+        },
+        bold: {
+            bgFill: 'rgba(40,8,8,0.88)', accentFill: '#ef4444', textFill: '#ffffff',
+            subFill: '#fca5a5', borderColor: 'rgba(239,68,68,0.3)', borderWidth: 2.5,
+            shadowColor: 'rgba(239,68,68,0.25)', shadowBlur: 16, radius: 6,
+            titleWeight: '900', titleSize: 38, subWeight: '700', subSize: 24,
+            glow: false, barWidth: 6,
+        },
+        minimal: {
+            bgFill: 'rgba(0,0,0,0.35)', accentFill: '#94a3b8', textFill: 'rgba(255,255,255,0.92)',
+            subFill: 'rgba(255,255,255,0.55)', borderColor: 'rgba(255,255,255,0.08)', borderWidth: 1,
+            shadowColor: 'none', shadowBlur: 0, radius: 6,
+            titleWeight: '500', titleSize: 34, subWeight: '400', subSize: 20,
+            glow: false, barWidth: 2,
+        },
+        neon: {
+            bgFill: 'rgba(0,6,14,0.86)', accentFill: '#00ff88', textFill: '#ffffff',
+            subFill: '#66ffbb', borderColor: 'rgba(0,255,136,0.3)', borderWidth: 1.5,
+            shadowColor: 'rgba(0,255,136,0.35)', shadowBlur: 24, radius: 10,
+            titleWeight: '800', titleSize: 36, subWeight: '600', subSize: 22,
+            glow: true, barWidth: 4,
+        },
+        cinematic: {
+            bgFill: 'rgba(12,8,0,0.85)', accentFill: '#d4af37', textFill: '#f5ecd0',
+            subFill: '#c8a944', borderColor: 'rgba(212,175,55,0.2)', borderWidth: 1,
+            shadowColor: 'rgba(0,0,0,0.6)', shadowBlur: 18, radius: 4,
+            titleWeight: '600', titleSize: 34, subWeight: '400', subSize: 21,
+            glow: false, barWidth: 3,
+        },
+        elegant: {
+            bgFill: 'rgba(10,4,22,0.82)', accentFill: '#8b5cf6', textFill: '#ffffff',
+            subFill: '#c4b5fd', borderColor: 'rgba(139,92,246,0.2)', borderWidth: 1.5,
+            shadowColor: 'rgba(139,92,246,0.18)', shadowBlur: 20, radius: 16,
+            titleWeight: '400', titleSize: 34, subWeight: '300', subSize: 21,
+            glow: true, barWidth: 3,
+        },
+    };
+
+    _getLowerThirdStyle(mg) {
+        const styleName = mg.style || 'clean';
+        return MGRenderer._LOWER_THIRD_STYLES[styleName] || MGRenderer._LOWER_THIRD_STYLES.clean;
+    }
+
+    // ========================================================================
+    // COUNTER STYLE TOKENS — Controls listicle counter badge/pill/ribbon/minimal look.
+    // Separate from MG overlay styles and template styles.
+    // ========================================================================
+    static _COUNTER_STYLES = {
+        clean: {
+            bgFill: 'rgba(15,23,42,0.85)', accentFill: '#3b82f6', textFill: '#ffffff',
+            numberFill: '#ffffff', borderColor: 'rgba(59,130,246,0.3)', borderWidth: 2,
+            shadowColor: 'rgba(0,0,0,0.4)', shadowBlur: 10, radius: 16,
+            numberWeight: '900', numberSize: 44, titleWeight: '700', titleSize: 30,
+            glow: false,
+        },
+        bold: {
+            bgFill: 'rgba(50,10,10,0.9)', accentFill: '#ef4444', textFill: '#ffffff',
+            numberFill: '#ffffff', borderColor: 'rgba(239,68,68,0.4)', borderWidth: 3,
+            shadowColor: 'rgba(239,68,68,0.3)', shadowBlur: 14, radius: 8,
+            numberWeight: '900', numberSize: 48, titleWeight: '800', titleSize: 32,
+            glow: false,
+        },
+        minimal: {
+            bgFill: 'rgba(0,0,0,0.45)', accentFill: '#94a3b8', textFill: 'rgba(255,255,255,0.9)',
+            numberFill: '#ffffff', borderColor: 'rgba(255,255,255,0.1)', borderWidth: 1,
+            shadowColor: 'none', shadowBlur: 0, radius: 10,
+            numberWeight: '600', numberSize: 40, titleWeight: '400', titleSize: 28,
+            glow: false,
+        },
+        neon: {
+            bgFill: 'rgba(0,8,16,0.88)', accentFill: '#00ff88', textFill: '#ffffff',
+            numberFill: '#000000', borderColor: 'rgba(0,255,136,0.35)', borderWidth: 2,
+            shadowColor: 'rgba(0,255,136,0.4)', shadowBlur: 22, radius: 12,
+            numberWeight: '900', numberSize: 46, titleWeight: '700', titleSize: 30,
+            glow: true,
+        },
+        cinematic: {
+            bgFill: 'rgba(15,10,0,0.88)', accentFill: '#d4af37', textFill: '#f0e6c8',
+            numberFill: '#1a1000', borderColor: 'rgba(212,175,55,0.25)', borderWidth: 1.5,
+            shadowColor: 'rgba(0,0,0,0.6)', shadowBlur: 16, radius: 6,
+            numberWeight: '800', numberSize: 44, titleWeight: '600', titleSize: 30,
+            glow: false,
+        },
+        elegant: {
+            bgFill: 'rgba(12,4,24,0.85)', accentFill: '#8b5cf6', textFill: '#ffffff',
+            numberFill: '#ffffff', borderColor: 'rgba(139,92,246,0.25)', borderWidth: 1.5,
+            shadowColor: 'rgba(139,92,246,0.2)', shadowBlur: 18, radius: 20,
+            numberWeight: '700', numberSize: 42, titleWeight: '300', titleSize: 28,
+            glow: true,
+        },
+    };
+
+    /** Resolve counter style tokens — counter-only, never touches MG or template styles */
+    _getCounterStyle(mg) {
+        const styleName = mg.style || 'clean';
+        return MGRenderer._COUNTER_STYLES[styleName] || MGRenderer._COUNTER_STYLES.clean;
+    }
+
+    // ========================================================================
+    // TEMPLATE STYLE TOKENS — Completely separate from MG overlay styles.
+    // Controls: colors, card shape, border, shadow, font weights, glow.
+    // ========================================================================
+    static _TEMPLATE_STYLES = {
+        clean: {
+            accent: '#3b82f6', accentText: '#ffffff', cardBg: 'rgba(20,30,60,0.85)',
+            cardBorder: 'rgba(255,255,255,0.08)', cardRadius: 12, cardShadow: 'rgba(0,0,0,0.3)',
+            cardShadowBlur: 8, titleWeight: '700', titleSize: 52, labelSize: 30, bodySize: 26, numberSize: 28,
+            barWidth: 5, gridBg: 'rgba(0,0,10,0.92)', gridLine: 'rgba(255,255,255,0.05)',
+            glow: false, fontOverride: null,
+        },
+        bold: {
+            accent: '#ef4444', accentText: '#ffffff', cardBg: 'rgba(40,10,10,0.9)',
+            cardBorder: 'rgba(239,68,68,0.3)', cardRadius: 6, cardShadow: 'rgba(239,68,68,0.2)',
+            cardShadowBlur: 12, titleWeight: '900', titleSize: 58, labelSize: 34, bodySize: 28, numberSize: 32,
+            barWidth: 8, gridBg: 'rgba(10,0,0,0.94)', gridLine: 'rgba(239,68,68,0.08)',
+            glow: false, fontOverride: null,
+        },
+        minimal: {
+            accent: '#94a3b8', accentText: '#0f172a', cardBg: 'rgba(255,255,255,0.06)',
+            cardBorder: 'rgba(255,255,255,0.12)', cardRadius: 8, cardShadow: 'none',
+            cardShadowBlur: 0, titleWeight: '400', titleSize: 46, labelSize: 28, bodySize: 24, numberSize: 24,
+            barWidth: 2, gridBg: 'rgba(0,0,0,0.4)', gridLine: 'rgba(255,255,255,0.03)',
+            glow: false, fontOverride: null,
+        },
+        neon: {
+            accent: '#00ff88', accentText: '#000000', cardBg: 'rgba(0,10,20,0.88)',
+            cardBorder: 'rgba(0,255,136,0.25)', cardRadius: 10, cardShadow: 'rgba(0,255,136,0.3)',
+            cardShadowBlur: 20, titleWeight: '800', titleSize: 54, labelSize: 30, bodySize: 26, numberSize: 30,
+            barWidth: 4, gridBg: 'rgba(0,0,15,0.92)', gridLine: 'rgba(0,255,136,0.06)',
+            glow: true, fontOverride: null,
+        },
+        cinematic: {
+            accent: '#d4af37', accentText: '#1a1000', cardBg: 'rgba(20,15,5,0.9)',
+            cardBorder: 'rgba(212,175,55,0.2)', cardRadius: 4, cardShadow: 'rgba(0,0,0,0.5)',
+            cardShadowBlur: 15, titleWeight: '600', titleSize: 50, labelSize: 30, bodySize: 26, numberSize: 28,
+            barWidth: 3, gridBg: 'rgba(10,8,0,0.94)', gridLine: 'rgba(212,175,55,0.05)',
+            glow: false, fontOverride: null,
+        },
+        elegant: {
+            accent: '#8b5cf6', accentText: '#ffffff', cardBg: 'rgba(15,5,30,0.85)',
+            cardBorder: 'rgba(139,92,246,0.2)', cardRadius: 16, cardShadow: 'rgba(139,92,246,0.15)',
+            cardShadowBlur: 18, titleWeight: '300', titleSize: 48, labelSize: 28, bodySize: 24, numberSize: 26,
+            barWidth: 3, gridBg: 'rgba(10,0,25,0.9)', gridLine: 'rgba(139,92,246,0.05)',
+            glow: true, fontOverride: null,
+        },
+    };
+
+    /** Resolve template style tokens — template-only, never touches MG styles */
+    _getTemplateStyle(mg, s) {
+        const styleName = mg.style || 'clean';
+        const ts = MGRenderer._TEMPLATE_STYLES[styleName] || MGRenderer._TEMPLATE_STYLES.clean;
+        return {
+            ...ts,
+            text: s.text || '#ffffff',
+            textSub: s.textSub || 'rgba(255,255,255,0.7)',
+            fontHeading: s.fontHeading || 'Arial, sans-serif',
+            fontBody: s.fontBody || 'Arial, sans-serif',
+        };
+    }
+
+    _renderListicleGrid(ctx, frame, fps, mg, s, anim) {
+        const { springValue, interpolate } = AnimationUtils;
+        const { enterFrames, isExiting, exitProgress, opacity, idleScale } = anim;
+
+        const variant = this._resolveVariant(mg, s, 'listicleGrid');
+        const ts = this._getTemplateStyle(mg, s);
+
+        // Parse items: prioritize _listicleItems (most reliable), then subtext, then text
+        let items = [];
+
+        // 1. Direct listicle items (attached by generateListicleGridMG)
+        if (mg._listicleItems && mg._listicleItems.length > 0) {
+            items = mg._listicleItems.map(item => ({
+                label: item.title || item.displayLabel || `Item ${item.itemNumber}`,
+                value: String(item.itemNumber),
+            }));
+        }
+
+        // 2. Subtext key:value pairs (comma-separated "Label:1, Label:2, ...")
+        if (items.length === 0) {
+            items = MGRenderer._parseKeyValuePairs(mg.subtext);
+        }
+
+        // 3. Fallback: split text by commas/semicolons/newlines
+        if (items.length === 0 && mg.text) {
+            items = (mg.text || '').split(/[,;]|\n/).map(t => t.trim()).filter(Boolean)
+                .map((t, i) => {
+                    const numMatch = t.match(/^#?(\d+)[.:)]\s*(.*)/);
+                    return numMatch
+                        ? { label: numMatch[2] || t, value: numMatch[1] }
+                        : { label: t, value: String(i + 1) };
+                });
+        }
+
+        const maxItems = Math.min(items.length, 8);
+        const title = mg.text && !mg.text.match(/^#?\d/) ? mg.text : '';
+
+        ctx.save();
+        ctx.globalAlpha = Math.min(1, opacity);
+
+        // Collect loaded thumbnails for each item
+        const thumbFiles = mg._itemThumbnails || [];
+        const thumbs = items.slice(0, maxItems).map((_, i) => this._getGridThumb(thumbFiles[i]));
+
+        const animationType = mg.animation || 'staggerSlide';
+
+        this._dispatchVariant(ctx, 'listicleGrid', variant, mg, s, anim, null, {
+            items: items.slice(0, maxItems), maxItems, title, thumbs, ts,
+            frame, fps, enterFrames, isExiting, exitProgress, idleScale,
+            hasMgBackground: !!(mg.mgBackground && mg.mgBackground !== 'none'),
+            animationType,
+        });
+
+        ctx.restore();
+    }
+
+    /**
+     * Compute per-card animation state for listicle grid templates.
+     * Returns { offsetX, offsetY, scaleX, scaleY, alpha, rotation } for a single card.
+     * @param {string} animationType - 'staggerSlide' | 'cascade' | 'flipIn'
+     * @param {number} spring - spring progress 0→1
+     * @param {number} i - card index
+     * @param {number} maxItems - total items
+     * @param {boolean} isExiting - exit phase
+     * @param {number} exitProgress - exit 1→0
+     * @param {string} variant - 'grid'|'strip'|'stack' for direction hints
+     */
+    _computeCardAnim(animationType, spring, i, maxItems, isExiting, exitProgress, variant) {
+        const { interpolate } = AnimationUtils;
+        const alpha = isExiting ? exitProgress : spring;
+
+        switch (animationType) {
+            case 'cascade': {
+                // Cards cascade from top with increasing rotation
+                const offsetY = interpolate(spring, [0, 1], [-200 - i * 40, 0]);
+                const rotation = interpolate(spring, [0, 1], [-8 + i * 2, 0]) * Math.PI / 180;
+                const scale = interpolate(spring, [0, 1], [0.7, 1]);
+                return { offsetX: 0, offsetY, scaleX: scale, scaleY: scale, alpha, rotation };
+            }
+            case 'flipIn': {
+                // Cards flip in with scaleY (simulated 3D flip via vertical squash)
+                const scaleY = interpolate(spring, [0, 1], [0, 1]);
+                const scaleX = interpolate(spring, [0, 1], [0.6, 1]);
+                const offsetY = interpolate(spring, [0, 1], [30, 0]);
+                return { offsetX: 0, offsetY, scaleX, scaleY, alpha, rotation: 0 };
+            }
+            case 'staggerSlide':
+            default: {
+                // Default: slide in from sides (grid), bottom (strip), left (stack)
+                let offsetX = 0, offsetY = 0;
+                if (variant === 'strip') {
+                    offsetY = interpolate(spring, [0, 1], [60, 0]);
+                } else if (variant === 'stack') {
+                    offsetX = interpolate(spring, [0, 1], [-100, 0]);
+                } else {
+                    // Grid: alternate left/right columns
+                    offsetX = interpolate(spring, [0, 1], [(i % 2 === 0 ? -80 : 80), 0]);
+                }
+                return { offsetX, offsetY, scaleX: 1, scaleY: 1, alpha, rotation: 0 };
+            }
+        }
+    }
+
+    // ── Grid: 2-column card grid with numbers ──
+    // All visuals driven by template style tokens (setup.ts) — completely separate from MG styles
+    _renderLG_Grid(ctx, mg, s, anim, _a, setup) {
+        const { springValue, interpolate } = AnimationUtils;
+        const { items, maxItems, title, frame, fps, enterFrames, isExiting, exitProgress, idleScale, thumbs, ts } = setup;
+
+        const W = 1920, H = 1080;
+
+        // Background (skip if mgBackground is set — drawn by _renderMGBackground)
+        if (!setup.hasMgBackground) {
+            ctx.fillStyle = ts.gridBg;
+            ctx.fillRect(0, 0, W, H);
+        }
+
+        // Subtle grid pattern
+        ctx.strokeStyle = ts.gridLine;
+        ctx.lineWidth = 1;
+        const gridSize = 60;
+        for (let x = 0; x < W; x += gridSize) {
+            ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+        }
+        for (let y = 0; y < H; y += gridSize) {
+            ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+        }
+
+        // Title
+        let titleBottom = 120;
+        if (title) {
+            const titleSpring = springValue(Math.max(0, frame - Math.round(enterFrames * 0.05)), fps, { damping: 14, stiffness: 100 });
+            const titleSlideY = interpolate(titleSpring, [0, 1], [-40, 0]);
+            ctx.save();
+            ctx.globalAlpha *= (isExiting ? exitProgress : titleSpring);
+            MGRenderer._setFont(ctx, ts.titleWeight, ts.titleSize, ts.fontHeading);
+            ctx.fillStyle = ts.text;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            if (ts.glow) { ctx.shadowColor = ts.accent; ctx.shadowBlur = 20; }
+            else { ctx.shadowColor = 'rgba(0,0,0,0.6)'; ctx.shadowBlur = 10; }
+            ctx.fillText(title, W / 2, 90 + titleSlideY);
+            ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+
+            // Accent underline
+            const titleW = ctx.measureText(title).width;
+            ctx.fillStyle = ts.accent;
+            ctx.fillRect(W / 2 - titleW / 2, 120 + titleSlideY, titleW * titleSpring, ts.barWidth);
+            ctx.restore();
+            titleBottom = 160;
+        }
+
+        // Check if any thumbnails are available
+        const hasThumbs = thumbs && thumbs.some(t => t);
+
+        // Grid layout: 2 columns
+        const cols = maxItems <= 3 ? 1 : 2;
+        const rows = Math.ceil(maxItems / cols);
+        const cardW = cols === 1 ? 800 : 680;
+        const cardH = hasThumbs ? 160 : 90;
+        const gapX = 40;
+        const gapY = hasThumbs ? 24 : 18;
+        const totalGridW = cols * cardW + (cols - 1) * gapX;
+        const totalGridH = rows * cardH + (rows - 1) * gapY;
+        const startX = (W - totalGridW) / 2;
+        const startY = titleBottom + (H - titleBottom - totalGridH) / 2 - 20;
+
+        const staggerDelay = Math.round(fps * 0.18);
+
+        for (let i = 0; i < maxItems; i++) {
+            const col = i % cols;
+            const row = Math.floor(i / cols);
+            const cx = startX + col * (cardW + gapX);
+            const cy = startY + row * (cardH + gapY);
+
+            const cardDelay = Math.round(enterFrames * 0.15 + i * staggerDelay);
+            const cardSpring = springValue(Math.max(0, frame - cardDelay), fps, { damping: 15, stiffness: 130 });
+            const ca = this._computeCardAnim(setup.animationType, cardSpring, i, maxItems, isExiting, exitProgress, 'grid');
+
+            ctx.save();
+            ctx.globalAlpha = Math.min(1, idleScale) * ca.alpha;
+
+            // Apply transform around card center
+            const ctrX = cx + cardW / 2;
+            const ctrY = cy + cardH / 2;
+            ctx.translate(ctrX + ca.offsetX, ctrY + ca.offsetY);
+            if (ca.rotation !== 0) ctx.rotate(ca.rotation);
+            if (ca.scaleX !== 1 || ca.scaleY !== 1) ctx.scale(ca.scaleX, ca.scaleY);
+            ctx.translate(-ctrX, -ctrY);
+
+            // Card shadow
+            if (ts.cardShadowBlur > 0) {
+                ctx.shadowColor = ts.cardShadow;
+                ctx.shadowBlur = ts.cardShadowBlur;
+                ctx.shadowOffsetY = 4;
+            }
+
+            // Card background
+            ctx.beginPath();
+            MGRenderer._roundRect(ctx, cx, cy, cardW, cardH, ts.cardRadius);
+            ctx.fillStyle = ts.cardBg;
+            ctx.fill();
+            ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+
+            // Card border
+            if (ts.cardBorder && ts.cardBorder !== 'none') {
+                ctx.strokeStyle = ts.cardBorder;
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                MGRenderer._roundRect(ctx, cx, cy, cardW, cardH, ts.cardRadius);
+                ctx.stroke();
+            }
+
+            // Left accent bar
+            if (ts.glow) { ctx.shadowColor = ts.accent; ctx.shadowBlur = 12; }
+            ctx.fillStyle = ts.accent;
+            MGRenderer._roundRect(ctx, cx, cy, ts.barWidth, cardH, [ts.cardRadius, 0, 0, ts.cardRadius]);
+            ctx.fill();
+            ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+
+            // Thumbnail (if available)
+            const thumb = thumbs && thumbs[i];
+            const thumbW = hasThumbs ? 150 : 0;
+            const thumbPad = hasThumbs ? 10 : 0;
+            if (thumb) {
+                const tw = thumbW - thumbPad * 2;
+                const th = cardH - thumbPad * 2;
+                const tx = cx + ts.barWidth + 10;
+                const ty = cy + thumbPad;
+                ctx.save();
+                ctx.beginPath();
+                MGRenderer._roundRect(ctx, tx, ty, tw, th, Math.max(4, ts.cardRadius - 4));
+                ctx.clip();
+                const srcAspect = (thumb.videoWidth || thumb.naturalWidth || thumb.width) / (thumb.videoHeight || thumb.naturalHeight || thumb.height);
+                const dstAspect = tw / th;
+                let sx = 0, sy = 0, sw = thumb.width, sh = thumb.height;
+                if (srcAspect > dstAspect) { sw = sh * dstAspect; sx = (thumb.width - sw) / 2; }
+                else { sh = sw / dstAspect; sy = (thumb.height - sh) / 2; }
+                ctx.drawImage(thumb, sx, sy, sw, sh, tx, ty, tw, th);
+                ctx.restore();
+                ctx.fillStyle = 'rgba(0,0,0,0.12)';
+                ctx.beginPath();
+                MGRenderer._roundRect(ctx, tx, ty, tw, th, Math.max(4, ts.cardRadius - 4));
+                ctx.fill();
+            }
+
+            const contentX = cx + ts.barWidth + 10 + (hasThumbs ? thumbW : 0);
+
+            // Number badge
+            const badgeSize = 52;
+            const badgeX = contentX + 12;
+            const badgeY = cy + (cardH - badgeSize) / 2;
+            if (ts.glow) { ctx.shadowColor = ts.accent; ctx.shadowBlur = 16; }
+            ctx.beginPath();
+            MGRenderer._roundRect(ctx, badgeX, badgeY, badgeSize, badgeSize, ts.cardRadius);
+            ctx.fillStyle = ts.accent;
+            ctx.fill();
+            ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+
+            MGRenderer._setFont(ctx, '900', ts.numberSize, ts.fontHeading);
+            ctx.fillStyle = ts.accentText;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(items[i].value || String(i + 1), badgeX + badgeSize / 2, badgeY + badgeSize / 2);
+
+            // Item label
+            MGRenderer._setFont(ctx, '600', ts.labelSize, ts.fontBody);
+            ctx.fillStyle = ts.text;
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'middle';
+            const labelX = badgeX + badgeSize + 16;
+            const maxLabelW = cardW - (labelX - cx) - 16;
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(labelX, cy, maxLabelW, cardH);
+            ctx.clip();
+            if (ts.glow) { ctx.shadowColor = ts.accent; ctx.shadowBlur = 6; }
+            ctx.fillText(items[i].label, labelX, cy + cardH / 2);
+            ctx.restore();
+
+            ctx.restore();
+        }
+    }
+
+    // ── Strip: Horizontal row of boxes ──
+    // All visuals driven by template style tokens (setup.ts)
+    _renderLG_Strip(ctx, mg, s, anim, _a, setup) {
+        const { springValue, interpolate } = AnimationUtils;
+        const { items, maxItems, title, frame, fps, enterFrames, isExiting, exitProgress, idleScale, thumbs, ts } = setup;
+
+        const W = 1920, H = 1080;
+
+        if (!setup.hasMgBackground) {
+            ctx.fillStyle = ts.gridBg;
+            ctx.fillRect(0, 0, W, H);
+        }
+
+        // Horizontal grid lines
+        ctx.strokeStyle = ts.gridLine;
+        ctx.lineWidth = 1;
+        for (let y = 0; y < H; y += 80) {
+            ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+        }
+
+        // Title
+        let titleBottom = H * 0.28;
+        if (title) {
+            const titleSpring = springValue(Math.max(0, frame - Math.round(enterFrames * 0.05)), fps, { damping: 14, stiffness: 100 });
+            ctx.save();
+            ctx.globalAlpha *= (isExiting ? exitProgress : titleSpring);
+            MGRenderer._setFont(ctx, ts.titleWeight, ts.titleSize, ts.fontHeading);
+            ctx.fillStyle = ts.text;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            if (ts.glow) { ctx.shadowColor = ts.accent; ctx.shadowBlur = 20; }
+            else { ctx.shadowColor = 'rgba(0,0,0,0.6)'; ctx.shadowBlur = 10; }
+            ctx.fillText(title, W / 2, H * 0.2);
+            ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+            ctx.restore();
+            titleBottom = H * 0.32;
+        }
+
+        const hasThumbs = thumbs && thumbs.some(t => t);
+
+        const gap = 20;
+        const maxBoxW = Math.min(280, (W - 120 - (maxItems - 1) * gap) / maxItems);
+        const boxH = hasThumbs ? 380 : 300;
+        const totalStripW = maxItems * maxBoxW + (maxItems - 1) * gap;
+        const startX = (W - totalStripW) / 2;
+        const centerY = titleBottom + (H - titleBottom - boxH) / 2;
+
+        const staggerDelay = Math.round(fps * 0.15);
+
+        for (let i = 0; i < maxItems; i++) {
+            const bx = startX + i * (maxBoxW + gap);
+
+            const cardDelay = Math.round(enterFrames * 0.1 + i * staggerDelay);
+            const cardSpring = springValue(Math.max(0, frame - cardDelay), fps, { damping: 14, stiffness: 140 });
+            const ca = this._computeCardAnim(setup.animationType, cardSpring, i, maxItems, isExiting, exitProgress, 'strip');
+
+            ctx.save();
+            ctx.globalAlpha = ca.alpha;
+
+            // Apply transform around box center
+            const ctrX = bx + maxBoxW / 2;
+            const ctrY = centerY + boxH / 2;
+            ctx.translate(ctrX + ca.offsetX, ctrY + ca.offsetY);
+            if (ca.rotation !== 0) ctx.rotate(ca.rotation);
+            if (ca.scaleX !== 1 || ca.scaleY !== 1) ctx.scale(ca.scaleX, ca.scaleY);
+            ctx.translate(-ctrX, -ctrY);
+
+            const drawY = centerY;
+
+            // Card shadow + background
+            if (ts.cardShadowBlur > 0) { ctx.shadowColor = ts.cardShadow; ctx.shadowBlur = ts.cardShadowBlur; ctx.shadowOffsetY = 4; }
+            ctx.beginPath();
+            MGRenderer._roundRect(ctx, bx, drawY, maxBoxW, boxH, ts.cardRadius);
+            ctx.fillStyle = ts.cardBg;
+            ctx.fill();
+            ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+
+            // Card border
+            if (ts.cardBorder && ts.cardBorder !== 'none') {
+                ctx.strokeStyle = ts.cardBorder;
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                MGRenderer._roundRect(ctx, bx, drawY, maxBoxW, boxH, ts.cardRadius);
+                ctx.stroke();
+            }
+
+            // Top accent stripe
+            if (ts.glow) { ctx.shadowColor = ts.accent; ctx.shadowBlur = 10; }
+            ctx.save();
+            ctx.beginPath();
+            MGRenderer._roundRect(ctx, bx, drawY, maxBoxW, ts.barWidth, [ts.cardRadius, ts.cardRadius, 0, 0]);
+            ctx.clip();
+            ctx.fillStyle = ts.accent;
+            ctx.fillRect(bx, drawY, maxBoxW, ts.barWidth);
+            ctx.restore();
+            ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+
+            // Thumbnail
+            const thumb = thumbs && thumbs[i];
+            let contentY = drawY + 14;
+            if (hasThumbs) {
+                const thumbH = 110;
+                const thumbPad = 10;
+                const tx = bx + thumbPad;
+                const ty = drawY + ts.barWidth + 6;
+                const tw = maxBoxW - thumbPad * 2;
+                if (thumb) {
+                    ctx.save();
+                    ctx.beginPath();
+                    MGRenderer._roundRect(ctx, tx, ty, tw, thumbH, Math.max(4, ts.cardRadius - 4));
+                    ctx.clip();
+                    const srcAspect = (thumb.videoWidth || thumb.naturalWidth || thumb.width) / (thumb.videoHeight || thumb.naturalHeight || thumb.height);
+                    const dstAspect = tw / thumbH;
+                    let sx = 0, sy = 0, sw = thumb.width, sh = thumb.height;
+                    if (srcAspect > dstAspect) { sw = sh * dstAspect; sx = (thumb.width - sw) / 2; }
+                    else { sh = sw / dstAspect; sy = (thumb.height - sh) / 2; }
+                    ctx.drawImage(thumb, sx, sy, sw, sh, tx, ty, tw, thumbH);
+                    ctx.restore();
+                } else {
+                    ctx.fillStyle = 'rgba(255,255,255,0.04)';
+                    ctx.beginPath();
+                    MGRenderer._roundRect(ctx, tx, ty, tw, thumbH, Math.max(4, ts.cardRadius - 4));
+                    ctx.fill();
+                }
+                contentY = ty + thumbH + 8;
+            }
+
+            // Big number
+            if (ts.glow) { ctx.shadowColor = ts.accent; ctx.shadowBlur = 14; }
+            MGRenderer._setFont(ctx, '900', 48, ts.fontHeading);
+            ctx.fillStyle = ts.accent;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(items[i].value || String(i + 1), bx + maxBoxW / 2, contentY + 30);
+            ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+
+            // Separator line
+            ctx.fillStyle = ts.cardBorder || 'rgba(255,255,255,0.1)';
+            ctx.fillRect(bx + 20, contentY + 60, maxBoxW - 40, 1);
+
+            // Item label (wrapped)
+            MGRenderer._setFont(ctx, '500', 20, ts.fontBody);
+            ctx.fillStyle = ts.text;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'top';
+            const label = items[i].label;
+            const wrapW = maxBoxW - 24;
+            const words = label.split(' ');
+            let line = '';
+            let lineY = contentY + 72;
+            for (const word of words) {
+                const test = line ? `${line} ${word}` : word;
+                if (ctx.measureText(test).width > wrapW && line) {
+                    ctx.fillText(line, bx + maxBoxW / 2, lineY);
+                    line = word;
+                    lineY += 26;
+                    if (lineY > drawY + boxH - 20) break;
+                } else { line = test; }
+            }
+            if (line && lineY <= drawY + boxH - 20) ctx.fillText(line, bx + maxBoxW / 2, lineY);
+
+            ctx.restore();
+        }
+    }
+
+    // ── Stack: Vertical stacked bars sliding in from left ──
+    // All visuals driven by template style tokens (setup.ts)
+    _renderLG_Stack(ctx, mg, s, anim, _a, setup) {
+        const { springValue, interpolate } = AnimationUtils;
+        const { items, maxItems, title, frame, fps, enterFrames, isExiting, exitProgress, idleScale, thumbs, ts } = setup;
+
+        const W = 1920, H = 1080;
+
+        if (!setup.hasMgBackground) {
+            ctx.fillStyle = ts.gridBg;
+            ctx.fillRect(0, 0, W, H);
+        }
+
+        // Subtle diagonal grid
+        ctx.strokeStyle = ts.gridLine;
+        ctx.lineWidth = 1;
+        for (let i = -H; i < W + H; i += 100) {
+            ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i + H, H); ctx.stroke();
+        }
+
+        // Title on left side
+        let contentTop = 100;
+        if (title) {
+            const titleSpring = springValue(Math.max(0, frame - Math.round(enterFrames * 0.05)), fps, { damping: 14, stiffness: 100 });
+            ctx.save();
+            ctx.globalAlpha *= (isExiting ? exitProgress : titleSpring);
+            const titleSlideX = interpolate(titleSpring, [0, 1], [-60, 0]);
+            MGRenderer._setFont(ctx, ts.titleWeight, ts.titleSize - 6, ts.fontHeading);
+            ctx.fillStyle = ts.text;
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'middle';
+            if (ts.glow) { ctx.shadowColor = ts.accent; ctx.shadowBlur = 20; }
+            else { ctx.shadowColor = 'rgba(0,0,0,0.6)'; ctx.shadowBlur = 10; }
+            ctx.fillText(title, 120 + titleSlideX, 80);
+            ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+
+            // Accent underline
+            const tw = ctx.measureText(title).width;
+            ctx.fillStyle = ts.accent;
+            ctx.fillRect(120 + titleSlideX, 106, tw * titleSpring, ts.barWidth);
+            ctx.restore();
+            contentTop = 140;
+        }
+
+        const hasThumbs = thumbs && thumbs.some(t => t);
+
+        const barH = hasThumbs ? 80 : 64;
+        const gap = 12;
+        const totalStackH = maxItems * barH + (maxItems - 1) * gap;
+        const startY = contentTop + (H - contentTop - totalStackH) / 2 - 10;
+        const barMaxW = W * 0.75;
+        const barStartX = 120;
+
+        const staggerDelay = Math.round(fps * 0.2);
+
+        for (let i = 0; i < maxItems; i++) {
+            const by = startY + i * (barH + gap);
+
+            const barDelay = Math.round(enterFrames * 0.12 + i * staggerDelay);
+            const barSpring = springValue(Math.max(0, frame - barDelay), fps, { damping: 15, stiffness: 120 });
+            const ca = this._computeCardAnim(setup.animationType, barSpring, i, maxItems, isExiting, exitProgress, 'stack');
+
+            ctx.save();
+            ctx.globalAlpha = ca.alpha;
+
+            // Apply transform around bar center
+            const ctrX = barStartX + barMaxW / 2;
+            const ctrY = by + barH / 2;
+            ctx.translate(ctrX + ca.offsetX, ctrY + ca.offsetY);
+            if (ca.rotation !== 0) ctx.rotate(ca.rotation);
+            if (ca.scaleX !== 1 || ca.scaleY !== 1) ctx.scale(ca.scaleX, ca.scaleY);
+            ctx.translate(-ctrX, -ctrY);
+
+            const bx = barStartX;
+
+            // Bar wipe reveal (clip from left)
+            const wipeProgress = AnimationUtils.interpolate(barSpring, [0, 1], [0, 1]);
+            const barW = barMaxW * wipeProgress;
+            ctx.beginPath();
+            MGRenderer._roundRect(ctx, bx, by, barW, barH, ts.cardRadius);
+            ctx.clip();
+
+            // Bar shadow + background
+            if (ts.cardShadowBlur > 0) { ctx.shadowColor = ts.cardShadow; ctx.shadowBlur = ts.cardShadowBlur; ctx.shadowOffsetY = 3; }
+            ctx.beginPath();
+            MGRenderer._roundRect(ctx, bx, by, barMaxW, barH, ts.cardRadius);
+            ctx.fillStyle = ts.cardBg;
+            ctx.fill();
+            ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+
+            // Bar border
+            if (ts.cardBorder && ts.cardBorder !== 'none') {
+                ctx.strokeStyle = ts.cardBorder;
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                MGRenderer._roundRect(ctx, bx, by, barMaxW, barH, ts.cardRadius);
+                ctx.stroke();
+            }
+
+            // Left accent block
+            const accentW = 56;
+            if (ts.glow) { ctx.shadowColor = ts.accent; ctx.shadowBlur = 10; }
+            ctx.fillStyle = ts.accent;
+            ctx.beginPath();
+            MGRenderer._roundRect(ctx, bx, by, accentW, barH, [ts.cardRadius, 0, 0, ts.cardRadius]);
+            ctx.fill();
+            ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+
+            // Number in accent block
+            MGRenderer._setFont(ctx, '900', ts.numberSize, ts.fontHeading);
+            ctx.fillStyle = ts.accentText;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(items[i].value || String(i + 1), bx + accentW / 2, by + barH / 2);
+
+            // Thumbnail (small square after accent block)
+            const thumb = thumbs && thumbs[i];
+            let labelStartX = bx + accentW + 20;
+            if (hasThumbs) {
+                const thumbSize = barH - 12;
+                const tx = bx + accentW + 8;
+                const ty = by + 6;
+                if (thumb) {
+                    ctx.save();
+                    ctx.beginPath();
+                    MGRenderer._roundRect(ctx, tx, ty, thumbSize, thumbSize, Math.max(4, ts.cardRadius - 4));
+                    ctx.clip();
+                    const srcAspect = (thumb.videoWidth || thumb.naturalWidth || thumb.width) / (thumb.videoHeight || thumb.naturalHeight || thumb.height);
+                    let sx = 0, sy = 0, sw = thumb.width, sh = thumb.height;
+                    if (srcAspect > 1) { sw = sh; sx = (thumb.width - sw) / 2; }
+                    else { sh = sw; sy = (thumb.height - sh) / 2; }
+                    ctx.drawImage(thumb, sx, sy, sw, sh, tx, ty, thumbSize, thumbSize);
+                    ctx.restore();
+                } else {
+                    ctx.fillStyle = 'rgba(255,255,255,0.04)';
+                    ctx.beginPath();
+                    MGRenderer._roundRect(ctx, tx, ty, thumbSize, thumbSize, Math.max(4, ts.cardRadius - 4));
+                    ctx.fill();
+                }
+                labelStartX = tx + thumbSize + 14;
+            }
+
+            // Item label
+            MGRenderer._setFont(ctx, '600', ts.labelSize - 2, ts.fontBody);
+            ctx.fillStyle = ts.text;
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'middle';
+            if (ts.glow) { ctx.shadowColor = ts.accent; ctx.shadowBlur = 4; }
+            ctx.fillText(items[i].label, labelStartX, by + barH / 2);
+
+            ctx.restore();
+        }
+    }
+
+    // ============================================================
+    // TEMPLATE RENDERERS (from ai-templates.js pipeline)
+    // ============================================================
+
+    /**
+     * Chapter Card — bold section header with accent bar and subtitle.
+     * Used for documentary/explainer section transitions.
+     */
+    _renderChapterCard(ctx, frame, fps, mg, s, anim) {
+        const { springValue, interpolate } = AnimationUtils;
+        const W = 1920, H = 1080;
+        const ts = this._getTemplateStyle(mg, s);
+        const hasMgBg = mg.mgBackground && mg.mgBackground !== 'none';
+
+        if (!hasMgBg) {
+            if (!this._drawTemplateBg(ctx, mg, W, H, 1)) {
+                ctx.fillStyle = ts.gridBg;
+                ctx.fillRect(0, 0, W, H);
+            }
+        }
+
+        const enterFrames = Math.round(fps * 1.2);
+        const mainSpring = springValue(frame, fps, { damping: 14, stiffness: 80 });
+        const exitDur = Math.round(fps * 0.5);
+        const totalFrames = Math.round((mg.duration || 4) * fps);
+        const isExiting = frame > totalFrames - exitDur;
+        const exitAlpha = isExiting ? interpolate(frame - (totalFrames - exitDur), [0, exitDur], [1, 0]) : 1;
+
+        ctx.save();
+        ctx.globalAlpha = Math.min(anim.opacity, exitAlpha);
+
+        // Accent bar (vertical, left side)
+        const barW = ts.barWidth * 3;
+        const barH = 220;
+        const barX = W * 0.12;
+        const barY = H / 2 - barH / 2;
+        const barScale = interpolate(mainSpring, [0, 1], [0, 1]);
+        ctx.fillStyle = ts.accent;
+        ctx.fillRect(barX, barY + barH * (1 - barScale) / 2, barW, barH * barScale);
+
+        // Glow effect on bar
+        if (ts.glow) {
+            ctx.shadowColor = ts.accent;
+            ctx.shadowBlur = 30;
+            ctx.fillRect(barX, barY + barH * (1 - barScale) / 2, barW, barH * barScale);
+            ctx.shadowColor = 'transparent';
+            ctx.shadowBlur = 0;
+        }
+
+        // Title text
+        const textX = barX + barW + 40;
+        const textSlide = interpolate(mainSpring, [0, 1], [80, 0]);
+        const textSpring = springValue(Math.max(0, frame - Math.round(fps * 0.15)), fps, { damping: 16, stiffness: 100 });
+
+        ctx.save();
+        ctx.globalAlpha *= textSpring;
+        MGRenderer._setFont(ctx, ts.titleWeight, ts.titleSize + 8, ts.fontHeading);
+        ctx.fillStyle = ts.text;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.shadowColor = 'rgba(0,0,0,0.5)';
+        ctx.shadowBlur = 12;
+        ctx.fillText(mg.text || '', textX + textSlide, H / 2 - 30);
+        ctx.shadowColor = 'transparent';
+        ctx.shadowBlur = 0;
+
+        // Subtitle
+        if (mg.subText || mg.subtext) {
+            const subSpring = springValue(Math.max(0, frame - Math.round(fps * 0.3)), fps, { damping: 16, stiffness: 100 });
+            const subSlide = interpolate(subSpring, [0, 1], [50, 0]);
+            ctx.globalAlpha = Math.min(anim.opacity, exitAlpha) * subSpring;
+            MGRenderer._setFont(ctx, '400', ts.labelSize + 2, ts.fontBody);
+            ctx.fillStyle = ts.textSub || 'rgba(255,255,255,0.7)';
+            ctx.fillText(mg.subText || mg.subtext || '', textX + subSlide, H / 2 + 30);
+        }
+        ctx.restore();
+
+        // Horizontal accent line under text
+        const lineW = interpolate(mainSpring, [0, 1], [0, W * 0.45]);
+        ctx.fillStyle = ts.accent;
+        ctx.globalAlpha *= 0.3;
+        ctx.fillRect(textX, H / 2 + 60, lineW, 2);
+
+        ctx.restore();
+    }
+
+    /**
+     * Location Card — pin icon + location name + region subtitle.
+     * Used when introducing a new geographic location.
+     */
+    _renderLocationCard(ctx, frame, fps, mg, s, anim) {
+        const { springValue, interpolate } = AnimationUtils;
+        const W = 1920, H = 1080;
+        const ts = this._getTemplateStyle(mg, s);
+        const hasMgBg = mg.mgBackground && mg.mgBackground !== 'none';
+
+        if (!hasMgBg) {
+            if (!this._drawTemplateBg(ctx, mg, W, H, 1)) {
+                ctx.fillStyle = ts.gridBg;
+                ctx.fillRect(0, 0, W, H);
+            }
+        }
+
+        const mainSpring = springValue(frame, fps, { damping: 12, stiffness: 90 });
+        const totalFrames = Math.round((mg.duration || 3) * fps);
+        const exitDur = Math.round(fps * 0.4);
+        const isExiting = frame > totalFrames - exitDur;
+        const exitAlpha = isExiting ? interpolate(frame - (totalFrames - exitDur), [0, exitDur], [1, 0]) : 1;
+
+        ctx.save();
+        ctx.globalAlpha = Math.min(anim.opacity, exitAlpha);
+
+        // Card background
+        const cardW = 700;
+        const cardH = 200;
+        const cardX = (W - cardW) / 2;
+        const cardY = (H - cardH) / 2;
+        const cardScale = interpolate(mainSpring, [0, 1], [0.85, 1]);
+
+        ctx.save();
+        ctx.translate(W / 2, H / 2);
+        ctx.scale(cardScale, cardScale);
+        ctx.translate(-W / 2, -H / 2);
+
+        // Card shape
+        ctx.fillStyle = ts.cardBg;
+        if (ts.cardShadow !== 'none') {
+            ctx.shadowColor = ts.cardShadow;
+            ctx.shadowBlur = ts.cardShadowBlur;
+        }
+        ctx.beginPath();
+        MGRenderer._roundRect(ctx, cardX, cardY, cardW, cardH, ts.cardRadius);
+        ctx.fill();
+        ctx.shadowColor = 'transparent';
+        ctx.shadowBlur = 0;
+
+        // Card border
+        ctx.strokeStyle = ts.cardBorder;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        MGRenderer._roundRect(ctx, cardX, cardY, cardW, cardH, ts.cardRadius);
+        ctx.stroke();
+
+        // Pin icon (circle + triangle)
+        const pinX = cardX + 60;
+        const pinY = cardY + cardH / 2 - 15;
+        ctx.fillStyle = ts.accent;
+        ctx.beginPath();
+        ctx.arc(pinX, pinY, 18, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.moveTo(pinX - 12, pinY + 10);
+        ctx.lineTo(pinX + 12, pinY + 10);
+        ctx.lineTo(pinX, pinY + 35);
+        ctx.closePath();
+        ctx.fill();
+        // White dot center
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath();
+        ctx.arc(pinX, pinY, 7, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Location name
+        const locTextX = pinX + 50;
+        MGRenderer._setFont(ctx, ts.titleWeight, ts.titleSize - 8, ts.fontHeading);
+        ctx.fillStyle = ts.text;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(mg.text || '', locTextX, cardY + cardH / 2 - 20);
+
+        // Region subtitle
+        if (mg.subText || mg.subtext) {
+            MGRenderer._setFont(ctx, '400', ts.labelSize - 2, ts.fontBody);
+            ctx.fillStyle = ts.textSub || 'rgba(255,255,255,0.6)';
+            ctx.fillText(mg.subText || mg.subtext || '', locTextX, cardY + cardH / 2 + 20);
+        }
+
+        ctx.restore(); // cardScale
+        ctx.restore(); // main
+    }
+
+    /**
+     * Quote Card — large quotation marks + quote text + attribution.
+     * Used for notable quotes that deserve visual emphasis.
+     */
+    _renderQuoteCard(ctx, frame, fps, mg, s, anim) {
+        const { springValue, interpolate } = AnimationUtils;
+        const W = 1920, H = 1080;
+        const ts = this._getTemplateStyle(mg, s);
+
+        const mainSpring = springValue(frame, fps, { damping: 14, stiffness: 80 });
+        const totalFrames = Math.round((mg.duration || 5) * fps);
+        const exitDur = Math.round(fps * 0.5);
+        const isExiting = frame > totalFrames - exitDur;
+        const exitAlpha = isExiting ? interpolate(frame - (totalFrames - exitDur), [0, exitDur], [1, 0]) : 1;
+
+        // Background: template media (video/image) → static bg → solid fill
+        if (!this._drawTemplateBg(ctx, mg, W, H, Math.min(anim.opacity, exitAlpha))) {
+            ctx.fillStyle = ts.gridBg;
+            ctx.fillRect(0, 0, W, H);
+        }
+
+        ctx.save();
+        ctx.globalAlpha = Math.min(anim.opacity, exitAlpha);
+
+        // Large quotation mark (opening)
+        const quoteSpring = springValue(frame, fps, { damping: 10, stiffness: 120 });
+        const quoteScale = interpolate(quoteSpring, [0, 1], [0.5, 1]);
+        const quoteSlideY = interpolate(quoteSpring, [0, 1], [40, 0]);
+
+        ctx.save();
+        ctx.translate(W * 0.15, H * 0.3 + quoteSlideY);
+        ctx.scale(quoteScale, quoteScale);
+        ctx.fillStyle = ts.accent;
+        ctx.globalAlpha *= 0.4;
+        MGRenderer._setFont(ctx, '900', 180, 'Georgia, serif');
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+        ctx.fillText('\u201C', 0, 0);
+        ctx.restore();
+
+        // Quote text
+        const textSpring = springValue(Math.max(0, frame - Math.round(fps * 0.2)), fps, { damping: 14, stiffness: 90 });
+        const textAlpha = textSpring;
+        const textSlideY = interpolate(textSpring, [0, 1], [30, 0]);
+
+        ctx.save();
+        ctx.globalAlpha = Math.min(anim.opacity, exitAlpha) * textAlpha;
+        const quoteText = mg.text || '';
+        MGRenderer._setFont(ctx, '500', Math.min(ts.titleSize, 44), ts.fontHeading);
+        ctx.fillStyle = ts.text;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.shadowColor = 'rgba(0,0,0,0.5)';
+        ctx.shadowBlur = 10;
+
+        // Word wrap the quote
+        const maxW = W * 0.6;
+        const lines = MGRenderer._wrapTextWords(ctx, quoteText, maxW);
+        const lineH = (ts.titleSize || 44) + 8;
+        const startY = H / 2 - (lines.length * lineH) / 2 + textSlideY;
+        for (let i = 0; i < lines.length; i++) {
+            ctx.fillText(lines[i], W / 2, startY + i * lineH);
+        }
+        ctx.shadowColor = 'transparent';
+        ctx.shadowBlur = 0;
+
+        // Attribution (subText)
+        if (mg.subText || mg.subtext) {
+            const attrSpring = springValue(Math.max(0, frame - Math.round(fps * 0.5)), fps, { damping: 16, stiffness: 100 });
+            ctx.globalAlpha = Math.min(anim.opacity, exitAlpha) * attrSpring;
+            MGRenderer._setFont(ctx, '400', ts.labelSize, ts.fontBody);
+            ctx.fillStyle = ts.accent;
+            const attrSlide = interpolate(attrSpring, [0, 1], [20, 0]);
+            ctx.fillText(`\u2014 ${mg.subText || mg.subtext}`, W / 2, startY + lines.length * lineH + 30 + attrSlide);
+        }
+        ctx.restore();
+
+        // Closing quotation mark
+        ctx.save();
+        ctx.translate(W * 0.8, H * 0.6 + quoteSlideY);
+        ctx.scale(quoteScale, quoteScale);
+        ctx.fillStyle = ts.accent;
+        ctx.globalAlpha *= 0.25;
+        MGRenderer._setFont(ctx, '900', 180, 'Georgia, serif');
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'bottom';
+        ctx.fillText('\u201D', 0, 0);
+        ctx.restore();
+
+        ctx.restore();
+    }
+
+    /**
+     * Key Takeaway — highlight box with check/star icon + point text.
+     * Used in conclusion sections for summary points.
+     */
+    _renderKeyTakeaway(ctx, frame, fps, mg, s, anim) {
+        const { springValue, interpolate } = AnimationUtils;
+        const W = 1920, H = 1080;
+        const ts = this._getTemplateStyle(mg, s);
+        const totalFrames = Math.round((mg.duration || 4) * fps);
+        const exitDur = Math.round(fps * 0.5);
+        const isExiting = frame > totalFrames - exitDur;
+        const exitAlpha = isExiting ? interpolate(frame - (totalFrames - exitDur), [0, exitDur], [1, 0]) : 1;
+
+        // Background: template media (video/image) → static bg → solid fill
+        if (!this._drawTemplateBg(ctx, mg, W, H, Math.min(anim.opacity, exitAlpha))) {
+            ctx.fillStyle = ts.gridBg;
+            ctx.fillRect(0, 0, W, H);
+        }
+
+        const mainSpring = springValue(frame, fps, { damping: 12, stiffness: 90 });
+
+        ctx.save();
+        ctx.globalAlpha = Math.min(anim.opacity, exitAlpha);
+
+        // Card
+        const cardW = 900;
+        const cardH = 240;
+        const cardX = (W - cardW) / 2;
+        const cardY = (H - cardH) / 2;
+        const cardSlide = interpolate(mainSpring, [0, 1], [60, 0]);
+
+        ctx.save();
+        ctx.translate(0, cardSlide);
+
+        // Card shadow + fill
+        if (ts.cardShadow !== 'none') {
+            ctx.shadowColor = ts.cardShadow;
+            ctx.shadowBlur = ts.cardShadowBlur + 5;
+        }
+        ctx.fillStyle = ts.cardBg;
+        ctx.beginPath();
+        MGRenderer._roundRect(ctx, cardX, cardY, cardW, cardH, ts.cardRadius);
+        ctx.fill();
+        ctx.shadowColor = 'transparent';
+        ctx.shadowBlur = 0;
+
+        // Accent left edge
+        ctx.fillStyle = ts.accent;
+        ctx.beginPath();
+        MGRenderer._roundRect(ctx, cardX, cardY, 6, cardH, ts.cardRadius);
+        ctx.fill();
+
+        // Card border
+        ctx.strokeStyle = ts.cardBorder;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        MGRenderer._roundRect(ctx, cardX, cardY, cardW, cardH, ts.cardRadius);
+        ctx.stroke();
+
+        // Star/key icon
+        const iconX = cardX + 60;
+        const iconY = cardY + cardH / 2;
+        const iconSpring = springValue(Math.max(0, frame - Math.round(fps * 0.1)), fps, { damping: 10, stiffness: 150 });
+        const iconScale = interpolate(iconSpring, [0, 1], [0, 1]);
+
+        ctx.save();
+        ctx.translate(iconX, iconY);
+        ctx.scale(iconScale, iconScale);
+        // Draw star
+        ctx.fillStyle = ts.accent;
+        ctx.beginPath();
+        for (let i = 0; i < 5; i++) {
+            const angle = (i * 72 - 90) * Math.PI / 180;
+            const innerAngle = ((i * 72) + 36 - 90) * Math.PI / 180;
+            const outerR = 22, innerR = 10;
+            if (i === 0) ctx.moveTo(Math.cos(angle) * outerR, Math.sin(angle) * outerR);
+            else ctx.lineTo(Math.cos(angle) * outerR, Math.sin(angle) * outerR);
+            ctx.lineTo(Math.cos(innerAngle) * innerR, Math.sin(innerAngle) * innerR);
+        }
+        ctx.closePath();
+        ctx.fill();
+        if (ts.glow) {
+            ctx.shadowColor = ts.accent;
+            ctx.shadowBlur = 15;
+            ctx.fill();
+            ctx.shadowColor = 'transparent';
+            ctx.shadowBlur = 0;
+        }
+        ctx.restore();
+
+        // Takeaway text
+        const textX = iconX + 55;
+        const textSpring = springValue(Math.max(0, frame - Math.round(fps * 0.2)), fps, { damping: 14, stiffness: 100 });
+        const textSlide = interpolate(textSpring, [0, 1], [40, 0]);
+
+        ctx.save();
+        ctx.globalAlpha *= textSpring;
+        MGRenderer._setFont(ctx, ts.titleWeight, ts.titleSize - 6, ts.fontHeading);
+        ctx.fillStyle = ts.text;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.shadowColor = 'rgba(0,0,0,0.4)';
+        ctx.shadowBlur = 8;
+
+        // Wrap text within card
+        const maxTextW = cardW - (textX - cardX) - 40;
+        const lines = MGRenderer._wrapTextWords(ctx, mg.text || '', maxTextW);
+        const lineH = (ts.titleSize - 6) + 6;
+        const textStartY = cardY + cardH / 2 - (lines.length * lineH) / 2 - 10 + textSlide;
+        for (let i = 0; i < lines.length; i++) {
+            ctx.fillText(lines[i], textX, textStartY + i * lineH);
+        }
+        ctx.shadowColor = 'transparent';
+        ctx.shadowBlur = 0;
+
+        // Sub text
+        if (mg.subText || mg.subtext) {
+            MGRenderer._setFont(ctx, '400', ts.labelSize - 2, ts.fontBody);
+            ctx.fillStyle = ts.textSub || 'rgba(255,255,255,0.6)';
+            ctx.fillText(mg.subText || mg.subtext || '', textX, textStartY + lines.length * lineH + 10);
+        }
+        ctx.restore();
+
+        ctx.restore(); // cardSlide
+        ctx.restore(); // main
+    }
+
+    /**
+     * Timeline Card — vertical line with date/event nodes.
+     * Used for chronological event sequences.
+     */
+    _renderTimelineCard(ctx, frame, fps, mg, s, anim) {
+        const { springValue, interpolate } = AnimationUtils;
+        const W = 1920, H = 1080;
+        const ts = this._getTemplateStyle(mg, s);
+
+        const totalFrames = Math.round((mg.duration || 5) * fps);
+        const exitDur = Math.round(fps * 0.5);
+        const isExiting = frame > totalFrames - exitDur;
+        const exitAlpha = isExiting ? interpolate(frame - (totalFrames - exitDur), [0, exitDur], [1, 0]) : 1;
+
+        // Background: template media (video/image) → static bg → solid fill
+        if (!this._drawTemplateBg(ctx, mg, W, H, Math.min(anim.opacity, exitAlpha))) {
+            ctx.fillStyle = ts.gridBg;
+            ctx.fillRect(0, 0, W, H);
+        }
+
+        ctx.save();
+        ctx.globalAlpha = Math.min(anim.opacity, exitAlpha);
+
+        // Parse items: "date: event; date: event" or from mg.items array
+        let events = [];
+        if (mg.items && mg.items.length > 0) {
+            events = mg.items.map(item => {
+                if (typeof item === 'string') {
+                    const colonIdx = item.indexOf(':');
+                    if (colonIdx > 0) return { date: item.substring(0, colonIdx).trim(), event: item.substring(colonIdx + 1).trim() };
+                    return { date: '', event: item };
+                }
+                return { date: item.date || '', event: item.event || item.label || '' };
+            });
+        } else if (mg.subText || mg.subtext) {
+            const parts = (mg.subText || mg.subtext || '').split(';');
+            events = parts.map(p => {
+                const colonIdx = p.indexOf(':');
+                if (colonIdx > 0) return { date: p.substring(0, colonIdx).trim(), event: p.substring(colonIdx + 1).trim() };
+                return { date: '', event: p.trim() };
+            }).filter(e => e.event);
+        }
+
+        if (events.length === 0) {
+            events = [{ date: '', event: mg.text || 'Event' }];
+        }
+
+        // Title
+        const titleSpring = springValue(frame, fps, { damping: 14, stiffness: 100 });
+        if (mg.text) {
+            ctx.save();
+            ctx.globalAlpha *= titleSpring;
+            MGRenderer._setFont(ctx, ts.titleWeight, ts.titleSize - 4, ts.fontHeading);
+            ctx.fillStyle = ts.text;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.shadowColor = 'rgba(0,0,0,0.5)';
+            ctx.shadowBlur = 10;
+            ctx.fillText(mg.text, W / 2, 80);
+            ctx.shadowColor = 'transparent';
+            ctx.shadowBlur = 0;
+            ctx.restore();
+        }
+
+        // Vertical timeline line
+        const lineX = W * 0.35;
+        const lineTop = 140;
+        const lineBottom = H - 80;
+        const lineGrow = interpolate(titleSpring, [0, 1], [0, lineBottom - lineTop]);
+
+        ctx.fillStyle = ts.accent;
+        ctx.globalAlpha *= 0.4;
+        ctx.fillRect(lineX - 1.5, lineTop, 3, lineGrow);
+        ctx.globalAlpha = Math.min(anim.opacity, exitAlpha);
+
+        // Event nodes
+        const maxEvents = Math.min(events.length, 6);
+        const nodeGap = (lineBottom - lineTop) / Math.max(maxEvents, 1);
+        const staggerDelay = Math.round(fps * 0.15);
+
+        for (let i = 0; i < maxEvents; i++) {
+            const event = events[i];
+            const nodeY = lineTop + nodeGap * (i + 0.5);
+            const nodeDelay = Math.round(fps * 0.3 + i * staggerDelay);
+            const nodeSpring = springValue(Math.max(0, frame - nodeDelay), fps, { damping: 14, stiffness: 120 });
+            const nodeScale = interpolate(nodeSpring, [0, 1], [0, 1]);
+            const nodeSlide = interpolate(nodeSpring, [0, 1], [30, 0]);
+
+            ctx.save();
+            ctx.globalAlpha = Math.min(anim.opacity, exitAlpha) * nodeSpring;
+
+            // Node circle
+            ctx.fillStyle = ts.accent;
+            ctx.beginPath();
+            ctx.arc(lineX, nodeY, 8 * nodeScale, 0, Math.PI * 2);
+            ctx.fill();
+            if (ts.glow) {
+                ctx.shadowColor = ts.accent;
+                ctx.shadowBlur = 12;
+                ctx.fill();
+                ctx.shadowColor = 'transparent';
+                ctx.shadowBlur = 0;
+            }
+
+            // Date label (left of line)
+            if (event.date) {
+                MGRenderer._setFont(ctx, '700', ts.labelSize - 2, ts.fontHeading);
+                ctx.fillStyle = ts.accent;
+                ctx.textAlign = 'right';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(event.date, lineX - 30 - nodeSlide, nodeY);
+            }
+
+            // Event text (right of line)
+            MGRenderer._setFont(ctx, '500', ts.labelSize, ts.fontBody);
+            ctx.fillStyle = ts.text;
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(event.event, lineX + 30 + nodeSlide, nodeY);
+
+            ctx.restore();
+        }
+
+        ctx.restore();
+    }
+
+    /**
+     * Fact Card — split-screen info panel.
+     * Fact Card — 4 layout variants, each with matched entry animations.
+     *   splitPanel: image left | dark panel right with staggered bullets (slides from right)
+     *   overlay:    full bg image | centered semi-transparent card floats up
+     *   sidebar:    image fills 75% | narrow dark strip on right with compact bullets
+     *   numbered:   full darkened bg | large accent numbers beside each bullet
+     */
+    _renderFactCard(ctx, frame, fps, mg, s, anim) {
+        const variant = this._resolveVariant(mg, s, 'factCard') || 'splitPanel';
+        switch (variant) {
+            case 'overlay':   return this._renderFactCard_overlay(ctx, frame, fps, mg, s, anim);
+            case 'sidebar':   return this._renderFactCard_sidebar(ctx, frame, fps, mg, s, anim);
+            case 'numbered':  return this._renderFactCard_numbered(ctx, frame, fps, mg, s, anim);
+            default:          return this._renderFactCard_splitPanel(ctx, frame, fps, mg, s, anim);
+        }
+    }
+
+    // ── Shared helpers for all factCard variants ──
+
+    /** Parse items array from mg, returns array of strings */
+    _factCardItems(mg) {
+        const raw = mg.items || mg._items || [];
+        return raw.slice(0, 6).map(item =>
+            typeof item === 'string' ? item : (item.text || item.event || '')
+        ).filter(Boolean);
+    }
+
+    /** Compute exit state shared across all factCard variants */
+    _factCardExit(frame, fps, mg) {
+        const { interpolate } = AnimationUtils;
+        const durSec = (mg.endTime && mg.startTime) ? (mg.endTime - mg.startTime) : (mg.duration > 100 ? mg.duration / fps : mg.duration || 5);
+        const totalFrames = Math.round(durSec * fps);
+        const exitDur = Math.round(fps * 0.5);
+        const isExiting = frame > totalFrames - exitDur;
+        const t = isExiting ? (frame - (totalFrames - exitDur)) : 0;
+        return {
+            alpha: isExiting ? interpolate(t, [0, exitDur], [1, 0]) : 1,
+            slide: isExiting ? interpolate(t, [0, exitDur], [0, 80]) : 0,
+            scaleOut: isExiting ? interpolate(t, [0, exitDur], [1, 0.96]) : 1,
+        };
+    }
+
+    // ── VARIANT: splitPanel ──
+    // Image left half | dark panel slides in from right with staggered bullets
+    _renderFactCard_splitPanel(ctx, frame, fps, mg, s, anim) {
+        const { springValue, interpolate } = AnimationUtils;
+        const W = 1920, H = 1080;
+        const ts = this._getTemplateStyle(mg, s);
+        const exit = this._factCardExit(frame, fps, mg);
+        const items = this._factCardItems(mg);
+
+        // Left half: background image
+        const panelX = W * 0.5;
+        const hasBg = this._drawTemplateBg(ctx, mg, W, H, Math.min(anim.opacity, exit.alpha));
+        if (!hasBg) {
+            const leftGrad = ctx.createLinearGradient(0, 0, panelX, 0);
+            leftGrad.addColorStop(0, 'rgba(15,15,20,0.95)');
+            leftGrad.addColorStop(1, 'rgba(15,15,20,0.6)');
+            ctx.fillStyle = leftGrad;
+            ctx.fillRect(0, 0, panelX, H);
+        }
+
+        ctx.save();
+        ctx.globalAlpha = Math.min(anim.opacity, exit.alpha);
+
+        // Panel slides from right
+        const panelSpring = springValue(frame, fps, { damping: 14, stiffness: 70 });
+        const panelSlideX = interpolate(panelSpring, [0, 1], [W * 0.3, 0]) + exit.slide;
+        ctx.save();
+        ctx.translate(panelSlideX, 0);
+
+        // Dark panel background
+        const panelGrad = ctx.createLinearGradient(panelX, 0, W, 0);
+        panelGrad.addColorStop(0, 'rgba(10,10,15,0.97)');
+        panelGrad.addColorStop(1, 'rgba(20,20,30,0.92)');
+        ctx.fillStyle = panelGrad;
+        ctx.fillRect(panelX, 0, W - panelX, H);
+
+        // Accent line on left edge of panel
+        const accentGrad = ctx.createLinearGradient(panelX, H * 0.15, panelX, H * 0.85);
+        accentGrad.addColorStop(0, 'transparent');
+        accentGrad.addColorStop(0.2, ts.accent);
+        accentGrad.addColorStop(0.8, ts.accent);
+        accentGrad.addColorStop(1, 'transparent');
+        ctx.fillStyle = accentGrad;
+        ctx.fillRect(panelX, H * 0.15, 3, H * 0.7);
+
+        // Title
+        const titleDelay = Math.round(fps * 0.2);
+        const titleSpring = springValue(Math.max(0, frame - titleDelay), fps, { damping: 14, stiffness: 100 });
+        const titleSlide = interpolate(titleSpring, [0, 1], [40, 0]);
+        const titleX = panelX + 60;
+        const titleY = H * 0.18;
+        const maxTitleW = (W - panelX) - 120;
+
+        ctx.save();
+        ctx.globalAlpha *= titleSpring;
+        MGRenderer._setFont(ctx, ts.titleWeight, ts.titleSize + 4, ts.fontHeading);
+        ctx.fillStyle = ts.text;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+        ctx.shadowColor = 'rgba(0,0,0,0.5)';
+        ctx.shadowBlur = 10;
+        const titleLines = MGRenderer._wrapTextWords(ctx, mg.text || '', maxTitleW);
+        const titleLineH = (ts.titleSize + 4) + 8;
+        for (let i = 0; i < titleLines.length; i++) {
+            ctx.fillText(titleLines[i], titleX, titleY + titleSlide + i * titleLineH);
+        }
+        ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+
+        // Accent underline
+        const underY = titleY + titleLines.length * titleLineH + 15;
+        const underSpring = springValue(Math.max(0, frame - titleDelay - Math.round(fps * 0.1)), fps, { damping: 12, stiffness: 90 });
+        const underW = interpolate(underSpring, [0, 1], [0, Math.min(maxTitleW * 0.4, 200)]);
+        ctx.fillStyle = ts.accent;
+        ctx.fillRect(titleX, underY, underW, 3);
+        if (ts.glow) { ctx.shadowColor = ts.accent; ctx.shadowBlur = 12; ctx.fillRect(titleX, underY, underW, 3); ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; }
+        ctx.restore();
+
+        // Bullets
+        this._factCardDrawBullets(ctx, frame, fps, ts, items, titleX, underY + 40, maxTitleW - 40, 58, anim);
+
+        ctx.restore(); // panelSlideX
+        ctx.restore(); // globalAlpha
+    }
+
+    // ── VARIANT: overlay ──
+    // Full bg image | centered semi-transparent floating card with title + bullets
+    _renderFactCard_overlay(ctx, frame, fps, mg, s, anim) {
+        const { springValue, interpolate } = AnimationUtils;
+        const W = 1920, H = 1080;
+        const ts = this._getTemplateStyle(mg, s);
+        const exit = this._factCardExit(frame, fps, mg);
+        const items = this._factCardItems(mg);
+
+        // Full background image
+        const hasBg = this._drawTemplateBg(ctx, mg, W, H, Math.min(anim.opacity, exit.alpha));
+        if (!hasBg) {
+            ctx.fillStyle = ts.gridBg;
+            ctx.fillRect(0, 0, W, H);
+        }
+
+        ctx.save();
+        ctx.globalAlpha = Math.min(anim.opacity, exit.alpha);
+
+        // Card dimensions — centered, 60% width, dynamic height
+        const cardW = W * 0.6;
+        const cardX = (W - cardW) / 2;
+        const cardPad = 50;
+        const maxTextW = cardW - cardPad * 2;
+
+        // Measure title height for card sizing
+        MGRenderer._setFont(ctx, ts.titleWeight, ts.titleSize, ts.fontHeading);
+        const titleLines = MGRenderer._wrapTextWords(ctx, mg.text || '', maxTextW);
+        const titleBlockH = titleLines.length * (ts.titleSize + 8) + 20;
+
+        MGRenderer._setFont(ctx, '500', ts.bodySize + 2, ts.fontBody);
+        let bulletBlockH = 0;
+        for (let i = 0; i < items.length; i++) {
+            const lines = MGRenderer._wrapTextWords(ctx, items[i], maxTextW - 35);
+            bulletBlockH += Math.max(1, lines.length) * (ts.bodySize + 6) + 16;
+        }
+        const cardH = Math.min(H * 0.78, titleBlockH + bulletBlockH + cardPad * 2 + 10);
+        const cardY = (H - cardH) / 2;
+
+        // Card entry: float up + fade
+        const cardSpring = springValue(frame, fps, { damping: 16, stiffness: 60 });
+        const cardSlideY = interpolate(cardSpring, [0, 1], [60, 0]);
+        const cardScale = interpolate(cardSpring, [0, 1], [0.95, 1]);
+
+        ctx.save();
+        ctx.translate(W / 2, H / 2);
+        ctx.scale(cardScale * exit.scaleOut, cardScale * exit.scaleOut);
+        ctx.translate(-W / 2, -H / 2 + cardSlideY);
+
+        // Card background — rounded rect with glass effect
+        ctx.fillStyle = 'rgba(8,8,14,0.88)';
+        MGRenderer._roundRect(ctx, cardX, cardY, cardW, cardH, ts.cardRadius + 4);
+        ctx.fill();
+
+        // Card border glow
+        ctx.strokeStyle = ts.accent + '30';
+        ctx.lineWidth = 1.5;
+        MGRenderer._roundRect(ctx, cardX, cardY, cardW, cardH, ts.cardRadius + 4);
+        ctx.stroke();
+
+        // Title
+        const titleDelay = Math.round(fps * 0.15);
+        const titleSpring = springValue(Math.max(0, frame - titleDelay), fps, { damping: 14, stiffness: 100 });
+        const titleX = cardX + cardPad;
+        let curY = cardY + cardPad;
+
+        ctx.save();
+        ctx.globalAlpha *= titleSpring;
+        MGRenderer._setFont(ctx, ts.titleWeight, ts.titleSize, ts.fontHeading);
+        ctx.fillStyle = ts.text;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+        ctx.shadowColor = 'rgba(0,0,0,0.5)'; ctx.shadowBlur = 8;
+        const titleSlide = interpolate(titleSpring, [0, 1], [20, 0]);
+        for (let i = 0; i < titleLines.length; i++) {
+            ctx.fillText(titleLines[i], titleX + titleSlide, curY + i * (ts.titleSize + 8));
+        }
+        ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+        curY += titleBlockH;
+
+        // Accent divider
+        const divSpring = springValue(Math.max(0, frame - titleDelay - Math.round(fps * 0.1)), fps, { damping: 12, stiffness: 90 });
+        const divW = interpolate(divSpring, [0, 1], [0, Math.min(maxTextW * 0.35, 180)]);
+        ctx.fillStyle = ts.accent;
+        ctx.fillRect(titleX, curY - 10, divW, 3);
+        ctx.restore();
+
+        // Bullets with stagger
+        curY += 10;
+        const staggerDelay = Math.round(fps * 0.2);
+        for (let i = 0; i < items.length && i < 6; i++) {
+            const itemDelay = Math.round(fps * 0.35) + i * staggerDelay;
+            const itemSpring = springValue(Math.max(0, frame - itemDelay), fps, { damping: 14, stiffness: 110 });
+            const itemSlide = interpolate(itemSpring, [0, 1], [25, 0]);
+
+            ctx.save();
+            ctx.globalAlpha *= itemSpring;
+
+            // Accent dot
+            ctx.fillStyle = ts.accent;
+            ctx.beginPath();
+            ctx.arc(titleX + 5, curY + (ts.bodySize + 2) / 2, 4 * itemSpring, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Text
+            MGRenderer._setFont(ctx, '500', ts.bodySize + 2, ts.fontBody);
+            ctx.fillStyle = ts.text;
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'top';
+            ctx.shadowColor = 'rgba(0,0,0,0.3)'; ctx.shadowBlur = 4;
+            const bulletLines = MGRenderer._wrapTextWords(ctx, items[i], maxTextW - 35);
+            for (let j = 0; j < bulletLines.length; j++) {
+                ctx.fillText(bulletLines[j], titleX + 22 + itemSlide, curY + j * (ts.bodySize + 6));
+            }
+            ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+            curY += Math.max(1, bulletLines.length) * (ts.bodySize + 6) + 16;
+            ctx.restore();
+        }
+
+        ctx.restore(); // card transform
+        ctx.restore(); // globalAlpha
+    }
+
+    // ── VARIANT: sidebar ──
+    // Image fills 75% | narrow dark sidebar on right with compact stacked bullets
+    _renderFactCard_sidebar(ctx, frame, fps, mg, s, anim) {
+        const { springValue, interpolate } = AnimationUtils;
+        const W = 1920, H = 1080;
+        const ts = this._getTemplateStyle(mg, s);
+        const exit = this._factCardExit(frame, fps, mg);
+        const items = this._factCardItems(mg);
+
+        // Sidebar dimensions
+        const sideW = Math.round(W * 0.28);
+        const sideX = W - sideW;
+
+        // Full background image (covers everything, sidebar overlaps)
+        const hasBg = this._drawTemplateBg(ctx, mg, W, H, Math.min(anim.opacity, exit.alpha));
+        if (!hasBg) {
+            ctx.fillStyle = ts.gridBg;
+            ctx.fillRect(0, 0, W, H);
+        }
+
+        ctx.save();
+        ctx.globalAlpha = Math.min(anim.opacity, exit.alpha);
+
+        // Sidebar slides in from right edge
+        const sideSpring = springValue(frame, fps, { damping: 18, stiffness: 65 });
+        const sideSlide = interpolate(sideSpring, [0, 1], [sideW + 20, 0]) + exit.slide;
+
+        ctx.save();
+        ctx.translate(sideSlide, 0);
+
+        // Sidebar background — dark with soft left edge fade
+        const sideGrad = ctx.createLinearGradient(sideX - 40, 0, sideX + 30, 0);
+        sideGrad.addColorStop(0, 'rgba(8,8,14,0)');
+        sideGrad.addColorStop(1, 'rgba(8,8,14,0.94)');
+        ctx.fillStyle = sideGrad;
+        ctx.fillRect(sideX - 40, 0, sideW + 40, H);
+
+        // Solid core
+        ctx.fillStyle = 'rgba(8,8,14,0.94)';
+        ctx.fillRect(sideX + 20, 0, sideW - 20, H);
+
+        // Accent strip on left edge
+        ctx.fillStyle = ts.accent;
+        ctx.fillRect(sideX + 18, H * 0.08, 2, H * 0.84);
+
+        // Title — compact, inside sidebar
+        const padX = sideX + 38;
+        const maxW = sideW - 56;
+        const titleDelay = Math.round(fps * 0.2);
+        const titleSpring = springValue(Math.max(0, frame - titleDelay), fps, { damping: 14, stiffness: 100 });
+
+        let curY = H * 0.1;
+        ctx.save();
+        ctx.globalAlpha *= titleSpring;
+        MGRenderer._setFont(ctx, ts.titleWeight, ts.titleSize - 8, ts.fontHeading);
+        ctx.fillStyle = ts.text;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+        ctx.shadowColor = 'rgba(0,0,0,0.6)'; ctx.shadowBlur = 8;
+        const titleLines = MGRenderer._wrapTextWords(ctx, mg.text || '', maxW);
+        const titleLineH = (ts.titleSize - 8) + 6;
+        const titleSlide = interpolate(titleSpring, [0, 1], [20, 0]);
+        for (let i = 0; i < titleLines.length; i++) {
+            ctx.fillText(titleLines[i], padX, curY + titleSlide + i * titleLineH);
+        }
+        ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+        curY += titleLines.length * titleLineH + 18;
+
+        // Short accent underline
+        const uSpring = springValue(Math.max(0, frame - titleDelay - Math.round(fps * 0.1)), fps, { damping: 12, stiffness: 90 });
+        ctx.fillStyle = ts.accent;
+        ctx.fillRect(padX, curY, interpolate(uSpring, [0, 1], [0, Math.min(maxW * 0.5, 140)]), 2);
+        curY += 24;
+        ctx.restore();
+
+        // Compact bullets — tighter spacing for narrow strip
+        const bulletGap = 48;
+        const staggerDelay = Math.round(fps * 0.22);
+        for (let i = 0; i < items.length && i < 6; i++) {
+            const itemDelay = Math.round(fps * 0.45) + i * staggerDelay;
+            const itemSpring = springValue(Math.max(0, frame - itemDelay), fps, { damping: 14, stiffness: 110 });
+            const itemSlide = interpolate(itemSpring, [0, 1], [15, 0]);
+
+            ctx.save();
+            ctx.globalAlpha *= itemSpring;
+
+            // Small accent dash instead of dot
+            ctx.fillStyle = ts.accent;
+            ctx.fillRect(padX, curY + (ts.bodySize - 2) / 2, 10, 2);
+
+            // Text
+            MGRenderer._setFont(ctx, '500', ts.bodySize - 2, ts.fontBody);
+            ctx.fillStyle = ts.text;
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'top';
+            const bulletLines = MGRenderer._wrapTextWords(ctx, items[i], maxW - 24);
+            for (let j = 0; j < bulletLines.length; j++) {
+                ctx.fillText(bulletLines[j], padX + 18 + itemSlide, curY + j * (ts.bodySize + 2));
+            }
+            curY += Math.max(1, bulletLines.length) * (ts.bodySize + 2) + (bulletGap - (ts.bodySize + 2));
+            ctx.restore();
+        }
+
+        ctx.restore(); // sideSlide
+        ctx.restore(); // globalAlpha
+    }
+
+    // ── VARIANT: numbered ──
+    // Full darkened bg | large accent numbers + editorial bullet layout
+    _renderFactCard_numbered(ctx, frame, fps, mg, s, anim) {
+        const { springValue, interpolate } = AnimationUtils;
+        const W = 1920, H = 1080;
+        const ts = this._getTemplateStyle(mg, s);
+        const exit = this._factCardExit(frame, fps, mg);
+        const items = this._factCardItems(mg);
+
+        // Full bg with heavy darken for readability
+        const hasBg = this._drawTemplateBg(ctx, mg, W, H, Math.min(anim.opacity, exit.alpha) * 0.45);
+        if (!hasBg) {
+            ctx.fillStyle = ts.gridBg;
+            ctx.fillRect(0, 0, W, H);
+        }
+        // Dark overlay scrim
+        ctx.fillStyle = 'rgba(5,5,10,0.7)';
+        ctx.fillRect(0, 0, W, H);
+
+        ctx.save();
+        ctx.globalAlpha = Math.min(anim.opacity, exit.alpha);
+
+        // Title — top-center, bold
+        const titleSpring = springValue(frame, fps, { damping: 14, stiffness: 80 });
+        const titleSlideY = interpolate(titleSpring, [0, 1], [40, 0]);
+        const maxTitleW = W * 0.7;
+
+        ctx.save();
+        ctx.globalAlpha *= titleSpring;
+        MGRenderer._setFont(ctx, ts.titleWeight, ts.titleSize + 6, ts.fontHeading);
+        ctx.fillStyle = ts.text;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        ctx.shadowColor = 'rgba(0,0,0,0.6)'; ctx.shadowBlur = 12;
+        const titleLines = MGRenderer._wrapTextWords(ctx, mg.text || '', maxTitleW);
+        const titleLineH = (ts.titleSize + 6) + 8;
+        const titleY = H * 0.1;
+        for (let i = 0; i < titleLines.length; i++) {
+            ctx.fillText(titleLines[i], W / 2, titleY + titleSlideY + i * titleLineH);
+        }
+        ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+
+        // Center accent line below title
+        const underY = titleY + titleLines.length * titleLineH + 12;
+        const underSpring = springValue(Math.max(0, frame - Math.round(fps * 0.15)), fps, { damping: 12, stiffness: 90 });
+        const underW = interpolate(underSpring, [0, 1], [0, 160]);
+        ctx.fillStyle = ts.accent;
+        ctx.fillRect(W / 2 - underW / 2, underY, underW, 3);
+        ctx.restore();
+
+        // Numbered bullets — two-column if 5+ items, single column if fewer
+        const startY = underY + 45;
+        const cols = items.length >= 5 ? 2 : 1;
+        const colW = cols === 2 ? W * 0.4 : W * 0.65;
+        const colStartX = cols === 2 ? [W * 0.08, W * 0.52] : [W * 0.175];
+        const rowsPerCol = Math.ceil(items.length / cols);
+        const rowGap = cols === 2 ? 72 : 80;
+        const numSize = ts.titleSize - 4;
+        const staggerDelay = Math.round(fps * 0.18);
+
+        for (let i = 0; i < items.length && i < 6; i++) {
+            const col = Math.floor(i / rowsPerCol);
+            const row = i % rowsPerCol;
+            const itemDelay = Math.round(fps * 0.35) + i * staggerDelay;
+            const itemSpring = springValue(Math.max(0, frame - itemDelay), fps, { damping: 14, stiffness: 100 });
+
+            const x = colStartX[col];
+            const y = startY + row * rowGap;
+
+            ctx.save();
+            ctx.globalAlpha *= itemSpring;
+
+            // Large accent number
+            const numSpring = springValue(Math.max(0, frame - itemDelay), fps, { damping: 10, stiffness: 140 });
+            const numScale = interpolate(numSpring, [0, 1], [0.5, 1]);
+            ctx.save();
+            ctx.translate(x + numSize / 2, y + numSize / 2);
+            ctx.scale(numScale, numScale);
+            ctx.translate(-(x + numSize / 2), -(y + numSize / 2));
+            MGRenderer._setFont(ctx, '800', numSize, ts.fontHeading);
+            ctx.fillStyle = ts.accent;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'top';
+            if (ts.glow) { ctx.shadowColor = ts.accent; ctx.shadowBlur = 14; }
+            ctx.fillText(String(i + 1), x + numSize / 2, y);
+            ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+            ctx.restore();
+
+            // Bullet text — right of number
+            const textX = x + numSize + 16;
+            const slideX = interpolate(itemSpring, [0, 1], [20, 0]);
+            MGRenderer._setFont(ctx, '500', ts.bodySize + 2, ts.fontBody);
+            ctx.fillStyle = ts.text;
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'top';
+            ctx.shadowColor = 'rgba(0,0,0,0.4)'; ctx.shadowBlur = 4;
+            const bulletLines = MGRenderer._wrapTextWords(ctx, items[i], colW - numSize - 24);
+            for (let j = 0; j < bulletLines.length; j++) {
+                ctx.fillText(bulletLines[j], textX + slideX, y + 4 + j * (ts.bodySize + 6));
+            }
+            ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+
+            ctx.restore();
+        }
+
+        ctx.restore(); // globalAlpha
+    }
+
+    /** Shared bullet renderer for factCard variants that use dot-style bullets */
+    _factCardDrawBullets(ctx, frame, fps, ts, items, bulletX, startY, maxW, gap, anim) {
+        const { springValue, interpolate } = AnimationUtils;
+        const staggerDelay = Math.round(fps * 0.25);
+        const dotRadius = 5;
+
+        for (let i = 0; i < items.length && i < 6; i++) {
+            const itemDelay = Math.round(fps * 0.5) + i * staggerDelay;
+            const itemSpring = springValue(Math.max(0, frame - itemDelay), fps, { damping: 14, stiffness: 110 });
+            const itemSlide = interpolate(itemSpring, [0, 1], [30, 0]);
+            const itemY = startY + i * gap;
+
+            ctx.save();
+            ctx.globalAlpha *= itemSpring;
+
+            // Dot with pop
+            const dotSpring = springValue(Math.max(0, frame - itemDelay + Math.round(fps * 0.05)), fps, { damping: 10, stiffness: 200 });
+            const dotScale = interpolate(dotSpring, [0, 1], [0, 1]);
+            ctx.fillStyle = ts.accent;
+            ctx.beginPath();
+            ctx.arc(bulletX + dotRadius, itemY + 10, dotRadius * dotScale, 0, Math.PI * 2);
+            ctx.fill();
+            if (ts.glow) { ctx.shadowColor = ts.accent; ctx.shadowBlur = 8; ctx.fill(); ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; }
+
+            // Text
+            MGRenderer._setFont(ctx, '500', ts.bodySize + 2, ts.fontBody);
+            ctx.fillStyle = ts.text;
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'top';
+            ctx.shadowColor = 'rgba(0,0,0,0.4)'; ctx.shadowBlur = 6;
+            const textX = bulletX + dotRadius * 2 + 18 + itemSlide;
+            const bulletLines = MGRenderer._wrapTextWords(ctx, items[i], maxW);
+            const bulletLineH = (ts.bodySize + 2) + 4;
+            for (let j = 0; j < bulletLines.length; j++) {
+                ctx.fillText(bulletLines[j], textX, itemY + j * bulletLineH);
+            }
+            ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+
+            ctx.restore();
+        }
+    }
+
+    /**
+     * Image Showcase — dual images with typewriter title.
+     * Two images slide in from opposite sides, feathered edges, title types letter by letter.
+     */
+    _renderImageShowcase(ctx, frame, fps, mg, s, anim) {
+        const { springValue, interpolate } = AnimationUtils;
+        const W = 1920, H = 1080;
+        const ts = this._getTemplateStyle(mg, s);
+        const totalFrames = Math.round((mg.duration || 5) * fps);
+        const exitDur = Math.round(fps * 0.5);
+        const isExiting = frame > totalFrames - exitDur;
+        const exitAlpha = isExiting ? interpolate(frame - (totalFrames - exitDur), [0, exitDur], [1, 0]) : 1;
+
+        // Dark background
+        ctx.fillStyle = ts.gridBg || '#111115';
+        ctx.fillRect(0, 0, W, H);
+
+        ctx.save();
+        ctx.globalAlpha = Math.min(anim.opacity, exitAlpha);
+
+        // --- Typewriter title at top ---
+        const title = mg.text || '';
+        const typewriterDur = Math.round(fps * 1.8); // 1.8s to type full title
+        const charsVisible = Math.min(title.length, Math.floor((frame / typewriterDur) * title.length));
+        const displayTitle = title.substring(0, charsVisible);
+        const cursorVisible = frame < typewriterDur + Math.round(fps * 0.5) && Math.floor(frame / (fps * 0.3)) % 2 === 0;
+
+        const titleY = H * 0.1;
+        MGRenderer._setFont(ctx, ts.titleWeight, ts.titleSize + 10, ts.fontHeading);
+        ctx.fillStyle = ts.text;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.shadowColor = 'rgba(0,0,0,0.5)';
+        ctx.shadowBlur = 10;
+
+        // Draw typed text + cursor
+        const titleText = displayTitle + (cursorVisible ? '|' : '');
+        ctx.fillText(titleText, W / 2, titleY);
+        ctx.shadowColor = 'transparent';
+        ctx.shadowBlur = 0;
+
+        // --- Two images ---
+        const items = mg.items || [];
+        const thumbs = mg._itemThumbnails || [];
+        const imgW = 380;
+        const imgH = 420;
+        const imgY = H * 0.22;
+        const gap = 80;
+        const leftImgX = W / 2 - gap / 2 - imgW;
+        const rightImgX = W / 2 + gap / 2;
+
+        // Slide animations (from opposite sides)
+        const imgDelay = Math.round(fps * 0.6);
+        const leftSpring = springValue(Math.max(0, frame - imgDelay), fps, { damping: 14, stiffness: 70 });
+        const rightSpring = springValue(Math.max(0, frame - imgDelay - Math.round(fps * 0.15)), fps, { damping: 14, stiffness: 70 });
+
+        const leftSlide = interpolate(leftSpring, [0, 1], [-W * 0.4, 0]);
+        const rightSlide = interpolate(rightSpring, [0, 1], [W * 0.4, 0]);
+        const leftAlpha = leftSpring;
+        const rightAlpha = rightSpring;
+
+        // Exit slide
+        const exitSlideL = isExiting ? interpolate(frame - (totalFrames - exitDur), [0, exitDur], [0, -200]) : 0;
+        const exitSlideR = isExiting ? interpolate(frame - (totalFrames - exitDur), [0, exitDur], [0, 200]) : 0;
+
+        const imgPositions = [
+            { x: leftImgX + leftSlide + exitSlideL, y: imgY, alpha: leftAlpha },
+            { x: rightImgX + rightSlide + exitSlideR, y: imgY, alpha: rightAlpha },
+        ];
+
+        for (let i = 0; i < 2; i++) {
+            const pos = imgPositions[i];
+            const file = thumbs[i];
+            const thumbKey = file ? file.replace(/^.*[/\\]/, '') : null;
+            const img = thumbKey ? this._gridThumbs[thumbKey] : null;
+
+            ctx.save();
+            ctx.globalAlpha *= pos.alpha;
+
+            // Rounded rectangle clip
+            ctx.beginPath();
+            MGRenderer._roundRect(ctx, pos.x, pos.y, imgW, imgH, 12);
+            ctx.clip();
+
+            if (img) {
+                // Draw image with cover-fit
+                const iw = img.naturalWidth || img.width || imgW;
+                const ih = img.naturalHeight || img.height || imgH;
+                const scale = Math.max(imgW / iw, imgH / ih);
+                const sw = imgW / scale;
+                const sh = imgH / scale;
+                const sx = (iw - sw) / 2;
+                const sy = (ih - sh) / 2;
+                ctx.drawImage(img, sx, sy, sw, sh, pos.x, pos.y, imgW, imgH);
+            } else {
+                // Placeholder
+                ctx.fillStyle = 'rgba(40,40,50,0.8)';
+                ctx.fillRect(pos.x, pos.y, imgW, imgH);
+                MGRenderer._setFont(ctx, '400', 16, ts.fontBody);
+                ctx.fillStyle = 'rgba(255,255,255,0.3)';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(items[i] || 'Loading...', pos.x + imgW / 2, pos.y + imgH / 2);
+            }
+
+            // Feathered edge blur (gradient overlays on edges)
+            const featherW = 40;
+            // Left edge
+            const lGrad = ctx.createLinearGradient(pos.x, pos.y, pos.x + featherW, pos.y);
+            lGrad.addColorStop(0, ts.gridBg || '#111115');
+            lGrad.addColorStop(1, 'transparent');
+            ctx.fillStyle = lGrad;
+            ctx.fillRect(pos.x, pos.y, featherW, imgH);
+            // Right edge
+            const rGrad = ctx.createLinearGradient(pos.x + imgW - featherW, pos.y, pos.x + imgW, pos.y);
+            rGrad.addColorStop(0, 'transparent');
+            rGrad.addColorStop(1, ts.gridBg || '#111115');
+            ctx.fillStyle = rGrad;
+            ctx.fillRect(pos.x + imgW - featherW, pos.y, featherW, imgH);
+            // Top edge
+            const tGrad = ctx.createLinearGradient(pos.x, pos.y, pos.x, pos.y + featherW);
+            tGrad.addColorStop(0, ts.gridBg || '#111115');
+            tGrad.addColorStop(1, 'transparent');
+            ctx.fillStyle = tGrad;
+            ctx.fillRect(pos.x, pos.y, imgW, featherW);
+            // Bottom edge
+            const bGrad = ctx.createLinearGradient(pos.x, pos.y + imgH - featherW, pos.x, pos.y + imgH);
+            bGrad.addColorStop(0, 'transparent');
+            bGrad.addColorStop(1, ts.gridBg || '#111115');
+            ctx.fillStyle = bGrad;
+            ctx.fillRect(pos.x, pos.y + imgH - featherW, imgW, featherW);
+
+            ctx.restore();
+
+            // Subtle border (outside clip)
+            ctx.strokeStyle = ts.cardBorder || 'rgba(255,255,255,0.08)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            MGRenderer._roundRect(ctx, pos.x, pos.y, imgW, imgH, 12);
+            ctx.stroke();
+        }
+
+        ctx.restore();
     }
 
     /**

@@ -199,6 +199,10 @@ window.electronAPI = {
     // Register .fvp file association with Windows
     registerFvpAssociation: () => ipcRenderer.invoke('register-fvp-association'),
 
+    // Qwen model pool management
+    qwenPoolStatus: () => ipcRenderer.invoke('qwen-pool-status'),
+    qwenPoolReset: () => ipcRenderer.invoke('qwen-pool-reset'),
+
     // Project file (.fvp) save/load
     saveProjectFile: (data) => ipcRenderer.invoke('save-project-file', data),
     loadProjectFile: () => ipcRenderer.invoke('load-project-file'),

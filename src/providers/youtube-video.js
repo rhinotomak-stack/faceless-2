@@ -20,13 +20,16 @@ const REJECT_TITLE_PATTERNS = [
     'sing along', 'instrumental', 'remix', 'live performance',
     'reaction video', 'unboxing', 'asmr',
     '#shorts', '#short',
+    // Studio/anchor content — prefer raw footage over news desk clips
+    'interview with', 'exclusive interview', 'press briefing',
+    'panel discussion', 'roundtable', 'podcast',
 ];
 
 // Theme-specific query strategies for YouTube
 const QUERY_STRATEGIES = {
-    politics:      (kw) => [`${kw} news report`, `${kw} press conference`, `${kw} footage`],
-    finance:       (kw) => [`${kw} news report`, `${kw} market analysis`, `${kw} footage`],
-    business:      (kw) => [`${kw} news`, `${kw} corporate`, `${kw} footage`],
+    politics:      (kw) => [`${kw} footage`, `${kw} aerial drone`, `${kw} raw video`],
+    finance:       (kw) => [`${kw} footage`, `${kw} stock exchange`, `${kw} trading floor`],
+    business:      (kw) => [`${kw} footage`, `${kw} corporate`, `${kw} aerial`],
     technology:    (kw) => [`${kw} demo`, `${kw} tech review`, `${kw} footage`],
     history:       (kw) => [`${kw} documentary`, `${kw} historical footage`, `${kw} archive`],
     entertainment: (kw) => [`${kw} clip`, `${kw} highlights`, `${kw} footage`],
@@ -34,9 +37,9 @@ const QUERY_STRATEGIES = {
     nature:        (kw) => [`${kw} nature documentary`, `${kw} wildlife`, `${kw} stock footage`],
     travel:        (kw) => [`${kw} travel`, `${kw} aerial`, `${kw} stock footage`],
     science:       (kw) => [`${kw} explained`, `${kw} experiment`, `${kw} documentary`],
-    health:        (kw) => [`${kw} medical`, `${kw} health report`, `${kw} footage`],
+    health:        (kw) => [`${kw} medical`, `${kw} footage`, `${kw} stock footage`],
     education:     (kw) => [`${kw} explained`, `${kw} lecture`, `${kw} educational`],
-    crime:         (kw) => [`${kw} crime report`, `${kw} investigation`, `${kw} footage`],
+    crime:         (kw) => [`${kw} footage`, `${kw} surveillance`, `${kw} raw video`],
     documentary:   (kw) => [`${kw} documentary`, `${kw} real footage`, `${kw} investigation`],
     motivation:    (kw) => [`${kw} motivational`, `${kw} inspirational`, `${kw} stock footage`],
 };
@@ -394,24 +397,31 @@ class YouTubeVideoProvider extends BaseProvider {
 
         const items = response.data.items;
 
-        // Fetch view counts for quality-based sorting (1 extra API call)
+        // Fetch view counts + duration for sorting (1 extra API call)
         let viewCounts = {};
+        let durations = {};
         try {
             const ids = items.map(i => i.id.videoId).join(',');
             const statsResponse = await axios.get(
                 'https://www.googleapis.com/youtube/v3/videos',
                 {
-                    params: { part: 'statistics', id: ids, key: config.youtube.apiKey },
+                    params: { part: 'statistics,contentDetails', id: ids, key: config.youtube.apiKey },
                     timeout: 10000
                 }
             );
             for (const vid of (statsResponse.data.items || [])) {
                 viewCounts[vid.id] = parseInt(vid.statistics.viewCount || '0');
+                // Parse ISO 8601 duration (PT1M20S → 80 seconds)
+                const match = (vid.contentDetails?.duration || '').match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
+                if (match) {
+                    durations[vid.id] = (parseInt(match[1] || 0) * 3600) + (parseInt(match[2] || 0) * 60) + parseInt(match[3] || 0);
+                }
             }
         } catch (e) {
             // Non-critical — continue without view counts
         }
 
+        const nicheId = (this._scriptContext?.nicheId || '').toLowerCase();
         return items
             .map(item => ({
                 id: item.id.videoId,
@@ -420,8 +430,17 @@ class YouTubeVideoProvider extends BaseProvider {
                 width: 1920,
                 height: 1080,
                 viewCount: viewCounts[item.id.videoId] || 0,
+                duration: durations[item.id.videoId] || 0,
             }))
-            .sort((a, b) => b.viewCount - a.viewCount); // Prefer higher view count
+            .sort((a, b) => {
+                // news.politics: prioritize short videos (under 3 min) first, then by views
+                if (nicheId === 'news.politics') {
+                    const aShort = a.duration > 0 && a.duration <= 180 ? 1 : 0;
+                    const bShort = b.duration > 0 && b.duration <= 180 ? 1 : 0;
+                    if (aShort !== bShort) return bShort - aShort; // short first
+                }
+                return b.viewCount - a.viewCount;
+            });
     }
 
     async _searchYtdlp(keyword) {
@@ -430,13 +449,13 @@ class YouTubeVideoProvider extends BaseProvider {
                 `ytsearch10:${keyword}`,
                 '--get-id',
                 '--get-title',
+                '--get-duration',
                 '--no-download',
                 '--no-warnings',
                 '--flat-playlist',
             ];
 
-            // Try with duration filter (newer yt-dlp versions)
-            // 60s minimum to avoid Shorts/intros, 600s max (10 min)
+            // 10s minimum to avoid Shorts/intros, 600s max (10 min)
             args.push('--match-filter', 'duration > 10 & duration < 600');
 
             execFile(this._ytdlpPath, args, {
@@ -470,19 +489,38 @@ class YouTubeVideoProvider extends BaseProvider {
     _parseYtdlpOutput(stdout) {
         const lines = stdout.trim().split('\n').filter(l => l.trim());
         const results = [];
-        // yt-dlp outputs alternating: title, id, title, id, ...
-        for (let i = 0; i < lines.length - 1; i += 2) {
+        // yt-dlp outputs: title, id, duration, title, id, duration, ...
+        for (let i = 0; i < lines.length - 2; i += 3) {
             const title = lines[i].trim();
             const videoId = lines[i + 1].trim();
+            const durStr = lines[i + 2].trim();
             if (videoId && videoId.length === 11) {
+                // Parse duration string (e.g. "1:20" → 80, "5:30" → 330, "01:02:03" → 3723)
+                const parts = durStr.split(':').map(Number);
+                let durSec = 0;
+                if (parts.length === 3) durSec = parts[0] * 3600 + parts[1] * 60 + parts[2];
+                else if (parts.length === 2) durSec = parts[0] * 60 + parts[1];
+                else if (parts.length === 1) durSec = parts[0];
+
                 results.push({
                     id: videoId,
                     url: `https://www.youtube.com/watch?v=${videoId}`,
                     title: title,
                     width: 1920,
                     height: 1080,
+                    duration: durSec,
                 });
             }
+        }
+        // news.politics: sort short videos (under 3 min) first
+        const nicheId = (this._scriptContext?.nicheId || '').toLowerCase();
+        if (nicheId === 'news.politics') {
+            results.sort((a, b) => {
+                const aShort = a.duration > 0 && a.duration <= 180 ? 1 : 0;
+                const bShort = b.duration > 0 && b.duration <= 180 ? 1 : 0;
+                if (aShort !== bShort) return bShort - aShort;
+                return 0; // keep yt-dlp relevance order otherwise
+            });
         }
         return results;
     }
@@ -505,14 +543,23 @@ class YouTubeVideoProvider extends BaseProvider {
 
         let startTime = null;
 
-        // Try vision-based segment selection (most accurate)
+        // Try vision-based segment selection (most accurate) — uses smart-segment.js + callVisionAI
         if (keyword && metadata && metadata.duration >= 60) {
+            console.log(`  🔍 [YouTube Smart Trim] Using smart-segment.js (callVisionAI) for ${Math.round(metadata.duration)}s video | keyword="${keyword}"`);
             startTime = await this._findBestSegment(url, keyword, metadata, downloadDuration, { sceneText: options.sceneText || '', niche: options.niche || '', videoTopic: options.videoTopic || '' });
+            if (startTime !== null) {
+                console.log(`  🎯 [YouTube Smart Trim] Vision picked start=${Math.round(startTime)}s`);
+            } else {
+                console.log(`  ⚠️ [YouTube Smart Trim] Vision returned null — falling back to heuristic`);
+            }
+        } else {
+            console.log(`  🔍 [YouTube Smart Trim] Skipped — ${!keyword ? 'no keyword' : `video too short (${Math.round(metadata?.duration || 0)}s < 60s)`}`);
         }
 
         // Fall back to chapter/percentage-based heuristic
         if (startTime === null) {
             startTime = this._calculateBestStartTime(metadata, downloadDuration);
+            console.log(`  🔍 [YouTube Smart Trim] Using heuristic fallback → start=${Math.round(startTime)}s`);
         }
 
         const endTime = startTime + downloadDuration;
@@ -545,6 +592,10 @@ class YouTubeVideoProvider extends BaseProvider {
         }
 
         return new Promise((resolve, reject) => {
+            // Clean up stale .part files from previous failed downloads (prevents WinError 32 file lock)
+            try { if (fs.existsSync(outputPath + '.part')) fs.unlinkSync(outputPath + '.part'); } catch (e) {}
+            try { if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath); } catch (e) {}
+
             console.log(`  [YouTube] Downloading ${downloadDuration}s clip from ${url} [${startTime}s-${endTime}s]`);
 
             execFile(this._ytdlpPath, args, {
@@ -552,7 +603,9 @@ class YouTubeVideoProvider extends BaseProvider {
                 windowsHide: true,
             }, (error) => {
                 if (error) {
+                    // Clean up both the final file and .part file (yt-dlp downloads to .part then renames)
                     try { if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath); } catch (e) {}
+                    try { if (fs.existsSync(outputPath + '.part')) fs.unlinkSync(outputPath + '.part'); } catch (e) {}
                     return reject(new Error(`yt-dlp download failed: ${error.message}`));
                 }
 

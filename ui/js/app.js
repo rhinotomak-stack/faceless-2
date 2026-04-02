@@ -76,15 +76,26 @@ function _showExplainerControls(show, mg) {
 }
 
 // Filter Type dropdown to only show types in the same group (overlay↔overlay, fullscreen↔fullscreen)
+// Listicle Templates group is always visible — they're a separate category
 function _filterTypeDropdownByGroup(mgType) {
     const typeEl = document.getElementById('mg-type');
     if (!typeEl || !window._mgRegistry) return;
     const reg = window._mgRegistry.registry[mgType];
     const currentGroup = reg?.group || 'overlay';
+    const isListicle = currentGroup === 'listicle';
     for (const optgroup of typeEl.querySelectorAll('optgroup')) {
         const groupLabel = optgroup.label.toLowerCase();
+        const isListicleGroup = groupLabel.includes('listicle');
         const isOverlay = groupLabel.includes('overlay');
-        const show = (currentGroup === 'overlay' && isOverlay) || (currentGroup === 'fullscreen' && !isOverlay);
+        // Listicle group always shown; when editing a listicle, hide overlay/fullscreen
+        let show;
+        if (isListicleGroup) {
+            show = true; // always visible
+        } else if (isListicle) {
+            show = false; // editing listicle — hide overlay/fullscreen
+        } else {
+            show = (currentGroup === 'overlay' && isOverlay) || (currentGroup === 'fullscreen' && !isOverlay && !isListicleGroup);
+        }
         for (const opt of optgroup.querySelectorAll('option')) {
             opt.disabled = !show;
             opt.style.display = show ? '' : 'none';
@@ -93,7 +104,74 @@ function _filterTypeDropdownByGroup(mgType) {
 }
 
 // Types with actual variant renderers implemented in MGRenderer._variantRenderers
-const MG_TYPES_WITH_VARIANTS = new Set(['headline', 'lowerThird', 'callout', 'statCounter', 'typewriter']);
+const MG_TYPES_WITH_VARIANTS = new Set(['headline', 'lowerThird', 'callout', 'statCounter', 'typewriter', 'listicleCounter', 'progressTracker', 'listicleGrid']);
+
+// Listicle item types (overlay counters on LI track)
+const LISTICLE_TYPES = new Set(['listicleCounter']);
+
+// Listicle template types (fullscreen V3 — separate system from MGs, will grow over time)
+const TEMPLATE_TYPES = new Set(['listicleGrid', 'chapterCard', 'locationCard', 'quoteCard', 'keyTakeaway', 'comparisonCard', 'timelineCard', 'factCard', 'imageShowcase']);
+
+// ── Template Registry (UI-side) ──
+// Single source of truth for per-type variants, animations, labels.
+// Mirrors the build-pipeline TEMPLATE_REGISTRY in ai-templates.js.
+// When adding a new template type: add entry here + TEMPLATE_TYPES above + index.html dropdown.
+const TEMPLATE_REGISTRY = {
+    listicleGrid:   { label: 'Listicle Overview',
+        variants: { grid: 'Card Grid', strip: 'Strip', stack: 'Stack' },
+        animations: { staggerSlide: 'Stagger Slide', cascade: 'Cascade', flipIn: 'Flip In' },
+        defaultVariant: 'grid', defaultAnimation: 'staggerSlide' },
+    chapterCard:    { label: 'Chapter Card',
+        variants: { standard: 'Standard', minimal: 'Minimal', cinematic: 'Cinematic' },
+        animations: { fadeSlide: 'Fade Slide', springScale: 'Spring Scale', wipeRight: 'Wipe Right' },
+        defaultVariant: 'standard', defaultAnimation: 'fadeSlide' },
+    locationCard:   { label: 'Location Card',
+        variants: { standard: 'Standard', minimal: 'Minimal', cinematic: 'Cinematic' },
+        animations: { fadeSlide: 'Fade Slide', slideLeft: 'Slide Left' },
+        defaultVariant: 'standard', defaultAnimation: 'fadeSlide' },
+    quoteCard:      { label: 'Quote Card',
+        variants: { standard: 'Standard', minimal: 'Minimal', cinematic: 'Cinematic' },
+        animations: { fadeSlide: 'Fade Slide', popUp: 'Pop Up' },
+        defaultVariant: 'standard', defaultAnimation: 'fadeSlide' },
+    keyTakeaway:    { label: 'Key Takeaway',
+        variants: { standard: 'Standard', minimal: 'Minimal', cinematic: 'Cinematic' },
+        animations: { fadeSlide: 'Fade Slide', springScale: 'Spring Scale' },
+        defaultVariant: 'standard', defaultAnimation: 'fadeSlide' },
+    comparisonCard: { label: 'Comparison Card',
+        variants: { standard: 'Standard', split: 'Split', stacked: 'Stacked' },
+        animations: { staggerSlide: 'Stagger Slide', flipIn: 'Flip In' },
+        defaultVariant: 'standard', defaultAnimation: 'staggerSlide' },
+    timelineCard:   { label: 'Timeline Card',
+        variants: { standard: 'Standard', minimal: 'Minimal', cinematic: 'Cinematic' },
+        animations: { staggerSlide: 'Stagger Slide', cascade: 'Cascade' },
+        defaultVariant: 'standard', defaultAnimation: 'staggerSlide' },
+    factCard:       { label: 'Fact Card',
+        variants: { splitPanel: 'Split Panel', overlay: 'Overlay Card', sidebar: 'Sidebar', numbered: 'Numbered' },
+        animations: { slideRight: 'Slide Right', fadeUp: 'Fade Up', staggerSlide: 'Stagger Slide' },
+        defaultVariant: 'splitPanel', defaultAnimation: 'slideRight' },
+    imageShowcase:  { label: 'Image Showcase',
+        variants: { standard: 'Standard', minimal: 'Minimal', cinematic: 'Cinematic' },
+        animations: { slideOpposite: 'Slide Opposite', fadeSlide: 'Fade Slide', springScale: 'Spring Scale' },
+        defaultVariant: 'standard', defaultAnimation: 'slideOpposite' },
+};
+
+/**
+ * Populate a <select> with options from a { value: label } map.
+ * Preserves current value if it exists in the new options.
+ */
+function _populateTemplateDropdown(selectEl, optionsMap, currentValue, defaultValue) {
+    if (!selectEl) return;
+    const prev = currentValue || selectEl.value;
+    selectEl.innerHTML = '';
+    for (const [val, label] of Object.entries(optionsMap)) {
+        const opt = document.createElement('option');
+        opt.value = val;
+        opt.textContent = label;
+        selectEl.appendChild(opt);
+    }
+    // Keep current value if still valid, otherwise use default
+    selectEl.value = (prev && optionsMap[prev]) ? prev : (defaultValue || Object.keys(optionsMap)[0]);
+}
 
 function _populateMgVariantDropdown(mgType, currentSubType) {
     const row = document.getElementById('mg-subtype-row');
@@ -134,6 +212,66 @@ function _populateMgAnimationDropdown(mgType, currentAnimation) {
     }
     sel.value = currentAnimation || anims[0] || '';
     row.style.display = '';
+}
+
+// Show/hide listicle template settings and populate dropdowns
+function _showListicleControls(mgType, mg) {
+    const section = document.getElementById('mg-listicle-section');
+    if (!section) return;
+
+    const isListicle = LISTICLE_TYPES.has(mgType);
+    section.style.display = isListicle ? '' : 'none';
+    if (!isListicle) return;
+
+    // Template dropdown — show variants for this listicle type
+    const templateSel = document.getElementById('mg-listicle-template');
+    if (templateSel && window._mgRegistry) {
+        const types = window._mgRegistry.getTypesForCategory(mgType);
+        templateSel.innerHTML = '';
+        for (const t of types) {
+            const opt = document.createElement('option');
+            opt.value = t.key;
+            opt.textContent = t.label;
+            templateSel.appendChild(opt);
+        }
+        templateSel.value = mg?.subType || window._mgRegistry.registry[mgType]?.defaultType || '';
+    }
+
+    // Animation dropdown
+    const animSel = document.getElementById('mg-listicle-anim');
+    if (animSel && window._mgRegistry) {
+        const anims = window._mgRegistry.getAnimationsForCategory(mgType);
+        animSel.innerHTML = '';
+        for (const a of anims) {
+            const opt = document.createElement('option');
+            opt.value = a;
+            opt.textContent = a.replace(/([A-Z])/g, ' $1').replace(/^./, c => c.toUpperCase());
+            animSel.appendChild(opt);
+        }
+        animSel.value = mg?.animation || anims[0] || '';
+    }
+
+    // Number field — show for counter/tracker, hide for grid
+    const numberRow = document.getElementById('mg-listicle-number-row');
+    if (numberRow) numberRow.style.display = mgType === 'listicleGrid' ? 'none' : '';
+    const numberEl = document.getElementById('mg-listicle-number');
+    if (numberEl && mg) {
+        if (mgType === 'listicleCounter') numberEl.value = mg.text || '';
+        else if (mgType === 'progressTracker') numberEl.value = mg.text || '';
+    }
+
+    // Items field — show for grid, hide for counter/tracker
+    const itemsRow = document.getElementById('mg-listicle-items-row');
+    if (itemsRow) itemsRow.style.display = mgType === 'listicleGrid' ? '' : 'none';
+    const itemsEl = document.getElementById('mg-listicle-items');
+    if (itemsEl && mg) {
+        const itemCount = mg._listicleItems?.length || (mg.subtext || '').split(',').filter(Boolean).length || 5;
+        itemsEl.value = itemCount;
+    }
+
+    // Background
+    const bgSel = document.getElementById('mg-listicle-bg');
+    if (bgSel && mg) bgSel.value = mg.mgBackground || 'auto';
 }
 
 // ========================================
@@ -356,23 +494,24 @@ const state = {
             { id: 'video-track-2', label: 'V2', type: 'video' },
             { id: 'video-track-1', label: 'V1', type: 'video', main: true },
             { id: 'mg-track', label: 'MG', type: 'graphics' },
+            { id: 'listicle-track', label: 'LI', type: 'listicle' },
             { id: 'audio-track', label: 'VO', type: 'audio' },
             { id: 'music-track', label: 'MUS', type: 'audio' },
             { id: 'sfx-track', label: 'SFX', type: 'audio' }
         ],
         trackHeights: {
             'video-track-5': 28, 'video-track-4': 28, 'video-track-3': 28, 'video-track-2': 28, 'video-track-1': 40,
-            'mg-track': 32,
+            'mg-track': 32, 'listicle-track': 28,
             'audio-track': 36, 'music-track': 28, 'sfx-track': 22
         },
         trackMinHeights: {
             'video-track-5': 22, 'video-track-4': 22, 'video-track-3': 22, 'video-track-2': 22, 'video-track-1': 28,
-            'mg-track': 22,
+            'mg-track': 22, 'listicle-track': 20,
             'audio-track': 26, 'music-track': 22, 'sfx-track': 18
         },
         trackMaxHeights: {
             'video-track-5': 120, 'video-track-4': 120, 'video-track-3': 120, 'video-track-2': 120, 'video-track-1': 120,
-            'mg-track': 80,
+            'mg-track': 80, 'listicle-track': 60,
             'audio-track': 80, 'music-track': 80, 'sfx-track': 60
         }
     },
@@ -402,6 +541,13 @@ const GRADIENT_BACKGROUNDS = window.GRADIENT_BACKGROUNDS = {
     'purple-haze': 'linear-gradient(135deg, #667eea 0%, #764ba2 50%, #3a1c71 100%)',
     'noir': 'radial-gradient(ellipse at 50% 30%, #1a1a1a 0%, #0a0a0a 40%, #000000 100%)',
     'ocean-deep': 'linear-gradient(180deg, #0c3547 0%, #0a2a3a 40%, #051a2a 100%)',
+    // Soft solid-ish backgrounds (great for floating frame)
+    'soft-beige': 'linear-gradient(180deg, #e8dcc8 0%, #d4c5a9 50%, #c4b494 100%)',
+    'warm-white': 'linear-gradient(180deg, #f5f0e8 0%, #ebe3d5 50%, #ddd3c0 100%)',
+    'soft-gray': 'linear-gradient(180deg, #d0d0d0 0%, #b8b8b8 50%, #a0a0a0 100%)',
+    'slate': 'linear-gradient(180deg, #2c3e50 0%, #1a252f 50%, #0e171f 100%)',
+    'warm-charcoal': 'linear-gradient(180deg, #3a3530 0%, #2a2520 50%, #1a1510 100%)',
+    'paper': 'linear-gradient(180deg, #f0ead6 0%, #e6dcc6 50%, #d6ccb2 100%)',
 };
 
 const GRADIENT_BACKGROUND_NAMES = {
@@ -411,6 +557,9 @@ const GRADIENT_BACKGROUND_NAMES = {
     'cream': 'Cream', 'grid-texture': 'Grid Texture',
     'red-dark': 'Red Dark', 'purple-haze': 'Purple Haze',
     'noir': 'Noir', 'ocean-deep': 'Ocean Deep',
+    'soft-beige': 'Soft Beige', 'warm-white': 'Warm White',
+    'soft-gray': 'Soft Gray', 'slate': 'Slate',
+    'warm-charcoal': 'Warm Charcoal', 'paper': 'Paper',
 };
 
 // ========================================
@@ -440,11 +589,15 @@ const elements = {
     buildTheme: document.getElementById('build-theme'),
     cinematicScale: document.getElementById('cinematic-scale'),
     cinematicScaleVal: document.getElementById('cinematic-scale-val'),
+    // Clip analyzer toggle
+    clipAnalyzerToggle: document.getElementById('clip-analyzer-toggle'),
     // Footage source toggles
     srcPexels: document.getElementById('src-pexels'),
     srcPixabay: document.getElementById('src-pixabay'),
     srcYouTube: document.getElementById('src-youtube'),
-    srcNewsVideo: document.getElementById('src-news-video'),
+    srcTelegram: document.getElementById('src-telegram'),
+    srcVKVideo: document.getElementById('src-vk-video'),
+    srcReddit: document.getElementById('src-reddit'),
     srcUnsplash: document.getElementById('src-unsplash'),
     srcGoogleCSE: document.getElementById('src-google-cse'),
     srcBing: document.getElementById('src-bing'),
@@ -518,6 +671,15 @@ const elements = {
     propCropRightVal: document.getElementById('prop-crop-right-val'),
     propBorderRadius: document.getElementById('prop-border-radius'),
     propBorderRadiusVal: document.getElementById('prop-border-radius-val'),
+    // Floating frame controls
+    propFloatingSection: document.getElementById('prop-floating-section'),
+    propFloatingControls: document.getElementById('prop-floating-controls'),
+    propFraming: document.getElementById('prop-framing'),
+    propShadow: document.getElementById('prop-shadow'),
+    propShadowVal: document.getElementById('prop-shadow-val'),
+    propFloatingAnim: document.getElementById('prop-floating-anim'),
+    propFloatingAnimDur: document.getElementById('prop-floating-anim-dur'),
+    propFloatingAnimDurVal: document.getElementById('prop-floating-anim-dur-val'),
     // Track wrappers (for crop/radius)
     trackWrapper1: document.getElementById('track-wrapper-1'),
     trackWrapper2: document.getElementById('track-wrapper-2'),
@@ -787,6 +949,22 @@ async function init() {
     setupVideoControls();
     setupClipPropertyListeners();
     setupMgPropertyListeners();
+    setupListiclePropertyListeners();
+    setupTemplatePropertyListeners();
+    // Populate template background dropdown with custom images from assets/backgrounds/
+    if (window.electronAPI?.scanBackgrounds) {
+        window.electronAPI.scanBackgrounds().then(bgList => {
+            const group = document.getElementById('tpl-bg-images');
+            if (!group || !bgList || !bgList.length) { if (group) group.remove(); return; }
+            for (const bg of bgList) {
+                const opt = document.createElement('option');
+                opt.value = `image:${bg.filename}`;
+                const label = bg.theme ? `${bg.theme} — ${bg.name}` : bg.name;
+                opt.textContent = label;
+                group.appendChild(opt);
+            }
+        }).catch(() => {});
+    }
     setupPreviewDrag();
     setupPreviewZoom();
     setupNotifCenter();
@@ -821,9 +999,11 @@ async function init() {
         if (state.scenes.length > 0) {
             console.log(`✅ Restored project: ${state.scenes.length} scenes`);
             await jumpToScene(0);
+        } else {
+            console.warn('⚠️ loadVideoPlan completed but state.scenes is empty');
         }
     } catch (e) {
-        console.log('No saved project to restore');
+        console.error('❌ No saved project to restore:', e?.message || e, e?.stack);
     }
 
     // Initialize WebGL2 Compositor Engine
@@ -865,6 +1045,46 @@ function setupEventListeners() {
         elements.smartAiToggle.addEventListener('change', () => { updateSmartAI(); saveSettings(); });
         updateSmartAI();
     }
+    if (elements.clipAnalyzerToggle) {
+        elements.clipAnalyzerToggle.addEventListener('change', () => saveSettings());
+    }
+
+    // Qwen Pool reset button + status (uses IPC, not direct Node.js)
+    const qwenPoolBtn = document.getElementById('reset-qwen-pool-btn');
+    const qwenPoolStatus = document.getElementById('qwen-pool-status');
+
+    function _updateQwenPoolStatus() {
+        if (!qwenPoolStatus || !window.electronAPI?.qwenPoolStatus) return;
+        window.electronAPI.qwenPoolStatus().then(status => {
+            if (status.exhausted > 0) {
+                qwenPoolStatus.textContent = `${status.exhausted} model${status.exhausted > 1 ? 's' : ''} exhausted`;
+                qwenPoolStatus.style.color = status.exhausted > 12 ? '#f55' : '#fa0';
+            } else {
+                qwenPoolStatus.textContent = 'all models available';
+                qwenPoolStatus.style.color = '#5a5';
+            }
+        }).catch(() => { qwenPoolStatus.textContent = ''; });
+    }
+
+    if (qwenPoolBtn) {
+        qwenPoolBtn.addEventListener('click', () => {
+            if (!window.electronAPI?.qwenPoolReset) return;
+            window.electronAPI.qwenPoolReset().then(result => {
+                if (result.success) {
+                    qwenPoolStatus.textContent = 'pool reset!';
+                    qwenPoolStatus.style.color = '#5a5';
+                    setTimeout(() => _updateQwenPoolStatus(), 2000);
+                } else {
+                    qwenPoolStatus.textContent = 'reset failed';
+                    qwenPoolStatus.style.color = '#f55';
+                }
+            }).catch(() => {
+                qwenPoolStatus.textContent = 'reset failed';
+                qwenPoolStatus.style.color = '#f55';
+            });
+        });
+        _updateQwenPoolStatus();
+    }
     elements.aiProvider.addEventListener('change', () => {
         // Show/hide Ollama model selection
         if (elements.ollamaModelRow) {
@@ -897,7 +1117,7 @@ function setupEventListeners() {
         });
     }
     // Footage source toggle listeners
-    ['srcPexels', 'srcPixabay', 'srcYouTube', 'srcNewsVideo', 'srcUnsplash', 'srcGoogleCSE', 'srcBing', 'srcDuckDuckGo', 'srcGoogleScrape'].forEach(key => {
+    ['srcPexels', 'srcPixabay', 'srcYouTube', 'srcTelegram', 'srcVKVideo', 'srcReddit', 'srcUnsplash', 'srcGoogleCSE', 'srcBing', 'srcDuckDuckGo', 'srcGoogleScrape'].forEach(key => {
         if (elements[key]) elements[key].addEventListener('change', saveSettings);
     });
     // Transition style + duration listeners
@@ -1555,6 +1775,8 @@ function updateClipProperties() {
     const panel = elements.clipProperties;
     const overlayPanel = document.getElementById('overlay-properties');
     const mgPanel = document.getElementById('mg-properties');
+    const listiclePanel = document.getElementById('listicle-properties');
+    const templatePanel = document.getElementById('template-properties');
     const emptyState = document.getElementById('properties-empty');
     const titleEl = document.getElementById('properties-title');
 
@@ -1562,13 +1784,24 @@ function updateClipProperties() {
     if (panel) panel.classList.add('hidden');
     if (overlayPanel) overlayPanel.classList.add('hidden');
     if (mgPanel) mgPanel.classList.add('hidden');
+    if (listiclePanel) listiclePanel.classList.add('hidden');
+    if (templatePanel) templatePanel.classList.add('hidden');
 
     // MG selected?
     if (state.selectedMgIndex >= 0 && state.motionGraphics[state.selectedMgIndex]) {
         if (emptyState) emptyState.classList.add('hidden');
-        const mgTypeLabels = { headline: 'Headline', lowerThird: 'Lower Third', statCounter: 'Stat Counter', callout: 'Callout', bulletList: 'Bullet List', focusWord: 'Focus Word', progressBar: 'Progress Bar' };
-        const mgType = state.motionGraphics[state.selectedMgIndex].type;
+        const mgTypeLabels = { headline: 'Headline', lowerThird: 'Lower Third', statCounter: 'Stat Counter', callout: 'Callout', bulletList: 'Bullet List', focusWord: 'Focus Word', progressBar: 'Progress Bar', listicleCounter: 'Listicle Item' };
+        const mg = state.motionGraphics[state.selectedMgIndex];
+        const mgType = mg.type;
         if (titleEl) titleEl.textContent = mgTypeLabels[mgType] || 'Motion Graphic';
+
+        // Listicle types get their own dedicated panel
+        if (LISTICLE_TYPES.has(mgType)) {
+            updateListicleProperties(mg);
+            expandPropertiesSection();
+            return;
+        }
+
         updateMgProperties();
         expandPropertiesSection();
         return;
@@ -1586,12 +1819,22 @@ function updateClipProperties() {
     // Full-screen MG scene on V3 — show MG properties panel
     if (scene.isMGScene) {
         if (emptyState) emptyState.classList.add('hidden');
-        const mgTypeLabels = { barChart: 'Bar Chart', donutChart: 'Donut Chart', rankingList: 'Ranking List', timeline: 'Timeline', comparisonCard: 'Comparison', bulletList: 'Bullet List', mapChart: 'Map', articleHighlight: 'Article' };
-        if (titleEl) titleEl.textContent = mgTypeLabels[scene.type] || 'Motion Graphic';
-        // Use MG properties panel with the scene's mgData
         const mgData = scene.mgData || scene;
         state.selectedMgIndex = -1; // Not from MG track
-        state._selectedMgScene = scene; // Temp reference for MG panel
+        state._selectedMgScene = scene; // Temp reference for panel
+
+        // Listicle Templates get their own dedicated panel (separate from MGs)
+        if (TEMPLATE_TYPES.has(scene.type)) {
+            const reg = TEMPLATE_REGISTRY[scene.type];
+            if (titleEl) titleEl.textContent = (reg ? reg.label : null) || 'Template';
+            updateTemplateProperties(mgData);
+            expandPropertiesSection();
+            return;
+        }
+
+        const mgTypeLabels = { barChart: 'Bar Chart', donutChart: 'Donut Chart', rankingList: 'Ranking List', timeline: 'Timeline', comparisonCard: 'Comparison', bulletList: 'Bullet List', mapChart: 'Map', articleHighlight: 'Article' };
+        if (titleEl) titleEl.textContent = mgTypeLabels[scene.type] || 'Motion Graphic';
+
         updateMgPropertiesForScene(scene);
         expandPropertiesSection();
         return;
@@ -1675,6 +1918,28 @@ function updateClipProperties() {
     const borderRadius = scene.borderRadius || 0;
     if (elements.propBorderRadius) { elements.propBorderRadius.value = borderRadius; }
     if (elements.propBorderRadiusVal) { elements.propBorderRadiusVal.value = `${borderRadius}%`; }
+
+    // Floating frame section — show for all V1 scenes, expand controls when floating
+    if (elements.propFloatingSection) {
+        const isV1 = !scene.trackId || scene.trackId === 'video-track-1';
+        elements.propFloatingSection.style.display = isV1 ? '' : 'none';
+        if (isV1) {
+            const framing = scene.framing || 'fullscreen';
+            if (elements.propFraming) elements.propFraming.value = framing;
+            const isFloating = framing === 'floating';
+            if (elements.propFloatingControls) elements.propFloatingControls.style.display = isFloating ? '' : 'none';
+            if (isFloating) {
+                const shadowVal = typeof scene.shadow === 'number' ? scene.shadow : (scene.shadow ? 0.5 : 0);
+                if (elements.propShadow) elements.propShadow.value = shadowVal;
+                if (elements.propShadowVal) elements.propShadowVal.value = shadowVal.toFixed(2);
+                if (elements.propFloatingAnim) elements.propFloatingAnim.value = scene.floatingAnim || 'slideRight';
+                const animDur = scene.floatingAnimDuration || 0.6;
+                if (elements.propFloatingAnimDur) elements.propFloatingAnimDur.value = animDur;
+                if (elements.propFloatingAnimDurVal) elements.propFloatingAnimDurVal.value = animDur.toFixed(2) + 's';
+
+            }
+        }
+    }
 
     // Effects controls
     _populateEffectControls(scene);
@@ -1910,6 +2175,8 @@ function _applyPresetSliders(sceneIndex) {
     const speedMul = (sliders.speed !== undefined ? sliders.speed : 50) / 50;
     // Warmth slider (0-100) scales tint strength and light leak warmth
     const warmthMul = (sliders.warmth !== undefined ? sliders.warmth : 50) / 50;
+    // Border slider (0-100) scales filmFrame border size
+    const borderMul = (sliders.border !== undefined ? sliders.border : 50) / 50;
 
     // Rebuild overrides from preset base, scaled by sliders
     s.effectOverrides = {};
@@ -1923,6 +2190,9 @@ function _applyPresetSliders(sceneIndex) {
         if (scaled.warmth !== undefined) scaled.warmth = Math.min(1, baseParams.warmth * (warmthMul !== undefined ? warmthMul : 1));
         // Scale speed-like params
         if (scaled.speed !== undefined) scaled.speed = baseParams.speed * speedMul;
+        // Scale border-like params (filmFrame)
+        if (scaled.border !== undefined) scaled.border = Math.min(0.12, baseParams.border * borderMul);
+        if (scaled.radius !== undefined && fx === 'filmFrame') scaled.radius = Math.min(0.08, baseParams.radius * borderMul);
         s.effectOverrides[fx] = scaled;
     }
 }
@@ -2024,6 +2294,9 @@ function updateMgProperties() {
     // Populate variant and animation dropdowns from registry
     _populateMgVariantDropdown(mg.type, mg.subType);
     _populateMgAnimationDropdown(mg.type, mg.animation);
+
+    // Show listicle template controls if applicable
+    _showListicleControls(mg.type, mg);
 }
 
 // Show MG properties panel for a V3 full-screen MG scene
@@ -2077,6 +2350,93 @@ function updateMgPropertiesForScene(scene) {
     // Populate variant and animation dropdowns from registry
     _populateMgVariantDropdown(sceneType, mg.subType || scene.subType);
     _populateMgAnimationDropdown(sceneType, mg.animation || scene.animation);
+
+    // Show listicle template controls if applicable
+    _showListicleControls(sceneType, mg);
+}
+
+/**
+ * Populate the dedicated Listicle Items properties panel (#listicle-properties)
+ */
+function updateListicleProperties(mg) {
+    const panel = document.getElementById('listicle-properties');
+    if (!panel) return;
+    panel.classList.remove('hidden');
+
+    const mgType = mg.type || 'listicleCounter';
+
+    // Type dropdown
+    const typeEl = document.getElementById('li-type');
+    if (typeEl) typeEl.value = mgType;
+
+    // Template dropdown — populate variants from registry
+    const templateSel = document.getElementById('li-template');
+    if (templateSel && window._mgRegistry) {
+        const types = window._mgRegistry.getTypesForCategory(mgType);
+        templateSel.innerHTML = '';
+        for (const t of types) {
+            const opt = document.createElement('option');
+            opt.value = t.key;
+            opt.textContent = t.label;
+            templateSel.appendChild(opt);
+        }
+        templateSel.value = mg.subType || window._mgRegistry.registry[mgType]?.defaultType || '';
+    }
+
+    // Animation dropdown — populate from registry
+    const animSel = document.getElementById('li-animation');
+    if (animSel && window._mgRegistry) {
+        const anims = window._mgRegistry.getAnimationsForCategory(mgType);
+        animSel.innerHTML = '';
+        for (const a of anims) {
+            const opt = document.createElement('option');
+            opt.value = a;
+            opt.textContent = a.replace(/([A-Z])/g, ' $1').replace(/^./, c => c.toUpperCase());
+            animSel.appendChild(opt);
+        }
+        animSel.value = mg.animation || anims[0] || '';
+    }
+
+    // Number field — show for counter/tracker, hide for grid
+    const numberRow = document.getElementById('li-number-row');
+    if (numberRow) numberRow.style.display = mgType === 'listicleGrid' ? 'none' : '';
+    const numberEl = document.getElementById('li-number');
+    if (numberEl) numberEl.value = mg.text || '';
+
+    // Title field — show for counter, hide for tracker/grid
+    const titleRow = document.getElementById('li-title-row');
+    if (titleRow) titleRow.style.display = mgType === 'listicleCounter' ? '' : 'none';
+    const titleEl = document.getElementById('li-title');
+    if (titleEl) titleEl.value = mg.subtext || '';
+
+    // Style
+    const styleSel2 = document.getElementById('li-style');
+    if (styleSel2) styleSel2.value = mg.style || 'clean';
+
+    // Position
+    const posEl = document.getElementById('li-position');
+    if (posEl) posEl.value = mg.position || 'bottomLeft';
+
+    // Duration
+    const durEl = document.getElementById('li-duration');
+    const durVal = document.getElementById('li-duration-val');
+    const dur = mg.duration || 4;
+    if (durEl) durEl.value = dur;
+    if (durVal) durVal.textContent = `${dur.toFixed(1)}s`;
+
+    // Scale
+    const scaleEl = document.getElementById('li-scale');
+    const scaleValEl = document.getElementById('li-scale-val');
+    const scaleV = mg.scale || 1.3;
+    if (scaleEl) scaleEl.value = scaleV;
+    if (scaleValEl) scaleValEl.textContent = `${scaleV.toFixed(1)}x`;
+
+    // Animation speed
+    const animSpeedEl = document.getElementById('li-anim-speed');
+    const animSpeedVal = document.getElementById('li-anim-speed-val');
+    const speed = mg.animationSpeed || 1;
+    if (animSpeedEl) animSpeedEl.value = speed;
+    if (animSpeedVal) animSpeedVal.textContent = `${speed.toFixed(1)}x`;
 }
 
 function setupClipPropertyListeners() {
@@ -2224,6 +2584,71 @@ function setupClipPropertyListeners() {
         apply: v => { state.scenes[state.selectedClipIndex].borderRadius = v; applySceneTransform(state.selectedClipIndex); refreshCompositorScene(state.selectedClipIndex); }
     });
 
+    // ── Floating frame controls ──
+    if (elements.propFraming) {
+        elements.propFraming.addEventListener('change', (e) => {
+            if (state.selectedClipIndex < 0) return;
+            pushUndoState();
+            const scene = state.scenes[state.selectedClipIndex];
+            const newFraming = e.target.value;
+            scene.framing = newFraming;
+            if (newFraming === 'floating') {
+                // Apply floating defaults if switching to floating
+                if (!scene.shadow && scene.shadow !== 0) scene.shadow = 0.5;
+                scene.floatingAnim = scene.floatingAnim || 'slideRight';
+                scene.floatingAnimDuration = scene.floatingAnimDuration || 0.6;
+                scene.borderRadius = scene.borderRadius || 4;
+                if (!scene.background || scene.background === 'none') scene.background = 'blur';
+                // Scale down for floating look
+                if (scene.scale > 0.7) scene.scale = 0.6;
+            } else if (newFraming === 'fullscreen') {
+                scene.shadow = 0;
+                scene.borderRadius = 0;
+                scene.scale = 1;
+                scene.background = 'none';
+            }
+            updateClipProperties();
+            applySceneTransform(state.selectedClipIndex);
+            refreshCompositorScene(state.selectedClipIndex);
+            loadActiveScenes();
+        });
+    }
+    if (elements.propShadow) {
+        elements.propShadow.addEventListener('input', (e) => {
+            if (state.selectedClipIndex < 0) return;
+            const val = parseFloat(e.target.value);
+            state.scenes[state.selectedClipIndex].shadow = val;
+            if (elements.propShadowVal) elements.propShadowVal.value = val.toFixed(2);
+            refreshCompositorScene(state.selectedClipIndex);
+        });
+    }
+    setupValueInput(elements.propShadowVal, elements.propShadow, {
+        parse: parseFloat,
+        format: v => v.toFixed(2),
+        apply: v => { state.scenes[state.selectedClipIndex].shadow = v; refreshCompositorScene(state.selectedClipIndex); }
+    });
+    if (elements.propFloatingAnim) {
+        elements.propFloatingAnim.addEventListener('change', (e) => {
+            if (state.selectedClipIndex < 0) return;
+            pushUndoState();
+            state.scenes[state.selectedClipIndex].floatingAnim = e.target.value;
+            refreshCompositorScene(state.selectedClipIndex);
+        });
+    }
+    if (elements.propFloatingAnimDur) {
+        elements.propFloatingAnimDur.addEventListener('input', (e) => {
+            if (state.selectedClipIndex < 0) return;
+            const val = parseFloat(e.target.value);
+            state.scenes[state.selectedClipIndex].floatingAnimDuration = val;
+            if (elements.propFloatingAnimDurVal) elements.propFloatingAnimDurVal.value = val.toFixed(2) + 's';
+            refreshCompositorScene(state.selectedClipIndex);
+        });
+    }
+    setupValueInput(elements.propFloatingAnimDurVal, elements.propFloatingAnimDur, {
+        parse: v => parseFloat(v.replace('s', '')),
+        format: v => v.toFixed(2) + 's',
+        apply: v => { state.scenes[state.selectedClipIndex].floatingAnimDuration = v; refreshCompositorScene(state.selectedClipIndex); }
+    });
     if (elements.propReset) {
         elements.propReset.addEventListener('click', () => {
             if (state.selectedClipIndex < 0) return;
@@ -2240,6 +2665,10 @@ function setupClipPropertyListeners() {
             scene.cropLeft = 0;
             scene.cropRight = 0;
             scene.borderRadius = 0;
+            scene.framing = 'fullscreen';
+            scene.shadow = 0;
+            scene.floatingAnim = 'slideRight';
+            scene.floatingAnimDuration = 0.6;
             updateClipProperties();
             applySceneTransform(state.selectedClipIndex);
             applyTrackVolumes();
@@ -2341,6 +2770,61 @@ function setupClipPropertyListeners() {
 /**
  * Populate the Background dropdown with available pattern files from assets/backgrounds/
  */
+/**
+ * Preload template media (video/image) into a shared cache so MGRenderer
+ * can use it immediately without a loading flash.
+ */
+const _preloadedTemplateMedia = {};
+function _preloadTemplateMedia(file, url, offset) {
+    if (_preloadedTemplateMedia[file]) return;
+    _preloadedTemplateMedia[file] = true;
+    const isVideo = /\.(mp4|webm|mov|mkv)$/i.test(file);
+    if (isVideo) {
+        const video = document.createElement('video');
+        video.crossOrigin = 'anonymous';
+        video.muted = true;
+        video.playsInline = true;
+        video.preload = 'auto';
+        video.style.display = 'none';
+        document.body.appendChild(video);
+        video.onloadeddata = () => {
+            // Seek to the offset so the first frame is ready
+            if (offset > 0 && video.duration > offset) {
+                video.currentTime = offset;
+            }
+            // Inject into MGRenderer's cache if available
+            if (state.compositor?.mgRenderer) {
+                const mgr = state.compositor.mgRenderer;
+                if (!mgr._templateMedia) mgr._templateMedia = {};
+                if (!mgr._templateMedia[file]) {
+                    mgr._templateMedia[file] = video;
+                    console.log(`[Preload] Template media ready: ${file.split(/[/\\]/).pop()}`);
+                }
+            }
+        };
+        video.onerror = () => {
+            delete _preloadedTemplateMedia[file];
+            if (video.parentNode) video.parentNode.removeChild(video);
+        };
+        video.src = url;
+    } else {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = () => {
+            if (state.compositor?.mgRenderer) {
+                const mgr = state.compositor.mgRenderer;
+                if (!mgr._templateMedia) mgr._templateMedia = {};
+                if (!mgr._templateMedia[file]) {
+                    mgr._templateMedia[file] = img;
+                    console.log(`[Preload] Template media ready: ${file.split(/[/\\]/).pop()}`);
+                }
+            }
+        };
+        img.onerror = () => { delete _preloadedTemplateMedia[file]; };
+        img.src = url;
+    }
+}
+
 function populateBackgroundDropdown() {
     const sel = elements.propBackground;
     if (!sel) return;
@@ -2512,12 +2996,14 @@ function setupMgPropertyListeners() {
         });
     }
 
-    // Show/hide map style row + explainer controls when type changes
+    // Show/hide map style row + explainer + listicle controls when type changes
     if (typeEl) {
         typeEl.addEventListener('change', () => {
             const mapStyleRow = document.getElementById('mg-map-style-row');
             if (mapStyleRow) mapStyleRow.style.display = typeEl.value === 'mapChart' ? '' : 'none';
             _showExplainerControls(typeEl.value === 'explainer', null);
+            const active = getActiveMG();
+            _showListicleControls(typeEl.value, active?.mg || null);
         });
     }
 
@@ -2579,6 +3065,387 @@ function setupMgPropertyListeners() {
             active.mg.animationSpeed = val;
             if (active.mg.mgData) active.mg.mgData.animationSpeed = val;
             document.getElementById('mg-anim-speed-val').textContent = `${val.toFixed(1)}x`;
+            refreshCompositorMGs();
+        });
+    }
+
+    // ── Listicle Template Listeners ──
+    const listicleTemplateSel = document.getElementById('mg-listicle-template');
+    if (listicleTemplateSel) {
+        listicleTemplateSel.addEventListener('change', (e) => {
+            const active = getActiveMG();
+            if (!active) return;
+            active.mg.subType = e.target.value;
+            if (active.mg.mgData) active.mg.mgData.subType = e.target.value;
+            // Also update the main variant dropdown if visible
+            const subTypeEl = document.getElementById('mg-subtype');
+            if (subTypeEl) subTypeEl.value = e.target.value;
+            if (active.isScene) loadActiveScenes(); else updateMGOverlay();
+            refreshCompositorMGs();
+        });
+    }
+
+    const listicleAnimSel = document.getElementById('mg-listicle-anim');
+    if (listicleAnimSel) {
+        listicleAnimSel.addEventListener('change', (e) => {
+            const active = getActiveMG();
+            if (!active) return;
+            active.mg.animation = e.target.value;
+            if (active.mg.mgData) active.mg.mgData.animation = e.target.value;
+            refreshCompositorMGs();
+        });
+    }
+
+    const listicleNumberEl = document.getElementById('mg-listicle-number');
+    if (listicleNumberEl) {
+        listicleNumberEl.addEventListener('input', (e) => {
+            const active = getActiveMG();
+            if (!active) return;
+            active.mg.text = e.target.value;
+            if (active.mg.mgData) active.mg.mgData.text = e.target.value;
+            // Sync with main text field
+            const textEl = document.getElementById('mg-text');
+            if (textEl) textEl.value = e.target.value;
+            refreshCompositorMGs();
+        });
+    }
+
+    const listicleItemsEl = document.getElementById('mg-listicle-items');
+    if (listicleItemsEl) {
+        listicleItemsEl.addEventListener('change', (e) => {
+            const active = getActiveMG();
+            if (!active) return;
+            active.mg._maxVisibleItems = parseInt(e.target.value) || 5;
+            if (active.mg.mgData) active.mg.mgData._maxVisibleItems = parseInt(e.target.value) || 5;
+            if (active.isScene) loadActiveScenes();
+            refreshCompositorMGs();
+        });
+    }
+
+    const listicleBgSel = document.getElementById('mg-listicle-bg');
+    if (listicleBgSel) {
+        listicleBgSel.addEventListener('change', (e) => {
+            const active = getActiveMG();
+            if (!active) return;
+            active.mg.mgBackground = e.target.value === 'auto' ? undefined : e.target.value;
+            if (active.mg.mgData) active.mg.mgData.mgBackground = e.target.value === 'auto' ? undefined : e.target.value;
+            refreshCompositorMGs();
+        });
+    }
+}
+
+/**
+ * Setup event listeners for the dedicated Listicle Items properties panel (#listicle-properties)
+ */
+function setupListiclePropertyListeners() {
+    // Helper: get the active listicle MG (overlay or fullscreen scene)
+    function getActiveListicleMG() {
+        if (state.selectedMgIndex >= 0 && state.motionGraphics[state.selectedMgIndex]) {
+            const mg = state.motionGraphics[state.selectedMgIndex];
+            return { mg, isScene: false };
+        }
+        if (state._selectedMgScene) {
+            const mgData = state._selectedMgScene.mgData || state._selectedMgScene;
+            return { mg: mgData, isScene: true, scene: state._selectedMgScene };
+        }
+        return null;
+    }
+
+    // Type change — switch between counter/tracker/grid
+    const typeEl = document.getElementById('li-type');
+    if (typeEl) {
+        typeEl.addEventListener('change', (e) => {
+            const active = getActiveListicleMG();
+            if (!active) return;
+            pushUndoState();
+            active.mg.type = e.target.value;
+            if (active.isScene && active.scene) active.scene.type = e.target.value;
+            // Re-populate template/animation dropdowns for new type
+            updateListicleProperties(active.mg);
+            if (active.isScene) loadActiveScenes(); else updateMGOverlay();
+            refreshCompositorMGs();
+            renderTimeline();
+        });
+    }
+
+    // Template (variant) change
+    const templateSel = document.getElementById('li-template');
+    if (templateSel) {
+        templateSel.addEventListener('change', (e) => {
+            const active = getActiveListicleMG();
+            if (!active) return;
+            active.mg.subType = e.target.value;
+            if (active.mg.mgData) active.mg.mgData.subType = e.target.value;
+            if (active.isScene) loadActiveScenes(); else updateMGOverlay();
+            refreshCompositorMGs();
+        });
+    }
+
+    // Style change
+    const styleSel = document.getElementById('li-style');
+    if (styleSel) {
+        styleSel.addEventListener('change', (e) => {
+            const active = getActiveListicleMG();
+            if (!active) return;
+            active.mg.style = e.target.value;
+            if (active.mg.mgData) active.mg.mgData.style = e.target.value;
+            refreshCompositorMGs();
+        });
+    }
+
+    // Animation change
+    const animSel = document.getElementById('li-animation');
+    if (animSel) {
+        animSel.addEventListener('change', (e) => {
+            const active = getActiveListicleMG();
+            if (!active) return;
+            active.mg.animation = e.target.value;
+            if (active.mg.mgData) active.mg.mgData.animation = e.target.value;
+            refreshCompositorMGs();
+        });
+    }
+
+    // Number field (text for counter/tracker)
+    const numberEl = document.getElementById('li-number');
+    if (numberEl) {
+        numberEl.addEventListener('input', (e) => {
+            const active = getActiveListicleMG();
+            if (!active) return;
+            active.mg.text = e.target.value;
+            if (active.mg.mgData) active.mg.mgData.text = e.target.value;
+            refreshCompositorMGs();
+        });
+    }
+
+    // Title field (subtext for counter)
+    const titleEl = document.getElementById('li-title');
+    if (titleEl) {
+        titleEl.addEventListener('input', (e) => {
+            const active = getActiveListicleMG();
+            if (!active) return;
+            active.mg.subtext = e.target.value;
+            if (active.mg.mgData) active.mg.mgData.subtext = e.target.value;
+            refreshCompositorMGs();
+        });
+    }
+
+    // Position
+    const posEl = document.getElementById('li-position');
+    if (posEl) {
+        posEl.addEventListener('change', (e) => {
+            const active = getActiveListicleMG();
+            if (!active) return;
+            active.mg.position = e.target.value;
+            if (active.mg.mgData) active.mg.mgData.position = e.target.value;
+            if (active.isScene) loadActiveScenes(); else updateMGOverlay();
+            refreshCompositorMGs();
+        });
+    }
+
+    // Duration slider
+    const durEl = document.getElementById('li-duration');
+    if (durEl) {
+        durEl.addEventListener('pointerdown', () => pushUndoState());
+        durEl.addEventListener('input', (e) => {
+            const val = parseFloat(e.target.value);
+            const durVal = document.getElementById('li-duration-val');
+            if (durVal) durVal.textContent = `${val.toFixed(1)}s`;
+
+            const active = getActiveListicleMG();
+            if (!active) return;
+            active.mg.duration = val;
+            if (active.mg.mgData) active.mg.mgData.duration = val;
+            refreshCompositorMGs();
+            renderTimeline();
+        });
+    }
+
+    // Animation speed slider
+    const animSpeedEl = document.getElementById('li-anim-speed');
+    if (animSpeedEl) {
+        animSpeedEl.addEventListener('pointerdown', () => pushUndoState());
+        animSpeedEl.addEventListener('input', (e) => {
+            const val = parseFloat(e.target.value);
+            const animSpeedVal = document.getElementById('li-anim-speed-val');
+            if (animSpeedVal) animSpeedVal.textContent = `${val.toFixed(1)}x`;
+
+            const active = getActiveListicleMG();
+            if (!active) return;
+            active.mg.animationSpeed = val;
+            if (active.mg.mgData) active.mg.mgData.animationSpeed = val;
+            refreshCompositorMGs();
+        });
+    }
+
+    // Scale slider
+    const scaleEl = document.getElementById('li-scale');
+    if (scaleEl) {
+        scaleEl.addEventListener('pointerdown', () => pushUndoState());
+        scaleEl.addEventListener('input', (e) => {
+            const val = parseFloat(e.target.value);
+            const scaleVal = document.getElementById('li-scale-val');
+            if (scaleVal) scaleVal.textContent = `${val.toFixed(1)}x`;
+
+            const active = getActiveListicleMG();
+            if (!active) return;
+            active.mg.scale = val;
+            if (active.mg.mgData) active.mg.mgData.scale = val;
+            refreshCompositorMGs();
+        });
+    }
+}
+
+// ========================================
+// Listicle Template Properties (separate system — overview grid, future templates)
+// ========================================
+
+/**
+ * Populate the Template properties panel (#template-properties).
+ * Variant + Animation dropdowns are dynamically populated from TEMPLATE_REGISTRY
+ * so each template type shows only its own valid options.
+ */
+function updateTemplateProperties(mgOrScene) {
+    const panel = document.getElementById('template-properties');
+    if (!panel) return;
+    panel.classList.remove('hidden');
+
+    // Read from scene first (what renderer sees), then mgData fallback
+    const scene = state._selectedMgScene || {};
+    const mg = scene.type ? scene : mgOrScene;
+
+    const tplType = document.getElementById('tpl-type');
+    const tplVariant = document.getElementById('tpl-variant');
+    const tplAnimation = document.getElementById('tpl-animation');
+    const tplStyle = document.getElementById('tpl-style');
+    const tplBackground = document.getElementById('tpl-background');
+    const tplAnimSpeed = document.getElementById('tpl-anim-speed');
+    const tplAnimSpeedVal = document.getElementById('tpl-anim-speed-val');
+
+    const type = mg.type || 'listicleGrid';
+    if (tplType) tplType.value = type;
+
+    // Populate variant + animation dropdowns from registry for THIS template type
+    const reg = TEMPLATE_REGISTRY[type];
+    if (reg) {
+        _populateTemplateDropdown(tplVariant, reg.variants, mg.subType || mg.variant, reg.defaultVariant);
+        _populateTemplateDropdown(tplAnimation, reg.animations, mg.animation, reg.defaultAnimation);
+    }
+
+    if (tplStyle) tplStyle.value = mg.style || 'clean';
+    if (tplBackground) tplBackground.value = mg.mgBackground || '';
+    if (tplAnimSpeed) {
+        const speed = mg.animationSpeed || mg._animationSpeed || 1.0;
+        tplAnimSpeed.value = speed;
+        if (tplAnimSpeedVal) tplAnimSpeedVal.textContent = `${speed.toFixed(1)}x`;
+    }
+}
+
+/**
+ * Get active template MG (from V3 scene selection)
+ */
+function getActiveTemplateMG() {
+    const scene = state._selectedMgScene;
+    if (!scene || !TEMPLATE_TYPES.has(scene.type)) return null;
+    return { scene };
+}
+
+/** Set a property on both scene and scene.mgData so renderer always sees it */
+function _setTemplateProp(scene, key, value) {
+    scene[key] = value;
+    if (scene.mgData) scene.mgData[key] = value;
+}
+
+/**
+ * Setup event listeners for Template properties panel.
+ * tpl-type change → re-populates variant/animation dropdowns from TEMPLATE_REGISTRY.
+ */
+function setupTemplatePropertyListeners() {
+    const tplType = document.getElementById('tpl-type');
+    if (tplType) {
+        tplType.addEventListener('change', (e) => {
+            const active = getActiveTemplateMG();
+            if (!active) return;
+            pushUndoState();
+            const newType = e.target.value;
+            _setTemplateProp(active.scene, 'type', newType);
+            // Update keyword display
+            active.scene.keyword = `Template: ${newType}`;
+            if (active.scene.mgData) active.scene.mgData.keyword = active.scene.keyword;
+            // Re-populate variant/animation with new type's options + set defaults
+            const reg = TEMPLATE_REGISTRY[newType];
+            if (reg) {
+                const tplVariant = document.getElementById('tpl-variant');
+                const tplAnimation = document.getElementById('tpl-animation');
+                _populateTemplateDropdown(tplVariant, reg.variants, null, reg.defaultVariant);
+                _populateTemplateDropdown(tplAnimation, reg.animations, null, reg.defaultAnimation);
+                _setTemplateProp(active.scene, 'subType', reg.defaultVariant);
+                _setTemplateProp(active.scene, 'variant', reg.defaultVariant);
+                _setTemplateProp(active.scene, 'animation', reg.defaultAnimation);
+            }
+            // Update panel title
+            const titleEl = document.getElementById('properties-title');
+            if (titleEl) titleEl.textContent = reg?.label || 'Template';
+            renderTimeline();
+            refreshCompositorMGs();
+        });
+    }
+
+    const tplVariant = document.getElementById('tpl-variant');
+    if (tplVariant) {
+        tplVariant.addEventListener('change', (e) => {
+            const active = getActiveTemplateMG();
+            if (!active) return;
+            pushUndoState();
+            _setTemplateProp(active.scene, 'subType', e.target.value);
+            _setTemplateProp(active.scene, 'variant', e.target.value);
+            refreshCompositorMGs();
+        });
+    }
+
+    const tplAnimation = document.getElementById('tpl-animation');
+    if (tplAnimation) {
+        tplAnimation.addEventListener('change', (e) => {
+            const active = getActiveTemplateMG();
+            if (!active) return;
+            pushUndoState();
+            _setTemplateProp(active.scene, 'animation', e.target.value);
+            refreshCompositorMGs();
+        });
+    }
+
+    const tplStyle = document.getElementById('tpl-style');
+    if (tplStyle) {
+        tplStyle.addEventListener('change', (e) => {
+            const active = getActiveTemplateMG();
+            if (!active) return;
+            pushUndoState();
+            _setTemplateProp(active.scene, 'style', e.target.value);
+            refreshCompositorMGs();
+        });
+    }
+
+    const tplBackground = document.getElementById('tpl-background');
+    if (tplBackground) {
+        tplBackground.addEventListener('change', (e) => {
+            const active = getActiveTemplateMG();
+            if (!active) return;
+            pushUndoState();
+            _setTemplateProp(active.scene, 'mgBackground', e.target.value || undefined);
+            refreshCompositorMGs();
+        });
+    }
+
+    const tplAnimSpeed = document.getElementById('tpl-anim-speed');
+    if (tplAnimSpeed) {
+        tplAnimSpeed.addEventListener('pointerdown', () => pushUndoState());
+        tplAnimSpeed.addEventListener('input', (e) => {
+            const val = parseFloat(e.target.value);
+            const valEl = document.getElementById('tpl-anim-speed-val');
+            if (valEl) valEl.textContent = `${val.toFixed(1)}x`;
+            const active = getActiveTemplateMG();
+            if (!active) return;
+            _setTemplateProp(active.scene, 'animationSpeed', val);
+            _setTemplateProp(active.scene, '_animationSpeed', val);
             refreshCompositorMGs();
         });
     }
@@ -2900,7 +3767,8 @@ async function saveProject(silent = false) {
             originalStartTime: s.originalStartTime,
             originalEndTime: s.originalEndTime
         }));
-        state.videoPlan.mgScenes = state.scenes.filter(s => s.isMGScene && !s.disabled).map(s => ({ ...s }));
+        state.videoPlan.mgScenes = state.scenes.filter(s => s.isMGScene && !s.disabled && !s.templateType).map(s => ({ ...s }));
+        state.videoPlan.templateScenes = state.scenes.filter(s => s.isMGScene && !s.disabled && s.templateType).map(s => ({ ...s }));
         state.videoPlan.mutedTracks = { ...state.mutedTracks };
         state.videoPlan.totalDuration = state.totalDuration;
         state.videoPlan.transitionStyle = elements.transitionStyle.value;
@@ -4214,7 +5082,8 @@ async function generateVideo() {
             buildNiche: elements.buildNiche ? elements.buildNiche.value : 'auto',
             buildTheme: elements.buildTheme.value,
             cinematicScale: elements.cinematicScale ? elements.cinematicScale.value : '0.65',
-            smartAI: elements.smartAiToggle ? elements.smartAiToggle.checked : true
+            smartAI: elements.smartAiToggle ? elements.smartAiToggle.checked : true,
+            clipAnalyzer: elements.clipAnalyzerToggle ? elements.clipAnalyzerToggle.checked : true
         });
         if (result.success) {
             updateProgress(90, '📋 Loading video plan...'); await loadVideoPlan({ freshBuild: true });
@@ -4248,18 +5117,27 @@ async function loadVideoPlan({ freshBuild = false } = {}) {
         let plan = null;
         let fvpSettings = null;
         if (!freshBuild && window.electronAPI.loadProjectFile) {
+            console.log('[loadVideoPlan] Attempting .fvp load...');
             const projectData = await window.electronAPI.loadProjectFile();
             if (projectData && projectData.videoPlan) {
                 plan = projectData.videoPlan;
                 fvpSettings = projectData.settings || null;
                 state.hasProjectFile = true;
-                console.log('✅ Loaded from .fvp project file');
+                console.log(`✅ Loaded from .fvp project file (${plan.scenes?.length || 0} scenes)`);
+            } else {
+                console.warn('[loadVideoPlan] .fvp returned no videoPlan:', projectData ? Object.keys(projectData) : 'null');
             }
         }
 
         // Load from video-plan.json (always used after fresh build, fallback otherwise)
         if (!plan) {
+            console.log('[loadVideoPlan] Falling back to video-plan.json...');
             plan = await window.electronAPI.loadVideoPlan();
+            if (plan) {
+                console.log(`✅ Loaded from video-plan.json (${plan.scenes?.length || 0} scenes)`);
+            } else {
+                console.warn('[loadVideoPlan] video-plan.json also returned null');
+            }
         }
 
         if (plan) {
@@ -4351,7 +5229,7 @@ async function loadVideoPlan({ freshBuild = false } = {}) {
             // Load motion graphics from plan
             // Full-screen types (barChart, donutChart, etc.) go on V3 as scene objects
             try {
-            const FULLSCREEN_MG_TYPES = new Set(['barChart', 'donutChart', 'rankingList', 'timeline', 'comparisonCard', 'bulletList', 'mapChart', 'articleHighlight']);
+            const FULLSCREEN_MG_TYPES = new Set(['barChart', 'donutChart', 'rankingList', 'timeline', 'comparisonCard', 'bulletList', 'mapChart', 'articleHighlight', 'listicleGrid']);
             const allMGs = plan.motionGraphics || [];
             // Explainer always stays as overlay MG (never fullscreen V3 scene)
             state.motionGraphics = allMGs.filter(mg => !FULLSCREEN_MG_TYPES.has(mg.type));
@@ -4360,9 +5238,10 @@ async function loadVideoPlan({ freshBuild = false } = {}) {
             // Resolve explainer image URLs for overlay MGs
             _resolveExplainerUrls(state.motionGraphics);
 
-            // Load full-screen MGs onto V3 (from mgScenes or classified from motionGraphics)
+            // Load full-screen MGs onto V3 (from mgScenes, templateScenes, or classified from motionGraphics)
             const fullscreenMGs = [
                 ...(plan.mgScenes || []),
+                ...(plan.templateScenes || []),
                 ...allMGs.filter(mg => FULLSCREEN_MG_TYPES.has(mg.type))
             ];
             // Deduplicate (in case both mgScenes and motionGraphics have the same MG)
@@ -4379,18 +5258,23 @@ async function loadVideoPlan({ freshBuild = false } = {}) {
                 const sceneObj = {
                     isMGScene: true,
                     trackId: 'video-track-3',
-                    mediaType: 'motion-graphic',
+                    mediaType: mg.templateType ? 'template' : 'motion-graphic',
                     startTime: mg.startTime,
                     endTime: mg.endTime || (mg.startTime + mg.duration),
                     duration: Math.round((mg.duration || (mg.endTime - mg.startTime)) * 30),
                     text: mg.text || '',
-                    subtext: mg.subtext || '',
+                    subtext: mg.subtext || mg.subText || '',
                     type: mg.type,
                     position: mg.position || 'center',
                     style: mg.style || state.mgStyle || 'clean',
-                    keyword: `MG: ${mg.type}`,
+                    keyword: mg.templateType ? `Template: ${mg.type}` : `MG: ${mg.type}`,
                     mgData: core === mg ? mgFlat : core,
                 };
+                if (mg.templateType) sceneObj.templateType = true;
+                if (mg.variant) sceneObj.variant = mg.variant;
+                if (mg.animation) sceneObj.animation = mg.animation;
+                if (mg.themeId) sceneObj.themeId = mg.themeId;
+                if (mg.items) sceneObj.items = mg.items;
                 if (mg.mapStyle) sceneObj.mapStyle = mg.mapStyle;
                 // Propagate article image properties for image mode
                 if (core.articleImageFile) {
@@ -4441,6 +5325,39 @@ async function loadVideoPlan({ freshBuild = false } = {}) {
                         }
                     }).catch(() => { });
                 }
+                // Propagate listicle grid data (items + thumbnails)
+                if (core._listicleItems) {
+                    sceneObj._listicleItems = core._listicleItems;
+                    if (sceneObj.mgData) sceneObj.mgData._listicleItems = core._listicleItems;
+                }
+                if (core._itemThumbnails) {
+                    sceneObj._itemThumbnails = core._itemThumbnails;
+                    if (sceneObj.mgData) sceneObj.mgData._itemThumbnails = core._itemThumbnails;
+                    // Pre-resolve thumbnail URLs via Electron IPC
+                    // Template item images (tpl-item-*) are in public/, listicle thumbs use getFileUrl directly
+                    const isTemplateItems = core._itemThumbnails.some(t => t && t.startsWith('tpl-item-'));
+                    if (isTemplateItems && window.electronAPI?.getProjectInfo && window.electronAPI?.getFileUrl) {
+                        window.electronAPI.getProjectInfo().then(async (info) => {
+                            const urls = await Promise.all(core._itemThumbnails.map(async (thumbFile) => {
+                                if (!thumbFile) return null;
+                                try {
+                                    const fullPath = info.projectDir + '/public/' + thumbFile;
+                                    return await window.electronAPI.getFileUrl(fullPath);
+                                } catch { return null; }
+                            }));
+                            sceneObj._itemThumbnailUrls = urls;
+                            if (sceneObj.mgData) sceneObj.mgData._itemThumbnailUrls = urls;
+                        }).catch(() => { });
+                    } else if (window.electronAPI?.getFileUrl) {
+                        Promise.all(core._itemThumbnails.map(async (thumbPath) => {
+                            if (!thumbPath) return null;
+                            try { return await window.electronAPI.getFileUrl(thumbPath); } catch { return null; }
+                        })).then(urls => {
+                            sceneObj._itemThumbnailUrls = urls;
+                            if (sceneObj.mgData) sceneObj.mgData._itemThumbnailUrls = urls;
+                        }).catch(() => { });
+                    }
+                }
                 // Pre-resolve article image URL for preview
                 if (core.articleImageFile && window.electronAPI?.getSceneMediaPath) {
                     const ext = core.articleImageFile.match(/\.\w+$/)?.[0] || '.jpg';
@@ -4449,6 +5366,42 @@ async function loadVideoPlan({ freshBuild = false } = {}) {
                             const url = await window.electronAPI.getFileUrl(filePath);
                             sceneObj._articleImageUrl = url;
                             if (sceneObj.mgData) sceneObj.mgData._articleImageUrl = url;
+                        }
+                    }).catch(() => { });
+                }
+                // Propagate template background image properties
+                if (core.templateBgFile) {
+                    sceneObj.templateBgFile = core.templateBgFile;
+                    if (sceneObj.mgData) sceneObj.mgData.templateBgFile = core.templateBgFile;
+                }
+                // Pre-resolve template background image URL
+                if (core.templateBgFile && window.electronAPI?.getProjectInfo && window.electronAPI?.getFileUrl) {
+                    window.electronAPI.getProjectInfo().then(async (info) => {
+                        const bgPath = info.projectDir + '/public/' + core.templateBgFile;
+                        const url = await window.electronAPI.getFileUrl(bgPath);
+                        if (url) {
+                            sceneObj._templateBgUrl = url;
+                            if (sceneObj.mgData) sceneObj.mgData._templateBgUrl = url;
+                        }
+                    }).catch(() => { });
+                }
+                // Propagate template media file (video/image from underlying scene)
+                if (core.templateMediaFile) {
+                    sceneObj.templateMediaFile = core.templateMediaFile;
+                    sceneObj.templateMediaOffset = core.templateMediaOffset || 0;
+                    if (sceneObj.mgData) {
+                        sceneObj.mgData.templateMediaFile = core.templateMediaFile;
+                        sceneObj.mgData.templateMediaOffset = core.templateMediaOffset || 0;
+                    }
+                }
+                // Pre-resolve template media URL and preload the media element
+                if (core.templateMediaFile && window.electronAPI?.getFileUrl) {
+                    window.electronAPI.getFileUrl(core.templateMediaFile).then(url => {
+                        if (url) {
+                            sceneObj._templateMediaUrl = url;
+                            if (sceneObj.mgData) sceneObj.mgData._templateMediaUrl = url;
+                            // Preload media now so it's ready before user seeks to it
+                            _preloadTemplateMedia(core.templateMediaFile, url, core.templateMediaOffset || 0);
                         }
                     }).catch(() => { });
                 }
@@ -4536,7 +5489,7 @@ async function loadVideoPlan({ freshBuild = false } = {}) {
             preloadUpcomingScenes(0, true);
         }
     } catch (error) {
-        console.error('Failed to load video plan:', error);
+        console.error('❌ Failed to load video plan:', error?.message || error, error?.stack);
     }
 }
 
@@ -4584,9 +5537,10 @@ window._loadTestPlan = async function(plan) {
         nextIndex = Math.max(nextIndex, scene.index + 1);
     }
 
-    // Process fullscreen MG scenes
+    // Process fullscreen MG scenes (includes templates from ai-templates.js)
     const fullscreenMGs = [
         ...(plan.mgScenes || []),
+        ...(plan.templateScenes || []),
         ...allMGs.filter(mg => FULLSCREEN_MG_TYPES.has(mg.type))
     ];
     for (const mg of fullscreenMGs) {
@@ -4822,6 +5776,9 @@ function renderTimeline() {
     const duration = Math.max(state.totalDuration, 60);
     const totalWidth = (duration * state.timeline.zoom) + TRACK_HEADER_WIDTH + 500;
 
+    // Preserve scroll position before innerHTML destroys it
+    const prevScroll = state.timeline.scrollX || 0;
+
     // Reset cached DOM refs — innerHTML destroys old elements
     _cachedPlayhead = null;
     _cachedTimelineScroll = null;
@@ -4864,6 +5821,8 @@ function renderTimeline() {
     updateInOutDisplay();
 
     const scroll = document.getElementById('timeline-scroll');
+    // Restore scroll position after innerHTML rebuild
+    if (prevScroll > 0) scroll.scrollLeft = prevScroll;
     scroll.addEventListener('scroll', () => { state.timeline.scrollX = scroll.scrollLeft; updatePlayhead(); });
     scroll.addEventListener('wheel', (e) => {
         if (e.ctrlKey) { e.preventDefault(); changeZoom(e.deltaY < 0 ? 10 : -10); }
@@ -4974,8 +5933,8 @@ function renderTracks() {
             </div>`;
         }
 
-        // Motion Graphics clips on mg-track (per-type colors)
-        if (track.id === 'mg-track' && state.motionGraphics.length > 0) {
+        // Motion Graphics clips on mg-track (per-type colors) — listicle types go to listicle-track
+        if ((track.id === 'mg-track' || track.id === 'listicle-track') && state.motionGraphics.length > 0) {
             const mgMeta = {
                 headline: { icon: 'H', colorClass: 'mg-headline' },
                 lowerThird: { icon: 'L3', colorClass: 'mg-lowerthird' },
@@ -4990,15 +5949,22 @@ function renderTracks() {
                 timeline: { icon: 'TL', colorClass: 'mg-timeline-clip' },
                 rankingList: { icon: 'RK', colorClass: 'mg-ranking' },
                 kineticText: { icon: 'KT', colorClass: 'mg-kinetic' },
+                listicleCounter: { icon: '#1', colorClass: 'mg-listicle-counter' },
+                progressTracker: { icon: '•••', colorClass: 'mg-listicle-tracker' },
+                listicleGrid: { icon: '▦', colorClass: 'mg-listicle-grid' },
             };
+            const isListicleTrack = track.id === 'listicle-track';
             state.motionGraphics.forEach((mg, i) => {
+                const isListicleMG = LISTICLE_TYPES.has(mg.type);
+                // Only render listicle MGs on listicle-track, others on mg-track
+                if (isListicleTrack !== isListicleMG) return;
+
                 const left = mg.startTime * state.timeline.zoom;
                 const w = mg.duration * state.timeline.zoom;
                 const meta = mgMeta[mg.type] || { icon: '?', colorClass: '' };
                 const isDisabled = mg.disabled === true;
                 const isSelected = state.selectedMgIndex === i;
                 const eyeIcon = isDisabled ? '👁️‍🗨️' : '👁️';
-                // Ensure minimum visible width, scale with duration
                 const clampedW = Math.max(w, 20);
                 html += `<div class="timeline-clip mg-clip ${meta.colorClass} ${isDisabled ? 'clip-disabled' : ''} ${isSelected ? 'selected' : ''}" data-mg-index="${i}"
                     style="left:${left}px;width:${clampedW}px"
@@ -6829,6 +7795,10 @@ function refreshCompositorScene(sceneIndex) {
     target.kenBurnsSpeed = srcScene.kenBurnsSpeed;
     target.effectOverrides = srcScene.effectOverrides;
     target.effectMask = srcScene.effectMask;
+    target.framing = srcScene.framing;
+    target.shadow = srcScene.shadow;
+    target.floatingAnim = srcScene.floatingAnim;
+    target.floatingAnimDuration = srcScene.floatingAnimDuration;
 
     // Re-render current frame
     const fps = state.compositor.fps;
@@ -6881,6 +7851,9 @@ function refreshCompositorMGs() {
                 _startFrame: startFrame, _endFrame: endFrame,
                 _totalFrames: endFrame - startFrame,
                 _animationSpeed: mgScene.animationSpeed || 1.0,
+                _listicleItems: mgScene._listicleItems,
+                _itemThumbnails: mgScene._itemThumbnails,
+                _itemThumbnailUrls: mgScene._itemThumbnailUrls,
             });
         }
     }
@@ -7045,7 +8018,8 @@ async function renderVideo() {
         // Save current scene state + transition style + SFX into the plan before rendering
         // Separate MG scenes from regular scenes for the renderer
         state.videoPlan.scenes = state.scenes.filter(s => !s.isMGScene).map((s, i) => ({ ...s, index: i }));
-        state.videoPlan.mgScenes = state.scenes.filter(s => s.isMGScene && !s.disabled).map(s => ({ ...s }));
+        state.videoPlan.mgScenes = state.scenes.filter(s => s.isMGScene && !s.disabled && !s.templateType).map(s => ({ ...s }));
+        state.videoPlan.templateScenes = state.scenes.filter(s => s.isMGScene && !s.disabled && s.templateType).map(s => ({ ...s }));
         state.videoPlan.totalDuration = state.totalDuration;
         state.videoPlan.transitionStyle = elements.transitionStyle.value;
         // Add SFX data to plan
@@ -7432,7 +8406,8 @@ function saveSettings() {
         aiInstructions: state.aiInstructions,
         mutedTracks: state.mutedTracks,
         buildNiche: elements.buildNiche ? elements.buildNiche.value : 'auto',
-        cinematicScale: elements.cinematicScale ? elements.cinematicScale.value : '0.65'
+        cinematicScale: elements.cinematicScale ? elements.cinematicScale.value : '0.65',
+        clipAnalyzer: elements.clipAnalyzerToggle?.checked !== false
     }));
     // Also trigger .fvp auto-save so settings persist per-project
     triggerAutoSave();
@@ -7443,7 +8418,9 @@ function getEnabledSources() {
         pexels: elements.srcPexels?.checked ?? true,
         pixabay: elements.srcPixabay?.checked ?? true,
         youtube: elements.srcYouTube?.checked ?? false,
-        newsVideo: elements.srcNewsVideo?.checked ?? false,
+        telegram: elements.srcTelegram?.checked ?? true,
+        vkVideo: elements.srcVKVideo?.checked ?? true,
+        reddit: elements.srcReddit?.checked ?? true,
         unsplash: elements.srcUnsplash?.checked ?? true,
         googleCSE: elements.srcGoogleCSE?.checked ?? false,
         bing: elements.srcBing?.checked ?? false,
@@ -7506,6 +8483,8 @@ function loadSettings() {
                 elements.cinematicScale.value = s.cinematicScale;
                 if (elements.cinematicScaleVal) elements.cinematicScaleVal.textContent = parseFloat(s.cinematicScale).toFixed(2);
             }
+            // Restore Clip Analyzer toggle
+            if (elements.clipAnalyzerToggle) elements.clipAnalyzerToggle.checked = s.clipAnalyzer !== false;
             // Restore track mute state
             if (s.mutedTracks) state.mutedTracks = s.mutedTracks;
             // Restore footage source toggles
@@ -7513,7 +8492,9 @@ function loadSettings() {
                 if (elements.srcPexels) elements.srcPexels.checked = s.footageSources.pexels ?? true;
                 if (elements.srcPixabay) elements.srcPixabay.checked = s.footageSources.pixabay ?? true;
                 if (elements.srcYouTube) elements.srcYouTube.checked = s.footageSources.youtube ?? false;
-                if (elements.srcNewsVideo) elements.srcNewsVideo.checked = s.footageSources.newsVideo ?? false;
+                if (elements.srcTelegram) elements.srcTelegram.checked = s.footageSources.telegram ?? true;
+                if (elements.srcVKVideo) elements.srcVKVideo.checked = s.footageSources.vkVideo ?? true;
+                if (elements.srcReddit) elements.srcReddit.checked = s.footageSources.reddit ?? true;
                 if (elements.srcUnsplash) elements.srcUnsplash.checked = s.footageSources.unsplash ?? true;
                 if (elements.srcGoogleCSE) elements.srcGoogleCSE.checked = s.footageSources.googleCSE ?? false;
                 if (elements.srcBing) elements.srcBing.checked = s.footageSources.bing ?? false;
@@ -7579,7 +8560,9 @@ function applyProjectSettings(s) {
             if (elements.srcPexels) elements.srcPexels.checked = s.footageSources.pexels ?? true;
             if (elements.srcPixabay) elements.srcPixabay.checked = s.footageSources.pixabay ?? true;
             if (elements.srcYouTube) elements.srcYouTube.checked = s.footageSources.youtube ?? false;
-            if (elements.srcNewsVideo) elements.srcNewsVideo.checked = s.footageSources.newsVideo ?? false;
+            if (elements.srcTelegram) elements.srcTelegram.checked = s.footageSources.telegram ?? true;
+            if (elements.srcVKVideo) elements.srcVKVideo.checked = s.footageSources.vkVideo ?? true;
+            if (elements.srcReddit) elements.srcReddit.checked = s.footageSources.reddit ?? true;
             if (elements.srcUnsplash) elements.srcUnsplash.checked = s.footageSources.unsplash ?? true;
             if (elements.srcGoogleCSE) elements.srcGoogleCSE.checked = s.footageSources.googleCSE ?? false;
             if (elements.srcBing) elements.srcBing.checked = s.footageSources.bing ?? false;
@@ -7863,10 +8846,19 @@ async function openExistingProject() {
     }
 }
 
-function refreshApp() {
+async function refreshApp() {
     if (state.isProcessing) {
         showToast('Please wait for current process to finish', 'error');
         return;
+    }
+    // Auto-save current state before refresh so no work is lost
+    if (state.scenes.length > 0 && window.electronAPI.saveProjectFile) {
+        try {
+            await saveProject();
+            console.log('✅ Auto-saved before refresh');
+        } catch (e) {
+            console.warn('Auto-save before refresh failed:', e.message);
+        }
     }
     showToast('Refreshing...', 'info');
     // Reload the window - picks up any file changes without restarting the server

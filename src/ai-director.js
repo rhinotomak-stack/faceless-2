@@ -93,71 +93,23 @@ ANALYSIS RULES:
   • Moderate pacing → 3 scenes per minute (standard)
   • Slow pacing → 2.5 scenes per minute (cinematic, breathing room)
 
-SCENE SPLITTING RULES (MANDATORY — DO NOT IGNORE):
-
-⚠️ CRITICAL: This is a FACELESS VIDEO. Split based on IDEAS, not on sentences or time intervals.
-
-1. WHAT IS A SCENE?
-   A scene = ONE complete visual idea or piece of information. Ask yourself:
-   "What would the viewer SEE on screen for this part?"
-   If the answer is the SAME visual → it's ONE scene, even if it spans multiple sentences.
-   If the answer CHANGES → that's a new scene.
-
-   GOOD splitting (by idea):
-   - "The drone descended 5000 meters into total darkness. No sunlight. No life." → 1 scene (one visual: drone descending into dark water)
-   - "Then it found something. On the seafloor, oxygen was being produced." → 1 scene (one visual: discovery on seafloor)
-
-   BAD splitting (by sentence):
-   - "A joint research" → Scene 8 (0.7 seconds — meaningless fragment!)
-   - "effort involving institutions across continents" → Scene 9 (this is the SAME idea as Scene 8!)
-
-2. TARGET: approximately ${targetScenes} scenes for ${audioDuration.toFixed(1)}s of audio.
-   - Ideal scene length: 5-10 seconds (gives each visual time to land)
-   - Minimum scene length: 3 seconds (anything shorter is a jarring cut)
-   - Maximum scene length: 15 seconds (split if it gets longer)
-   - NEVER create scenes under 2 seconds — merge short fragments with adjacent scenes
-
-3. SPLITTING TRIGGERS (when to start a new scene):
-   - The TOPIC changes (new subject, new entity, new location)
-   - The VISUAL changes (what you'd show on screen is different)
-   - A new SECTION begins (listicle item, new chapter, new argument)
-   - The MOOD shifts (dramatic reveal, tone change, climax)
-
-   DO NOT split just because:
-   - A new sentence started (sentences within the same idea = same scene)
-   - You reached 5 seconds (time alone is not a reason to split)
-   - A comma or pause exists (natural speech pauses are not scene breaks)
-
-4. HARD RULES:
-   - Each scene MUST be at least 3 seconds long
-   - Boundaries at sentence/clause breaks only (never mid-word)
-   - First scene starts at 0s, last scene ends at ${audioDuration.toFixed(1)}s
-   - NO GAPS between scenes
-   - Group related sentences into ONE scene when they describe the same visual
-
-5. OUTPUT FORMAT:
-   For each scene, write the EXACT first 5-6 words from the script (must match transcript exactly)
+TASK: Analyze the content ONLY. Do NOT split scenes — scene splitting is handled separately.
 
 Reply in EXACTLY this format:
 summary: <1 sentence, max 20 words>
+eventType: <real-past|real-ongoing|speculative|educational|fictional>
 theme: <technology|history|finance|science|health|travel|politics|entertainment|education|sports|nature|business|lifestyle|motivation|crime|mystery>
 tone: <informative|dramatic|casual|urgent|inspirational|educational|serious|lighthearted|emotional|suspenseful>
 mood: <dark|uplifting|tense|calm|energetic|nostalgic|hopeful|mysterious|intense|playful>
 pacing: <fast|moderate|slow>
 visualStyle: <cinematic|documentary|corporate|lifestyle|abstract|nature|urban|tech|vintage|minimalist>
-entities: <comma-separated key people, companies, places, or "none">
+entities: <comma-separated, each tagged with type: "Name [person]", "Name [place]", "Name [org]", "Name [event]", or "none". Example: "King Khalid [person], Strait of Hormuz [place], Saudi Aramco [org]">
 stats: <comma-separated key numbers/statistics, or "none">
 format: <documentary|listicle>
 sections: <comma-separated section titles if listicle, or "none">
 hookEnd: <approximate seconds where the hook/intro ends, e.g. "18">
 ctaStart: <approximate seconds where CTA/sign-off begins, or "none">
-background: <dark|tech|nature|warm|neutral>
-scenes: <total number of scenes>
----
-SCENE 1: <exact first 5-6 words from the script>
-SCENE 2: <exact first 5-6 words from the script>
-SCENE 3: <exact first 5-6 words from the script>
-...`;
+background: <dark|tech|nature|warm|neutral>`;
 
     return prompt;
 }
@@ -210,6 +162,12 @@ function parseDirectorContext(contextText) {
             result.summary = extractValue();
             if (result.summary.length > 120) result.summary = result.summary.substring(0, 120);
         }
+        if (lower.startsWith('eventtype:') || lower.startsWith('event type:') || lower.startsWith('event_type:')) {
+            const val = extractValue().toLowerCase();
+            if (['real-past', 'real-ongoing', 'speculative', 'educational', 'fictional'].includes(val)) {
+                result.eventType = val;
+            }
+        }
         if (lower.startsWith('theme:')) result.theme = extractValue().toLowerCase();
         if (lower.startsWith('tone:')) result.tone = extractValue().toLowerCase();
         if (lower.startsWith('mood:')) result.mood = extractValue().toLowerCase();
@@ -220,7 +178,22 @@ function parseDirectorContext(contextText) {
         if (lower.startsWith('entities:')) {
             const val = extractValue();
             if (val.toLowerCase() !== 'none') {
-                result.entities = val.split(',').map(s => s.trim()).filter(Boolean);
+                const raw = val.split(',').map(s => s.trim()).filter(Boolean);
+                result.entities = [];
+                result.entityTypes = {}; // name → 'person'|'place'|'org'|'event'
+                for (const entry of raw) {
+                    const tagMatch = entry.match(/^(.+?)\s*\[(person|place|org|event|organization|location)\]\s*$/i);
+                    if (tagMatch) {
+                        const name = tagMatch[1].trim();
+                        let type = tagMatch[2].toLowerCase();
+                        if (type === 'organization') type = 'org';
+                        if (type === 'location') type = 'place';
+                        result.entities.push(name);
+                        result.entityTypes[name.toLowerCase()] = type;
+                    } else {
+                        result.entities.push(entry);
+                    }
+                }
             }
         }
         if (lower.startsWith('stats:')) {
@@ -413,7 +386,7 @@ function buildScenesFromAnchors(sceneAnchors, allWords, audioDuration, fps) {
  * Merge scenes shorter than minDuration into their neighbors.
  * Short scenes get merged into whichever neighbor is shorter (to balance lengths).
  */
-function _mergeTinyScenes(scenes, minDuration = 3.0) {
+function _mergeTinyScenes(scenes, minDuration = 3.0, hookEndTime = 0, hookMinDuration = 1.5) {
     if (scenes.length <= 1) return scenes;
 
     let merged = [...scenes];
@@ -428,7 +401,11 @@ function _mergeTinyScenes(scenes, minDuration = 3.0) {
             const scene = merged[i];
             const duration = (scene.endTime || 0) - (scene.startTime || 0);
 
-            if (duration < minDuration && next.length > 0) {
+            // Hook scenes can be shorter — fast cuts are intentional
+            const isHook = hookEndTime > 0 && (scene.startTime || 0) < hookEndTime;
+            const effectiveMin = isHook ? hookMinDuration : minDuration;
+
+            if (duration < effectiveMin && next.length > 0) {
                 // Merge into previous scene
                 const prev = next[next.length - 1];
                 prev.endTime = scene.endTime;
@@ -437,7 +414,7 @@ function _mergeTinyScenes(scenes, minDuration = 3.0) {
                 if (scene.words) prev.words = [...(prev.words || []), ...scene.words];
                 mergeCount++;
                 changed = true;
-            } else if (duration < minDuration && i + 1 < merged.length) {
+            } else if (duration < effectiveMin && i + 1 < merged.length) {
                 // First scene is tiny — merge into next
                 const nextScene = merged[i + 1];
                 nextScene.startTime = scene.startTime;
@@ -646,6 +623,432 @@ function createScenesFromWhisper(transcription) {
 }
 
 // ============================================================
+// PUNCTUATION-BASED SCENE SPLITTING
+// ============================================================
+
+/**
+ * Split transcript into micro-scenes at every sentence/clause boundary (. , ! ? ; :).
+ * This creates many small scenes that AI will merge in the next step.
+ *
+ * @param {Array} allWords - Word-level timestamps from Whisper
+ * @param {number} audioDuration - Total audio duration in seconds
+ * @param {number} fps - Frames per second
+ * @returns {Array} Micro-scenes with text, startTime, endTime, words
+ */
+function _splitAtPunctuation(allWords, audioDuration, fps) {
+    const scenes = [];
+    let currentWords = [];
+
+    for (let i = 0; i < allWords.length; i++) {
+        const word = allWords[i];
+        currentWords.push(word);
+
+        const text = word.word.trim();
+        const isPunctuation = /[.!?,;:]$/.test(text);
+        const isLastWord = i === allWords.length - 1;
+
+        if ((isPunctuation || isLastWord) && currentWords.length > 0) {
+            const startTime = currentWords[0].start;
+            const endTime = (i + 1 < allWords.length) ? allWords[i + 1].start : audioDuration;
+
+            scenes.push({
+                index: scenes.length,
+                text: currentWords.map(w => w.word).join(' ').trim(),
+                startTime,
+                endTime,
+                duration: Math.round((endTime - startTime) * fps),
+                words: [...currentWords]
+            });
+            currentWords = [];
+        }
+    }
+
+    return scenes;
+}
+
+/**
+ * AI reviews micro-scenes and returns merge instructions.
+ * Groups related clauses into proper visual scenes.
+ *
+ * @param {Array} microScenes - Punctuation-split micro-scenes
+ * @param {Object} scriptContext - Parsed context from Director
+ * @param {number} audioDuration - Total audio duration
+ * @param {Object} directorsBrief - Build settings
+ * @returns {Array} Merged scenes
+ */
+async function _aiMergeScenes(microScenes, scriptContext, audioDuration, directorsBrief) {
+    const { tier } = directorsBrief;
+    const baseDensity = tier.sceneDensity || 3;
+    const targetScenes = Math.max(4, Math.round((audioDuration / 60) * baseDensity));
+
+    // Build rich context block so AI understands the topic deeply
+    const contextLines = [];
+    contextLines.push(`TOPIC: ${scriptContext.summary || 'unknown'}`);
+    if (scriptContext.webContext) contextLines.push(`RESEARCH CONTEXT: ${scriptContext.webContext.substring(0, 500)}`);
+    if (scriptContext.entities?.length > 0) contextLines.push(`KEY ENTITIES: ${scriptContext.entities.slice(0, 10).join(', ')}`);
+    if (scriptContext.theme) contextLines.push(`THEME: ${scriptContext.theme}`);
+    if (scriptContext.tone) contextLines.push(`TONE: ${scriptContext.tone}`);
+    if (scriptContext.format) contextLines.push(`FORMAT: ${scriptContext.format}`);
+    const contextBlock = contextLines.join('\n');
+
+    // ── Detect pacing zones ──
+    const pacing = scriptContext.pacing || 'moderate';
+    const hookEnd = parseFloat(scriptContext.hookEndTime) || Math.min(25, audioDuration * 0.12);
+    const ctaStart = parseFloat(scriptContext.ctaStartTime) || (audioDuration * 0.92);
+
+    // ── Chunk micro-segments into batches of ~80 to avoid overwhelming AI ──
+    const CHUNK_SIZE = 80;
+    const allMergedScenes = [];
+
+    for (let chunkStart = 0; chunkStart < microScenes.length; chunkStart += CHUNK_SIZE) {
+        const chunkEnd = Math.min(chunkStart + CHUNK_SIZE, microScenes.length);
+        const chunk = microScenes.slice(chunkStart, chunkEnd);
+        const chunkStartTime = chunk[0].startTime || 0;
+        const chunkEndTime = chunk[chunk.length - 1].endTime || 0;
+        const chunkDuration = chunkEndTime - chunkStartTime;
+
+        // Determine zone-aware density for this chunk
+        const hookOverlap = Math.max(0, Math.min(hookEnd, chunkEndTime) - chunkStartTime);
+        const ctaOverlap = Math.max(0, chunkEndTime - Math.max(ctaStart, chunkStartTime));
+        const bodyOverlap = chunkDuration - hookOverlap - ctaOverlap;
+
+        // Hook density scales with pacing, Body uses baseDensity, CTA breathes
+        const hookDensity = pacing === 'fast' ? 7 : pacing === 'slow' ? 4 : 5.5;
+        const ctaDensity = pacing === 'fast' ? 2.5 : 1.5;
+        const hookScenes = Math.round((hookOverlap / 60) * hookDensity);
+        const bodyScenes = Math.round((bodyOverlap / 60) * baseDensity);
+        const ctaScenes = Math.round((ctaOverlap / 60) * ctaDensity);
+        const chunkTarget = Math.max(2, hookScenes + bodyScenes + ctaScenes);
+
+        const sceneList = chunk.map((s, i) =>
+            `[${chunkStart + i}] (${s.startTime.toFixed(1)}s-${s.endTime.toFixed(1)}s) "${s.text}"`
+        ).join('\n');
+
+        // Build pacing zone instructions for this chunk
+        let pacingZoneInstructions = '';
+        const hookRange = pacing === 'fast' ? '2-3.5' : pacing === 'slow' ? '3-5' : '2-4';
+        const bodyRange = pacing === 'fast' ? '3-7' : pacing === 'slow' ? '6-12' : '4-8';
+        const ctaRange = pacing === 'fast' ? '5-8' : pacing === 'slow' ? '8-12' : '6-10';
+
+        if (hookOverlap > 2) {
+            pacingZoneInstructions += `\n🔥 HOOK ZONE (0s - ${hookEnd.toFixed(0)}s): This is the HOOK — viewer decides to stay or leave. Pacing: ${pacing}.
+   - FAST CUTS: ${hookRange} seconds per scene. Every sentence or strong clause = new scene.
+   - Each scene = a different visual. Rapid variety keeps the viewer hooked.
+   - A bold claim, a stat, a question — each gets its OWN scene with its own footage.
+   - Example: "This house can survive an EF5 tornado." = scene 1 (tornado damage footage)
+             "It cuts energy bills by 75%." = scene 2 (energy/utility footage)
+             "Yet less than 900 exist." = scene 3 (aerial suburban homes)
+   - Do NOT merge hook segments into long scenes. Every idea = a CUT.`;
+        }
+        if (bodyOverlap > 2) {
+            pacingZoneInstructions += `\n📖 BODY ZONE (${hookEnd.toFixed(0)}s - ${ctaStart.toFixed(0)}s): Main content. Pacing: ${pacing}.
+   - ${bodyRange} seconds per scene. Merge related clauses about the SAME visual.
+   - NEW scene when the SUBJECT changes (new person, place, concept, or visual).
+   - One scene should need exactly ONE piece of B-roll footage.`;
+        }
+        if (ctaOverlap > 2) {
+            pacingZoneInstructions += `\n🎬 CTA ZONE (${ctaStart.toFixed(0)}s+): Call-to-action / closing — let it breathe.
+   - ${ctaRange} seconds per scene. Fewer cuts, let the message land.`;
+        }
+
+        const prompt = `You are a professional video editor cutting a FACELESS YouTube video. You think in VISUALS, not text.
+
+For every group of segments, ask: "What FOOTAGE would I put on screen here?"
+If the answer CHANGES → that's a CUT (new scene).
+If the answer is the SAME → keep them together.
+
+${contextBlock}
+AUDIO: ${chunkStartTime.toFixed(1)}s - ${chunkEndTime.toFixed(1)}s (${chunkDuration.toFixed(1)}s)
+TARGET: ~${chunkTarget} scenes for this section
+${pacingZoneInstructions}
+
+MICRO-SEGMENTS (split at every punctuation mark — most commas are NOT real scene breaks):
+${sceneList}
+
+VIDEO EDITING RULES:
+1. Think FOOTAGE FIRST: "What clip would I search for?" If two segments need the SAME clip → merge.
+2. Each scene = ONE search query for footage. "monolithic dome exterior" is one scene. "ancient Roman arch" is a different scene.
+3. When the narration mentions a NEW entity, location, concept, or visual subject → NEW SCENE.
+4. Commas inside a sentence are NOT cuts. "It saves 75%, reduces insurance by 90%, and lasts centuries" = ONE scene about cost benefits.
+5. BUT: "It saves 75%. And the government hates it." = TWO scenes (cost savings visual → government/regulation visual).
+6. Dramatic one-liners CAN be standalone: "This is called a monolithic dome." = its own scene (reveal moment).
+7. MAXIMUM ${bodyRange.split('-')[1]}s per scene in body, ${hookRange.split('-')[1]}s in hook. If a merged scene would exceed this → split it.
+8. EVERY segment index from ${chunkStart} to ${chunkEnd - 1} MUST appear in exactly one SCENE line.
+
+OUTPUT — one line per scene, segment indices to merge:
+SCENE 1: ${chunkStart},${chunkStart + 1}
+SCENE 2: ${chunkStart + 2}
+...
+
+Output ONLY scene lines, nothing else. Cover ALL indices ${chunkStart} to ${chunkEnd - 1}.`;
+
+        const chunkLabel = microScenes.length > CHUNK_SIZE
+            ? ` (chunk ${Math.floor(chunkStart / CHUNK_SIZE) + 1}/${Math.ceil(microScenes.length / CHUNK_SIZE)}: segments ${chunkStart}-${chunkEnd - 1})`
+            : '';
+        console.log(`   🤖 AI reviewing ${chunk.length} segments → target ~${chunkTarget} scenes [hook:${hookScenes} body:${bodyScenes} cta:${ctaScenes}]${chunkLabel}...`);
+
+        const rawText = await callAI(prompt, { maxTokens: 2500, provider: 'gemini' });
+
+        if (!rawText) {
+            console.log(`   ⚠️ AI merge returned empty for chunk — using fallback`);
+            allMergedScenes.push(..._fallbackMergeChunk(chunk, chunkStart, chunkTarget));
+            continue;
+        }
+
+        // Parse merge instructions
+        const chunkMerged = _parseMergeResponse(rawText, microScenes, chunkStart, chunkEnd);
+
+        if (chunkMerged.length === 0) {
+            console.log(`   ⚠️ AI merge parse failed for chunk — using fallback`);
+            allMergedScenes.push(..._fallbackMergeChunk(chunk, chunkStart, chunkTarget));
+            continue;
+        }
+
+        // ── Coverage check: find any segments the AI skipped ──
+        const covered = new Set();
+        for (const scene of chunkMerged) {
+            for (const idx of (scene._indices || [])) covered.add(idx);
+        }
+        const missing = [];
+        for (let i = chunkStart; i < chunkEnd; i++) {
+            if (!covered.has(i)) missing.push(i);
+        }
+        if (missing.length > 0) {
+            console.log(`   ⚠️ AI skipped ${missing.length} segments — patching: [${missing.slice(0, 10).join(',')}${missing.length > 10 ? '...' : ''}]`);
+            // Attach missing segments to nearest preceding scene
+            for (const idx of missing) {
+                const ms = microScenes[idx];
+                // Find which merged scene should absorb this
+                let bestScene = chunkMerged[chunkMerged.length - 1]; // default: last scene
+                for (const scene of chunkMerged) {
+                    if (scene.endTime <= ms.startTime || Math.abs(scene.endTime - ms.startTime) < 0.5) {
+                        bestScene = scene;
+                    }
+                }
+                bestScene.text += ' ' + (ms.text || '');
+                bestScene.words.push(...(ms.words || []));
+                if (ms.endTime > bestScene.endTime) bestScene.endTime = ms.endTime;
+                bestScene.duration = Math.round((bestScene.endTime - bestScene.startTime) * config.video.fps);
+            }
+        }
+
+        allMergedScenes.push(...chunkMerged);
+        console.log(`   ✅ Chunk merged: ${chunk.length} segments → ${chunkMerged.length} scenes${missing.length > 0 ? ` (+${missing.length} patched)` : ''}`);
+    }
+
+    if (allMergedScenes.length === 0) {
+        console.log(`   ⚠️ All AI merge chunks failed — full fallback`);
+        return _fallbackMerge(microScenes, targetScenes, audioDuration);
+    }
+
+    // ── Hook enforcement: force-split long hook scenes (pacing-driven) ──
+    const fps = config.video.fps;
+    const hookMaxDur = pacing === 'fast' ? 3.5 : pacing === 'slow' ? 5.5 : 4.5;
+    let hookSplitCount = 0;
+    const enforced = [];
+    for (const scene of allMergedScenes) {
+        const dur = (scene.endTime || 0) - (scene.startTime || 0);
+        if (scene.startTime < hookEnd && dur > hookMaxDur && scene.words && scene.words.length >= 4) {
+            // Split at punctuation boundaries within the scene
+            const subScenes = [];
+            let subWords = [];
+            let subStart = scene.startTime;
+            for (let w = 0; w < scene.words.length; w++) {
+                subWords.push(scene.words[w]);
+                const wordText = scene.words[w].word.trim();
+                const isBreak = /[.!?,;:]$/.test(wordText);
+                const isLast = w === scene.words.length - 1;
+                const subDur = (scene.words[w].start || 0) + 0.2 - subStart;
+
+                if ((isBreak && subDur >= 2.0 && subWords.length >= 2) || isLast) {
+                    const subEnd = isLast ? scene.endTime : (w + 1 < scene.words.length ? scene.words[w + 1].start : scene.endTime);
+                    subScenes.push({
+                        index: 0,
+                        text: subWords.map(sw => sw.word).join(' ').trim(),
+                        startTime: subStart,
+                        endTime: subEnd,
+                        duration: Math.round((subEnd - subStart) * fps),
+                        words: [...subWords]
+                    });
+                    subWords = [];
+                    subStart = subEnd;
+                }
+            }
+            if (subScenes.length > 1) {
+                hookSplitCount += subScenes.length - 1;
+                enforced.push(...subScenes);
+            } else {
+                enforced.push(scene);
+            }
+        } else {
+            enforced.push(scene);
+        }
+    }
+    if (hookSplitCount > 0) {
+        console.log(`   🔥 Hook enforcement: split ${hookSplitCount} extra scenes in hook zone (max ${hookMaxDur}s)`);
+    }
+
+    // Re-index and ensure last scene extends to audio end
+    enforced.forEach((s, i) => { s.index = i; delete s._indices; });
+    const last = enforced[enforced.length - 1];
+    if (audioDuration > last.endTime + 0.3) {
+        last.endTime = audioDuration;
+        last.duration = Math.round((last.endTime - last.startTime) * fps);
+    }
+
+    console.log(`   ✅ AI merged ${microScenes.length} segments → ${enforced.length} scenes (target was ~${targetScenes})`);
+    return enforced;
+}
+
+/**
+ * Parse AI merge response into scene objects.
+ */
+function _parseMergeResponse(rawText, microScenes, chunkStart, chunkEnd) {
+    const scenes = [];
+    const lines = rawText.trim().split('\n').filter(l => l.trim().toLowerCase().startsWith('scene'));
+
+    for (const line of lines) {
+        const colonIdx = line.indexOf(':');
+        if (colonIdx < 0) continue;
+
+        const indicesStr = line.substring(colonIdx + 1).trim();
+        const indices = indicesStr.split(/[,\s]+/).map(s => parseInt(s.trim())).filter(n => !isNaN(n) && n >= chunkStart && n < chunkEnd);
+
+        if (indices.length === 0) continue;
+
+        const mergedWords = [];
+        let startTime = Infinity, endTime = 0;
+
+        for (const idx of indices) {
+            const ms = microScenes[idx];
+            if (!ms) continue;
+            mergedWords.push(...(ms.words || []));
+            if (ms.startTime < startTime) startTime = ms.startTime;
+            if (ms.endTime > endTime) endTime = ms.endTime;
+        }
+
+        if (mergedWords.length === 0) continue;
+
+        scenes.push({
+            index: scenes.length,
+            text: mergedWords.map(w => w.word).join(' ').trim(),
+            startTime,
+            endTime,
+            duration: Math.round((endTime - startTime) * config.video.fps),
+            words: mergedWords,
+            _indices: indices
+        });
+    }
+
+    return scenes;
+}
+
+/**
+ * Fallback merge for a single chunk when AI fails.
+ */
+function _fallbackMergeChunk(chunk, chunkStart, chunkTarget) {
+    const chunkDuration = (chunk[chunk.length - 1].endTime || 0) - (chunk[0].startTime || 0);
+    const targetDuration = chunkDuration / chunkTarget;
+    const merged = [];
+    let currentWords = [];
+    let currentStart = 0;
+
+    for (const ms of chunk) {
+        if (currentWords.length === 0) currentStart = ms.startTime;
+        currentWords.push(...(ms.words || []));
+
+        const elapsed = ms.endTime - currentStart;
+        if (elapsed >= targetDuration * 0.8) {
+            merged.push({
+                index: merged.length,
+                text: currentWords.map(w => w.word).join(' ').trim(),
+                startTime: currentStart,
+                endTime: ms.endTime,
+                duration: Math.round((ms.endTime - currentStart) * config.video.fps),
+                words: [...currentWords]
+            });
+            currentWords = [];
+        }
+    }
+
+    // Flush remaining
+    if (currentWords.length > 0) {
+        const endTime = chunk[chunk.length - 1].endTime;
+        if (merged.length > 0 && (endTime - currentStart) < 2.5) {
+            const last = merged[merged.length - 1];
+            last.endTime = endTime;
+            last.duration = Math.round((endTime - last.startTime) * config.video.fps);
+            last.text += ' ' + currentWords.map(w => w.word).join(' ').trim();
+            last.words.push(...currentWords);
+        } else {
+            merged.push({
+                index: merged.length,
+                text: currentWords.map(w => w.word).join(' ').trim(),
+                startTime: currentStart,
+                endTime,
+                duration: Math.round((endTime - currentStart) * config.video.fps),
+                words: currentWords
+            });
+        }
+    }
+
+    return merged;
+}
+
+/**
+ * Fallback merge when AI fails — group micro-scenes by duration target.
+ */
+function _fallbackMerge(microScenes, targetScenes, audioDuration) {
+    const targetDuration = audioDuration / targetScenes;
+    const merged = [];
+    let currentWords = [];
+    let currentStart = 0;
+
+    for (const ms of microScenes) {
+        if (currentWords.length === 0) currentStart = ms.startTime;
+        currentWords.push(...(ms.words || []));
+
+        const elapsed = ms.endTime - currentStart;
+        if (elapsed >= targetDuration * 0.8) {
+            merged.push({
+                index: merged.length,
+                text: currentWords.map(w => w.word).join(' ').trim(),
+                startTime: currentStart,
+                endTime: ms.endTime,
+                duration: Math.round((ms.endTime - currentStart) * config.video.fps),
+                words: [...currentWords]
+            });
+            currentWords = [];
+        }
+    }
+
+    // Flush remaining
+    if (currentWords.length > 0) {
+        const last = merged.length > 0 ? merged[merged.length - 1] : null;
+        const endTime = audioDuration;
+        if (last && (endTime - currentStart) < 2.5) {
+            // Too short — merge into previous
+            last.endTime = endTime;
+            last.duration = Math.round((endTime - last.startTime) * config.video.fps);
+            last.text += ' ' + currentWords.map(w => w.word).join(' ').trim();
+            last.words.push(...currentWords);
+        } else {
+            merged.push({
+                index: merged.length,
+                text: currentWords.map(w => w.word).join(' ').trim(),
+                startTime: currentStart,
+                endTime,
+                duration: Math.round((endTime - currentStart) * config.video.fps),
+                words: currentWords
+            });
+        }
+    }
+
+    console.log(`   🔧 Fallback merged ${microScenes.length} segments → ${merged.length} scenes`);
+    return merged;
+}
+
+// ============================================================
 // WEB SEARCH FOR CONTEXT (Gemini Search Grounding)
 // ============================================================
 
@@ -681,7 +1084,7 @@ Rules:
 - Examples: "Gene Hackman disappearance 2024", "deep sea mining environmental impact", "Tesla Cybertruck recall"
 - If the script is about a person, include their full name
 - If it's about an event, include what happened and when`,
-                { maxTokens: 30, systemPrompt: 'You extract search queries. Output ONLY the query, no explanation.' }
+                { maxTokens: 30, systemPrompt: 'You extract search queries. Output ONLY the query, no explanation.', provider: 'gemini' }
             );
             if (aiQuery && aiQuery.trim().length > 3) {
                 queryText = aiQuery.trim()
@@ -746,7 +1149,7 @@ Rules:
             return null;
         }
 
-        // Step 2: Use the selected AI provider to analyze search results + script
+        // Step 2: Use Gemini to analyze search results + script (critical context for Director)
         const summary = await callAI(
             `You are analyzing a video narration and web search results to extract context that will help an AI plan visual scenes.
 
@@ -756,21 +1159,21 @@ Web search results:
 ${searchSnippets}
 
 Provide a brief analysis (3-5 sentences) covering:
-1. What is the main topic/subject? (real event, scientific topic, trending story, fictional scenario, etc.)
+1. What is the main topic/subject? If it mentions real people, places, organizations, ships, or military units — it is a REAL EVENT, not fiction.
 2. Key entities: people, places, organizations, objects mentioned
 3. Visual context: what real-world imagery, locations, or scenes are associated with this topic?
 4. Time period and setting: when and where does this take place?
 
-Always provide useful context — even if the topic is speculative or fictional, describe the real-world elements it references (real locations, real technology, real phenomena, etc.) that would help find relevant footage.
+CRITICAL: If the narration references real-world entities (named ships, real military units, real places, real people), ALWAYS treat it as a REAL EVENT. Do NOT call it "fictional" or "speculative" just because it describes events you haven't heard of — news happens after your training cutoff. Only call something fictional if it involves clearly made-up entities (aliens, magic, fictional countries, etc.).
 
 Return ONLY the analysis, no disclaimers.`,
-            { maxTokens: 400, systemPrompt: 'You are a media research assistant for video production. Extract actionable visual context from any topic.' }
+            { maxTokens: 400, systemPrompt: 'You are a media research assistant for video production. Extract actionable visual context from any topic.', provider: 'gemini' }
         );
 
         if (summary && summary.trim().length > 10) {
             console.log(`   ✅ Web context analyzed:\n`);
             console.log(`   ${summary.trim()}\n`);
-            return summary.trim();
+            return { text: summary.trim(), searchQuery: queryText };
         }
 
         console.log('   ℹ️ Could not extract useful context\n');
@@ -898,21 +1301,23 @@ async function analyzeAndCreateScenes(transcription, directorsBrief) {
 
     try {
         // Search web for real-world context (if Gemini key available)
-        const webContext = await searchWebContext(fullScript);
+        const webResult = await searchWebContext(fullScript);
+        const webContext = webResult?.text || null;
+        const webSearchQuery = webResult?.searchQuery || null;
 
         if (webContext) {
-            console.log(`   💡 AI will use this context to understand the story and split scenes intelligently.\n`);
+            console.log(`   💡 AI will use this context to understand the story.\n`);
         }
 
+        // Step A: AI analyzes content (context only, no scene splitting)
         const prompt = buildDirectorPrompt(fullScript, audioDuration, directorsBrief, webContext);
-        const rawText = await callAI(prompt, { maxTokens: 1500 });
+        console.log(`   🧠 Director forced to Gemini (critical step — context analysis)`);
+        const rawText = await callAI(prompt, { maxTokens: 1000, provider: 'gemini' });
 
         if (!rawText) throw new Error('Empty AI response');
 
-        // Split on --- separator
-        const parts = rawText.split('---');
-        const contextPart = parts[0] || '';
-        const scenesPart = parts[1] || '';
+        // Parse context — no --- separator needed (no scene section)
+        const contextPart = rawText.split('---')[0] || rawText;
 
         // Parse context (legacy + new fields)
         const scriptContext = parseDirectorContext(contextPart);
@@ -920,6 +1325,9 @@ async function analyzeAndCreateScenes(transcription, directorsBrief) {
         // Store web research context so Visual Planner can use it
         if (webContext) {
             scriptContext.webContext = webContext;
+        }
+        if (webSearchQuery) {
+            scriptContext.eventAnchor = webSearchQuery;
         }
 
         // Override format if user specified
@@ -959,32 +1367,36 @@ async function analyzeAndCreateScenes(transcription, directorsBrief) {
         console.log(`      Niche: ${scriptContext.nicheId} (${nicheSource}${nicheSource === 'auto-detect' ? `, AI theme="${scriptContext.theme || '?'}"` : ''})`);
         console.log(`      Theme: ${scriptContext.themeId} (${themeSource}${themeSource === 'niche-default' ? `, niche.defaultTheme="${niche.defaultTheme}"` : ''})`);
         console.log(`      Pacing: ${scriptContext.pacing} (${pacingSource}${pacingSource === 'preset' ? `, AI was="${aiPacing}"` : ''})`);
+        if (niche.footagePriority?.video) {
+            console.log(`      Video sources: ${niche.footagePriority.video.join(' → ')}`);
+        }
+        if (niche.allowedMGs) {
+            console.log(`      Allowed MGs: ${niche.allowedMGs.join(', ')}`);
+        }
 
-        // Parse scene anchors
-        const sceneLines = scenesPart.trim().split('\n').filter(line => {
-            const lower = line.toLowerCase().trim();
-            return lower.startsWith('scene ') && lower.includes(':');
-        });
+        // Step B: Split transcript at punctuation (deterministic)
+        const microScenes = _splitAtPunctuation(allWords, audioDuration, fps);
+        console.log(`   📊 Punctuation split: ${microScenes.length} micro-segments`);
 
-        if (sceneLines.length === 0) throw new Error('AI returned no scene boundaries');
+        // Step C: AI merges related micro-scenes into proper visual scenes
+        let scenes = await _aiMergeScenes(microScenes, scriptContext, audioDuration, directorsBrief);
 
-        const sceneAnchors = sceneLines.map(line => {
-            const colonIndex = line.indexOf(':');
-            return colonIndex >= 0 ? line.substring(colonIndex + 1).trim() : '';
-        }).filter(Boolean);
+        if (scenes.length === 0) throw new Error('No valid scenes after merge');
 
-        console.log(`   📊 AI planned ${sceneAnchors.length} scenes`);
+        // Pacing-driven limits — nothing hardcoded
+        const pacing = scriptContext.pacing || 'moderate';
+        const maxSceneDur = pacing === 'fast' ? 8 : pacing === 'slow' ? 14 : 10;
+        const minSceneDur = pacing === 'fast' ? 2.0 : pacing === 'slow' ? 3.5 : 2.5;
+        const hookMinDur = 1.5; // hook scenes can be very short regardless of pacing
 
-        // Build scenes from anchors
-        let scenes = buildScenesFromAnchors(sceneAnchors, allWords, audioDuration, fps);
+        console.log(`   ⚙️ Pacing limits (${pacing}): max=${maxSceneDur}s, min=${minSceneDur}s, hookMin=${hookMinDur}s`);
 
-        if (scenes.length === 0) throw new Error('No valid scenes after mapping');
+        // Safety net: split scenes exceeding pacing-driven max
+        scenes = autoSplitLongScenes(scenes, allWords, audioDuration, fps, maxSceneDur);
 
-        // Post-processing: Auto-split scenes longer than 12 seconds
-        scenes = autoSplitLongScenes(scenes, allWords, audioDuration, fps, 12.0);
-
-        // Post-processing: Merge scenes shorter than 3 seconds into neighbors
-        scenes = _mergeTinyScenes(scenes, 3.0);
+        // Safety net: merge scenes under pacing-driven min (hook scenes use hookMinDur)
+        const mergeHookEnd = parseFloat(scriptContext.hookEndTime) || Math.min(25, audioDuration * 0.12);
+        scenes = _mergeTinyScenes(scenes, minSceneDur, mergeHookEnd, hookMinDur);
 
         // Assign transitions between scenes
         assignTransitions(scenes, scriptContext);

@@ -1,12 +1,33 @@
 const path = require('path');
 
-// Load app root .env first (has all API keys), then project .env to override per-project settings
+// Load app root .env first (has all API keys — single source of truth for credentials)
 const appRootEnv = path.join(__dirname, '..', '.env');
 require('dotenv').config({ path: appRootEnv });
 
-// If a project-specific .env exists, load it to override (e.g., AI_PROVIDER per project)
+// If a project-specific .env exists, only override PROJECT-SPECIFIC settings (not API keys).
+// This prevents stale API keys in old project .env files from breaking builds.
+const PROJECT_OVERRIDE_KEYS = new Set([
+    'AI_PROVIDER', 'AI_INSTRUCTIONS',
+    'BUILD_QUALITY_TIER', 'BUILD_FORMAT', 'BUILD_THEME', 'BUILD_NICHE',
+    'CINEMATIC_SCALE', 'SMART_AI',
+    'OLLAMA_MODEL', 'OLLAMA_VISION_MODEL',
+]);
 if (process.env.DOTENV_PATH && process.env.DOTENV_PATH !== appRootEnv) {
-    require('dotenv').config({ path: process.env.DOTENV_PATH, override: true });
+    const fs = require('fs');
+    try {
+        const projEnvContent = fs.readFileSync(process.env.DOTENV_PATH, 'utf8');
+        for (const line of projEnvContent.split('\n')) {
+            const trimmed = line.trim();
+            if (!trimmed || trimmed.startsWith('#')) continue;
+            const eqIdx = trimmed.indexOf('=');
+            if (eqIdx <= 0) continue;
+            const key = trimmed.substring(0, eqIdx).trim();
+            const value = trimmed.substring(eqIdx + 1).trim();
+            if (PROJECT_OVERRIDE_KEYS.has(key) && value) {
+                process.env[key] = value;
+            }
+        }
+    } catch (e) {} // project .env missing is fine
 }
 
 // Project directory for isolated data (input/output/temp)
@@ -20,6 +41,7 @@ function parseEnvList(raw) {
 }
 
 const nvidiaApiKeys = parseEnvList(process.env.NVIDIA_API_KEYS || process.env.NVIDIA_API_KEY || '');
+const geminiApiKeys = parseEnvList(process.env.GEMINI_API_KEY || '');
 
 const config = {
     // AI Provider: 'ollama', 'claude', 'openai', 'deepseek', 'qwen', 'nvidia', 'gemini', or 'groq'
@@ -65,10 +87,11 @@ const config = {
 
     // Google Gemini API settings (free tier available, text + vision)
     gemini: {
-        apiKey: process.env.GEMINI_API_KEY || '',
+        apiKey: geminiApiKeys[0] || '',
+        apiKeys: geminiApiKeys,
         baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
-        model: 'gemini-2.5-flash',
-        visionModel: 'gemini-2.5-flash'
+        model: process.env.GEMINI_MODEL || 'gemini-3.1-pro-preview',
+        visionModel: process.env.GEMINI_VISION_MODEL || 'gemini-3-flash-preview'
     },
 
     // Groq API settings (ultra-fast inference)
@@ -135,6 +158,10 @@ const config = {
         creativeCommonsOnly: false,
     },
 
+    // Reddit — uses public JSON API (no keys needed)
+    // Rate limited to ~10 req/min unauthenticated, provider self-throttles
+    reddit: {},
+
     // Map providers (for static map images in mapChart MGs)
     // Geoapify: free 3,000 req/day — https://myprojects.geoapify.com/
     geoapify: {
@@ -143,6 +170,14 @@ const config = {
     // MapTiler: free 100K req/month — https://cloud.maptiler.com/
     maptiler: {
         apiKey: process.env.MAPTILER_API_KEY || ''
+    },
+
+    // Clip Analyzer — Omni multimodal video understanding (Qwen Omni / Gemini)
+    clipAnalyzer: {
+        enabled: process.env.CLIP_ANALYZER_ENABLED !== 'false',  // enabled by default if Qwen/Gemini key exists
+        maxFramesPerBuild: parseInt(process.env.CLIP_ANALYZER_MAX_FRAMES || '200', 10),
+        framesPerClip: parseInt(process.env.CLIP_ANALYZER_FRAMES_PER_CLIP || '8', 10),
+        rejectThreshold: parseInt(process.env.CLIP_ANALYZER_REJECT_THRESHOLD || '3', 10), // reject clips scoring ≤ this
     },
 
     // Paths (resolved from PROJECT_DIR for multi-instance isolation)

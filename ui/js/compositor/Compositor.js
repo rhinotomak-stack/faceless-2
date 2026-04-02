@@ -107,9 +107,10 @@ class Compositor {
         this.gl = gl;
 
         // Compile blit shaders
-        const { QUAD_VERT, BLIT_FRAG, BLUR_BLIT_FRAG, EFFECTS_FRAG, ShaderProgram } = window.ShaderLib;
+        const { QUAD_VERT, BLIT_FRAG, BLUR_BLIT_FRAG, DROP_SHADOW_FRAG, EFFECTS_FRAG, ShaderProgram } = window.ShaderLib;
         this._blitProgram = new ShaderProgram(gl, QUAD_VERT, BLIT_FRAG);
         this._blurBlitProgram = new ShaderProgram(gl, QUAD_VERT, BLUR_BLIT_FRAG);
+        this._dropShadowProgram = new ShaderProgram(gl, QUAD_VERT, DROP_SHADOW_FRAG);
         this._effectsProgram = new ShaderProgram(gl, QUAD_VERT, EFFECTS_FRAG);
 
         // Gradient background cache: gradientId → WebGL texture
@@ -153,6 +154,7 @@ class Compositor {
         if (this.transitionRenderer) this.transitionRenderer.destroy();
         if (this._blitProgram) this._blitProgram.destroy();
         if (this._blurBlitProgram) this._blurBlitProgram.destroy();
+        if (this._dropShadowProgram) this._dropShadowProgram.destroy();
         if (this._effectsProgram) this._effectsProgram.destroy();
         // Clean up gradient textures
         if (this._gradientCache && this.gl) {
@@ -585,8 +587,10 @@ class Compositor {
         }
 
         // 4. Render overlay motion graphics
+        // Skip overlays when a fullscreen MG scene is active (it covers the entire screen)
+        const hasFsMG = activeScenes.some(a => a.scene.isMGScene || a.scene.mediaType === 'motion-graphic');
         const activeMGs = this.sceneGraph.getActiveMGsAtFrame(frame);
-        if (activeMGs.length > 0) {
+        if (activeMGs.length > 0 && !hasFsMG) {
             gl.enable(gl.BLEND);
             gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
 
@@ -710,7 +714,76 @@ class Compositor {
                 offsetX += kb.translateX / 100;
                 offsetY += kb.translateY / 100;
             }
+
+            // Floating frame entry + exit animations
+            if (scene.framing === 'floating' && scene._startFrame !== undefined && scene._endFrame !== undefined) {
+                const currentFrame = this._currentFrame || 0;
+                const localFrame = currentFrame - scene._startFrame;
+                const totalFrames = scene._endFrame - scene._startFrame;
+                const animDuration = scene.floatingAnimDuration || 0.6;
+                const animFrames = Math.round(this.fps * animDuration);
+                const animType = scene.floatingAnim || 'slideRight';
+
+                // Ease function: spring-like overshoot for entries, smooth decel for exits
+                const easeOutBack = (x) => {
+                    const c1 = 0.6; // gentle overshoot
+                    const c3 = c1 + 1;
+                    return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2);
+                };
+                const easeInCubic = (x) => x * x * x;
+
+                let animT = 0; // -1 to 0 = entering, 0 = idle, 0 to 1 = exiting
+                if (localFrame < 0) {
+                    // Before scene starts (transition overlap) — keep fully off-screen
+                    animT = -1;
+                } else if (localFrame < animFrames) {
+                    // Entry phase
+                    const rawT = localFrame / animFrames;
+                    animT = -(1 - easeOutBack(Math.min(rawT, 1)));
+                } else if (localFrame > totalFrames - animFrames) {
+                    // Exit phase
+                    const exitProgress = (localFrame - (totalFrames - animFrames)) / animFrames;
+                    animT = easeInCubic(Math.min(exitProgress, 1));
+                }
+
+                if (animT !== 0) {
+                    const absT = Math.abs(animT);
+
+                    // Direction-specific offset
+                    switch (animType) {
+                        case 'slideLeft':
+                        case 'slideRight':
+                        case 'slideUp': {
+                            // Full off-screen slide: frame starts completely outside viewport
+                            const frameHalf = (scaleX + 0.05); // half frame + margin
+                            const slideDist = (0.5 + frameHalf) * absT;
+                            if (animType === 'slideRight') {
+                                offsetX += slideDist;
+                            } else if (animType === 'slideLeft') {
+                                offsetX -= slideDist;
+                            } else {
+                                offsetY -= slideDist;
+                            }
+                            // Slight opacity fade only at the very start/end
+                            if (absT > 0.7) {
+                                opacity *= Math.max(0, 1 - (absT - 0.7) / 0.3);
+                            }
+                            break;
+                        }
+                        case 'fadeScale':
+                            // Pure scale + fade, no directional slide
+                            const fadeScale = 1 - absT * 0.25;
+                            scaleX *= fadeScale;
+                            scaleY *= fadeScale;
+                            opacity *= Math.max(0, 1 - absT * 0.6);
+                            break;
+                    }
+                }
+            }
         }
+
+        // For floating scenes, background stays at full opacity while frame animates
+        const bgOpacity = (scene && scene.framing === 'floating') ? 1.0 : opacity;
 
         // Check if scene has visual effects
         const sceneEffects = scene ? (scene.effects || []) : [];
@@ -744,7 +817,7 @@ class Compositor {
                 }
                 this._blurBlitProgram.use();
                 this._blurBlitProgram.setTexture('u_texture', 0, texEntry.texture);
-                this._blurBlitProgram.set1f('u_opacity', opacity);
+                this._blurBlitProgram.set1f('u_opacity', bgOpacity);
                 this._blurBlitProgram.set4f('u_transform', bgSx, bgSy, 0, 0);
                 this._blurBlitProgram.set2f('u_texelSize', 1.0 / texEntry.width, 1.0 / texEntry.height);
                 this._drawQuad();
@@ -752,14 +825,32 @@ class Compositor {
                 // Pattern: render custom background image/video file as texture
                 const patTex = this._getPatternTexture(bg);
                 if (patTex) {
-                    this._blitTexture(patTex, opacity, 1, 1, 0, 0, null);
+                    this._blitTexture(patTex, bgOpacity, 1, 1, 0, 0, null);
                 }
             } else if (bg.startsWith('gradient:')) {
                 // Gradient: render CSS gradient from cache
                 const gradTex = this._getGradientTexture(bg);
                 if (gradTex) {
-                    this._blitTexture(gradTex, opacity, 1, 1, 0, 0, null);
+                    this._blitTexture(gradTex, bgOpacity, 1, 1, 0, 0, null);
                 }
+            }
+            // Drop shadow for floating/scaled-down scenes
+            if (scene && scene.shadow && (scene.scale || 1) < 0.98) {
+                gl.enable(gl.BLEND);
+                gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+                const shadowOffX = 0.012; // offset right
+                const shadowOffY = -0.018; // offset down (Y is flipped in GL)
+                const baseShadow = typeof scene.shadow === 'number' ? scene.shadow : 0.5;
+                const shadowOpacity = baseShadow * Math.min(1, opacity);
+                const radius = scene.borderRadius ? (scene.borderRadius / 100) : 0;
+                // Proper rounded-rect drop shadow via dedicated shader
+                this._dropShadowProgram.use();
+                this._dropShadowProgram.set4f('u_transform', scaleX, scaleY, offsetX + shadowOffX, offsetY + shadowOffY);
+                this._dropShadowProgram.set1f('u_borderRadius', radius);
+                this._dropShadowProgram.set1f('u_opacity', shadowOpacity);
+                this._dropShadowProgram.set1f('u_softness', 0.035); // soft gaussian edge
+                this._drawQuad();
+                gl.disable(gl.BLEND);
             }
             // Draw the video on top with blending
             gl.enable(gl.BLEND);
@@ -881,6 +972,13 @@ class Compositor {
         prog.set1f('u_flickerOn', effectSet.has('flicker') ? 1.0 : 0.0);
         prog.set1f('u_flickerIntensity', _p('flicker', 'intensity', 0.08));
         prog.set1f('u_flickerSpeed', _p('flicker', 'speed', 1.0));
+
+        // -- Film Frame --
+        prog.set1f('u_filmFrameOn', effectSet.has('filmFrame') ? 1.0 : 0.0);
+        prog.set1f('u_filmFrameBorder', _p('filmFrame', 'border', 0.04));
+        prog.set1f('u_filmFrameRadius', _p('filmFrame', 'radius', 0.03));
+        prog.set1f('u_filmFrameSoftness', _p('filmFrame', 'softness', 0.012));
+        prog.set1f('u_filmFrameDarken', _p('filmFrame', 'darken', 1.0));
 
         this._drawQuad();
     }
@@ -1705,7 +1803,7 @@ class Compositor {
                 };
                 const onLoaded = () => done();
                 const onError = () => {
-                    console.warn(`[Compositor] Video for scene ${sceneIndex} failed to load`);
+                    console.warn(`[Compositor] Video for scene ${key} failed to load`);
                     done();
                 };
                 vid.addEventListener('loadeddata', onLoaded);
@@ -1713,7 +1811,7 @@ class Compositor {
                 // If already loaded by now (race), resolve immediately
                 if (vid.readyState >= 2) { done(); return; }
                 const timer = setTimeout(() => {
-                    console.warn(`[Compositor] Timeout waiting for video scene ${sceneIndex} to load`);
+                    console.warn(`[Compositor] Timeout waiting for video scene ${key} to load`);
                     done();
                 }, 15000);
             });

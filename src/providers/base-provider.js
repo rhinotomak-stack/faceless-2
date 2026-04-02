@@ -48,19 +48,34 @@ class BaseProvider {
     /**
      * Pick first result not already downloaded (dedup by both ID and URL)
      */
-    pickUnused(results) {
+    /**
+     * Pick first result not already downloaded (dedup by both ID and URL).
+     * @param {Array} results - search results
+     * @param {Function} [isOverused] - optional callback(url) → boolean, checks global reuse count
+     */
+    pickUnused(results, isOverused) {
+        // Pass 1: find truly unused result
         for (const result of results) {
-            const urlKey = result.url ? result.url.split('?')[0] : ''; // Ignore query params for dedup
+            const urlKey = result.url ? result.url.split('?')[0] : '';
             if (!this.downloadedIds.has(result.id) && !this.downloadedIds.has(urlKey)) {
                 this.downloadedIds.add(result.id);
                 if (urlKey) this.downloadedIds.add(urlKey);
                 return result;
             }
         }
-        // All used, reuse first
+        // Pass 2: all locally used — find one that's NOT globally overused
+        if (isOverused) {
+            for (const result of results) {
+                const url = result._directVideoUrl || result.url;
+                if (!isOverused(url)) {
+                    return result;
+                }
+            }
+        }
+        // Pass 3: everything is used and overused — last resort
         if (results.length > 0) {
-            console.log(`  ⚠️ [${this.name}] All results used, reusing`);
-            return results[0];
+            console.log(`  ⚠️ [${this.name}] All results used & overused, reusing least recent`);
+            return results[results.length - 1]; // pick last (least likely to be the repeated one)
         }
         return null;
     }

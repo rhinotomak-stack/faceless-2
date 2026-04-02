@@ -19,7 +19,7 @@
  *   - Enriched scenes with:
  *     • keyword: "FBI agents raiding mansion at night"
  *     • mediaType: "video" | "image"
- *     • sourceHint: "stock" | "youtube" | "web-image"
+ *     • sourceHint: "stock" | "youtube" | "web-image" | "telegram" | "reddit"
  *     • visualIntent: "Aerial establishing shot of large mansion surrounded by police vehicles"
  *     • effects: ["grain", "vignette"] — expanded from effectPreset (preset-based, not individual picks)
  *     • mgHint: "lowerThird: Detective Smith, Lead Investigator" — MG suggestion from niche's allowed list (or null)
@@ -172,11 +172,26 @@ function buildBatchPrompt(scenes, scriptContext, directorsBrief, options = {}) {
     // Build topic anchor from summary + web context
     const summary = scriptContext.summary || '';
     const webContext = scriptContext.webContext || '';
+    const eventType = scriptContext.eventType || '';
+    const eventAnchor = scriptContext.eventAnchor || '';
     let topicBlock = '';
     if (summary || webContext) {
         topicBlock = `\nTOPIC CONTEXT (use this to stay on-topic and pick relevant visuals):`;
         if (summary) {
             topicBlock += `\n- Summary: ${summary}`;
+        }
+        if (eventType) {
+            const eventLabels = {
+                'real-past': '⚠️ This is a REAL EVENT that already happened — search for REAL footage, photos, and news clips. Do NOT use stock footage for scenes about this event.',
+                'real-ongoing': '⚠️ This is a REAL ONGOING EVENT — search for REAL footage and news coverage. Do NOT use stock footage for scenes about this event.',
+                'speculative': 'This is speculative/hypothetical — use a mix of real reference footage and mood B-roll.',
+                'educational': 'This is educational content — use documentary footage, diagrams, and explainers.',
+                'fictional': 'This is fictional — use cinematic/stock footage for mood and atmosphere.',
+            };
+            topicBlock += `\n- Event type: ${eventLabels[eventType] || eventType}`;
+        }
+        if (eventAnchor) {
+            topicBlock += `\n- ⚡ EVENT ANCHOR: "${eventAnchor}" — For scenes directly about THIS event, INCLUDE the event name in your keyword so searches find REAL footage of THIS incident. Example: instead of "ship fire damage" use "${eventAnchor} fire damage". Instead of "crew sleeping on floor" use "${eventAnchor} crew displaced". For generic/background scenes (nature, mood, equipment) you don't need the anchor.`;
         }
         if (webContext) {
             topicBlock += `\n- Research: ${webContext.substring(0, 1500)}`;
@@ -229,6 +244,34 @@ ${searchPolicy.contextTerms?.length ? `- For WEB providers (Bing/Google): adding
 ${searchPolicy.entityBoost ? '- Entity names (people, companies) work well in web searches but NOT in stock searches' : ''}
 - Fallback keywords if nothing specific works: ${(searchPolicy.fallbackKeywords || []).slice(0, 3).join(', ')}
 
+⚠️ AVAILABLE VIDEO SOURCES FOR THIS NICHE (${niche.name}) — PRIORITY ORDER:
+${(() => {
+    const sourceDescriptions = {
+        telegram: 'Telegram/VK channels — real raw footage (wars, protests, political events)',
+        youtube: 'YouTube — match highlights, documentaries, tours, training footage, interviews',
+        reddit: 'Reddit — TV broadcast captures, match highlights, drone footage (BEST FOR SPORTS)',
+        pexels: 'Pexels — ONLY abstract mood B-roll (sunsets, rain, crowds) — NO specific events/people',
+        pixabay: 'Pixabay — ONLY abstract mood B-roll (sunsets, rain, crowds) — NO specific events/people',
+        vkVideo: 'VK Video — Russian/international news footage, military clips',
+    };
+    const videoPriority = niche.footagePriority?.video || ['youtube', 'telegram', 'vkVideo', 'reddit', 'pexels', 'pixabay'];
+    return videoPriority.map((src, i) => `  ${i + 1}. ${src} — ${sourceDescriptions[src] || src}`).join('\n');
+})()}
+- web-image — Bing/Google Images (photos, maps, portraits, data) — always available for images
+
+⚠️ CRITICAL SOURCE RULES:
+- You MUST prefer sources #1 and #2 for MOST scenes (aim for 70%+ of video scenes)
+- "stock" (pexels/pixabay) = ONLY for abstract/cinematic mood B-roll with NO specific entity (max ~10% of scenes)
+- stock does NOT have: match footage, player clips, sports highlights, specific events, named athletes
+- If a scene shows ANY real action, person, or event → use the top-priority sources, NOT stock
+${(() => {
+    const videoPriority = niche.footagePriority?.video || [];
+    const topSrc = videoPriority[0] || 'youtube';
+    const isStockLast = videoPriority.indexOf('pexels') >= videoPriority.length - 2;
+    if (isStockLast) return `- FOR THIS "${niche.name}" NICHE: stock should be RARE. Use "${topSrc}" or "${videoPriority[1] || 'youtube'}" for action/event scenes.`;
+    return '';
+})()}
+
 QUALITY TIER: ${qualityTier}
 ${tier.allowVideo ? '- Can use VIDEO clips (preferred for motion and impact)' : '- IMAGES ONLY (no video allowed)'}
 
@@ -278,58 +321,73 @@ PLANNING RULES:
    - Numbers, charts, graphs, infographics
    - Example: "unemployment rate chart" → web-image
 
-   **Priority 3: REAL NEWS EVENTS** → youtube
-   - Current events, breaking news, viral moments
-   - Theme: ${theme} ${['politics', 'news', 'entertainment', 'sports'].includes(theme) ? '→ PREFER YOUTUBE for real footage' : ''}
-   - Example: "Tesla recall announcement" → youtube
+   **Priority 3: REAL EVENTS / ACTION** → use top niche sources (see AVAILABLE VIDEO SOURCES above)
+   - Current events, breaking news, match highlights, action footage
+   - Use the #1 and #2 sources from the niche priority list above
+   - Example: "tennis serve ace" → use top niche source, NOT stock
 
-   **Priority 4: GENERIC ACTIONS** → stock
-   - No specific person/event, just illustrative B-roll
-   - Example: "scientists in lab" → stock
+   **Priority 4: ABSTRACT MOOD / SCENERY** → stock (ONLY if no entity/event)
+   - ONLY for: sunsets, rain, generic crowds, abstract backgrounds, nature
+   - NOT for: any named person, specific event, sport action, real footage
+   - Example: "sunset over stadium" → stock
 
-   **Priority 5: NATURE/LOCATIONS** → stock
-   - Landscapes, cityscapes, establishing shots
-   - Example: "Santa Fe sunset" → stock
+   **CRITICAL**: Don't default to stock! Stock is a LAST RESORT for abstract mood only. For any real action, person, or event → use the top niche sources.
 
-   **CRITICAL**: Don't default to stock for everything! Actively consider if YouTube or web-image would be better.
+3. SOURCE HINTS (YOU MUST ACTIVELY CHOOSE THE BEST SOURCE FOR EACH SCENE):
 
-3. SOURCE HINTS (YOU MUST ACTIVELY CHOOSE THE BEST SOURCE):
+   **"telegram"** — Real raw footage from news/military Telegram & VK channels:
+   - Wars, military operations, combat, naval confrontations, missile strikes, troop movements
+   - Protests, riots, elections, political speeches, sanctions, summits, diplomacy
+   - ANY specific real-world event, conflict, or political development
+   - Example: "USS Gerald R Ford underway" → telegram
+   - Example: "Northern Red Sea naval operations" → telegram
+   - Example: "Ukraine drone strike" → telegram
 
-   **When to use "youtube":**
-   - Real news events, breaking stories, press conferences
-   - Viral moments, trending topics, social media incidents
-   - Interviews, speeches, public appearances
-   - Specific documented events (protests, disasters, ceremonies)
-   - Documentary footage of real places/events
-   - Theme: news, politics, entertainment, sports → prefer YouTube
-   - Example: "2024 presidential debate" → YouTube
-   - Example: "Tesla Cybertruck reveal" → YouTube
+   **"youtube"** — Documentaries, tours, behind-the-scenes, equipment footage:
+   - Military interiors (aircraft carrier bridge, cockpit, engine room, command center)
+   - Factory/facility tours, equipment demonstrations, training exercises
+   - Historical documentaries, archival footage, analysis clips
+   - Vehicle/ship/aircraft walkarounds, how-it-works videos
+   - Example: "aircraft carrier damage control training" → youtube
+   - Example: "F-35 cockpit view" → youtube
+   - Example: "Navy berthing quarters tour" → youtube
 
-   **When to use "stock":**
-   - Generic actions (walking, working, cooking, driving)
-   - Nature scenes (sunsets, mountains, oceans, forests)
-   - Abstract concepts (technology, business, lifestyle)
-   - Establishing shots (cityscapes, buildings, interiors)
-   - No specific person/event mentioned
-   - Theme: nature, lifestyle, technology, business → prefer stock
+   **"stock"** — ONLY for abstract/cinematic mood B-roll with NO specific entity:
+   - Nature landscapes (sunsets, storms, oceans), generic aerials
+   - Abstract mood shots (dark clouds, fire texture, water ripples)
+   - Generic lifestyle (walking, cooking, typing) — NOT military/news content
+   - ⚠️ NEVER use stock for: military scenes, ship interiors, specific equipment, named events, investigations, forensics
+   - ⚠️ Stock sites do NOT have: military interiors, sabotage footage, NCIS investigations, damaged ships, exhausted soldiers
+   - Example: "stormy ocean waves" → stock
    - Example: "woman typing on laptop" → stock
-   - Example: "aerial view of forest" → stock
 
-   **When to use "web-image":**
+   **"reddit"** — Community-uploaded video clips (BEST FOR SPORTS & MILITARY):
+   - Sports highlights: broadcast captures, match clips, reactions (landscape TV footage)
+   - Military/combat: drone footage, missile launches, satellite imagery, dashcam
+   - Crime: bodycam footage, dashcam chases, press conferences
+   - ⚠️ Reddit is ~70% vertical phone recordings — ONLY use for niches with broadcast/drone content
+   - ⚠️ DO NOT use reddit for: celebrity, tech, entertainment (barely any hosted video)
+   - Example: "tennis match point rally" → reddit (TV broadcast capture)
+   - Example: "drone strike footage" → reddit (military subreddits)
+   - Example: "police bodycam pursuit" → reddit
+
+   **"web-image"** — Specific photos, maps, data, portraits:
    - Specific real people (photos, portraits, headshots)
+   - Maps, routes, geographic locations
    - Data visualizations (charts, graphs, infographics)
-   - Historical photos, archival images
-   - Product images, logos, branding
-   - Screenshots, diagrams, technical illustrations
+   - Historical photos, diagrams, technical illustrations
    - Example: "Elon Musk portrait" → web-image
-   - Example: "global warming temperature chart" → web-image
+   - Example: "Persian Gulf naval route map" → web-image
+
+   ⚠️ FOR NEWS/MILITARY NICHES: stock should be RARE (≤10% of scenes). Use telegram for real events, youtube for interiors/equipment/training, web-image for maps/portraits. Stock ONLY for abstract nature/mood shots.
 
 4. MEDIA TYPE SELECTION:
 ${tier.allowVideo
     ? `   - Prefer VIDEO for: action scenes, locations, events, motion-heavy moments
    - Use IMAGE for: data/stats, specific people, charts, historical photos
    - NICHE PREFERENCE: This "${niche.name}" content works best with ${
-       niche.preferredMediaType === 'video' ? 'MORE VIDEO clips (aim for ~70% video, 30% image) — this niche needs motion and energy'
+       niche.preferredMediaType === 'video' && nicheId.startsWith('news') ? 'HEAVILY VIDEO (aim for ~80-85% video, 15-20% image) — news/military content MUST be dominated by real video footage. Only use image for specific portraits, data charts, or historical photos'
+     : niche.preferredMediaType === 'video' ? 'MORE VIDEO clips (aim for ~70% video, 30% image) — this niche needs motion and energy'
      : niche.preferredMediaType === 'image' ? 'MORE IMAGES (aim for ~60-70% image, 30-40% video) — this niche relies on photos, stills, and evidence'
      : 'a BALANCED MIX of video and images (~50/50) — use whichever fits each scene best'
    }
@@ -354,11 +412,44 @@ ${tier.allowVideo
      • Example: "They found the body of John Smith" → keyword: "John Smith photo", mediaType: image, sourceHint: web-image
    - **LOCATIONS**: Use specific place names (e.g., "Santa Fe mansion" not "luxury house")
    - **COMPANIES**: Show their products/branding (e.g., "Tesla Model 3" not "electric car")
-   - **NEWS/CURRENT EVENTS**: When the scene describes a recent event, conflict, or political development:
-     • Use sourceHint: "news" — this searches news sites (BBC, Al Jazeera, Reuters) for real footage
-     • Use sourceHint: "news" for: wars, elections, political speeches, protests, sanctions, summits, disasters
+   - **NEWS/CURRENT EVENTS**: When the scene describes a specific real-world event, conflict, or development:
+     • Use sourceHint: "telegram" — searches Telegram/VK news channels for real raw footage
+     • Use sourceHint: "telegram" for: wars, military operations, missile strikes, naval confrontations, troop movements, combat, protests, elections, political speeches, sanctions, summits, diplomacy
      • The keyword should be the EVENT or TOPIC (e.g., "Iran Saudi Arabia tensions", "NATO summit 2024")
-   - **GENERIC ACTIONS**: When NO specific entity mentioned → stock footage is OK
+   - **YOUTUBE SCENES**: When the scene describes something found in documentaries or real-world footage that ISN'T breaking news:
+     • Use sourceHint: "youtube" — real footage from YouTube (tours, documentaries, reviews, behind-the-scenes)
+     • Use "youtube" for: military interiors (aircraft carrier bridge, cockpit, engine room), factory tours, historical footage, equipment demonstrations, vehicle/ship/aircraft walkthroughs, training exercises
+     • Example: "inside aircraft carrier command center" → youtube (navy tour videos)
+     • Example: "F-35 cockpit view" → youtube (pilot footage, military documentaries)
+     • Example: "oil refinery operations" → youtube (industrial documentaries)
+   - **STOCK SCENES**: When the scene describes something ABSTRACT or CINEMATIC with no specific entity:
+     • Use sourceHint: "stock" — high-quality cinematic B-roll from Pexels/Pixabay
+     • Use "stock" for: nature landscapes, sunsets, city aerials, abstract mood shots (dark clouds, stormy seas), generic technology close-ups (screens, circuits), calm establishing shots
+     • Example: "stormy ocean waves" → stock (cinematic nature B-roll)
+     • Example: "world map" → web-image (specific infographic)
+   - **REDDIT SCENES**: When the scene describes sports highlights or military/combat footage with broadcast or drone footage:
+     • Use sourceHint: "reddit" — broadcast captures and drone/dashcam footage from subreddits
+     • Use "reddit" for: sports highlights (TV broadcast captures), military drone footage, bodycam/dashcam clips, combat footage
+     • ⚠️ Do NOT use reddit for: celebrity, tech, entertainment (almost no hosted video on those subs)
+     • Example: "UFC knockout highlights" → reddit (broadcast capture)
+     • Example: "drone strike on tank column" → reddit (combat footage sub)
+   - **BUSINESS/CORPORATE SCENES**: When the niche is business/corporate:
+     • Use sourceHint: "youtube" for: real product demos, company HQs, factory tours, CEO interviews, product launches, brand stores, real-world business footage
+     • Use sourceHint: "reddit" for: consumer reactions, product comparisons, brand fails/wins, viral business moments
+     • Use sourceHint: "stock" ONLY for generic filler: someone typing on laptop, checking bills, office hallway, angry customer on phone, handshake — generic human actions with no specific entity
+     • Example: "Nike's new factory in Vietnam" → youtube (real factory footage)
+     • Example: "Tesla Cybertruck delivery" → youtube (real delivery event footage)
+     • Example: "customers are angry about the price increase" → stock (generic angry person)
+     • Example: "the CEO checking quarterly reports" → stock (generic person at desk)
+     • ⚠️ Business = REAL PRODUCTS, REAL BRANDS, REAL BUILDINGS. Use youtube/reddit for anything with a named entity. Stock only for faceless generic visuals.
+   - **SOURCE DIVERSITY IS MANDATORY** — NO source should appear on more than 50% of video scenes. Spread across providers:
+     • telegram → specific real events, named conflicts, actual military/news/political footage
+     • reddit → broadcast captures, drone/dashcam footage, bodycam clips, viral clips
+     • youtube → documentaries, tours, behind-the-scenes, training footage, equipment reviews
+     • stock → abstract/cinematic B-roll ONLY (nature, mood, generic aerials) — max 10% of scenes
+     • web-image → maps, portraits, infographics, specific photos
+   - DISTRIBUTION TARGET: For a 20-scene news video, aim for ~6-8 telegram, ~5-7 youtube, ~3-5 reddit, ~2-3 web-image, ~0-1 stock
+   - DO NOT just default everything to one source. Each scene should use the BEST source for its specific content.
    - Be SPECIFIC, not generic! Use the entity names we found!
 
    **VAGUE/ABSTRACT NARRATION (CRITICAL):**
@@ -390,29 +481,55 @@ ${tier.allowVideo
 
 9. FRAMING (how the footage fills the 16:9 frame):
    - "fullscreen" = media fills the entire frame edge-to-edge (DEFAULT for most scenes)
-   - "cinematic" = pulled back with a styled background visible behind the footage (scale set by user)
+   - "cinematic" = pulled back with a styled background visible behind the footage
+   - "floating" = smaller frame with rounded corners, drop shadow, on a styled background (like a photo/slide on a surface)
 
    USE "fullscreen" FOR (MOST scenes should be this):
    - Generic B-roll: cityscapes, nature, actions, establishing shots
    - Stock video footage — it's already 16:9, looks best filling the frame
    - Any scene where the visual works as a full-bleed background
 
-   USE "cinematic" ONLY FOR these specific cases:
+   USE "cinematic" FOR:
    - Web images of REAL PEOPLE (portraits, headshots) — gives breathing room, looks polished
    - Screenshots, charts, data images, infographics — important content at edges would be cropped
    - News footage with on-screen graphics/tickers — don't crop out the lower-third
    - Historical photos, archival images — respect the original framing
    - Any image where the subject is CENTERED and cropping edges would lose important detail
 
-   IMPORTANT: Do NOT overuse "cinematic"! Most scenes (70%+) should be "fullscreen".
-   Only use "cinematic" when there's a clear reason the edges matter.
+   USE "floating" FOR (works with BOTH images AND videos):
+   - Archival/historical photos or footage — presented like media on a display
+   - Key evidence photos, documents, screenshots, or surveillance clips — spotlighted as visual artifacts
+   - Dramatic reveal scenes — footage floats in on a contrasting background
+   - Transition moments between major sections — visual breathing room
+   - Documentary-style presentations — footage as "exhibit" on neutral background
+   - Raw video clips that benefit from a framed, cinematic presentation (e.g. leaked footage, CCTV, phone recordings)
+   BEST backgrounds for floating: "soft-beige", "paper", "warm-white", "cream", "warm-charcoal", "slate", "blur"
+   How many floating scenes depends on the video type — documentaries/history can use more, fast-paced news/crime should use fewer.
 
-10. BACKGROUND ID (only when framing is "cinematic"):
-   When framing is "cinematic", choose a background that shows behind the pulled-back footage.
-   - "blur" = blurred duplicate of same footage (good default)
+   IMPORTANT: Do NOT overuse non-fullscreen framing! Most scenes should still be "fullscreen".
+   Use your judgment on how many cinematic/floating scenes fit the video's style and pacing.
+
+   FLOATING ANIMATION (only when framing is "floating"):
+   When you pick floating, also choose:
+   - floatingAnim: how the frame enters/exits the screen
+     • "slideRight" = slides in from right (good for reveals, new evidence, forward momentum)
+     • "slideLeft" = slides in from left (good for flashbacks, returns, looking back)
+     • "slideUp" = slides up from bottom (dramatic reveals, rising tension, unveiling)
+     • "fadeScale" = fades in with scale (quiet moments, reflective, contemplative)
+     DIVERSIFY — don't repeat the same animation for consecutive floating scenes.
+   - floatingShadow: shadow intensity behind the frame (0.3 = light/subtle, 0.5 = medium, 0.7 = heavy/dramatic)
+     • Light (0.3): clean documentary look, archival photos
+     • Medium (0.5): standard, works for most
+     • Heavy (0.7): dramatic moments, key evidence, dark themes
+   When framing is NOT floating, set both to "none".
+
+10. BACKGROUND ID (only when framing is "cinematic" or "floating"):
+   When framing is "cinematic" or "floating", choose a background that shows behind the footage.
+   - "blur" = blurred duplicate of same footage (good default for cinematic)
    - Or pick from the available gradient backgrounds:
 ${_buildBackgroundList(theme)}
    Pick the background that best matches the scene mood. Use "blur" as safe default if unsure.
+   For "floating" framing, prefer solid/soft backgrounds: soft-beige, paper, warm-white, cream, warm-charcoal, slate.
    When framing is "fullscreen", set backgroundId to "none".
 
 11. KEYWORD FORMAT (CRITICAL — this is THE primary search term):
@@ -439,6 +556,29 @@ ${(() => {
 })()}
    The keyword is NOT a shot description. Save cinematic details for visualIntent.
    If the scene names a person, the keyword MUST be that person's name (+ optional context word).
+
+   CRITICAL — NEVER use abstract, metaphorical, or conceptual keywords:
+   - BAD: "warfare principles Sun Tzu analogy", "lighthouse emission analogy", "elegance of collapse", "paper defense strategy", "physics trap principle", "no-win battery dilemma"
+   - These return ZERO useful footage on any search engine. They are concepts, not visual things.
+   - ALWAYS rewrite to the CONCRETE PHYSICAL THING the narration is describing:
+   - "warfare principles Sun Tzu" → "military command center screens" (what you'd actually SHOW)
+   - "lighthouse emission analogy" → "radar antenna rotating signal" (the real object being compared)
+   - "paper defense strategy" → "Iran air defense missile launchers" (what the narration is about)
+   - "no-win battery dilemma" → "missile battery operator radar screen" (the actual scene)
+   - Ask yourself: "Can I take a PHOTO of this keyword?" If no, rewrite it.
+
+   ⚠️ TOPIC ANCHORING (CRITICAL FOR NEWS/POLITICS/MILITARY NICHES):
+   - Every keyword MUST be grounded in the SPECIFIC topic of this video.
+   - News channels and search engines return the MOST RECENT content matching your words.
+   - Generic keywords like "Iran blockade" or "government building" will return footage from whatever conflict is trending TODAY — not from the topic of THIS video.
+   - ALWAYS include the specific country, entity, or event anchor in your keyword.
+   - BAD: "Tehran control lost" — returns random Iran news, probably unrelated
+   - BAD: "two weeks blockade" — returns any blockade from any conflict
+   - BAD: "government building" — returns any government building anywhere
+   - GOOD: "Iran Strait of Hormuz shipping" — specific to this topic
+   - GOOD: "Saudi Arabia oil pipeline Yanbu" — anchored to the exact story
+   - GOOD: "Aramco oil terminal Red Sea" — concrete + topic-specific
+   - Rule: If the keyword could match footage from a DIFFERENT news story, add the specific entity/location to anchor it.
 
 12. SEARCH-OPTIMIZED QUERIES (CRITICAL FOR QUALITY):
    You must provide TWO different search queries optimized for different providers:
@@ -498,10 +638,27 @@ ${(() => {
    - Do NOT overuse — max ~15% of scenes. Most scenes should be footage.
    - NEVER use on HOOK or CTA scenes — those need strong visual footage.
 
+16. TEMPLATE HINT (fullscreen template card on V3 — separate system from MGs):
+   - Format: "<templateType>: <brief content>" or "none"
+   - Template types: chapterCard, locationCard, quoteCard, keyTakeaway, comparisonCard, timelineCard, factCard, imageShowcase
+   - USE templateHint WHEN:
+     • Narration transitions to a NEW MAJOR SECTION/TOPIC → "chapterCard: Chapter Title"
+     • A NEW SPECIFIC LOCATION is introduced for the first time → "locationCard: Place Name, Country"
+     • A DIRECT QUOTE is spoken that deserves visual emphasis → "quoteCard: The quote text"
+     • In the final 20% of video, a key insight/conclusion → "keyTakeaway: Main point"
+     • An explicit COMPARISON (X vs Y) in narration → "comparisonCard: Thing A vs Thing B"
+     • Dates/events forming a chronological sequence → "timelineCard: Date1: Event | Date2: Event"
+     • Narration lists multiple facts/features/details about a topic → "factCard: Title | fact1; fact2; fact3; fact4"
+     • Narration references two related concepts/people/places worth visualizing → "imageShowcase: Title | image1 desc; image2 desc"
+   - Max 3-4 per video — these are premium visual moments, not filler
+   - NEVER on HOOK or CTA scenes
+   - Can't be same scene as fullscreenMG (choose one or the other)
+   - Default is "none" for most scenes
+
 OUTPUT FORMAT (one line per scene):
 
-SCENE 0: keyword: <search term or none> | stockQuery: <query or none> | webQuery: <query or none> | mediaType: <video|image> | sourceHint: <stock|youtube|web-image|news> | framing: <fullscreen|cinematic> | backgroundId: <none|blur|gradient-id> | visualIntent: <shot description> | effects: <presetName or none> | mgHint: <overlay type: desc or none> | fullscreenMG: <fullscreen type: data or none>
-SCENE 1: keyword: <search term or none> | stockQuery: <query or none> | webQuery: <query or none> | mediaType: <video|image> | sourceHint: <stock|youtube|web-image|news> | framing: <fullscreen|cinematic> | backgroundId: <none|blur|gradient-id> | visualIntent: <shot description> | effects: <presetName or none> | mgHint: <overlay type: desc or none> | fullscreenMG: <fullscreen type: data or none>
+SCENE 0: keyword: <search term or none> | stockQuery: <query or none> | webQuery: <query or none> | mediaType: <video|image> | sourceHint: <stock|youtube|web-image|telegram|reddit> | framing: <fullscreen|cinematic|floating> | backgroundId: <none|blur|gradient-id> | floatingAnim: <slideRight|slideLeft|slideUp|fadeScale|none> | floatingShadow: <0.3|0.5|0.7|none> | visualIntent: <shot description> | effects: <presetName or none> | mgHint: <overlay type: desc or none> | fullscreenMG: <fullscreen type: data or none> | templateHint: <template type: content or none>
+SCENE 1: keyword: <search term or none> | stockQuery: <query or none> | webQuery: <query or none> | mediaType: <video|image> | sourceHint: <stock|youtube|web-image|telegram|reddit> | framing: <fullscreen|cinematic|floating> | backgroundId: <none|blur|gradient-id> | floatingAnim: <slideRight|slideLeft|slideUp|fadeScale|none> | floatingShadow: <0.3|0.5|0.7|none> | visualIntent: <shot description> | effects: <presetName or none> | mgHint: <overlay type: desc or none> | fullscreenMG: <fullscreen type: data or none> | templateHint: <template type: content or none>
 ...
 
 CRITICAL: YOU MUST OUTPUT EXACTLY ${scenes.length} LINES (one per scene).
@@ -521,7 +678,8 @@ stockQuery and webQuery must BOTH be provided for every footage scene.`;
  * Parse the batch visual plan response.
  * Extracts keyword, mediaType, sourceHint, visualIntent for each scene.
  */
-function parseBatchResponse(rawText, scenes, nicheId, themeId) {
+function parseBatchResponse(rawText, scenes, nicheId, themeId, scriptContext) {
+    const entities = scriptContext?.entities || [];
     const enrichedScenes = [];
     const lines = rawText.trim().split('\n').filter(line => {
         const lower = line.toLowerCase().trim();
@@ -566,7 +724,7 @@ function parseBatchResponse(rawText, scenes, nicheId, themeId) {
                 }
                 if (lower.startsWith('sourcehint:') || lower.startsWith('source hint:')) {
                     const val = part.substring(part.indexOf(':') + 1).trim().toLowerCase();
-                    if (['stock', 'youtube', 'web-image', 'news'].includes(val)) {
+                    if (['stock', 'youtube', 'web-image', 'news', 'telegram', 'reddit'].includes(val)) {
                         scene.sourceHint = val;
                     }
                 }
@@ -581,8 +739,22 @@ function parseBatchResponse(rawText, scenes, nicheId, themeId) {
                 }
                 if (lower.startsWith('framing:')) {
                     const val = part.substring(part.indexOf(':') + 1).trim().toLowerCase();
-                    if (['fullscreen', 'cinematic'].includes(val)) {
+                    if (['fullscreen', 'cinematic', 'floating'].includes(val)) {
                         scene.framing = val;
+                    }
+                }
+                if (lower.startsWith('floatinganim:') || lower.startsWith('floating anim:')) {
+                    const val = part.substring(part.indexOf(':') + 1).trim().toLowerCase();
+                    if (['slideright', 'slideleft', 'slideup', 'fadescale'].includes(val)) {
+                        // Normalize to camelCase
+                        const animMap = { slideright: 'slideRight', slideleft: 'slideLeft', slideup: 'slideUp', fadescale: 'fadeScale' };
+                        scene.floatingAnim = animMap[val] || 'slideRight';
+                    }
+                }
+                if (lower.startsWith('floatingshadow:') || lower.startsWith('floating shadow:')) {
+                    const val = parseFloat(part.substring(part.indexOf(':') + 1).trim());
+                    if (!isNaN(val) && val >= 0 && val <= 1) {
+                        scene.floatingShadow = val;
                     }
                 }
                 if (lower.startsWith('backgroundid:') || lower.startsWith('background id:')) {
@@ -625,7 +797,7 @@ function parseBatchResponse(rawText, scenes, nicheId, themeId) {
                     }
                 }
                 if (lower.startsWith('mghint:') || lower.startsWith('mg hint:')) {
-                    const val = part.substring(part.indexOf(':') + 1).trim();
+                    const val = part.substring(part.indexOf(':') + 1).trim().replace(/^["']+|["']+$/g, '');
                     if (val.toLowerCase() === 'none' || val === '') {
                         scene.mgHint = null;
                     } else {
@@ -633,11 +805,25 @@ function parseBatchResponse(rawText, scenes, nicheId, themeId) {
                     }
                 }
                 if (lower.startsWith('fullscreenmg:') || lower.startsWith('fullscreen mg:')) {
-                    const val = part.substring(part.indexOf(':') + 1).trim();
+                    const val = part.substring(part.indexOf(':') + 1).trim().replace(/^["']+|["']+$/g, '');
                     if (val.toLowerCase() === 'none' || val === '') {
                         scene.fullscreenMG = null;
                     } else {
                         scene.fullscreenMG = val;
+                        // Fullscreen MG replaces footage — clear download fields
+                        scene.keyword = null;
+                        scene.stockQuery = null;
+                        scene.webQuery = null;
+                        scene.mediaType = null;
+                        scene.sourceHint = null;
+                    }
+                }
+                if (lower.startsWith('templatehint:') || lower.startsWith('template hint:')) {
+                    const val = part.substring(part.indexOf(':') + 1).trim().replace(/^["']+|["']+$/g, '');
+                    if (val.toLowerCase() === 'none' || val === '') {
+                        scene.templateHint = null;
+                    } else {
+                        scene.templateHint = val;
                     }
                 }
             }
@@ -648,6 +834,12 @@ function parseBatchResponse(rawText, scenes, nicheId, themeId) {
             if (scene.stockQuery) scene.stockQuery = stripQuotes(scene.stockQuery);
             if (scene.webQuery) scene.webQuery = stripQuotes(scene.webQuery);
             if (scene.visualIntent) scene.visualIntent = stripQuotes(scene.visualIntent);
+            if (scene.templateHint) scene.templateHint = stripQuotes(scene.templateHint);
+
+            // templateHint and fullscreenMG are mutually exclusive — fullscreenMG wins
+            if (scene.templateHint && scene.fullscreenMG) {
+                scene.templateHint = null;
+            }
 
             // Auto-generate stockQuery/webQuery from keyword if AI didn't provide them
             if (scene.keyword && !scene.stockQuery) {
@@ -658,26 +850,87 @@ function parseBatchResponse(rawText, scenes, nicheId, themeId) {
             }
         }
 
-        // Fallback: Generate keyword from scene text if missing
-        if (!scene.keyword || scene.keyword.length < 3) {
-            scene.keyword = extractFallbackKeyword(scene.text);
+        // Fullscreen MG scenes don't need keywords/media — skip fallbacks
+        if (!scene.fullscreenMG) {
+            // Fallback: Generate keyword from scene text if missing
+            if (!scene.keyword || scene.keyword.length < 3) {
+                scene.keyword = extractFallbackKeyword(scene.text);
+            }
+
+            // Default values
+            scene.mediaType = scene.mediaType || 'video';
+            scene.sourceHint = scene.sourceHint || 'stock';
         }
 
-        // Default values
-        scene.mediaType = scene.mediaType || 'video';
-        scene.sourceHint = scene.sourceHint || 'stock';
+        // Person entity override: if keyword matches a known entity name AND the AI
+        // didn't set web-image, force it. Stock providers will never have real people.
+        const entityTypes = scriptContext?.entityTypes || {};
+        if (entities && entities.length > 0 && scene.keyword) {
+            const kwLower = scene.keyword.toLowerCase();
+            // Check ALL matching entities — if ANY is a person, trigger person lock
+            const matchedEntities = entities.filter(e => {
+                const eLower = e.toLowerCase();
+                return kwLower.includes(eLower) || eLower.includes(kwLower);
+            });
+            const personEntity = matchedEntities.find(e => entityTypes[e.toLowerCase()] === 'person');
+            const hasPortraitHint = /portrait|photo|headshot|face/i.test(kwLower);
 
-        // News niche override: upgrade video sourceHint to 'news' so newsVideo provider is tried first
-        if (nicheId && nicheId.startsWith('news') && scene.mediaType === 'video'
-            && (scene.sourceHint === 'stock' || scene.sourceHint === 'youtube')) {
-            scene.sourceHint = 'news';
+            if ((personEntity || hasPortraitHint) && scene.sourceHint !== 'web-image') {
+                const name = personEntity || matchedEntities[0];
+                console.log(`  🧑 Person detected: "${name}" — forcing web-image`);
+                scene.mediaType = 'image';
+                scene.sourceHint = 'web-image';
+                scene._personLock = true;
+                if (!hasPortraitHint) {
+                    scene.keyword = `${scene.keyword} photo`;
+                }
+            }
+        }
+
+        // News niche safety net: only override "stock" default (when AI didn't provide sourceHint)
+        // If AI explicitly chose a source, trust it — the prompt now teaches per-scene source selection
+        if (nicheId && nicheId.startsWith('news') && scene.sourceHint === 'stock') {
+            if (scene.mediaType !== 'video') {
+                scene.sourceHint = 'web-image'; // images in news should be real photos, not stock
+            }
+        }
+
+        // ── Niche-aware stock override ──
+        // Stock (pexels/pixabay) doesn't have real footage for news/military/sport niches.
+        // If AI picked stock for a video scene where stock is last-resort, override to niche's #1 source.
+        // Other sources (youtube/telegram/reddit) are left as-is — let the AI decide.
+        if (scene.mediaType === 'video' && nicheId) {
+            const { getNiche: _getNiche } = require('./niches');
+            const _niche = _getNiche(nicheId);
+            const videoPriority = _niche.footagePriority?.video || [];
+
+            if (videoPriority.length > 0) {
+                const hint = scene.sourceHint || 'stock';
+                const isStock = hint === 'stock' || hint === 'pexels' || hint === 'pixabay';
+                const stockIdx = Math.max(
+                    videoPriority.indexOf('pexels'),
+                    videoPriority.indexOf('pixabay')
+                );
+                const isStockLastResort = stockIdx >= videoPriority.length - 2;
+
+                if (isStock && isStockLastResort) {
+                    const topSource = videoPriority[0];
+                    console.log(`      🔄 stock → ${topSource} (stock is last-resort for ${_niche.name})`);
+                    scene.sourceHint = topSource;
+                }
+            }
         }
 
         scene.framing = scene.framing || 'fullscreen';
+        // Floating animation defaults (AI may have set these)
+        if (scene.framing === 'floating') {
+            scene.floatingAnim = scene.floatingAnim || 'slideRight';
+            scene.shadow = scene.floatingShadow || 0.5;
+        }
         // Derive background from framing + backgroundId
         if (!scene.background) {
-            if (scene.framing === 'cinematic') {
-                const bgId = scene.backgroundId || 'blur';
+            if (scene.framing === 'cinematic' || scene.framing === 'floating') {
+                const bgId = scene.backgroundId || (scene.framing === 'floating' ? 'soft-beige' : 'blur');
                 if (bgId === 'blur') {
                     scene.background = 'blur';
                 } else if (bgId === 'none') {
@@ -701,6 +954,11 @@ function parseBatchResponse(rawText, scenes, nicheId, themeId) {
         enrichedScenes.push(scene);
     }
 
+    // ── Source Diversity Enforcement ──
+    // AI tends to over-pick one source (e.g. 90% youtube for news).
+    // Redistribute when any single video source exceeds its fair share.
+    _enforceSourceDiversity(enrichedScenes, nicheId);
+
     return enrichedScenes;
 }
 
@@ -720,6 +978,288 @@ function extractFallbackKeyword(text) {
     // Take first 3-4 meaningful words
     const keyword = words.slice(0, 4).join(' ');
     return keyword.length > 0 ? keyword : text.substring(0, 50);
+}
+
+// ============================================================
+// VIDEO RATIO ENFORCEMENT
+// ============================================================
+
+/**
+ * Enforce minimum video ratio for niches that need it.
+ * News/military niches target 80-85% video. If AI picked too many images,
+ * flip the least-important image scenes to video (skip person portraits, data charts).
+ */
+function _enforceVideoRatio(scenes, nicheId) {
+    if (!nicheId) return;
+
+    // Define target ratios per niche prefix
+    let targetVideoRatio = null;
+    if (nicheId.startsWith('news')) targetVideoRatio = 0.80;
+    if (!targetVideoRatio) return;
+
+    const totalScenes = scenes.filter(s => !s.fullscreenMG).length; // exclude fullscreen MGs
+    if (totalScenes < 5) return;
+
+    const videoCount = scenes.filter(s => !s.fullscreenMG && s.mediaType === 'video').length;
+    const currentRatio = videoCount / totalScenes;
+
+    if (currentRatio >= targetVideoRatio) return; // already meets target
+
+    // How many image→video flips needed?
+    const needed = Math.ceil(targetVideoRatio * totalScenes) - videoCount;
+
+    // Rank image scenes by "flippability" — prefer generic scenes, avoid portraits/data
+    const KEEP_AS_IMAGE = /portrait|headshot|chart|graph|data|diagram|infographic|photo of|face of/i;
+    const imageScenes = scenes
+        .filter(s => !s.fullscreenMG && s.mediaType === 'image' && !s._personLock)
+        .map(s => ({
+            scene: s,
+            priority: KEEP_AS_IMAGE.test(s.keyword || '') ? 100 : (s.sourceHint === 'web-image' ? 2 : 1)
+        }))
+        .sort((a, b) => a.priority - b.priority); // lowest priority = flip first
+
+    let flipped = 0;
+    for (const { scene } of imageScenes) {
+        if (flipped >= needed) break;
+        scene.mediaType = 'video';
+        if (scene.sourceHint === 'web-image') scene.sourceHint = 'stock';
+        flipped++;
+    }
+
+    if (flipped > 0) {
+        const newRatio = Math.round(((videoCount + flipped) / totalScenes) * 100);
+        console.log(`   📊 Video ratio enforcement: flipped ${flipped} image→video (${Math.round(currentRatio * 100)}% → ${newRatio}% video) [target: ${Math.round(targetVideoRatio * 100)}%]`);
+    }
+}
+
+// ============================================================
+// SOURCE DIVERSITY ENFORCEMENT
+// ============================================================
+
+/**
+ * Redistribute source hints when one video source dominates too heavily.
+ * Ensures visual variety — different providers have different footage styles.
+ *
+ * Rules:
+ * - No single video source should exceed 50% of video scenes
+ * - Uses niche footagePriority to know which sources are available
+ * - Only reassigns scenes where the source is interchangeable (not person photos, not maps)
+ * - Prefers round-robin across top 3 niche sources
+ */
+function _enforceSourceDiversity(scenes, nicheId) {
+    const { getNiche: _getNiche } = require('./niches');
+    const niche = _getNiche(nicheId || 'general');
+    const videoPriority = niche.footagePriority?.video || ['youtube', 'telegram', 'reddit', 'pexels', 'pixabay'];
+
+    // Only consider video scenes with swappable sources
+    const LOCKED_HINTS = new Set(['web-image']); // web-image = specific photos, don't touch
+    const videoScenes = scenes.filter(s =>
+        s.mediaType === 'video' && !s.fullscreenMG && !LOCKED_HINTS.has(s.sourceHint)
+    );
+
+    if (videoScenes.length < 6) return; // too few to care about diversity
+
+    // Count source distribution
+    const counts = {};
+    for (const s of videoScenes) {
+        const src = s.sourceHint || 'stock';
+        counts[src] = (counts[src] || 0) + 1;
+    }
+
+    // Find dominant source
+    const maxAllowed = Math.ceil(videoScenes.length * 0.50); // no source should exceed 50%
+    let dominant = null;
+    let dominantCount = 0;
+    for (const [src, count] of Object.entries(counts)) {
+        if (count > maxAllowed && count > dominantCount) {
+            dominant = src;
+            dominantCount = count;
+        }
+    }
+
+    if (!dominant) return; // distribution is fine
+
+    // How many to reassign from the dominant source
+    const excess = dominantCount - maxAllowed;
+
+    // Pick alternative sources from niche priority (skip the dominant one)
+    const alternatives = videoPriority.filter(s => s !== dominant && s !== 'pexels' && s !== 'pixabay');
+    if (alternatives.length === 0) return;
+
+    // Scenes eligible for reassignment: dominant source, not hook/CTA, not person-specific
+    const PERSON_KW = /portrait|headshot|photo of|face of|mugshot/i;
+    const eligible = videoScenes.filter(s =>
+        (s.sourceHint || 'stock') === dominant &&
+        s.sceneType !== 'hook' && s.sceneType !== 'cta' &&
+        !PERSON_KW.test(s.keyword || '')
+    );
+
+    // Round-robin reassign from the middle of the video (keep first/last scenes stable)
+    // Sort by scene index, skip first 2 and last 2
+    eligible.sort((a, b) => (a.index || 0) - (b.index || 0));
+    const reassignable = eligible.length > 4
+        ? eligible.slice(2, -2)  // skip first 2 and last 2
+        : eligible.slice(1);     // at least skip the first
+
+    let reassigned = 0;
+    for (let i = 0; i < reassignable.length && reassigned < excess; i++) {
+        const scene = reassignable[i];
+        const newSource = alternatives[reassigned % alternatives.length];
+        const oldSource = scene.sourceHint;
+        scene.sourceHint = newSource;
+        reassigned++;
+    }
+
+    if (reassigned > 0) {
+        // Recount for logging
+        const newCounts = {};
+        for (const s of videoScenes) {
+            const src = s.sourceHint || 'stock';
+            newCounts[src] = (newCounts[src] || 0) + 1;
+        }
+        const distStr = Object.entries(newCounts).map(([k, v]) => `${k}:${v}`).join(', ');
+        console.log(`   🔀 Source diversity: ${dominant} was ${dominantCount}/${videoScenes.length} (${Math.round(dominantCount / videoScenes.length * 100)}%) — redistributed ${reassigned} scenes → [${distStr}]`);
+    }
+}
+
+// ============================================================
+// KEYWORD QUALITY VALIDATOR
+// ============================================================
+
+// Words that signal abstract/metaphorical/unsearchable keywords
+const ABSTRACT_WORDS = new Set([
+    'analogy', 'metaphor', 'concept', 'principle', 'philosophy', 'theory',
+    'dilemma', 'paradox', 'irony', 'symbolism', 'allegory', 'notion',
+    'abstraction', 'essence', 'elegance', 'implications', 'perspective',
+    'dynamics', 'paradigm', 'framework', 'methodology', 'rationale',
+    'simulation', 'visualization', 'conceptual', 'hypothetical',
+    'anchor', 'intro', 'outro', 'cta', 'transition', 'statement',
+    'comparison', 'contrast', 'overview', 'summary', 'recap',
+]);
+
+// Phrases that are unsearchable (no real footage exists)
+const ABSTRACT_PHRASES = [
+    /\b(sun tzu|art of war)\b/i,
+    /\b(no[- ]win|win[- ]win)\b/i,
+    /\blighthouse\s+emission\b/i,
+    /\bpaper\s+(defense|strategy|plan)\b/i,
+    /\b(physics|math)\s+(trap|trick|principle)\b/i,
+    /\b(cost|price)\s+exchange\b/i,
+    /\b(channel|subscribe|like|comment)\s+(comparison|intro|outro|cta)\b/i,
+];
+
+/**
+ * Extract a concrete keyword from scene text by picking the most visual nouns.
+ * Used as fallback when the AI-generated keyword is abstract/unsearchable.
+ */
+function _extractConcreteKeyword(text, entities) {
+    if (!text) return null;
+
+    // If scene mentions entities, use the first entity + context
+    if (entities && entities.length > 0) {
+        // Find which entity appears in this scene's text
+        for (const entity of entities) {
+            if (text.toLowerCase().includes(entity.toLowerCase())) {
+                return entity;
+            }
+        }
+    }
+
+    // Extract noun phrases — prefer capitalized words (proper nouns), military/tech terms
+    const CONCRETE_PATTERNS = [
+        // Specific equipment/systems: "F-35C", "Bavar-373", "S-300"
+        /\b[A-Z][\w-]*[-]\d+\w*\b/g,
+        // Proper nouns (2+ capitalized words): "Cyber Command", "Persian Gulf"
+        /\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+\b/g,
+        // Single proper nouns: "Iran", "Pentagon", "Tomahawk"
+        /\b[A-Z][a-z]{3,}\b/g,
+    ];
+
+    const found = [];
+    for (const pattern of CONCRETE_PATTERNS) {
+        const matches = text.match(pattern);
+        if (matches) {
+            for (const m of matches) {
+                // Skip common words that happen to be capitalized (start of sentence)
+                const lower = m.toLowerCase();
+                if (['the', 'this', 'that', 'when', 'what', 'here', 'there', 'every',
+                     'because', 'before', 'after', 'while', 'other', 'something',
+                     'nothing', 'everything', 'imagine', 'reverse', 'respect',
+                     'not', 'but', 'and', 'start', 'now'].includes(lower)) continue;
+                found.push(m);
+            }
+        }
+        if (found.length >= 3) break;
+    }
+
+    if (found.length === 0) return null;
+
+    // Take up to 3 unique terms
+    const unique = [...new Set(found)].slice(0, 3);
+    return unique.join(' ');
+}
+
+/**
+ * Validate and fix abstract/unsearchable keywords.
+ * Runs after AI response is parsed — no extra AI calls needed.
+ */
+function _validateKeywords(scenes, scriptContext) {
+    let fixed = 0;
+
+    for (const scene of scenes) {
+        if (!scene.keyword || scene.fullscreenMG) continue;
+
+        const keyword = scene.keyword.toLowerCase();
+        const words = keyword.split(/\s+/);
+
+        // Check 1: keyword contains abstract words
+        const hasAbstract = words.some(w => ABSTRACT_WORDS.has(w));
+
+        // Check 2: keyword matches abstract phrase patterns
+        const hasAbstractPhrase = ABSTRACT_PHRASES.some(re => re.test(keyword));
+
+        // Check 3: keyword has no concrete nouns (all generic/filler words)
+        const FILLER_WORDS = new Set([
+            'the', 'a', 'an', 'of', 'in', 'on', 'at', 'to', 'for', 'by', 'with',
+            'and', 'or', 'but', 'not', 'no', 'is', 'was', 'are', 'were', 'be',
+            'this', 'that', 'how', 'why', 'what', 'when', 'where', 'who',
+            'new', 'old', 'modern', 'real', 'simple', 'complex',
+        ]);
+        const meaningfulWords = words.filter(w => w.length > 2 && !FILLER_WORDS.has(w));
+        const allAbstract = meaningfulWords.length > 0 && meaningfulWords.every(w => ABSTRACT_WORDS.has(w));
+
+        if (hasAbstract || hasAbstractPhrase || allAbstract) {
+            // Build reason string for logging
+            const reasons = [];
+            if (hasAbstract) reasons.push(`word: "${words.find(w => ABSTRACT_WORDS.has(w))}"`);
+            if (hasAbstractPhrase) reasons.push('abstract phrase');
+            if (allAbstract) reasons.push('all abstract');
+
+            const replacement = _extractConcreteKeyword(
+                scene.text,
+                scriptContext?.entities
+            );
+
+            if (replacement && replacement !== scene.keyword) {
+                const old = scene.keyword;
+                scene.keyword = replacement;
+                // Also regenerate stockQuery and webQuery
+                const oldStock = scene.stockQuery;
+                const oldWeb = scene.webQuery;
+                scene.stockQuery = _autoStockQuery(replacement);
+                scene.webQuery = _autoWebQuery(replacement, scene.sourceHint);
+                console.log(`   🔧 Scene ${scene.index}: keyword "${old}" → "${replacement}" [${reasons.join(', ')}]`);
+                console.log(`      stock: "${oldStock || ''}" → "${scene.stockQuery}" | web: "${oldWeb || ''}" → "${scene.webQuery}"`);
+                fixed++;
+            } else {
+                console.log(`   ⚠️ Scene ${scene.index}: abstract keyword "${scene.keyword}" [${reasons.join(', ')}] — no concrete replacement found`);
+            }
+        }
+    }
+
+    if (fixed > 0) {
+        console.log(`   📝 Fixed ${fixed} abstract keyword(s)`);
+    }
 }
 
 // ============================================================
@@ -763,23 +1303,84 @@ async function planVisuals(scenes, scriptContext, directorsBrief) {
 
         console.log(`   [AI Response Preview]:\n${rawText.substring(0, 400)}${rawText.length > 400 ? '...' : ''}\n`);
 
-        const enrichedScenes = parseBatchResponse(rawText, scenes, scriptContext.nicheId, scriptContext.themeId);
+        const enrichedScenes = parseBatchResponse(rawText, scenes, scriptContext.nicheId, scriptContext.themeId, scriptContext);
 
         // Listicle keyword variety enforcement
         if (scriptContext.format === 'listicle' && scriptContext.listicleItems) {
             const { enforceKeywordVariety } = require('./listicle-format');
             enforceKeywordVariety(enrichedScenes, scriptContext.listicleItems);
+
+            // Force overview scene to be a listicleGrid fullscreen MG (in case AI missed it)
+            const firstItem = scriptContext.listicleItems.find(it => it.startSceneIndex != null);
+            if (firstItem) {
+                const overviewIdx = Math.max(0, firstItem.startSceneIndex - 1);
+                const overviewScene = enrichedScenes.find(s => s.index === overviewIdx);
+                if (overviewScene && !overviewScene.fullscreenMG) {
+                    overviewScene.fullscreenMG = 'listicleGrid';
+                    overviewScene.isListicleOverview = true;
+                    overviewScene.keyword = null;
+                    overviewScene.stockQuery = null;
+                    overviewScene.webQuery = null;
+                    overviewScene.mediaType = null;
+                    overviewScene.sourceHint = null;
+                    console.log(`      [Listicle] Scene ${overviewIdx}: forced to listicleGrid overview (no footage needed)`);
+                }
+            }
         }
 
+        // Enforce video ratio for news niches (80-85% video target)
+        _enforceVideoRatio(enrichedScenes, scriptContext.nicheId);
+
+        // Post-enforcement: for news niches, only fix stock images (video source = AI's choice)
+        if (scriptContext.nicheId && scriptContext.nicheId.startsWith('news')) {
+            for (const scene of enrichedScenes) {
+                if (scene.sourceHint === 'stock' && scene.mediaType !== 'video') {
+                    scene.sourceHint = 'web-image';
+                }
+            }
+        }
+
+        // Post-enforcement: force person scenes back to image if ratio enforcement flipped them.
+        // This runs AFTER ratio enforcement to guarantee person photos stay as images.
+        const entities = scriptContext.entities || [];
+        const entityTypes2 = scriptContext.entityTypes || {};
+        if (entities.length > 0) {
+            for (const scene of enrichedScenes) {
+                if (!scene.keyword || scene.sourceHint === 'web-image') continue;
+                const kwLower = scene.keyword.toLowerCase();
+                const matchedEntities = entities.filter(e => {
+                    const eLower = e.toLowerCase();
+                    return kwLower.includes(eLower) || eLower.includes(kwLower);
+                });
+                const personEntity = matchedEntities.find(e => entityTypes2[e.toLowerCase()] === 'person');
+                const hasPortraitHint = /portrait|photo|headshot|face/i.test(kwLower);
+                if (personEntity || hasPortraitHint) {
+                    if (scene.mediaType !== 'image' || scene.sourceHint !== 'web-image') {
+                        console.log(`   🧑 Person override: "${scene.keyword}" → [image, web-image]`);
+                        scene.mediaType = 'image';
+                        scene.sourceHint = 'web-image';
+                    }
+                }
+            }
+        }
+
+        // Validate keywords — fix abstract/unsearchable ones
+        _validateKeywords(enrichedScenes, scriptContext);
+
         // Log results
-        console.log(`   ✅ Visual plan created for ${enrichedScenes.length} scenes:\n`);
+        const footageCount = enrichedScenes.filter(s => !s.fullscreenMG).length;
+        const fsMGCount = enrichedScenes.filter(s => s.fullscreenMG).length;
+        console.log(`   ✅ Visual plan created for ${enrichedScenes.length} scenes (${footageCount} footage + ${fsMGCount} fullscreen MG):\n`);
         for (const scene of enrichedScenes.slice(0, 5)) { // Show first 5
-            const sq = scene.stockQuery ? ` stock:"${scene.stockQuery}"` : '';
-            const wq = scene.webQuery ? ` web:"${scene.webQuery}"` : '';
-            const fx = scene.effectPreset && scene.effectPreset !== 'none' ? ` fx:${scene.effectPreset}` : (scene.effects && scene.effects.length ? ` fx:[${scene.effects.join(',')}]` : '');
-            const mg = scene.mgHint ? ` mg:"${scene.mgHint}"` : '';
-            const fmg = scene.fullscreenMG ? ` ★FULLSCREEN:"${scene.fullscreenMG}"` : '';
-            console.log(`      Scene ${scene.index}: "${scene.keyword}" [${scene.mediaType}, ${scene.sourceHint}]${sq}${wq}${fx}${mg}${fmg}`);
+            if (scene.fullscreenMG) {
+                console.log(`      Scene ${scene.index}: 🎨 [FULLSCREEN MG] ${scene.fullscreenMG}`);
+            } else {
+                const sq = scene.stockQuery ? ` stock:"${scene.stockQuery}"` : '';
+                const wq = scene.webQuery ? ` web:"${scene.webQuery}"` : '';
+                const fx = scene.effectPreset && scene.effectPreset !== 'none' ? ` fx:${scene.effectPreset}` : (scene.effects && scene.effects.length ? ` fx:[${scene.effects.join(',')}]` : '');
+                const mg = scene.mgHint ? ` mg:"${scene.mgHint}"` : '';
+                console.log(`      Scene ${scene.index}: "${scene.keyword}" [${scene.mediaType}, ${scene.sourceHint}]${sq}${wq}${fx}${mg}`);
+            }
         }
         if (enrichedScenes.length > 5) {
             console.log(`      ... and ${enrichedScenes.length - 5} more scenes`);
@@ -832,7 +1433,7 @@ async function _planVisualsChunked(scenes, scriptContext, directorsBrief, chunkS
 
             if (!rawText) throw new Error('Empty AI response');
 
-            const enriched = parseBatchResponse(rawText, chunk, scriptContext.nicheId, scriptContext.themeId);
+            const enriched = parseBatchResponse(rawText, chunk, scriptContext.nicheId, scriptContext.themeId, scriptContext);
             allEnriched.push(...enriched);
 
             // Collect keywords for next chunk's awareness
@@ -841,7 +1442,11 @@ async function _planVisualsChunked(scenes, scriptContext, directorsBrief, chunkS
             }
 
             for (const scene of enriched) {
-                console.log(`      Scene ${scene.index}: "${scene.keyword}" [${scene.mediaType}, ${scene.sourceHint}]`);
+                if (scene.fullscreenMG) {
+                    console.log(`      Scene ${scene.index}: 🎨 [FULLSCREEN MG] ${scene.fullscreenMG}`);
+                } else {
+                    console.log(`      Scene ${scene.index}: "${scene.keyword}" [${scene.mediaType}, ${scene.sourceHint}]`);
+                }
             }
         } catch (error) {
             console.log(`      ⚠️ Batch ${c + 1} failed: ${error.message}, falling back to per-scene...`);
@@ -852,15 +1457,14 @@ async function _planVisualsChunked(scenes, scriptContext, directorsBrief, chunkS
                     const prompt = buildSingleScenePrompt(scene, scriptContext, directorsBrief);
                     const rawText = await callAI(prompt, { maxTokens: 100 });
                     const parsed = parseSingleSceneResponse(rawText, scene);
-                    // News niche override
-                    if (nicheId.startsWith('news') && parsed.mediaType === 'video'
-                        && (parsed.sourceHint === 'stock' || parsed.sourceHint === 'youtube')) {
-                        parsed.sourceHint = 'news';
+                    // News niche safety net: only override stock images (not video — AI decides)
+                    if (nicheId.startsWith('news') && parsed.sourceHint === 'stock' && parsed.mediaType !== 'video') {
+                        parsed.sourceHint = 'web-image';
                     }
                     allEnriched.push(parsed);
                     console.log(`      Scene ${scene.index}: "${parsed.keyword}" [${parsed.mediaType}, ${parsed.sourceHint}]`);
                 } catch (err) {
-                    const fallbackHint = nicheId.startsWith('news') ? 'news' : 'stock';
+                    const fallbackHint = nicheId.startsWith('news') ? 'telegram' : 'stock';
                     allEnriched.push({
                         ...scene,
                         keyword: extractFallbackKeyword(scene.text),
@@ -898,16 +1502,15 @@ async function planVisualsPerScene(scenes, scriptContext, directorsBrief) {
         try {
             const rawText = await callAI(prompt, { maxTokens: 100 });
             const parsed = parseSingleSceneResponse(rawText, scene);
-            // News niche override: upgrade video sourceHint to 'news'
-            if (nicheId.startsWith('news') && parsed.mediaType === 'video'
-                && (parsed.sourceHint === 'stock' || parsed.sourceHint === 'youtube')) {
-                parsed.sourceHint = 'news';
+            // News niche safety net: only override stock images (not video — AI decides)
+            if (nicheId.startsWith('news') && parsed.sourceHint === 'stock' && parsed.mediaType !== 'video') {
+                parsed.sourceHint = 'web-image';
             }
             enrichedScenes.push(parsed);
             console.log(`   Scene ${scene.index}: "${parsed.keyword}" [${parsed.mediaType}, ${parsed.sourceHint}]`);
         } catch (error) {
             // Ultimate fallback: extract from text
-            const fallbackHint = nicheId.startsWith('news') ? 'news' : 'stock';
+            const fallbackHint = nicheId.startsWith('news') ? 'telegram' : 'stock';
             enrichedScenes.push({
                 ...scene,
                 keyword: extractFallbackKeyword(scene.text),
@@ -931,14 +1534,21 @@ async function planVisualsPerScene(scenes, scriptContext, directorsBrief) {
 function buildSingleScenePrompt(scene, scriptContext, directorsBrief) {
     const { theme, mood, entities } = scriptContext;
     const { tier } = directorsBrief;
+    const nicheId = scriptContext.nicheId || 'general';
+    const { getNiche } = require('./niches');
+    const niche = getNiche(nicheId);
+    const videoPriority = niche.footagePriority?.video || ['youtube', 'telegram', 'vkVideo', 'reddit', 'pexels', 'pixabay'];
 
     return `You are planning B-ROLL for a ${theme || 'general'} video with ${mood || 'neutral'} mood.
 
 SCENE TEXT: "${scene.text}"
 ${entities.length > 0 ? `KEY ENTITIES: ${entities.join(', ')}` : ''}
 
+AVAILABLE SOURCES (priority order for this ${niche.name} niche): ${videoPriority.join(' → ')}
+Pick sourceHint from these. Top sources are BEST for this niche.
+
 OUTPUT FORMAT (one line):
-keyword: <searchable keyword> | mediaType: <${tier.allowVideo ? 'video|image' : 'image'}> | sourceHint: <stock|youtube|web-image|news>`;
+keyword: <searchable keyword> | mediaType: <${tier.allowVideo ? 'video|image' : 'image'}> | sourceHint: <stock|youtube|web-image|telegram|reddit>`;
 }
 
 /**
@@ -958,7 +1568,7 @@ function parseSingleSceneResponse(rawText, scene) {
         }
         if (lower.startsWith('sourcehint:')) {
             const val = part.substring(part.indexOf(':') + 1).trim().toLowerCase();
-            if (['stock', 'youtube', 'web-image', 'news'].includes(val)) enriched.sourceHint = val;
+            if (['stock', 'youtube', 'web-image', 'news', 'telegram', 'reddit'].includes(val)) enriched.sourceHint = val;
         }
     }
 

@@ -232,6 +232,47 @@ const MG_REGISTRY = {
         defaultType: 'standard',
         fields: ['text', 'subtext'],
     },
+
+    // ── Listicle MGs ──
+    listicleCounter: {
+        label: 'Listicle Counter',
+        group: 'listicle',
+        types: {
+            badge:     { label: 'Badge',           animation: 'popUp',      themeOverridable: true },
+            pill:      { label: 'Pill',            animation: 'slideLeft',  themeOverridable: true },
+            ribbon:    { label: 'Ribbon',          animation: 'wipeRight',  themeOverridable: true },
+            minimal:   { label: 'Minimal',         animation: 'fadeSlide',  themeOverridable: true },
+        },
+        animations: ['popUp', 'slideLeft', 'wipeRight', 'fadeSlide', 'springScale'],
+        defaultType: 'badge',
+        fields: ['text', 'subtext', 'position'],
+    },
+
+    progressTracker: {
+        label: 'Progress Tracker',
+        group: 'listicle',
+        types: {
+            bar:       { label: 'Bar',             animation: 'slideLeft',  themeOverridable: true },
+            dots:      { label: 'Dots',            animation: 'popUp',      themeOverridable: true },
+            fraction:  { label: 'Fraction',        animation: 'fadeSlide',  themeOverridable: true },
+        },
+        animations: ['slideLeft', 'popUp', 'fadeSlide'],
+        defaultType: 'bar',
+        fields: ['text', 'subtext', 'position'],
+    },
+
+    listicleGrid: {
+        label: 'Listicle Grid',
+        group: 'listicle',
+        types: {
+            grid:      { label: 'Card Grid',       animation: 'staggerSlide', themeOverridable: true },
+            strip:     { label: 'Horizontal Strip', animation: 'staggerSlide', themeOverridable: true },
+            stack:     { label: 'Stacked Bars',     animation: 'staggerSlide', themeOverridable: true },
+        },
+        animations: ['staggerSlide', 'popUp', 'fadeSlide'],
+        defaultType: 'grid',
+        fields: ['text', 'subtext'],
+    },
 };
 
 /**

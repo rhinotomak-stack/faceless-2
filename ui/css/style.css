@@ -3167,6 +3167,25 @@ select:focus {
 }
 .mg-clip.mg-kinetic:hover { box-shadow: 0 0 6px rgba(190, 24, 93, 0.6); }
 
+/* Listicle Items track — distinct from MG track */
+.mg-clip.mg-listicle-counter {
+    background: linear-gradient(135deg, #16a34a, #4ade80) !important;
+    border-color: rgba(74, 222, 128, 0.5) !important;
+}
+.mg-clip.mg-listicle-counter:hover { box-shadow: 0 0 6px rgba(22, 163, 74, 0.6); }
+
+.mg-clip.mg-listicle-tracker {
+    background: linear-gradient(135deg, #0d9488, #2dd4bf) !important;
+    border-color: rgba(45, 212, 191, 0.5) !important;
+}
+.mg-clip.mg-listicle-tracker:hover { box-shadow: 0 0 6px rgba(13, 148, 136, 0.6); }
+
+.mg-clip.mg-listicle-grid {
+    background: linear-gradient(135deg, #059669, #34d399) !important;
+    border-color: rgba(52, 211, 153, 0.5) !important;
+}
+.mg-clip.mg-listicle-grid:hover { box-shadow: 0 0 6px rgba(5, 150, 105, 0.6); }
+
 /* ========================================
    OVERLAY / VFX TRACK — per-type colors
    ======================================== */

@@ -472,7 +472,7 @@ function createWindow() {
     });
 
     // Disable caching so CSS/JS changes are picked up immediately
-    mainWindow.webContents.session.clearCache();
+    mainWindow.webContents.session.clearCache().catch(() => {});
 
     // Set window title with project name
     if (PROJECT_NAME) {
@@ -572,6 +572,15 @@ function createWindow() {
 
     mainWindow.on('closed', () => {
         mainWindow = null;
+    });
+
+    // Forward renderer console messages to main process log (critical for diagnostics)
+    mainWindow.webContents.on('console-message', (event, level, message, line, sourceId) => {
+        // level: 0=verbose, 1=info, 2=warning, 3=error
+        if (level >= 2 || message.includes('✅') || message.includes('❌') || message.includes('Restored project') || message.includes('No saved project') || message.includes('[PreCache]')) {
+            const prefix = level >= 3 ? '[RENDERER ERROR]' : level >= 2 ? '[RENDERER WARN]' : '[RENDERER]';
+            console.log(`${prefix} ${message}`);
+        }
     });
 
     console.log('🎬 YTA Empire WEBGL started');
@@ -812,6 +821,11 @@ ipcMain.handle('run-build', async (event, options) => {
             }
         };
 
+        sendProgress(5, '🔑 Checking API tokens...');
+
+        // Pre-flight: check VK token before build starts
+        await checkVKToken(sendProgress);
+
         sendProgress(10, '🎙️ Transcribing audio...');
 
         // Run the build script
@@ -849,6 +863,10 @@ ipcMain.handle('run-build', async (event, options) => {
             const isSmartAI = options.smartAI !== false && options.smartAI !== 'false';
             buildEnv.SMART_AI = isSmartAI ? 'true' : 'false';
             console.log(`   🧠 Smart AI: smartAI=${options.smartAI} (${typeof options.smartAI}) → SMART_AI=${buildEnv.SMART_AI}`);
+            // Clip Analyzer toggle
+            const clipAnalyzerOn = options.clipAnalyzer !== false && options.clipAnalyzer !== 'false';
+            buildEnv.CLIP_ANALYZER_ENABLED = clipAnalyzerOn ? 'true' : 'false';
+            console.log(`   🎬 Clip Analyzer: ${clipAnalyzerOn ? 'ON' : 'OFF'}`);
             // Also pass DOTENV_PATH so build pipeline loads the project-local .env
             buildEnv.DOTENV_PATH = path.join(PROJECT_DIR, '.env');
             // Pass --smart-ai flag as CLI arg for reliability (env vars can be lost on Windows)
@@ -1036,18 +1054,21 @@ ipcMain.handle('save-project-file', async (event, data) => {
 
 // Load .fvp project file
 ipcMain.handle('load-project-file', async () => {
+    console.log('[IPC] load-project-file called, PROJECT_DIR:', PROJECT_DIR);
     try {
         // Try expected .fvp name first, then scan for any .fvp in project dir
         let fvpPath = getProjectFilePath();
+        console.log('[IPC] Expected .fvp path:', fvpPath, 'exists:', fs.existsSync(fvpPath));
         if (!fs.existsSync(fvpPath)) {
             // Scan for any .fvp file (handles renamed projects or legacy "project.fvp")
             const files = fs.readdirSync(PROJECT_DIR).filter(f => f.endsWith('.fvp'));
             if (files.length > 0) fvpPath = path.join(PROJECT_DIR, files[0]);
             else fvpPath = null;
+            console.log('[IPC] Scanned .fvp files:', files, 'resolved:', fvpPath);
         }
         if (fvpPath) {
             const data = JSON.parse(fs.readFileSync(fvpPath, 'utf8'));
-            console.log('✅ Loaded project from .fvp file:', fvpPath);
+            console.log('✅ Loaded project from .fvp file:', fvpPath, '| scenes:', data?.videoPlan?.scenes?.length || 0);
             return data;
         }
 
@@ -1062,6 +1083,7 @@ ipcMain.handle('load-project-file', async () => {
             return { version: 1, savedAt: null, settings: null, videoPlan };
         }
 
+        console.log('⚠️ No .fvp or video-plan.json found in:', PROJECT_DIR);
         return null;
     } catch (error) {
         console.error('❌ Failed to load project file:', error);
@@ -1893,6 +1915,31 @@ ipcMain.handle('get-project-info', async () => {
     };
 });
 
+// Qwen model pool status + reset (used by UI)
+const _qwenExhaustedPath = path.join(APP_ROOT, '.qwen-exhausted-models.json');
+ipcMain.handle('qwen-pool-status', async () => {
+    try {
+        if (fs.existsSync(_qwenExhaustedPath)) {
+            const data = JSON.parse(fs.readFileSync(_qwenExhaustedPath, 'utf8'));
+            const exhausted = Object.values(data).filter(v => v === true).length;
+            return { exhausted, total: Object.keys(data).length };
+        }
+        return { exhausted: 0, total: 0 };
+    } catch (e) {
+        return { exhausted: 0, total: 0 };
+    }
+});
+ipcMain.handle('qwen-pool-reset', async () => {
+    try {
+        if (fs.existsSync(_qwenExhaustedPath)) {
+            fs.unlinkSync(_qwenExhaustedPath);
+        }
+        return { success: true };
+    } catch (e) {
+        return { success: false, error: e.message };
+    }
+});
+
 // Launch a new instance with a new project folder
 // options: { projectName, location } — if provided, creates named subfolder
 ipcMain.handle('launch-new-instance', async (event, options) => {
@@ -2080,12 +2127,193 @@ if (process.platform === 'win32' && !fs.existsSync(fvpRegisteredFlag)) {
 }
 
 // ========================================
+// VK Token Auto-Refresh (OAuth popup)
+// ========================================
+
+/**
+ * Check if VK token is valid. If expired and VK_APP_ID is set,
+ * automatically open OAuth popup to get a fresh token before build starts.
+ */
+async function checkVKToken(sendProgress) {
+    // Check both project .env and app .env for VK credentials
+    const envPaths = [
+        path.join(PROJECT_DIR, '.env'),
+        path.join(APP_ROOT, '.env'),
+    ];
+    let token = '', appId = '';
+    for (const envPath of envPaths) {
+        try {
+            const content = fs.readFileSync(envPath, 'utf8');
+            if (!token) {
+                const m = content.match(/^VK_ACCESS_TOKEN=(.+)$/m);
+                if (m) token = m[1].trim();
+            }
+            if (!appId) {
+                const m = content.match(/^VK_APP_ID=(.+)$/m);
+                if (m) appId = m[1].trim();
+            }
+        } catch (e) {}
+    }
+
+    // No token or no app ID — skip silently
+    if (!token || !appId) return;
+
+    // Quick validation: call video.search (the actual endpoint we use) with current token
+    try {
+        const https = require('https');
+        const valid = await new Promise((resolve) => {
+            const url = `https://api.vk.com/method/video.search?q=test&count=1&access_token=${token}&v=5.199`;
+            https.get(url, { timeout: 8000 }, (res) => {
+                let data = '';
+                res.on('data', c => data += c);
+                res.on('end', () => {
+                    try {
+                        const json = JSON.parse(data);
+                        resolve(!json.error || json.error.error_code !== 5);
+                    } catch (e) { resolve(true); } // parse error = assume ok
+                });
+            }).on('error', () => resolve(true)); // network error = assume ok, let build handle it
+        });
+
+        if (valid) {
+            console.log('[VK] Token is valid');
+            return;
+        }
+    } catch (e) {
+        return; // can't check = don't block build
+    }
+
+    // Token expired — open OAuth popup
+    console.log('[VK] Token expired — opening refresh popup...');
+    if (sendProgress) sendProgress(5, '🔑 VK token expired — authorize in popup...');
+
+    const result = await openVKOAuthPopup(appId);
+    if (result.success) {
+        console.log('[VK] Token refreshed successfully');
+        if (sendProgress) sendProgress(8, '🔑 VK token refreshed!');
+    } else {
+        console.log(`[VK] Token refresh failed: ${result.error} — VK provider will be skipped`);
+    }
+}
+
+/**
+ * Opens a BrowserWindow to VK OAuth, waits for user to authorize,
+ * extracts token from redirect, saves to .env and process.env.
+ */
+function openVKOAuthPopup(appId) {
+    const redirectUri = 'https://oauth.vk.com/blank.html';
+    // scope=video as string + v=5.131 — this combo works for Mini-apps (numeric scope IDs don't)
+    const authUrl = `https://oauth.vk.com/authorize?client_id=${appId}&display=page&redirect_uri=${encodeURIComponent(redirectUri)}&scope=video&response_type=token&v=5.131`;
+
+    return new Promise((resolve) => {
+        const authWin = new BrowserWindow({
+            width: 600,
+            height: 500,
+            title: 'VK Authorization — Token Refresh',
+            autoHideMenuBar: true,
+            alwaysOnTop: true,
+            webPreferences: { nodeIntegration: false, contextIsolation: true },
+        });
+
+        let resolved = false;
+        const finish = (result) => {
+            if (resolved) return;
+            resolved = true;
+            if (!authWin.isDestroyed()) authWin.close();
+            resolve(result);
+        };
+
+        const saveToken = (token) => {
+            // Save to app .env (where VK_ACCESS_TOKEN lives)
+            updateEnvFileAt(path.join(APP_ROOT, '.env'), 'VK_ACCESS_TOKEN', token);
+            // Also save to project .env if it exists and has VK_ACCESS_TOKEN
+            if (PROJECT_DIR !== APP_ROOT) {
+                const projEnv = path.join(PROJECT_DIR, '.env');
+                try {
+                    const c = fs.readFileSync(projEnv, 'utf8');
+                    if (/^VK_ACCESS_TOKEN=/m.test(c)) {
+                        updateEnvFileAt(projEnv, 'VK_ACCESS_TOKEN', token);
+                    }
+                } catch (e) {}
+            }
+            process.env.VK_ACCESS_TOKEN = token;
+            console.log(`[VK] New token: ${token.substring(0, 15)}...`);
+            finish({ success: true, token });
+        };
+
+        // Watch for navigation to blank.html
+        authWin.webContents.on('will-redirect', (event, url) => {
+            if (url.startsWith(redirectUri)) {
+                const token = extractTokenFromFragment(url);
+                if (token) { event.preventDefault(); saveToken(token); }
+            }
+        });
+
+        authWin.webContents.on('did-navigate', (event, url) => {
+            if (url.startsWith(redirectUri)) {
+                const token = extractTokenFromFragment(url);
+                if (token) saveToken(token);
+            }
+        });
+
+        // Fragment (#access_token=...) doesn't always appear in navigation events.
+        // Extract it via JS once the blank page loads.
+        authWin.webContents.on('did-finish-load', () => {
+            const currentUrl = authWin.webContents.getURL();
+            if (currentUrl.startsWith(redirectUri)) {
+                authWin.webContents.executeJavaScript(`
+                    (() => {
+                        const hash = window.location.hash.substring(1);
+                        const params = new URLSearchParams(hash);
+                        return params.get('access_token') || '';
+                    })()
+                `).then(token => {
+                    if (token) saveToken(token);
+                }).catch(() => {});
+            }
+        });
+
+        authWin.on('closed', () => {
+            finish({ success: false, error: 'Window closed by user' });
+        });
+
+        // Timeout after 3 minutes
+        setTimeout(() => finish({ success: false, error: 'Timeout' }), 3 * 60 * 1000);
+
+        authWin.loadURL(authUrl);
+    });
+}
+
+function extractTokenFromFragment(url) {
+    const hashIdx = url.indexOf('#');
+    if (hashIdx < 0) return null;
+    const params = new URLSearchParams(url.substring(hashIdx + 1));
+    return params.get('access_token') || null;
+}
+
+// IPC handler for manual refresh from UI
+ipcMain.handle('vk-refresh-token', async () => {
+    let appId = '';
+    for (const dir of [PROJECT_DIR, APP_ROOT]) {
+        try {
+            const content = fs.readFileSync(path.join(dir, '.env'), 'utf8');
+            const match = content.match(/^VK_APP_ID=(.+)$/m);
+            if (match && match[1].trim()) { appId = match[1].trim(); break; }
+        } catch (e) {}
+    }
+    if (!appId) return { success: false, error: 'VK_APP_ID not set in .env' };
+    return openVKOAuthPopup(appId);
+});
+
+// ========================================
 // Helper Functions
 // ========================================
 
 function updateEnvFile(key, value) {
-    const envPath = path.join(PROJECT_DIR, '.env');
+    updateEnvFileAt(path.join(PROJECT_DIR, '.env'), key, value);
+}
 
+function updateEnvFileAt(envPath, key, value) {
     try {
         let envContent = '';
         if (fs.existsSync(envPath)) {
@@ -2101,7 +2329,7 @@ function updateEnvFile(key, value) {
         }
 
         fs.writeFileSync(envPath, envContent.trim() + '\n');
-        console.log(`✅ Updated ${key} in .env`);
+        console.log(`✅ Updated ${key} in ${path.basename(path.dirname(envPath))}/.env`);
     } catch (error) {
         console.error('Failed to update .env:', error);
     }
@@ -2117,5 +2345,12 @@ process.on('uncaughtException', (error) => {
 });
 
 process.on('unhandledRejection', (reason, promise) => {
-    console.error('Unhandled Rejection:', reason);
+    // Log more detail — plain objects serialize as {} with console.error
+    if (reason instanceof Error) {
+        console.error('Unhandled Rejection:', reason.message, reason.stack);
+    } else if (reason && typeof reason === 'object') {
+        console.error('Unhandled Rejection (object):', JSON.stringify(reason, null, 2));
+    } else {
+        console.error('Unhandled Rejection:', reason);
+    }
 });

@@ -166,11 +166,20 @@
 
                 <div class="panel-section">
                     <h3>🎬 Footage Sources</h3>
+                    <label class="source-toggle" style="margin-bottom:8px;" title="Deep clip analysis using Qwen Omni — sends 8 frames per clip for holistic video understanding (watermarks, motion, relevance)">
+                        <input type="checkbox" id="clip-analyzer-toggle" checked> <strong>Clip Analyzer</strong> <small style="color:#888">(Omni multimodal)</small>
+                    </label>
+                    <div style="margin-bottom:8px;display:flex;align-items:center;gap:6px;">
+                        <button id="reset-qwen-pool-btn" style="padding:2px 8px;font-size:11px;background:#2a2a3a;color:#ccc;border:1px solid #444;border-radius:4px;cursor:pointer;" title="Reset exhausted Qwen VL/Omni model pool (use after changing API key)">🔄 Reset Qwen Pool</button>
+                        <span id="qwen-pool-status" style="font-size:11px;color:#888;"></span>
+                    </div>
                     <div class="source-toggles">
                         <label class="source-toggle"><input type="checkbox" id="src-pexels" checked> Pexels</label>
                         <label class="source-toggle"><input type="checkbox" id="src-pixabay" checked> Pixabay</label>
                         <label class="source-toggle"><input type="checkbox" id="src-youtube"> YouTube (yt-dlp)</label>
-                        <label class="source-toggle"><input type="checkbox" id="src-news-video"> News Sites (yt-dlp)</label>
+                        <label class="source-toggle"><input type="checkbox" id="src-telegram" checked> Telegram (yt-dlp)</label>
+                        <label class="source-toggle"><input type="checkbox" id="src-vk-video" checked> VK Video</label>
+                        <label class="source-toggle"><input type="checkbox" id="src-reddit" checked> Reddit</label>
                         <label class="source-toggle"><input type="checkbox" id="src-unsplash" checked> Unsplash</label>
                         <label class="source-toggle"><input type="checkbox" id="src-google-cse"> Google CSE</label>
                         <label class="source-toggle"><input type="checkbox" id="src-bing"> Bing</label>
@@ -492,6 +501,39 @@
                                 <input type="range" id="prop-border-radius" class="property-slider" min="0" max="50" step="1" value="0">
                                 <input type="text" id="prop-border-radius-val" class="property-value property-value-input" value="0%">
                             </div>
+                            <!-- Floating Frame Properties -->
+                            <div id="prop-floating-section" style="display:none">
+                                <div class="property-section-label">Floating Frame</div>
+                                <div class="property-row">
+                                    <label>Framing</label>
+                                    <select id="prop-framing" class="property-select">
+                                        <option value="fullscreen">Fullscreen</option>
+                                        <option value="cinematic">Cinematic</option>
+                                        <option value="floating">Floating</option>
+                                    </select>
+                                </div>
+                                <div id="prop-floating-controls">
+                                    <div class="property-row">
+                                        <label>Shadow</label>
+                                        <input type="range" id="prop-shadow" class="property-slider" min="0" max="1" step="0.05" value="0.5">
+                                        <input type="text" id="prop-shadow-val" class="property-value property-value-input" value="0.50">
+                                    </div>
+                                    <div class="property-row">
+                                        <label>Animation</label>
+                                        <select id="prop-floating-anim" class="property-select">
+                                            <option value="slideRight">Slide Right</option>
+                                            <option value="slideLeft">Slide Left</option>
+                                            <option value="slideUp">Slide Up</option>
+                                            <option value="fadeScale">Fade Scale</option>
+                                        </select>
+                                    </div>
+                                    <div class="property-row">
+                                        <label>Anim Speed</label>
+                                        <input type="range" id="prop-floating-anim-dur" class="property-slider" min="0.2" max="1.5" step="0.05" value="0.6">
+                                        <input type="text" id="prop-floating-anim-dur-val" class="property-value property-value-input" value="0.60s">
+                                    </div>
+                                </div>
+                            </div>
                             <!-- Effects -->
                             <div id="prop-effects-section" style="display:none">
                                 <div class="property-section-label">Effects</div>
@@ -616,6 +658,41 @@
                                     <option value="political">Political</option>
                                 </select>
                             </div>
+                            <!-- Listicle Template Settings -->
+                            <div id="mg-listicle-section" style="display:none">
+                                <div style="padding:6px 0 2px; font-size:11px; color:#888; text-transform:uppercase; letter-spacing:0.5px; border-top:1px solid #333; margin-top:4px">Listicle Template</div>
+                                <div class="property-row" id="mg-listicle-template-row">
+                                    <label>Template</label>
+                                    <select id="mg-listicle-template" class="property-select">
+                                        <!-- Populated dynamically from registry -->
+                                    </select>
+                                </div>
+                                <div class="property-row" id="mg-listicle-anim-row">
+                                    <label>Animation</label>
+                                    <select id="mg-listicle-anim" class="property-select">
+                                        <!-- Populated dynamically from registry -->
+                                    </select>
+                                </div>
+                                <div class="property-row" id="mg-listicle-items-row">
+                                    <label>Items</label>
+                                    <input type="number" id="mg-listicle-items" class="property-input" min="1" max="10" value="5" style="width:60px">
+                                    <span style="font-size:11px;color:#888;margin-left:4px">visible items</span>
+                                </div>
+                                <div class="property-row" id="mg-listicle-number-row">
+                                    <label>Number</label>
+                                    <input type="text" id="mg-listicle-number" class="property-input" placeholder="e.g. #3 or 2/5" style="width:80px">
+                                    <span style="font-size:11px;color:#888;margin-left:4px">counter / progress</span>
+                                </div>
+                                <div class="property-row" id="mg-listicle-bg-row">
+                                    <label>Background</label>
+                                    <select id="mg-listicle-bg" class="property-select">
+                                        <option value="auto">Auto (theme)</option>
+                                        <option value="none">None (Transparent)</option>
+                                        <option value="scrim">Scrim Dark</option>
+                                        <option value="solid-dark">Solid Dark</option>
+                                    </select>
+                                </div>
+                            </div>
                             <div class="property-row">
                                 <label>Text</label>
                                 <input type="text" id="mg-text" class="property-input" placeholder="Text content">
@@ -643,6 +720,146 @@
                                 <label>Anim Speed</label>
                                 <input type="range" id="mg-anim-speed" class="property-slider" min="0.3" max="2" step="0.1" value="1">
                                 <span id="mg-anim-speed-val" class="property-value">1.0x</span>
+                            </div>
+                        </div>
+
+                        <!-- Listicle Items Properties Panel -->
+                        <div id="listicle-properties" class="clip-properties hidden">
+                            <div class="property-row">
+                                <label>Type</label>
+                                <select id="li-type" class="property-select">
+                                    <option value="listicleCounter">Listicle Item</option>
+                                </select>
+                            </div>
+                            <div class="property-row">
+                                <label>Variant</label>
+                                <select id="li-template" class="property-select">
+                                    <!-- Populated dynamically from registry -->
+                                </select>
+                            </div>
+                            <div class="property-row">
+                                <label>Style</label>
+                                <select id="li-style" class="property-select">
+                                    <option value="clean">Clean</option>
+                                    <option value="bold">Bold</option>
+                                    <option value="minimal">Minimal</option>
+                                    <option value="neon">Neon</option>
+                                    <option value="cinematic">Cinematic</option>
+                                    <option value="elegant">Elegant</option>
+                                </select>
+                            </div>
+                            <div class="property-row">
+                                <label>Animation</label>
+                                <select id="li-animation" class="property-select">
+                                    <!-- Populated dynamically from registry -->
+                                </select>
+                            </div>
+                            <div class="property-row" id="li-number-row">
+                                <label>Number</label>
+                                <input type="text" id="li-number" class="property-input" placeholder="#3 or 2/5" style="width:100px">
+                            </div>
+                            <div class="property-row" id="li-title-row">
+                                <label>Title</label>
+                                <input type="text" id="li-title" class="property-input" placeholder="Item name">
+                            </div>
+                            <div class="property-row">
+                                <label>Position</label>
+                                <select id="li-position" class="property-select">
+                                    <option value="bottomLeft">Bottom Left</option>
+                                    <option value="bottomRight">Bottom Right</option>
+                                    <option value="topLeft">Top Left</option>
+                                    <option value="topRight">Top Right</option>
+                                    <option value="center">Center</option>
+                                </select>
+                            </div>
+                            <div class="property-row">
+                                <label>Scale</label>
+                                <input type="range" id="li-scale" class="property-slider" min="0.5" max="2.5" step="0.1" value="1.3">
+                                <span id="li-scale-val" class="property-value">1.3x</span>
+                            </div>
+                            <div class="property-row">
+                                <label>Duration</label>
+                                <input type="range" id="li-duration" class="property-slider" min="1" max="10" step="0.5" value="4">
+                                <span id="li-duration-val" class="property-value">4.0s</span>
+                            </div>
+                            <div class="property-row">
+                                <label>Anim Speed</label>
+                                <input type="range" id="li-anim-speed" class="property-slider" min="0.3" max="2" step="0.1" value="1">
+                                <span id="li-anim-speed-val" class="property-value">1.0x</span>
+                            </div>
+                        </div>
+
+                        <!-- Listicle Templates Properties Panel (separate from MGs and counter items) -->
+                        <div id="template-properties" class="clip-properties hidden">
+                            <div class="property-row">
+                                <label>Template</label>
+                                <select id="tpl-type" class="property-select">
+                                    <option value="listicleGrid">Listicle Overview</option>
+                                    <option value="chapterCard">Chapter Card</option>
+                                    <option value="locationCard">Location Card</option>
+                                    <option value="quoteCard">Quote Card</option>
+                                    <option value="keyTakeaway">Key Takeaway</option>
+                                    <option value="comparisonCard">Comparison Card</option>
+                                    <option value="timelineCard">Timeline Card</option>
+                                    <option value="factCard">Fact Card</option>
+                                    <option value="imageShowcase">Image Showcase</option>
+                                </select>
+                            </div>
+                            <div class="property-row">
+                                <label>Variant</label>
+                                <select id="tpl-variant" class="property-select">
+                                    <!-- Populated dynamically from TEMPLATE_REGISTRY -->
+                                </select>
+                            </div>
+                            <div class="property-row">
+                                <label>Animation</label>
+                                <select id="tpl-animation" class="property-select">
+                                    <!-- Populated dynamically from TEMPLATE_REGISTRY -->
+                                </select>
+                            </div>
+                            <div class="property-row">
+                                <label>Style</label>
+                                <select id="tpl-style" class="property-select">
+                                    <option value="clean">Clean</option>
+                                    <option value="bold">Bold</option>
+                                    <option value="minimal">Minimal</option>
+                                    <option value="neon">Neon</option>
+                                    <option value="cinematic">Cinematic</option>
+                                    <option value="elegant">Elegant</option>
+                                </select>
+                            </div>
+                            <div class="property-row">
+                                <label>Background</label>
+                                <select id="tpl-background" class="property-select">
+                                    <option value="">None (Transparent)</option>
+                                    <option value="solid-black">Solid Black</option>
+                                    <option value="solid-dark">Solid Dark</option>
+                                    <option value="scrim-light">Scrim Light</option>
+                                    <option value="scrim">Scrim Medium</option>
+                                    <option value="scrim-dark">Scrim Dark</option>
+                                    <optgroup label="Image Backgrounds" id="tpl-bg-images">
+                                        <!-- Populated dynamically from assets/backgrounds/ -->
+                                    </optgroup>
+                                    <optgroup label="Gradients">
+                                        <option value="gradient:dark-gradient">Dark Gradient</option>
+                                        <option value="gradient:dark-blue">Dark Blue</option>
+                                        <option value="gradient:midnight">Midnight</option>
+                                        <option value="gradient:red-dark">Red Dark</option>
+                                        <option value="gradient:noir">Noir</option>
+                                        <option value="gradient:ocean-deep">Ocean Deep</option>
+                                        <option value="gradient:purple-haze">Purple Haze</option>
+                                        <option value="gradient:blue-minimal">Blue Minimal</option>
+                                        <option value="gradient:green-gradient">Green Gradient</option>
+                                        <option value="gradient:warm-sunset">Warm Sunset</option>
+                                        <option value="gradient:grid-texture">Grid Texture</option>
+                                        <option value="gradient:cream">Cream</option>
+                                    </optgroup>
+                                </select>
+                            </div>
+                            <div class="property-row">
+                                <label>Anim Speed</label>
+                                <input type="range" id="tpl-anim-speed" class="property-slider" min="0.3" max="2" step="0.1" value="1">
+                                <span id="tpl-anim-speed-val" class="property-value">1.0x</span>
                             </div>
                         </div>
 

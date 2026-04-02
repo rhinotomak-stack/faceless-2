@@ -11,7 +11,8 @@
     "start": "electron .",
     "start:v2": "set EXPORT_V2=1&& electron .",
     "dev": "electron . --dev",
-    "setup-empire": "echo Setup removed"
+    "setup-empire": "echo Setup removed",
+    "vk-token": "node refresh-vk-token.js"
   },
   "devDependencies": {
     "electron": "^40.1.0",

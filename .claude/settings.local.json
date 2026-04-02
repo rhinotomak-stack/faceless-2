@@ -10,7 +10,9 @@
       "WebFetch(domain:docs.vidrush.ai)",
       "WebFetch(domain:github.com)",
       "Bash(where melt)",
-      "Bash(where melt.exe)"
+      "Bash(where melt.exe)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code} %{size_download}\" -H \"User-Agent: Mozilla/5.0\" \"https://t.me/s/intelopenSource\")",
+      "WebSearch"
     ]
   }
 }

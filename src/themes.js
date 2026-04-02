@@ -389,6 +389,43 @@ const BACKGROUND_LIBRARY = {
         themes: ['minimal', 'modern', 'standard'],
         mood: ['calm', 'cool', 'professional'],
     },
+    // Soft/solid backgrounds (ideal for floating frame)
+    'soft-beige': {
+        name: 'Soft Beige',
+        css: 'linear-gradient(180deg, #e8dcc8 0%, #d4c5a9 50%, #c4b494 100%)',
+        themes: ['history', 'standard', 'minimal'],
+        mood: ['warm', 'calm', 'bright'],
+    },
+    'warm-white': {
+        name: 'Warm White',
+        css: 'linear-gradient(180deg, #f5f0e8 0%, #ebe3d5 50%, #ddd3c0 100%)',
+        themes: ['minimal', 'standard', 'history'],
+        mood: ['warm', 'bright', 'calm'],
+    },
+    'soft-gray': {
+        name: 'Soft Gray',
+        css: 'linear-gradient(180deg, #d0d0d0 0%, #b8b8b8 50%, #a0a0a0 100%)',
+        themes: ['minimal', 'modern', 'standard'],
+        mood: ['calm', 'professional', 'cool'],
+    },
+    'slate': {
+        name: 'Slate',
+        css: 'linear-gradient(180deg, #2c3e50 0%, #1a252f 50%, #0e171f 100%)',
+        themes: ['crime', 'modern', 'standard'],
+        mood: ['dark', 'professional', 'cool'],
+    },
+    'warm-charcoal': {
+        name: 'Warm Charcoal',
+        css: 'linear-gradient(180deg, #3a3530 0%, #2a2520 50%, #1a1510 100%)',
+        themes: ['crime', 'history', 'standard'],
+        mood: ['dark', 'warm', 'dramatic'],
+    },
+    'paper': {
+        name: 'Paper',
+        css: 'linear-gradient(180deg, #f0ead6 0%, #e6dcc6 50%, #d6ccb2 100%)',
+        themes: ['history', 'minimal', 'standard'],
+        mood: ['warm', 'calm', 'bright'],
+    },
 };
 
 // ============================================================
@@ -1025,34 +1062,104 @@ const MG_STYLE_PRESETS = {
 // Structure: MG_THEME_OVERRIDES[themeId][mgCategory] = { style, anim, colors }
 const MG_THEME_OVERRIDES = {
     crime: {
-        lowerThird:  { style: 'banner',   anim: 'wipeRight', colors: { bgFill: '#cc0000', textFill: '#ffffff', accentFill: '#ffffff' } },
-        callout:     { style: 'accent',   anim: 'slideLeft', colors: { bgFill: 'rgba(30,0,0,0.85)', textFill: '#ffffff', accentFill: '#cc0000' } },
-        statCounter: { style: 'standard', anim: 'countUp',   colors: { bgFill: 'rgba(30,0,0,0.8)', textFill: '#ffffff', accentFill: '#cc0000' } },
-        typewriter:  { style: 'standard', anim: 'slideLeft', colors: { bgFill: 'rgba(30,0,0,0.85)', textFill: '#ffffff', accentFill: '#cc0000' } },
+        lowerThird:      { style: 'banner',   anim: 'wipeRight', colors: { bgFill: '#cc0000', textFill: '#ffffff', accentFill: '#ffffff' } },
+        callout:         { style: 'accent',   anim: 'slideLeft', colors: { bgFill: 'rgba(30,0,0,0.85)', textFill: '#ffffff', accentFill: '#cc0000' } },
+        statCounter:     { style: 'standard', anim: 'countUp',   colors: { bgFill: 'rgba(30,0,0,0.8)', textFill: '#ffffff', accentFill: '#cc0000' } },
+        typewriter:      { style: 'standard', anim: 'slideLeft', colors: { bgFill: 'rgba(30,0,0,0.85)', textFill: '#ffffff', accentFill: '#cc0000' } },
+        listicleCounter: { style: 'ribbon',   anim: 'wipeRight', colors: { bgFill: '#cc0000', textFill: '#ffffff', accentFill: '#ffd700', numberFill: '#ffffff' } },
+        progressTracker: { style: 'bar',      anim: 'slideLeft', colors: { bgFill: 'rgba(30,0,0,0.8)', textFill: '#ffffff', accentFill: '#cc0000', trackFill: 'rgba(255,255,255,0.15)' } },
+        listicleGrid:    { style: 'grid',     anim: 'staggerSlide', colors: { bgFill: 'rgba(20,0,0,0.92)', textFill: '#ffffff', accentFill: '#cc0000', cardFill: 'rgba(60,0,0,0.85)', numberFill: '#ffd700', gridLine: 'rgba(204,0,0,0.15)' } },
     },
     history: {
-        lowerThird:  { style: 'glass',    anim: 'fadeSlide', colors: { bgFill: 'rgba(20,10,5,0.7)', textFill: '#ffffff', accentFill: '#d4af37' } },
-        callout:     { style: 'standard', anim: 'fadeSlide', colors: { bgFill: 'rgba(20,10,5,0.75)', textFill: '#f5f0e0', accentFill: '#d4af37' } },
-        statCounter: { style: 'standard', anim: 'countUp',   colors: { bgFill: 'rgba(20,10,5,0.7)', textFill: '#f5f0e0', accentFill: '#d4af37' } },
-        typewriter:  { style: 'standard', anim: 'fadeSlide', colors: { bgFill: 'rgba(20,10,5,0.8)', textFill: '#f5f0e0', accentFill: '#d4af37' } },
+        lowerThird:      { style: 'glass',    anim: 'fadeSlide', colors: { bgFill: 'rgba(20,10,5,0.7)', textFill: '#ffffff', accentFill: '#d4af37' } },
+        callout:         { style: 'standard', anim: 'fadeSlide', colors: { bgFill: 'rgba(20,10,5,0.75)', textFill: '#f5f0e0', accentFill: '#d4af37' } },
+        statCounter:     { style: 'standard', anim: 'countUp',   colors: { bgFill: 'rgba(20,10,5,0.7)', textFill: '#f5f0e0', accentFill: '#d4af37' } },
+        typewriter:      { style: 'standard', anim: 'fadeSlide', colors: { bgFill: 'rgba(20,10,5,0.8)', textFill: '#f5f0e0', accentFill: '#d4af37' } },
+        listicleCounter: { style: 'badge',    anim: 'fadeSlide', colors: { bgFill: 'rgba(20,10,5,0.75)', textFill: '#f5f0e0', accentFill: '#d4af37', numberFill: '#d4af37' } },
+        progressTracker: { style: 'dots',     anim: 'fadeSlide', colors: { bgFill: 'rgba(20,10,5,0.6)', textFill: '#f5f0e0', accentFill: '#d4af37', trackFill: 'rgba(212,175,55,0.2)' } },
+        listicleGrid:    { style: 'stack',    anim: 'staggerSlide', colors: { bgFill: 'rgba(10,5,0,0.9)', textFill: '#f5f0e0', accentFill: '#d4af37', cardFill: 'rgba(30,20,10,0.8)', numberFill: '#d4af37', gridLine: 'rgba(212,175,55,0.1)' } },
     },
     modern: {
-        lowerThird:  { style: 'split',    anim: 'popUp',     colors: { bgFill: '#00ccff', textFill: '#ffffff', accentFill: '#ff4500' } },
-        callout:     { style: 'minimal',  anim: 'fadeSlide', colors: { bgFill: 'rgba(0,0,0,0.5)', textFill: '#ffffff', accentFill: '#00ccff' } },
-        statCounter: { style: 'ticker',   anim: 'countUp',   colors: { bgFill: 'rgba(0,10,20,0.85)', textFill: '#ffffff', accentFill: '#00ccff' } },
-        typewriter:  { style: 'naked',    anim: 'slideLeft', colors: { bgFill: null, textFill: '#ffffff', accentFill: '#00ccff' } },
+        lowerThird:      { style: 'split',    anim: 'popUp',     colors: { bgFill: '#00ccff', textFill: '#ffffff', accentFill: '#ff4500' } },
+        callout:         { style: 'minimal',  anim: 'fadeSlide', colors: { bgFill: 'rgba(0,0,0,0.5)', textFill: '#ffffff', accentFill: '#00ccff' } },
+        statCounter:     { style: 'ticker',   anim: 'countUp',   colors: { bgFill: 'rgba(0,10,20,0.85)', textFill: '#ffffff', accentFill: '#00ccff' } },
+        typewriter:      { style: 'naked',    anim: 'slideLeft', colors: { bgFill: null, textFill: '#ffffff', accentFill: '#00ccff' } },
+        listicleCounter: { style: 'pill',     anim: 'springScale', colors: { bgFill: '#00ccff', textFill: '#ffffff', accentFill: '#ff4500', numberFill: '#ffffff' } },
+        progressTracker: { style: 'bar',      anim: 'slideLeft', colors: { bgFill: 'rgba(0,10,20,0.85)', textFill: '#ffffff', accentFill: '#00ccff', trackFill: 'rgba(0,204,255,0.15)' } },
+        listicleGrid:    { style: 'strip',    anim: 'staggerSlide', colors: { bgFill: 'rgba(0,5,15,0.92)', textFill: '#ffffff', accentFill: '#00ccff', cardFill: 'rgba(0,20,40,0.85)', numberFill: '#ff4500', gridLine: 'rgba(0,204,255,0.12)' } },
     },
     minimal: {
-        lowerThird:  { style: 'underline', anim: 'fadeSlide', colors: null },
-        callout:     { style: 'minimal',  anim: 'fadeSlide', colors: null },
-        statCounter: { style: 'ticker',   anim: 'countUp',   colors: null },
-        typewriter:  { style: 'naked',    anim: 'fadeSlide', colors: null },
+        lowerThird:      { style: 'underline', anim: 'fadeSlide', colors: null },
+        callout:         { style: 'minimal',  anim: 'fadeSlide', colors: null },
+        statCounter:     { style: 'ticker',   anim: 'countUp',   colors: null },
+        typewriter:      { style: 'naked',    anim: 'fadeSlide', colors: null },
+        listicleCounter: { style: 'minimal',  anim: 'fadeSlide', colors: null },
+        progressTracker: { style: 'fraction', anim: 'fadeSlide', colors: null },
+        listicleGrid:    { style: 'stack',    anim: 'staggerSlide', colors: null },
     },
     standard: {
-        lowerThird:  { style: 'box',      anim: 'slideLeft', colors: { bgFill: '#0055aa', textFill: '#ffffff', accentFill: '#00cc66' } },
-        callout:     { style: 'standard', anim: 'springScale', colors: { bgFill: 'rgba(0,0,0,0.75)', textFill: '#ffffff', accentFill: '#0055aa' } },
-        statCounter: { style: 'standard', anim: 'countUp',   colors: { bgFill: 'rgba(0,0,0,0.75)', textFill: '#ffffff', accentFill: '#0055aa' } },
-        typewriter:  { style: 'standard', anim: 'slideLeft', colors: { bgFill: 'rgba(0,0,0,0.75)', textFill: '#ffffff', accentFill: '#0055aa' } },
+        lowerThird:      { style: 'box',      anim: 'slideLeft', colors: { bgFill: '#0055aa', textFill: '#ffffff', accentFill: '#00cc66' } },
+        callout:         { style: 'standard', anim: 'springScale', colors: { bgFill: 'rgba(0,0,0,0.75)', textFill: '#ffffff', accentFill: '#0055aa' } },
+        statCounter:     { style: 'standard', anim: 'countUp',   colors: { bgFill: 'rgba(0,0,0,0.75)', textFill: '#ffffff', accentFill: '#0055aa' } },
+        typewriter:      { style: 'standard', anim: 'slideLeft', colors: { bgFill: 'rgba(0,0,0,0.75)', textFill: '#ffffff', accentFill: '#0055aa' } },
+        listicleCounter: { style: 'badge',    anim: 'popUp',     colors: { bgFill: '#0055aa', textFill: '#ffffff', accentFill: '#00cc66', numberFill: '#ffffff' } },
+        progressTracker: { style: 'bar',      anim: 'slideLeft', colors: { bgFill: 'rgba(0,0,0,0.75)', textFill: '#ffffff', accentFill: '#0055aa', trackFill: 'rgba(0,85,170,0.2)' } },
+        listicleGrid:    { style: 'grid',     anim: 'staggerSlide', colors: { bgFill: 'rgba(0,0,10,0.92)', textFill: '#ffffff', accentFill: '#0055aa', cardFill: 'rgba(0,10,30,0.85)', numberFill: '#00cc66', gridLine: 'rgba(0,85,170,0.12)' } },
+    },
+};
+
+// ── Per-theme Template overrides ──
+// Controls which template variant/animation is used for each template type per theme.
+const TEMPLATE_THEME_OVERRIDES = {
+    crime: {
+        chapterCard:    { variant: 'cinematic', animation: 'wipeRight' },
+        quoteCard:      { variant: 'standard',  animation: 'fadeSlide' },
+        locationCard:   { variant: 'cinematic', animation: 'fadeSlide' },
+        keyTakeaway:    { variant: 'cinematic', animation: 'springScale' },
+        comparisonCard: { variant: 'split',     animation: 'flipIn' },
+        timelineCard:   { variant: 'cinematic', animation: 'cascade' },
+        factCard:       { variant: 'splitPanel', animation: 'slideRight' },
+        imageShowcase:  { variant: 'cinematic', animation: 'slideOpposite' },
+    },
+    history: {
+        chapterCard:     { variant: 'standard',  animation: 'fadeSlide' },
+        quoteCard:       { variant: 'cinematic', animation: 'fadeSlide' },
+        locationCard:    { variant: 'minimal',   animation: 'fadeSlide' },
+        keyTakeaway:     { variant: 'standard',  animation: 'fadeSlide' },
+        comparisonCard:  { variant: 'standard',  animation: 'staggerSlide' },
+        timelineCard:    { variant: 'standard',  animation: 'cascade' },
+        factCard:        { variant: 'numbered',   animation: 'staggerSlide' },
+        imageShowcase:   { variant: 'standard',  animation: 'slideOpposite' },
+    },
+    modern: {
+        chapterCard:     { variant: 'minimal',   animation: 'springScale' },
+        quoteCard:       { variant: 'minimal',   animation: 'popUp' },
+        locationCard:    { variant: 'minimal',   animation: 'slideLeft' },
+        keyTakeaway:     { variant: 'standard',  animation: 'springScale' },
+        comparisonCard:  { variant: 'split',     animation: 'flipIn' },
+        timelineCard:    { variant: 'minimal',   animation: 'staggerSlide' },
+        factCard:        { variant: 'overlay',    animation: 'fadeUp' },
+        imageShowcase:   { variant: 'minimal',   animation: 'slideOpposite' },
+    },
+    minimal: {
+        chapterCard:     { variant: 'minimal',   animation: 'fadeSlide' },
+        quoteCard:       { variant: 'minimal',   animation: 'fadeSlide' },
+        locationCard:    { variant: 'minimal',   animation: 'fadeSlide' },
+        keyTakeaway:     { variant: 'minimal',   animation: 'fadeSlide' },
+        comparisonCard:  { variant: 'standard',  animation: 'staggerSlide' },
+        timelineCard:    { variant: 'minimal',   animation: 'staggerSlide' },
+        factCard:        { variant: 'sidebar',    animation: 'slideRight' },
+        imageShowcase:   { variant: 'minimal',   animation: 'fadeSlide' },
+    },
+    standard: {
+        chapterCard:     { variant: 'standard',  animation: 'fadeSlide' },
+        quoteCard:       { variant: 'standard',  animation: 'popUp' },
+        locationCard:    { variant: 'standard',  animation: 'slideLeft' },
+        keyTakeaway:     { variant: 'standard',  animation: 'springScale' },
+        comparisonCard:  { variant: 'standard',  animation: 'staggerSlide' },
+        timelineCard:    { variant: 'standard',  animation: 'cascade' },
+        factCard:        { variant: 'splitPanel', animation: 'slideRight' },
+        imageShowcase:   { variant: 'standard',  animation: 'slideOpposite' },
     },
 };
 
@@ -1149,6 +1256,11 @@ function getThemeTokens(themeId) {
         background: {
             type: theme.background,
             canvasPattern: theme.canvasBackground,
+        },
+
+        // ---- Templates ----
+        templates: {
+            overrides: TEMPLATE_THEME_OVERRIDES[theme.id] || {},
         },
 
         // ---- Raw modifier (for consumers that apply their own) ----
@@ -1281,6 +1393,7 @@ module.exports = {
     MG_STYLE_PRESETS,
     MG_THEME_OVERRIDES,
     LOWER_THIRD_THEME_OVERRIDES,
+    TEMPLATE_THEME_OVERRIDES,
     getTheme,
     getThemeIds,
     getAllThemes,

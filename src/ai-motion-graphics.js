@@ -129,6 +129,7 @@ function extractKeyPhrase(text, maxWords = 8) {
 // Classification: full-screen MGs go on V3, overlay MGs stay on MG track
 const FULLSCREEN_MG_TYPES = new Set([
     'barChart', 'donutChart', 'rankingList', 'timeline', 'comparisonCard', 'bulletList', 'mapChart', 'articleHighlight', 'kineticText'
+    // NOTE: listicleGrid removed — now handled by ai-templates.js
 ]);
 
 // Default positions by type
@@ -277,6 +278,23 @@ const CONTENT_PATTERNS = {
 
                 // Skip age/rank-like: "at age 15", "ranked 3rd"
                 if (/\b(?:age|aged|rank|ranked|number|no\.?)\s*$/i.test(before)) return false;
+
+                // Skip model/designation numbers — numbers that are part of a NAME, not a statistic
+                // Hyphen-adjacent: "S-400", "F-35", "MiG-29", "AK-47"
+                if (/[-‑]\s*$/.test(before)) return false;
+                const after = text.substring(idx + n.length, idx + n.length + 15).toLowerCase();
+                if (/^\s*[-‑]/.test(after)) return false;
+                // Capitalized word directly before number = likely a name/model: "Bavar 373", "Type 052", "Mirage 2000"
+                // Exception: stat verbs ("Reached 500", "Cost 200") are real stats
+                const nameBeforeNum = /\b[A-Z][a-zA-Z]+\s*$/.test(before);
+                if (nameBeforeNum && !/\b(?:reached|grew|rose|fell|dropped|cost|earned|spent|lost|gained|increased|decreased|totaled|surpassed|exceeded|worth|over|about|nearly)\s*$/i.test(before)) return false;
+                // Short uppercase prefix: "S 400", "F 35", "T 72" (1-3 letter designations)
+                if (/\b[A-Z]{1,3}\s*$/.test(before) && !/\b(?:OF|IN|AT|TO|BY|OR|AN|ON|IS)\s*$/i.test(before)) return false;
+                // Number followed by a proper name = model designation: "373 system", not a stat
+                if (/^\s*[A-Z][a-z]/.test(text.substring(idx + n.length, idx + n.length + 15))) {
+                    // But allow "500 million", "200 percent" etc.
+                    if (!/^\s*(?:million|billion|trillion|thousand|percent|%|times|fold)/i.test(after)) return false;
+                }
 
                 return true;
             });
@@ -566,6 +584,13 @@ function generateCandidates(scene, sceneIndex, totalScenes, allowedMGs, alreadyP
     const hasQualifyingStat = statisticHit && statisticHit.score >= 3;
 
     for (const [type, rawScore] of Object.entries(typeScores)) {
+        // Block fullscreen MG types — only Visual Planner can assign fullscreen MGs
+        // MG engine only creates overlay MGs on footage scenes
+        if (FULLSCREEN_MG_TYPES.has(type)) {
+            skipped.push({ type, reason: 'fullscreen type (only VP can assign)' });
+            continue;
+        }
+
         // statCounter MUST have a qualifying statistic pattern — no exceptions
         // This prevents dates, rankings, geographic mentions from triggering statCounter
         if (type === 'statCounter' && !hasQualifyingStat) {
@@ -1531,6 +1556,18 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
             continue;
         }
 
+        // Skip listicleGrid here — it's auto-generated later with proper _listicleItems data
+        if (mgType === 'listicleGrid') {
+            console.log(`  Scene ${i}: [fullscreenMG] listicleGrid handled by auto-generation (skipping VP duplicate)`);
+            continue;
+        }
+
+        // Enforce niche filter: skip fullscreen MGs not allowed in this niche
+        if (!allowedMGs.includes(mgType)) {
+            console.log(`  Scene ${i}: [fullscreenMG] "${mgType}" not allowed in niche "${niche.name}" — skipping`);
+            continue;
+        }
+
         const duration = scene.endTime - scene.startTime;
         const mg = {
             id: `mg-${i}`,
@@ -1660,6 +1697,15 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
             }
 
             if (mg) {
+                // Block fullscreen MG types on footage scenes — only VP can plan fullscreen MGs
+                // These scenes already have footage downloaded; a fullscreen MG would waste that download
+                if (FULLSCREEN_MG_TYPES.has(mg.type)) {
+                    console.log(`    -> Rejected "${mg.type}" (fullscreen type on footage scene — only Visual Planner can assign fullscreen MGs)`);
+                    mg = null;
+                }
+            }
+
+            if (mg) {
                 // Duplicate text rejection — skip if text is too similar to a recent MG
                 if (ctx.isDuplicateText(mg.text)) {
                     console.log(`    -> Rejected (duplicate text): "${mg.text.substring(0, 40)}"`);
@@ -1784,14 +1830,19 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
         }
     }
 
-    // Listicle item counter MGs
+    // Listicle item counter MGs (overlay on LI track)
+    // NOTE: listicleGrid (overview grid) is now handled by ai-templates.js (Step 6.5)
     if (scriptContext.format === 'listicle' && scriptContext.listicleItems) {
         const { generateItemCounterMG } = require('./listicle-format');
         let counterCount = 0;
+        const totalItems = scriptContext.listicleItems.length;
+
         for (const item of scriptContext.listicleItems) {
             const counterMG = generateItemCounterMG(item, scenes, mgStyle);
             if (counterMG) {
                 counterMG.style = mgStyle;
+                // Attach progress data directly to counter (no separate tracker MG)
+                counterMG._progress = { current: item.itemNumber, total: totalItems };
                 results.push(counterMG);
                 counterCount++;
                 const syncSource = item.spokenTime ? 'word-sync' : 'scene-start';
@@ -1799,7 +1850,36 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
             }
         }
         if (counterCount > 0) {
-            console.log(`  [Listicle] Added ${counterCount} item counter MGs`);
+            console.log(`  [Listicle] Added ${counterCount} listicle item MGs (counter + progress combined)`);
+        }
+
+        // Dedup: remove AI-placed overlay MGs that overlap with auto-generated listicle MGs
+        // AI often places "Number three" lowerThirds on scenes near item starts
+        const listicleTimes = results
+            .filter(mg => mg.isListicleCounter || mg.isListicleOverview)
+            .map(mg => ({ start: mg.startTime, end: mg.startTime + (mg.duration || 4) }));
+
+        if (listicleTimes.length > 0) {
+            const overlapMargin = 3; // seconds
+            let removed = 0;
+            for (let i = results.length - 1; i >= 0; i--) {
+                const mg = results[i];
+                if (mg.isListicleCounter || mg.isListicleOverview || mg.selectionMode === 'listicle-counter') continue;
+                if (mg.category === 'fullscreen') continue;
+                const mgStart = mg.startTime;
+                const mgEnd = mgStart + (mg.duration || 3);
+                const overlaps = listicleTimes.some(lt =>
+                    mgStart < lt.end + overlapMargin && mgEnd > lt.start - overlapMargin
+                );
+                if (overlaps) {
+                    console.log(`    [Listicle] Removed overlapping ${mg.type} "${(mg.text || '').substring(0, 30)}" @${mgStart.toFixed(1)}s (too close to listicle counter)`);
+                    results.splice(i, 1);
+                    removed++;
+                }
+            }
+            if (removed > 0) {
+                console.log(`  [Listicle] Dedup: removed ${removed} AI-placed MGs overlapping with listicle counters`);
+            }
         }
     }
 

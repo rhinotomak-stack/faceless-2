@@ -117,6 +117,36 @@ void main() {
 }`;
 
 // ============================================================================
+// DROP SHADOW FRAGMENT — Soft rounded-rect shadow (no texture, pure geometry)
+// ============================================================================
+const DROP_SHADOW_FRAG = `#version 300 es
+precision highp float;
+
+uniform vec4 u_transform; // x=scaleX, y=scaleY, z=offsetX, w=offsetY
+uniform float u_borderRadius; // corner radius (0-0.5)
+uniform float u_opacity; // shadow opacity
+uniform float u_softness; // shadow blur softness (larger = softer edge)
+
+in vec2 v_texCoord;
+out vec4 fragColor;
+
+float roundedBoxSDF(vec2 p, vec2 halfSize, float radius) {
+    vec2 d = abs(p) - halfSize + radius;
+    return length(max(d, 0.0)) - radius;
+}
+
+void main() {
+    // Map texCoord to the shadow rect position
+    vec2 uv = (v_texCoord - 0.5) / u_transform.xy + 0.5 - u_transform.zw;
+    vec2 pos = uv - 0.5;
+    float r = u_borderRadius * 0.5;
+    float dist = roundedBoxSDF(pos, vec2(0.5), r);
+    // Soft falloff: inside = 1.0, outside fades to 0.0 over u_softness range
+    float shadow = 1.0 - smoothstep(-u_softness * 0.5, u_softness, dist);
+    fragColor = vec4(0.0, 0.0, 0.0, shadow * u_opacity);
+}`;
+
+// ============================================================================
 // CROSSFADE FRAGMENT — Blend between two textures
 // ============================================================================
 const CROSSFADE_FRAG = `#version 300 es
@@ -316,6 +346,13 @@ uniform float u_flickerOn;
 uniform float u_flickerIntensity;   // 0-1
 uniform float u_flickerSpeed;       // speed of flicker
 
+// Film Frame params (rounded inner frame with black border)
+uniform float u_filmFrameOn;
+uniform float u_filmFrameBorder;      // border inset in UV space (0.02-0.08)
+uniform float u_filmFrameRadius;      // corner radius in UV space (0.01-0.06)
+uniform float u_filmFrameSoftness;    // edge feather softness (0.005-0.03)
+uniform float u_filmFrameDarken;      // how dark the border gets (0-1, 1=pure black)
+
 // Global effect mask: applies to ALL effects on this scene
 // type: 0=none, 1=radialCenter (soft center), 2=radialEdge (soft edges), 3=linearTB (top→bottom)
 uniform float u_effectMaskType;
@@ -493,6 +530,31 @@ vec3 applyFlicker(vec3 color, vec2 uv) {
     return color * brightness;
 }
 
+// ---- Film Frame (rounded inner rectangle with black border) ----
+vec3 applyFilmFrame(vec3 color, vec2 uv) {
+    // Remap UV so (0,0) is center, accounting for aspect ratio
+    vec2 aspect = vec2(u_resolution.x / u_resolution.y, 1.0);
+    vec2 center = uv - 0.5;
+
+    // Inner frame bounds (inset from edges by border amount)
+    float border = u_filmFrameBorder;
+    vec2 halfSize = vec2(0.5 - border) * aspect;
+    float radius = u_filmFrameRadius;
+
+    // Signed distance to rounded rectangle (in aspect-corrected space)
+    vec2 p = abs(center) * aspect;
+    vec2 q = p - halfSize + radius;
+    float dist = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - radius;
+
+    // Soft feathered edge: 0 inside frame, 1 outside
+    float edge = smoothstep(-u_filmFrameSoftness, u_filmFrameSoftness * 0.5, dist);
+
+    // Darken towards black at edges
+    color = mix(color, vec3(0.0), edge * u_filmFrameDarken);
+
+    return color;
+}
+
 void main() {
     vec2 uv = v_texCoord;
     vec3 color = texture(u_texture, uv).rgb;
@@ -512,6 +574,9 @@ void main() {
     if (u_scratchOn > 0.5) color = applyScratch(color, uv, mask);
     if (u_lightLeakOn > 0.5) color = applyLightLeak(color, uv, mask);
 
+    // Film frame must be LAST — overlays black border on top of everything
+    if (u_filmFrameOn > 0.5) color = applyFilmFrame(color, uv);
+
     fragColor = vec4(clamp(color, 0.0, 1.0), 1.0);
 }`;
 
@@ -520,6 +585,7 @@ window.ShaderLib = {
     QUAD_VERT,
     BLIT_FRAG,
     BLUR_BLIT_FRAG,
+    DROP_SHADOW_FRAG,
     CROSSFADE_FRAG,
     WIPE_FRAG,
     EFFECTS_FRAG,

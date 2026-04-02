@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Listicle Grid Test — All 3 Variants</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #111; color: #eee; font-family: Arial, sans-serif; padding: 20px; }
+h1 { font-size: 20px; margin-bottom: 12px; }
+.controls { margin-bottom: 16px; display: flex; gap: 12px; align-items: center; }
+.controls label { font-size: 13px; }
+.controls select, .controls button { padding: 4px 10px; font-size: 13px; }
+.variant-row { display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 20px; }
+.variant-box { flex: 0 0 auto; }
+.variant-box h3 { font-size: 14px; margin-bottom: 6px; color: #aaa; }
+canvas { border: 1px solid #333; display: block; }
+#status { font-size: 12px; color: #888; margin-top: 8px; }
+</style>
+</head>
+<body>
+
+<h1>Listicle Grid Variants — Thumbnail Test</h1>
+
+<div class="controls">
+    <label>Theme:
+        <select id="themeSelect">
+            <option value="crime">Crime (red)</option>
+            <option value="history">History (gold)</option>
+            <option value="modern" selected>Modern (cyan)</option>
+            <option value="minimal">Minimal</option>
+            <option value="standard">Standard (blue)</option>
+        </select>
+    </label>
+    <label>Items:
+        <select id="itemCount">
+            <option value="3">3</option>
+            <option value="5" selected>5</option>
+            <option value="7">7</option>
+        </select>
+    </label>
+    <label>Thumbs:
+        <select id="thumbMode">
+            <option value="color">Color blocks</option>
+            <option value="gradient">Gradient images</option>
+            <option value="none">No thumbnails</option>
+        </select>
+    </label>
+    <button id="playBtn">▶ Play entrance</button>
+    <button id="resetBtn">⟲ Reset</button>
+</div>
+
+<div class="variant-row">
+    <div class="variant-box">
+        <h3>Grid (2-column cards)</h3>
+        <canvas id="cGrid" width="960" height="540"></canvas>
+    </div>
+    <div class="variant-box">
+        <h3>Strip (horizontal boxes)</h3>
+        <canvas id="cStrip" width="960" height="540"></canvas>
+    </div>
+    <div class="variant-box">
+        <h3>Stack (horizontal bars)</h3>
+        <canvas id="cStack" width="960" height="540"></canvas>
+    </div>
+</div>
+<div id="status">Ready</div>
+
+<!-- Load AnimationUtils (real file) -->
+<script src="ui/js/compositor/AnimationUtils.js"></script>
+
+<!-- Minimal stubs so MGRenderer can construct without errors -->
+<script>
+// ── Theme override colors per theme per listicleGrid ──
+const THEME_OVERRIDES = {
+    crime: {
+        listicleGrid: { style: 'grid', anim: 'staggerSlide', colors: {
+            bgFill: 'rgba(15,0,0,0.94)', cardFill: 'rgba(50,10,10,0.85)',
+            textFill: '#ffffff', accentFill: '#cc0000', numberFill: '#ffd700',
+            gridLine: 'rgba(200,0,0,0.08)',
+        }},
+        listicleCounter: { style: 'ribbon', anim: 'wipeRight', colors: { bg: '#cc0000', text: '#fff', accent: '#ffd700' }},
+        progressTracker: { style: 'bar', anim: 'slideLeft', colors: { bg: 'rgba(204,0,0,0.9)', fill: '#ffd700', text: '#fff' }},
+    },
+    history: {
+        listicleGrid: { style: 'stack', anim: 'staggerSlide', colors: {
+            bgFill: 'rgba(20,15,5,0.92)', cardFill: 'rgba(50,40,20,0.8)',
+            textFill: '#f0e6d0', accentFill: '#b8860b', numberFill: '#ffd700',
+            gridLine: 'rgba(184,134,11,0.08)',
+        }},
+        listicleCounter: { style: 'badge', anim: 'popUp', colors: { bg: '#b8860b', text: '#ffd700', accent: '#f0e6d0' }},
+        progressTracker: { style: 'dots', anim: 'popUp', colors: { bg: 'rgba(184,134,11,0.7)', fill: '#ffd700', text: '#f0e6d0' }},
+    },
+    modern: {
+        listicleGrid: { style: 'strip', anim: 'staggerSlide', colors: {
+            bgFill: 'rgba(0,5,20,0.94)', cardFill: 'rgba(0,30,60,0.85)',
+            textFill: '#e0f0ff', accentFill: '#00d4ff', numberFill: '#ff6b2b',
+            gridLine: 'rgba(0,212,255,0.06)',
+        }},
+        listicleCounter: { style: 'pill', anim: 'slideLeft', colors: { bg: '#00d4ff', text: '#001428', accent: '#ff6b2b' }},
+        progressTracker: { style: 'bar', anim: 'slideLeft', colors: { bg: 'rgba(0,212,255,0.15)', fill: '#00d4ff', text: '#e0f0ff' }},
+    },
+    minimal: {
+        listicleGrid: { style: 'stack', anim: 'staggerSlide', colors: {
+            bgFill: 'rgba(0,0,0,0.88)', cardFill: 'rgba(30,30,30,0.8)',
+            textFill: '#e0e0e0', accentFill: '#666666', numberFill: '#ffffff',
+            gridLine: 'rgba(255,255,255,0.04)',
+        }},
+        listicleCounter: { style: 'minimal', anim: 'fadeSlide', colors: {} },
+        progressTracker: { style: 'fraction', anim: 'fadeSlide', colors: {} },
+    },
+    standard: {
+        listicleGrid: { style: 'grid', anim: 'staggerSlide', colors: {
+            bgFill: 'rgba(0,0,10,0.92)', cardFill: 'rgba(20,20,40,0.85)',
+            textFill: '#ffffff', accentFill: '#0055aa', numberFill: '#22cc66',
+            gridLine: 'rgba(255,255,255,0.06)',
+        }},
+        listicleCounter: { style: 'badge', anim: 'popUp', colors: { bg: '#0055aa', text: '#fff', accent: '#22cc66' }},
+        progressTracker: { style: 'bar', anim: 'slideLeft', colors: { bg: 'rgba(0,85,170,0.2)', fill: '#0055aa', text: '#fff' }},
+    },
+};
+
+// ── Global stubs that MGRenderer._getStyle / _resolveVariant read ──
+const MG_STYLES = {
+    clean: {
+        primary: '#3b82f6', accent: '#f59e0b', bg: 'rgba(0,0,0,0.7)',
+        text: '#ffffff', textSub: 'rgba(255,255,255,0.75)', glow: false,
+    },
+};
+
+window._mgRegistry = { registry: {
+    listicleGrid: {
+        defaultType: 'grid',
+        types: {
+            grid: { animation: 'staggerSlide' },
+            strip: { animation: 'staggerSlide' },
+            stack: { animation: 'staggerSlide' },
+        },
+    },
+    listicleCounter: { defaultType: 'badge', types: { badge: {}, pill: {}, ribbon: {}, minimal: {} } },
+    progressTracker: { defaultType: 'bar', types: { bar: {}, dots: {}, fraction: {} } },
+}};
+
+// Stub theme functions
+function getStyledThemeColors() { return null; }
+function getActiveThemeFonts() { return { heading: 'Arial', body: 'Arial' }; }
+function _resolveActiveTheme() { return document.getElementById('themeSelect').value; }
+
+window._themeTokens = {
+    getTokens(themeId) {
+        const ov = THEME_OVERRIDES[themeId];
+        return ov ? { chrome: { mgOverrides: ov } } : null;
+    }
+};
+</script>
+
+<!-- Load real MGRenderer -->
+<script src="ui/js/compositor/MGRenderer.js"></script>
+
+<script>
+// ── Dummy thumbnail generator ──
+function makeDummyThumbs(count, mode) {
+    if (mode === 'none') return new Array(count).fill(null);
+
+    const colors = ['#e74c3c', '#3498db', '#2ecc71', '#f39c12', '#9b59b6', '#1abc9c', '#e67e22', '#34495e'];
+    const thumbs = [];
+    for (let i = 0; i < count; i++) {
+        const c = document.createElement('canvas');
+        c.width = 320; c.height = 180;
+        const cx = c.getContext('2d');
+        if (mode === 'gradient') {
+            const g = cx.createLinearGradient(0, 0, 320, 180);
+            g.addColorStop(0, colors[i % colors.length]);
+            g.addColorStop(1, colors[(i + 3) % colors.length]);
+            cx.fillStyle = g;
+        } else {
+            cx.fillStyle = colors[i % colors.length];
+        }
+        cx.fillRect(0, 0, 320, 180);
+        // Fake "product" icon
+        cx.fillStyle = 'rgba(255,255,255,0.3)';
+        cx.beginPath();
+        cx.arc(160, 80, 40, 0, Math.PI * 2);
+        cx.fill();
+        cx.fillStyle = 'rgba(255,255,255,0.6)';
+        cx.font = 'bold 28px Arial';
+        cx.textAlign = 'center';
+        cx.textBaseline = 'middle';
+        cx.fillText(`#${i + 1}`, 160, 82);
+        thumbs.push(c);
+    }
+    return thumbs;
+}
+
+// ── Dummy items ──
+const ALL_ITEMS = [
+    { label: 'Premium Wireless Headphones', value: '1' },
+    { label: 'Mechanical Keyboard Pro', value: '2' },
+    { label: 'Ultra-Wide Monitor 34"', value: '3' },
+    { label: 'Ergonomic Standing Desk', value: '4' },
+    { label: 'Noise Cancelling Earbuds', value: '5' },
+    { label: 'Smart Home Speaker Hub', value: '6' },
+    { label: 'Portable SSD 2TB Drive', value: '7' },
+];
+
+// ── Create MGRenderer with null textureManager (we draw directly) ──
+const renderer = new MGRenderer(null, 30);
+
+// ── Animation state ──
+let currentFrame = 0;
+let playing = false;
+let animId = null;
+const FPS = 30;
+const DURATION_FRAMES = FPS * 6; // 6 second preview
+
+function getItems() {
+    const n = parseInt(document.getElementById('itemCount').value);
+    return ALL_ITEMS.slice(0, n);
+}
+
+function getThumbs() {
+    const n = parseInt(document.getElementById('itemCount').value);
+    return makeDummyThumbs(n, document.getElementById('thumbMode').value);
+}
+
+function getTheme() {
+    return document.getElementById('themeSelect').value;
+}
+
+function buildStyle() {
+    const themeId = getTheme();
+    const s = {
+        primary: '#3b82f6', accent: '#f59e0b', bg: 'rgba(0,0,0,0.7)',
+        text: '#ffffff', textSub: 'rgba(255,255,255,0.75)', glow: false,
+        fontHeading: 'Arial, sans-serif', fontBody: 'Arial, sans-serif',
+    };
+    const tokens = window._themeTokens.getTokens(themeId);
+    if (tokens?.chrome?.mgOverrides) {
+        s._mgOverrides = tokens.chrome.mgOverrides;
+    }
+    return s;
+}
+
+function buildAnim(frame) {
+    const enterDur = 1.5;
+    const exitDur = 0.8;
+    const totalDur = DURATION_FRAMES / FPS;
+    const t = frame / FPS;
+    const enterFrames = Math.round(enterDur * FPS);
+    const exitStart = totalDur - exitDur;
+    const isExiting = t >= exitStart;
+    const exitProgress = isExiting ? Math.max(0, 1 - (t - exitStart) / exitDur) : 1;
+
+    return {
+        enterFrames,
+        isExiting,
+        exitProgress,
+        opacity: isExiting ? exitProgress : Math.min(1, t / 0.3),
+        idleScale: 1,
+    };
+}
+
+function renderVariant(canvasId, variant, frame) {
+    const canvas = document.getElementById(canvasId);
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // Scale from 1920x1080 down to 960x540
+    ctx.save();
+    ctx.scale(0.5, 0.5);
+
+    const items = getItems();
+    const thumbs = getThumbs();
+    const s = buildStyle();
+    const anim = buildAnim(frame);
+    const colors = s._mgOverrides?.listicleGrid?.colors || null;
+
+    const mg = { type: 'listicleGrid', text: 'Top 5 Tech Gadgets of 2026', subType: variant };
+
+    const setup = {
+        items, maxItems: items.length, title: mg.text, colors, thumbs,
+        frame, fps: FPS, enterFrames: anim.enterFrames,
+        isExiting: anim.isExiting, exitProgress: anim.exitProgress, idleScale: 1,
+    };
+
+    const methodMap = {
+        grid: '_renderLG_Grid',
+        strip: '_renderLG_Strip',
+        stack: '_renderLG_Stack',
+    };
+
+    renderer[methodMap[variant]](ctx, mg, s, anim, null, setup);
+    ctx.restore();
+}
+
+function renderAll() {
+    renderVariant('cGrid', 'grid', currentFrame);
+    renderVariant('cStrip', 'strip', currentFrame);
+    renderVariant('cStack', 'stack', currentFrame);
+    document.getElementById('status').textContent =
+        `Frame ${currentFrame}/${DURATION_FRAMES}  |  ${(currentFrame / FPS).toFixed(1)}s  |  Theme: ${getTheme()}`;
+}
+
+function animate() {
+    if (!playing) return;
+    currentFrame++;
+    if (currentFrame > DURATION_FRAMES) {
+        playing = false;
+        document.getElementById('playBtn').textContent = '▶ Play entrance';
+        return;
+    }
+    renderAll();
+    animId = requestAnimationFrame(animate);
+}
+
+document.getElementById('playBtn').addEventListener('click', () => {
+    if (playing) {
+        playing = false;
+        cancelAnimationFrame(animId);
+        document.getElementById('playBtn').textContent = '▶ Play entrance';
+    } else {
+        currentFrame = 0;
+        playing = true;
+        document.getElementById('playBtn').textContent = '⏸ Pause';
+        animate();
+    }
+});
+
+document.getElementById('resetBtn').addEventListener('click', () => {
+    playing = false;
+    cancelAnimationFrame(animId);
+    currentFrame = 0;
+    document.getElementById('playBtn').textContent = '▶ Play entrance';
+    renderAll();
+});
+
+// Re-render on control changes
+['themeSelect', 'itemCount', 'thumbMode'].forEach(id => {
+    document.getElementById(id).addEventListener('change', () => {
+        if (!playing) renderAll();
+    });
+});
+
+// Initial render at frame 90 (fully entered)
+currentFrame = 90;
+renderAll();
+</script>
+
+</body>
+</html>

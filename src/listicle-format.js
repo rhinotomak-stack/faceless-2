@@ -387,39 +387,95 @@ function generateItemCounterMG(item, scenes, mgStyle) {
     // Animation entrance takes ~0.4s, so start 0.4s before
     mgStartTime = Math.max(0, mgStartTime - 0.4);
 
-    // Pick overlay type based on MG style — consistent across all items in a video
-    const STYLE_TO_COUNTER_TYPE = {
-        cinematic: 'lowerThird',
-        elegant:   'typewriter',
-        bold:      'headline',
-        minimal:   'callout',
-        clean:     'lowerThird',
-        neon:      'headline',
-    };
-    const mgType = STYLE_TO_COUNTER_TYPE[mgStyle] || 'lowerThird';
-
     const numberPrefix = `#${item.itemNumber}`;
     const title = item.title || '';
     const displayText = title ? `${numberPrefix} ${title}` : numberPrefix;
 
-    const positions = {
-        lowerThird: 'bottomLeft',
-        headline: 'center',
-        typewriter: 'bottomLeft',
-        callout: 'center',
-    };
-
     return {
-        type: mgType,
+        type: 'listicleCounter',
         text: displayText,
         subtext: '',
         startTime: mgStartTime,
         duration: 4.0,
-        position: positions[mgType] || 'bottomLeft',
+        position: 'bottomLeft',
         category: 'overlay',
         isListicleCounter: true,
         sceneIndex: item.startSceneIndex,
         selectionMode: 'listicle-counter',
+    };
+}
+
+/**
+ * Generate a progress tracker MG for a listicle item (e.g., "2/5").
+ * Shows list position so viewers know how far along the list they are.
+ *
+ * @param {Object} item - ListicleItem
+ * @param {number} totalItems - Total number of items in the listicle
+ * @param {Array} scenes
+ * @returns {Object|null} MG object
+ */
+function generateProgressTrackerMG(item, totalItems, scenes) {
+    const scene = scenes[item.startSceneIndex];
+    if (!scene) return null;
+
+    // Same timing logic as counter
+    let mgStartTime = item.spokenTime || null;
+    if (!mgStartTime) {
+        const searchIndices = [item.startSceneIndex];
+        if (item.startSceneIndex + 1 < scenes.length) searchIndices.push(item.startSceneIndex + 1);
+        for (const si of searchIndices) {
+            mgStartTime = _findSpokenTime(scenes[si], item.itemNumber);
+            if (mgStartTime) break;
+        }
+    }
+    if (!mgStartTime) mgStartTime = item.startTime;
+    mgStartTime = Math.max(0, mgStartTime - 0.2);
+
+    return {
+        type: 'progressTracker',
+        text: `${item.itemNumber}/${totalItems}`,
+        subtext: '',
+        startTime: mgStartTime,
+        duration: 4.0,
+        position: 'topRight',
+        category: 'overlay',
+        isListicleCounter: true,
+        sceneIndex: item.startSceneIndex,
+        selectionMode: 'listicle-counter',
+    };
+}
+
+/**
+ * Generate a fullscreen listicleGrid MG for the overview scene.
+ * Shows all items at once in a grid/strip/stack layout.
+ * Typically placed on the scene that announces the list (e.g., "Here are the 5 brands").
+ *
+ * @param {Array} listicleItems - All listicle items with titles
+ * @param {number} overviewSceneIndex - Scene index where the overview should appear
+ * @param {number} startTime - Start time of the overview scene
+ * @param {number} duration - Duration of the overview scene
+ * @param {string} title - Title text (e.g., "5 Buy-It-For-Life Brands")
+ * @returns {Object} MG object
+ */
+function generateListicleGridMG(listicleItems, overviewSceneIndex, startTime, duration, title) {
+    // Build subtext as "label:number" pairs for the renderer to parse
+    const subtextParts = listicleItems.map(item => {
+        const label = item.title || item.displayLabel || `Item ${item.itemNumber}`;
+        return `${label}:${item.itemNumber}`;
+    });
+
+    return {
+        type: 'listicleGrid',
+        text: title || '',
+        subtext: subtextParts.join(', '),
+        startTime: Math.max(0, startTime),
+        duration: Math.min(duration, 6),
+        position: 'center',
+        category: 'fullscreen',
+        isListicleOverview: true,
+        sceneIndex: overviewSceneIndex,
+        selectionMode: 'listicle-counter',
+        _listicleItems: listicleItems,
     };
 }
 
@@ -489,6 +545,9 @@ function getListiclePromptRules(listicleItems) {
         .map(it => `  #${it.itemNumber}: scenes ${it.startSceneIndex}-${it.endSceneIndex}${it.title ? ` "${it.title}"` : ''}`)
         .join('\n');
 
+    const firstItem = listicleItems.find(it => it.startSceneIndex != null);
+    const overviewIdx = firstItem ? Math.max(0, firstItem.startSceneIndex - 1) : -1;
+
     return `
 LISTICLE FORMAT RULES:
 - This is a listicle with ${listicleItems.length} items
@@ -497,7 +556,8 @@ LISTICLE FORMAT RULES:
 - Items:
 ${itemList}
 - For each item: use the item's unique subject as the primary keyword, NOT generic topic words
-- Ensure visual variety: if item #1 uses "aerial cityscape", item #2 should NOT also use city/aerial shots`;
+- Ensure visual variety: if item #1 uses "aerial cityscape", item #2 should NOT also use city/aerial shots
+${overviewIdx >= 0 ? `- OVERVIEW SCENE ${overviewIdx}: Set fullscreenMG to "listicleGrid" — this scene shows all items in a visual grid, NO footage needed (set keyword/stockQuery/webQuery to "none")` : ''}`;
 }
 
 // ============ HOOK PACING ============
@@ -523,6 +583,8 @@ module.exports = {
     buildListicleItemMap,
     getListicleTransitionRules,
     generateItemCounterMG,
+    generateProgressTrackerMG,
+    generateListicleGridMG,
     enforceKeywordVariety,
     getListiclePromptRules,
     getListicleHookPacing,
