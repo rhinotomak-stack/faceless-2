@@ -6,39 +6,10 @@
 // ========================================
 // MG Style Themes — from src/themes.js design tokens
 // ========================================
-// MG_STYLES are the per-style visual presets (bg, glow, etc.)
-// THEME_FONTS and THEME_COLORS are populated from theme tokens at init
-// This eliminates duplication between app.js and src/themes.js
-
-// Populated from theme tokens (via preload _themeTokens), with inline fallbacks
-const MG_STYLES = {
-    clean: { primary: '#3b82f6', accent: '#f59e0b', bg: 'rgba(0,0,0,0.7)', text: '#ffffff', textSub: 'rgba(255,255,255,0.75)', glow: false },
-    bold: { primary: '#ef4444', accent: '#fbbf24', bg: 'rgba(10,10,10,0.92)', text: '#ffffff', textSub: 'rgba(255,255,255,0.85)', glow: false },
-    minimal: { primary: '#e5e7eb', accent: '#94a3b8', bg: 'rgba(0,0,0,0.35)', text: '#f8fafc', textSub: 'rgba(255,255,255,0.5)', glow: false },
-    neon: { primary: '#00ff88', accent: '#ff00ff', bg: 'rgba(0,0,15,0.85)', text: '#ffffff', textSub: 'rgba(255,255,255,0.7)', glow: true },
-    cinematic: { primary: '#d4af37', accent: '#c0c0c0', bg: 'rgba(0,0,0,0.92)', text: '#f5f0e8', textSub: 'rgba(245,240,232,0.55)', glow: false },
-    elegant: { primary: '#8b5cf6', accent: '#f472b6', bg: 'rgba(10,0,25,0.82)', text: '#ffffff', textSub: 'rgba(255,255,255,0.6)', glow: true },
-};
-
-// Hydrate MG_STYLES from theme tokens (adds chrome properties)
-if (window._themeTokens) {
-    for (const styleName of window._themeTokens.stylePresetNames) {
-        const preset = window._themeTokens.getStylePreset(styleName);
-        if (MG_STYLES[styleName]) {
-            MG_STYLES[styleName].bg = preset.bg;
-            MG_STYLES[styleName].glow = preset.glow;
-            MG_STYLES[styleName].borderRadius = preset.borderRadius;
-            MG_STYLES[styleName].strokeWidth = preset.strokeWidth;
-            MG_STYLES[styleName].shadowStyle = preset.shadowStyle;
-            MG_STYLES[styleName].shadowBlur = preset.shadowBlur;
-            MG_STYLES[styleName].shadowOffsetY = preset.shadowOffsetY;
-            MG_STYLES[styleName].cardStyle = preset.cardStyle;
-            MG_STYLES[styleName].lowerThirdStyle = preset.lowerThirdStyle;
-            MG_STYLES[styleName].lowerThirdAnimation = preset.lowerThirdAnimation;
-            MG_STYLES[styleName].chartBarRadius = preset.chartBarRadius;
-        }
-    }
-}
+// MG_STYLES, THEME_FONTS, THEME_COLORS, getStyledThemeColors, getActiveThemeFonts,
+// _resolveActiveTheme are defined in mg-theme-bridge.js (loaded before app.js)
+// and shared with qa-studio.html so QA export clips match preview MGs exactly.
+// ========================================
 
 // ========================================
 // MG Registry helpers — populate variant/animation dropdowns
@@ -110,7 +81,10 @@ const MG_TYPES_WITH_VARIANTS = new Set(['headline', 'lowerThird', 'callout', 'st
 const LISTICLE_TYPES = new Set(['listicleCounter']);
 
 // Listicle template types (fullscreen V3 — separate system from MGs, will grow over time)
-const TEMPLATE_TYPES = new Set(['listicleGrid', 'chapterCard', 'locationCard', 'quoteCard', 'keyTakeaway', 'comparisonCard', 'timelineCard', 'factCard', 'imageShowcase']);
+const TEMPLATE_TYPES = new Set(['listicleGrid', 'chapterCard', 'locationCard', 'quoteCard', 'keyTakeaway', 'comparisonCard', 'timelineCard', 'factCard', 'imageShowcase', 'statCard', 'personIntro']);
+
+// Fields synced from QA Studio fixes into live state (crop, framing, QA flags)
+const QA_SYNCABLE_FIELDS = ['cropTop','cropRight','cropBottom','cropLeft','scale','posY','posX','framingMode','floatingBackground','floatingAnim','floatingShadow','flagForReplacement','qaFixed','qaFixReason','qaReason','qaReplacementKeyword','qaReplacementSource','qaReplacementDiagnosis'];
 
 // ── Template Registry (UI-side) ──
 // Single source of truth for per-type variants, animations, labels.
@@ -153,6 +127,14 @@ const TEMPLATE_REGISTRY = {
         variants: { standard: 'Standard', minimal: 'Minimal', cinematic: 'Cinematic' },
         animations: { slideOpposite: 'Slide Opposite', fadeSlide: 'Fade Slide', springScale: 'Spring Scale' },
         defaultVariant: 'standard', defaultAnimation: 'slideOpposite' },
+    statCard:       { label: 'Stat Card',
+        variants: { sideBySide: 'Side by Side', stacked: 'Stacked', single: 'Single', triple: 'Triple' },
+        animations: { countUp: 'Count Up', staggerSlide: 'Stagger Slide', fadeScale: 'Fade Scale' },
+        defaultVariant: 'sideBySide', defaultAnimation: 'countUp' },
+    personIntro:    { label: 'Person Intro',
+        variants: { standard: 'Standard', cinematic: 'Cinematic', minimal: 'Minimal' },
+        animations: { slideRight: 'Slide Right', fadeSlide: 'Fade Slide', springScale: 'Spring Scale' },
+        defaultVariant: 'standard', defaultAnimation: 'slideRight' },
 };
 
 /**
@@ -274,110 +256,34 @@ function _showListicleControls(mgType, mg) {
     if (bgSel && mg) bgSel.value = mg.mgBackground || 'auto';
 }
 
-// ========================================
-// Theme Fonts & Colors — from design tokens
-// ========================================
-const THEME_FONTS = {};
-const THEME_COLORS = {};
+// THEME_FONTS, THEME_COLORS — defined in mg-theme-bridge.js
 
-if (window._themeTokens) {
-    for (const themeId of window._themeTokens.themeIds) {
-        const tokens = window._themeTokens.getTokens(themeId);
-        THEME_FONTS[themeId] = {
-            heading: tokens.typography.headingFont,
-            body: tokens.typography.bodyFont,
-        };
-        THEME_COLORS[themeId] = {
-            primary: tokens.colors.primary,
-            accent: tokens.colors.accent,
-            text: tokens.colors.textPrimary,
-            textSub: tokens.colors.textSecondary,
-        };
-    }
-} else {
-    // Fallback: hardcoded values if preload tokens unavailable
-    console.warn('Theme tokens not available — using hardcoded fallbacks');
-    Object.assign(THEME_FONTS, {
-        tech: { heading: 'Orbitron, Electrolize, "Courier New", monospace', body: '"Roboto Mono", "Source Code Pro", monospace' },
-        nature: { heading: '"Libre Baskerville", Merriweather, Georgia, serif', body: 'Lora, "Open Sans", Georgia, sans-serif' },
-        crime: { heading: 'Oswald, "Bebas Neue", Impact, sans-serif', body: '"Barlow Condensed", Lato, Arial, sans-serif' },
-        corporate: { heading: 'Montserrat, "Work Sans", Arial, sans-serif', body: '"Source Sans Pro", "Open Sans", "Segoe UI", sans-serif' },
-        luxury: { heading: '"Playfair Display", Cinzel, Georgia, serif', body: 'Lora, "Libre Baskerville", "Times New Roman", serif' },
-        sport: { heading: '"Bebas Neue", "Fjalla One", Impact, sans-serif', body: '"Roboto Condensed", "Barlow Condensed", Arial, sans-serif' },
-        neutral: { heading: 'Nunito, Raleway, Arial, sans-serif', body: '"Open Sans", Roboto, Arial, sans-serif' },
-    });
-    Object.assign(THEME_COLORS, {
-        tech: { primary: '#00ffff', accent: '#00ff00', text: '#ffffff', textSub: 'rgba(255,255,255,0.7)' },
-        nature: { primary: '#8B4513', accent: '#87CEEB', text: '#ffffff', textSub: 'rgba(255,255,255,0.7)' },
-        crime: { primary: '#dc143c', accent: '#ffd700', text: '#ffffff', textSub: 'rgba(255,255,255,0.7)' },
-        corporate: { primary: '#0066cc', accent: '#00cc66', text: '#ffffff', textSub: 'rgba(255,255,255,0.7)' },
-        luxury: { primary: '#d4af37', accent: '#c0c0c0', text: '#ffffff', textSub: 'rgba(255,255,255,0.6)' },
-        sport: { primary: '#ff4500', accent: '#00ff00', text: '#ffffff', textSub: 'rgba(255,255,255,0.8)' },
-        neutral: { primary: '#4a90e2', accent: '#e74c3c', text: '#ffffff', textSub: 'rgba(255,255,255,0.7)' },
-    });
-}
+// getStyledThemeColors, _resolveActiveTheme — defined in mg-theme-bridge.js
 
 /**
- * Get themed+styled colors for MG preview.
- * Uses theme tokens to apply modifier-adjusted colors.
+ * Populate the #build-language dropdown from the language registry.
+ * Called during init. The "Auto-Detect" option is already in the HTML — this
+ * appends supported languages below it. Adding a language to src/languages.js
+ * will automatically appear here on next app reload, no HTML edit required.
  */
-function getStyledThemeColors(styleName) {
-    const activeTheme = _resolveActiveTheme();
-    if (!activeTheme) return null;
-
-    // Apply the REQUESTED style's modifier to theme colors (not the theme's default)
-    if (window._themeTokens) {
-        const tokens = window._themeTokens.getTokens(activeTheme);
-        const stylePreset = window._themeTokens.getStylePreset(styleName || 'clean');
-        const mod = stylePreset?.modifier;
-
-        // If the style has a modifier, re-apply it to the raw theme colors
-        // This makes different styles (bold, neon, minimal, etc.) produce visually distinct results
-        if (mod && window._themeTokens.applyModifier) {
-            const rawPrimary = tokens.colors.primary;
-            const rawAccent = tokens.colors.accent;
-            return {
-                primary: window._themeTokens.applyModifier(rawPrimary, mod),
-                accent: window._themeTokens.applyModifier(rawAccent, mod),
-                text: tokens.colors.textPrimary,
-                textSub: tokens.colors.textSecondary,
-                bg: stylePreset.bg,
-            };
-        }
-
-        return {
-            primary: tokens.colors.mgPrimary,
-            accent: tokens.colors.mgAccent,
-            text: tokens.colors.textPrimary,
-            textSub: tokens.colors.textSecondary,
-            bg: stylePreset?.bg || tokens.colors.surface,
-        };
+function populateLanguageDropdown() {
+    const sel = document.getElementById('build-language');
+    if (!sel) return;
+    if (!window._languages?.getLanguageList) {
+        console.warn('Language registry not available — dropdown will only show Auto-Detect');
+        return;
     }
-
-    // Fallback: return raw theme colors
-    return THEME_COLORS[activeTheme] || null;
+    const list = window._languages.getLanguageList();
+    for (const lang of list) {
+        const opt = document.createElement('option');
+        opt.value = lang.code;
+        // Show "English" for en, "Korean (한국어)" for non-English to make it easy to find
+        opt.textContent = lang.code === 'en' ? lang.name : `${lang.name} (${lang.nativeName})`;
+        sel.appendChild(opt);
+    }
 }
 
-function _resolveActiveTheme() {
-    const themeEl = document.getElementById('build-theme');
-    let themeId = themeEl ? themeEl.value : 'auto';
-    if (themeId === 'auto' && state.videoPlan && state.videoPlan.scriptContext) {
-        themeId = state.videoPlan.scriptContext.themeId || null;
-    }
-    if (!themeId || themeId === 'auto') return null;
-    return themeId;
-}
-
-/**
- * Get active theme fonts for MG preview
- */
-function getActiveThemeFonts() {
-    const activeTheme = _resolveActiveTheme();
-    if (!activeTheme || !THEME_FONTS[activeTheme]) {
-        return { heading: 'Arial, sans-serif', body: 'Arial, sans-serif' };
-    }
-    return THEME_FONTS[activeTheme];
-}
+// getActiveThemeFonts — defined in mg-theme-bridge.js
 
 function getActiveThemeColors() {
     const activeTheme = _resolveActiveTheme();
@@ -481,6 +387,7 @@ const state = {
     subtitlesEnabled: false,
     mgStyle: 'clean',
     aiInstructions: '',
+    videoTitle: '',
     timeline: {
         zoom: 50,
         scrollX: 0,
@@ -571,6 +478,8 @@ const elements = {
     projectNameLabel: document.getElementById('project-name-label'),
     btnRefresh: document.getElementById('btn-refresh'),
     btnRender: document.getElementById('btn-render'),
+    btnQAStudio: document.getElementById('btn-qa-studio'),
+    btnQAChat:   document.getElementById('btn-qa-chat'),
     btnGenerate: document.getElementById('btn-generate'),
     btnRemoveAudio: document.getElementById('btn-remove-audio'),
     dropZone: document.getElementById('drop-zone'),
@@ -583,10 +492,22 @@ const elements = {
     ollamaModel: document.getElementById('ollama-model'),
     ollamaVisionModel: document.getElementById('ollama-vision-model'),
     aiInstructions: document.getElementById('ai-instructions'),
+    videoTitle: document.getElementById('video-title'),
     buildQuality: document.getElementById('build-quality'),
     buildFormat: document.getElementById('build-format'),
     buildNiche: document.getElementById('build-niche'),
     buildTheme: document.getElementById('build-theme'),
+    buildLanguage: document.getElementById('build-language'),
+    buildStyleProfile: document.getElementById('build-style-profile'),
+    btnLearnStyle: document.getElementById('btn-learn-style'),
+    learnStyleDialog: document.getElementById('learn-style-dialog'),
+    learnStyleUrl: document.getElementById('learn-style-url'),
+    learnStyleBrowse: document.getElementById('learn-style-browse'),
+    learnStyleStart: document.getElementById('learn-style-start'),
+    learnStyleCancel: document.getElementById('learn-style-cancel'),
+    learnStyleProgress: document.getElementById('learn-style-progress'),
+    learnStyleBar: document.getElementById('learn-style-bar'),
+    learnStyleMsg: document.getElementById('learn-style-msg'),
     cinematicScale: document.getElementById('cinematic-scale'),
     cinematicScaleVal: document.getElementById('cinematic-scale-val'),
     // Clip analyzer toggle
@@ -669,6 +590,7 @@ const elements = {
     propCropBottomVal: document.getElementById('prop-crop-bottom-val'),
     propCropLeftVal: document.getElementById('prop-crop-left-val'),
     propCropRightVal: document.getElementById('prop-crop-right-val'),
+    btnFillFrame: document.getElementById('btn-fill-frame'),
     propBorderRadius: document.getElementById('prop-border-radius'),
     propBorderRadiusVal: document.getElementById('prop-border-radius-val'),
     // Floating frame controls
@@ -785,6 +707,7 @@ function initCaptureMode() {
         console.log('[CaptureMode] Received plan data');
         try {
             state.videoPlan = planData;
+            window._mgBridgeVideoPlan = planData;
 
             const plan = planData;
             state.scenes = plan.scenes || [];
@@ -941,6 +864,10 @@ async function init() {
     // Load and display project info
     loadProjectInfo();
 
+    // Populate language dropdown from the language registry (exposed via preload.js).
+    // Adding a language in src/languages.js automatically adds it here — no UI edit needed.
+    populateLanguageDropdown();
+
     setupEventListeners();
     setupElectronListeners();
     setupKeyboardShortcuts();
@@ -1025,6 +952,8 @@ function setupEventListeners() {
     elements.btnRemoveAudio.addEventListener('click', removeAudio);
     elements.btnGenerate.addEventListener('click', generateVideo);
     elements.btnRender.addEventListener('click', renderVideo);
+    if (elements.btnQAStudio) elements.btnQAStudio.addEventListener('click', () => window.electronAPI.openQAStudio());
+    if (elements.btnQAChat)   elements.btnQAChat.addEventListener('click',   () => window.electronAPI.openQAChat());
     elements.btnCancel.addEventListener('click', cancelProcess);
     elements.btnNew.addEventListener('click', newProject);
     if (elements.btnOpenProject) {
@@ -1095,6 +1024,12 @@ function setupEventListeners() {
     // Ollama model changes
     if (elements.ollamaModel) elements.ollamaModel.addEventListener('change', saveSettings);
     if (elements.ollamaVisionModel) elements.ollamaVisionModel.addEventListener('change', saveSettings);
+    if (elements.videoTitle) {
+        elements.videoTitle.addEventListener('input', () => {
+            state.videoTitle = elements.videoTitle.value;
+        });
+        elements.videoTitle.addEventListener('change', saveSettings);
+    }
     if (elements.aiInstructions) {
         elements.aiInstructions.addEventListener('input', () => {
             state.aiInstructions = elements.aiInstructions.value;
@@ -1120,6 +1055,9 @@ function setupEventListeners() {
     ['srcPexels', 'srcPixabay', 'srcYouTube', 'srcTelegram', 'srcVKVideo', 'srcReddit', 'srcUnsplash', 'srcGoogleCSE', 'srcBing', 'srcDuckDuckGo', 'srcGoogleScrape'].forEach(key => {
         if (elements[key]) elements[key].addEventListener('change', saveSettings);
     });
+
+    // Style Learner — populate dropdown, wire learn dialog
+    setupStyleLearner();
     // Transition style + duration listeners
     if (elements.transitionStyle) {
         elements.transitionStyle.addEventListener('change', () => {
@@ -1251,6 +1189,23 @@ function setupElectronListeners() {
         window.electronAPI.onMenuSelectAll?.(() => selectAllClips());
         window.electronAPI.onMenuNew?.(() => newProject());
     }
+
+    // QA Studio pushes fixes directly into memory so auto-save picks them up
+    window.electronAPI.onQAPlanUpdated?.((plan) => {
+        if (!plan || !plan.scenes) return;
+        const sceneByIndex = new Map(state.scenes.map(s => [s.index, s]));
+        plan.scenes.forEach((fixedScene, i) => {
+            if (!state.videoPlan?.scenes?.[i]) return;
+            QA_SYNCABLE_FIELDS.forEach(f => {
+                if (fixedScene[f] !== undefined) state.videoPlan.scenes[i][f] = fixedScene[f];
+            });
+            const stateScene = sceneByIndex.get(fixedScene.index) ?? sceneByIndex.get(i);
+            if (stateScene) QA_SYNCABLE_FIELDS.forEach(f => { if (fixedScene[f] !== undefined) stateScene[f] = fixedScene[f]; });
+        });
+        if (state.compositorActive) loadPlanIntoCompositor();
+        showToast('QA fixes applied — compositor updated');
+        console.log('[QA] Plan patched from QA Studio — crop/flag fixes active');
+    });
 }
 
 // ========================================
@@ -2676,6 +2631,36 @@ function setupClipPropertyListeners() {
             loadActiveScenes();
         });
     }
+    // Fill Frame button — calculates exact scale to cover the frame given current crop values
+    if (elements.btnFillFrame) {
+        elements.btnFillFrame.addEventListener('click', () => {
+            if (state.selectedClipIndex < 0) return;
+            pushUndoState();
+            const scene = state.scenes[state.selectedClipIndex];
+            const cropT = scene.cropTop    || 0;
+            const cropB = scene.cropBottom || 0;
+            const cropL = scene.cropLeft   || 0;
+            const cropR = scene.cropRight  || 0;
+            // Compute scale to fill frame after crop
+            const scaleH = (cropL + cropR) > 0 ? 100 / (100 - cropL - cropR) : 1;
+            const scaleV = (cropT + cropB) > 0 ? 100 / (100 - cropT - cropB) : 1;
+            const fillScale = Math.round(Math.max(scaleH, scaleV) * 100) / 100;
+            scene.scale = Math.max(fillScale, 1);
+            scene.fitMode = 'cover';
+            // Position offset to center visible area (asymmetric crops need translate)
+            scene.posX = parseFloat((scene.scale * (cropR - cropL) / 2).toFixed(2));
+            scene.posY = parseFloat((scene.scale * (cropB - cropT) / 2).toFixed(2));
+            if (elements.propScale)    elements.propScale.value = scene.scale;
+            if (elements.propScaleVal) elements.propScaleVal.value = scene.scale.toFixed(2);
+            if (elements.propFitMode)  elements.propFitMode.value = 'cover';
+            if (elements.propPosX)     elements.propPosX.value = scene.posX;
+            if (elements.propPosXVal)  elements.propPosXVal.value = `${scene.posX}%`;
+            if (elements.propPosY)     elements.propPosY.value = scene.posY;
+            if (elements.propPosYVal)  elements.propPosYVal.value = `${scene.posY}%`;
+            applySceneTransform(state.selectedClipIndex);
+            refreshCompositorScene(state.selectedClipIndex);
+        });
+    }
     // Background dropdown
     if (elements.propBackground) {
         elements.propBackground.addEventListener('change', (e) => {
@@ -3785,6 +3770,11 @@ async function saveProject(silent = false) {
             mgEnabled: state.mgEnabled,
             subtitlesEnabled: state.subtitlesEnabled,
             aiInstructions: state.aiInstructions,
+            videoTitle: state.videoTitle,
+            buildNiche: elements.buildNiche ? elements.buildNiche.value : 'auto',
+            buildLanguage: elements.buildLanguage ? elements.buildLanguage.value : 'auto',
+            cinematicScale: elements.cinematicScale ? elements.cinematicScale.value : '0.65',
+            clipAnalyzer: elements.clipAnalyzerToggle?.checked !== false,
             mutedTracks: state.mutedTracks
         };
 
@@ -5077,10 +5067,13 @@ async function generateVideo() {
             audioFileName,
             footageSources: getEnabledSources(),
             aiInstructions: state.aiInstructions,
+            videoTitle: state.videoTitle,
             buildQuality: elements.buildQuality.value,
             buildFormat: elements.buildFormat.value,
             buildNiche: elements.buildNiche ? elements.buildNiche.value : 'auto',
             buildTheme: elements.buildTheme.value,
+            buildLanguage: elements.buildLanguage ? elements.buildLanguage.value : 'auto',
+            buildStyleProfile: elements.buildStyleProfile ? elements.buildStyleProfile.value : 'none',
             cinematicScale: elements.cinematicScale ? elements.cinematicScale.value : '0.65',
             smartAI: elements.smartAiToggle ? elements.smartAiToggle.checked : true,
             clipAnalyzer: elements.clipAnalyzerToggle ? elements.clipAnalyzerToggle.checked : true
@@ -5147,6 +5140,7 @@ async function loadVideoPlan({ freshBuild = false } = {}) {
             }
 
             state.videoPlan = plan;
+            window._mgBridgeVideoPlan = plan;
             state._mediaUrlCache = {}; // Clear media URL cache on new plan load
             state._trackActiveEl = { '1': 'a', '2': 'a', '3': 'a' }; // Reset double-buffer state
             state._trackSwapPending = { '1': false, '2': false, '3': false }; // Reset deferred swaps
@@ -5514,6 +5508,7 @@ window._loadTestPlan = async function(plan) {
         }
     }
     state.videoPlan = plan;
+    window._mgBridgeVideoPlan = plan; // sync with mg-theme-bridge.js for MG style resolution
     state._mediaUrlCache = {};
     state.scenes = [];
     state.motionGraphics = [];
@@ -5756,9 +5751,10 @@ function renderScenes() {
         const trIcons = { cut: '✂️', crossfade: '🔀', fade: '🔀', dissolve: '🔀', blur: '🔀', crossBlur: '🔀', luma: '🌗', morph: '🔀', dreamFade: '💭', ripple: '🌊', wipe: '↔️', slide: '↔️', push: '↔️', swipe: '↔️', splitWipe: '↔️', zoom: '🔎', zoomBlur: '🔎', whip: '💨', bounce: '⬆️', shutterSlice: '📷', flash: '⚡', directionalBlur: '💨', colorFade: '🎨', spin: '🌀', cameraFlash: '📸', filmBurn: '🎞️', filmGrain: '🎞️', flare: '✨', lightLeak: '✨', shadowWipe: '🌑', vignetteBlink: '👁️', reveal: '🔀', ink: '🖋️', prismShift: '🔮', glitch: '⚡', pixelate: '🟦', mosaic: '🟦', dataMosh: '⚡', scanline: '📺', rgbSplit: '🌈', static: '📺', fade_to_black: '⬛' };
         const trBadge = i > 0 && !scene.isMGScene ? `<span class="scene-transition-badge" title="${trType}">${trIcons[trType] || '🔀'} ${trType}</span>` : '';
         const mgBadge = scene.isMGScene ? `<span class="scene-mg-badge" title="Motion Graphic: ${scene.type || 'MG'}">🎨 ${scene.type || 'MG'}</span>` : '';
+        const qaBadge = scene.flagForReplacement ? `<span class="scene-qa-badge" title="${(scene.qaReason || 'Flagged by QA').replace(/"/g, '&quot;')}">⚠ QA</span>` : '';
         const keyword = scene.isMGScene ? `🎨 MG: ${scene.type || 'motion-graphic'}` : `🔍 ${scene.keyword}`;
-        return `<div class="scene-card ${scene.isMGScene ? 'scene-card-mg' : ''}" data-index="${i}">
-            <div class="scene-number">Scene ${i}${trBadge}${mgBadge}</div>
+        return `<div class="scene-card ${scene.isMGScene ? 'scene-card-mg' : ''} ${scene.flagForReplacement ? 'scene-card-qa-flagged' : ''}" data-index="${i}">
+            <div class="scene-number">Scene ${i}${trBadge}${mgBadge}${qaBadge}</div>
             <div class="scene-text">${scene.text || ''}</div>
             <div class="scene-keyword">${keyword}</div>
         </div>`;
@@ -8346,6 +8342,7 @@ function clearScenes() {
     // Reset state
     state.scenes = [];
     state.videoPlan = null;
+    window._mgBridgeVideoPlan = null;
     state.currentSceneIndex = 0;
     state.currentTime = 0;
     state.totalDuration = 0;
@@ -8389,6 +8386,133 @@ function clearScenes() {
     }
 }
 
+// ========================================
+// Style Learner — Reference Style Dropdown + Learn Dialog
+// ========================================
+async function refreshStyleProfileDropdown() {
+    const sel = elements.buildStyleProfile;
+    if (!sel || !window.electronAPI?.scanStyleProfiles) return;
+    try {
+        const profiles = await window.electronAPI.scanStyleProfiles();
+        const prevValue = sel.value;
+        // Reset, keeping "None"
+        sel.innerHTML = '<option value="none">None (AI decides)</option>';
+        for (const p of (profiles || [])) {
+            const opt = document.createElement('option');
+            opt.value = p.path;
+            const dur = p.videoDuration ? ` · ${Math.round(p.videoDuration / 60)}min` : '';
+            opt.textContent = `${p.name || 'unnamed'}${dur}`;
+            sel.appendChild(opt);
+        }
+        // Restore selection (current value, or pending from loadSettings, or "none")
+        const restore = state._pendingStyleProfile || prevValue || 'none';
+        if (Array.from(sel.options).some(o => o.value === restore)) {
+            sel.value = restore;
+        } else {
+            sel.value = 'none';
+        }
+        delete state._pendingStyleProfile;
+    } catch (e) {
+        console.warn('[StyleLearner] Failed to scan style profiles:', e?.message || e);
+    }
+}
+
+function setupStyleLearner() {
+    if (!elements.btnLearnStyle) return;
+
+    // Save selection on change
+    if (elements.buildStyleProfile) {
+        elements.buildStyleProfile.addEventListener('change', saveSettings);
+    }
+
+    // Open learn dialog
+    elements.btnLearnStyle.addEventListener('click', () => {
+        const dlg = elements.learnStyleDialog;
+        if (dlg) dlg.style.display = (dlg.style.display === 'none' ? 'block' : 'none');
+    });
+
+    // Cancel
+    if (elements.learnStyleCancel) {
+        elements.learnStyleCancel.addEventListener('click', () => {
+            elements.learnStyleDialog.style.display = 'none';
+            elements.learnStyleProgress.style.display = 'none';
+            elements.learnStyleUrl.value = '';
+        });
+    }
+
+    // Browse local file
+    if (elements.learnStyleBrowse) {
+        elements.learnStyleBrowse.addEventListener('click', async () => {
+            if (!window.electronAPI?.pickVideoFile) return;
+            try {
+                const filePath = await window.electronAPI.pickVideoFile();
+                if (filePath) elements.learnStyleUrl.value = filePath;
+            } catch (e) {
+                console.warn('[StyleLearner] file pick failed:', e?.message || e);
+            }
+        });
+    }
+
+    // Listen to progress events from main process
+    if (window.electronAPI?.onLearnStyleProgress) {
+        window.electronAPI.onLearnStyleProgress((data) => {
+            if (!elements.learnStyleBar || !elements.learnStyleMsg) return;
+            const pct = Math.max(0, Math.min(100, data.percent || 0));
+            elements.learnStyleBar.style.width = `${pct}%`;
+            elements.learnStyleMsg.textContent = data.message || `${pct}%`;
+        });
+    }
+
+    // Start analysis
+    if (elements.learnStyleStart) {
+        elements.learnStyleStart.addEventListener('click', async () => {
+            const input = (elements.learnStyleUrl.value || '').trim();
+            if (!input) {
+                showToast('Enter a YouTube URL or pick a local video file', 'error');
+                return;
+            }
+            if (!window.electronAPI?.learnStyle) {
+                showToast('Style Learner not available', 'error');
+                return;
+            }
+            elements.learnStyleProgress.style.display = 'block';
+            elements.learnStyleBar.style.width = '0%';
+            elements.learnStyleMsg.textContent = 'Starting…';
+            elements.learnStyleStart.disabled = true;
+            try {
+                const result = await window.electronAPI.learnStyle(input);
+                if (result && result.success) {
+                    elements.learnStyleBar.style.width = '100%';
+                    elements.learnStyleMsg.textContent = `✓ Saved: ${result.profile?.name || 'profile'}`;
+                    showToast(`Learned style: ${result.profile?.name || 'profile'}`, 'success');
+                    await refreshStyleProfileDropdown();
+                    if (result.path) {
+                        elements.buildStyleProfile.value = result.path;
+                        saveSettings();
+                    }
+                    setTimeout(() => {
+                        elements.learnStyleDialog.style.display = 'none';
+                        elements.learnStyleProgress.style.display = 'none';
+                        elements.learnStyleUrl.value = '';
+                    }, 1500);
+                } else {
+                    const err = (result && result.error) || 'Unknown error';
+                    elements.learnStyleMsg.textContent = `✕ ${err}`;
+                    showToast(`Style learner failed: ${err}`, 'error');
+                }
+            } catch (e) {
+                elements.learnStyleMsg.textContent = `✕ ${e.message || e}`;
+                showToast(`Style learner error: ${e.message || e}`, 'error');
+            } finally {
+                elements.learnStyleStart.disabled = false;
+            }
+        });
+    }
+
+    // Initial population
+    refreshStyleProfileDropdown();
+}
+
 function saveSettings() {
     localStorage.setItem('faceless-settings', JSON.stringify({
         smartAI: elements.smartAiToggle?.checked !== false,
@@ -8404,8 +8528,11 @@ function saveSettings() {
         mgEnabled: state.mgEnabled,
         subtitlesEnabled: state.subtitlesEnabled,
         aiInstructions: state.aiInstructions,
+        videoTitle: state.videoTitle,
         mutedTracks: state.mutedTracks,
         buildNiche: elements.buildNiche ? elements.buildNiche.value : 'auto',
+        buildLanguage: elements.buildLanguage ? elements.buildLanguage.value : 'auto',
+        buildStyleProfile: elements.buildStyleProfile ? elements.buildStyleProfile.value : 'none',
         cinematicScale: elements.cinematicScale ? elements.cinematicScale.value : '0.65',
         clipAnalyzer: elements.clipAnalyzerToggle?.checked !== false
     }));
@@ -8473,11 +8600,19 @@ function loadSettings() {
             // Restore Subtitles setting
             state.subtitlesEnabled = s.subtitlesEnabled !== undefined ? s.subtitlesEnabled : false;
             if (elements.subtitlesEnabled) elements.subtitlesEnabled.checked = state.subtitlesEnabled;
+            // Restore Video Title
+            state.videoTitle = s.videoTitle || '';
+            if (elements.videoTitle) elements.videoTitle.value = state.videoTitle;
             // Restore AI Instructions
             state.aiInstructions = s.aiInstructions || '';
             if (elements.aiInstructions) elements.aiInstructions.value = state.aiInstructions;
             // Restore Niche Preset
             if (elements.buildNiche && s.buildNiche) elements.buildNiche.value = s.buildNiche;
+            if (elements.buildLanguage && s.buildLanguage) elements.buildLanguage.value = s.buildLanguage;
+            if (elements.buildStyleProfile && s.buildStyleProfile) {
+                // Defer setting until dropdown is populated
+                state._pendingStyleProfile = s.buildStyleProfile;
+            }
             // Restore Cinematic Scale
             if (elements.cinematicScale && s.cinematicScale) {
                 elements.cinematicScale.value = s.cinematicScale;
@@ -8543,11 +8678,15 @@ function applyProjectSettings(s) {
         // Subtitles
         state.subtitlesEnabled = s.subtitlesEnabled !== undefined ? s.subtitlesEnabled : false;
         if (elements.subtitlesEnabled) elements.subtitlesEnabled.checked = state.subtitlesEnabled;
+        // Video Title
+        state.videoTitle = s.videoTitle || '';
+        if (elements.videoTitle) elements.videoTitle.value = state.videoTitle;
         // AI Instructions
         state.aiInstructions = s.aiInstructions || '';
         if (elements.aiInstructions) elements.aiInstructions.value = state.aiInstructions;
         // Niche Preset
         if (elements.buildNiche && s.buildNiche) elements.buildNiche.value = s.buildNiche;
+        if (elements.buildLanguage && s.buildLanguage) elements.buildLanguage.value = s.buildLanguage;
         // Cinematic Scale
         if (elements.cinematicScale && s.cinematicScale) {
             elements.cinematicScale.value = s.cinematicScale;

@@ -12,6 +12,7 @@
 
 const { getThemeIds } = require('./themes');
 const { getNicheIds, resolvePreset, NICHE_PRESETS } = require('./niches');
+const styleLearner = require('./style-learner');
 
 // ============================================================
 // QUALITY TIER DEFINITIONS
@@ -123,8 +124,28 @@ function createDirectorsBrief() {
         recipeOverride, // explicit genre recipe name, or null for auto-detect
         presetPacing: presetHints.suggestedPacing, // hint for scene density, or null
         // Resolved tier config for easy access
-        tier: QUALITY_TIERS[qualityTier]
+        tier: QUALITY_TIERS[qualityTier],
+        // Reference style profile (optional)
+        styleProfile: null,
+        styleBlock: ''
     };
+
+    // Load reference style profile if BUILD_STYLE_PROFILE points to a .style.json
+    const styleProfilePath = (process.env.BUILD_STYLE_PROFILE || '').trim();
+    if (styleProfilePath && styleProfilePath !== 'none') {
+        try {
+            const profile = styleLearner.loadStyleProfile(styleProfilePath);
+            if (profile) {
+                brief.styleProfile = profile;
+                brief.styleBlock = styleLearner.buildStyleBlock(profile);
+                console.log(`[DirectorsBrief] Loaded reference style profile: "${profile.name || styleProfilePath}"`);
+            } else {
+                console.warn(`[DirectorsBrief] Style profile file not found: ${styleProfilePath}`);
+            }
+        } catch (e) {
+            console.warn(`[DirectorsBrief] Failed to load style profile: ${e.message}`);
+        }
+    }
 
     return brief;
 }

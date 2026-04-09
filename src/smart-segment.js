@@ -213,11 +213,11 @@ async function selectBestSegment(videoUrl, opts = {}) {
 
         _cleanupFrames(framePaths);
 
-        // 7. Pick best scoring frame
+        // 7. Pick best scoring frame (on tie, prefer later frame — past intros, more content)
         let bestIdx = 0;
         let bestScore = 0;
         for (let i = 0; i < scores.length; i++) {
-            if (scores[i] > bestScore) {
+            if (scores[i] >= bestScore) {
                 bestScore = scores[i];
                 bestIdx = validIndices[i];
             }

@@ -9,8 +9,6 @@ const { analyzeAndCreateScenes } = require('./ai-director');
 const { planVisuals } = require('./ai-visual-planner');
 const { planCompositorOverlays } = require('./ai-compositor-planner');
 // Existing modules
-const { analyzeArticleHighlights } = require('./ai-vision');
-const { processArticleImages } = require('./article-image');
 const { processMotionGraphics, FULLSCREEN_MG_TYPES } = require('./ai-motion-graphics');
 const { processTemplates, downloadTemplateBackgrounds, downloadTemplateItemImages, TEMPLATE_TYPES } = require('./ai-templates');
 const { downloadAllMedia } = require('./footage-manager');
@@ -25,6 +23,24 @@ function cleanFolder(folderPath, label) {
     const files = fs.readdirSync(folderPath);
     let cleaned = 0;
     const mediaExts = new Set(['.mp4', '.jpg', '.jpeg', '.png', '.webp', '.bmp', '.gif', '.webm', '.mov', '.mkv', '.mp3', '.wav']);
+
+    // Resume detection: if scene-N.mp4/jpg files already exist, this is a restart of a
+    // cancelled build — preserve downloaded scenes so footage-manager can skip them.
+    const hasSceneFiles = files.some(f => /^scene-\d+\.(mp4|jpg|jpeg|png|webp)$/i.test(f));
+    if (hasSceneFiles && label === 'temp') {
+        // Only clean non-scene files (MG pre-renders, tmp files, etc.) — keep scene-N media
+        for (const file of files) {
+            if (/^scene-\d+\.(mp4|jpg|jpeg|png|webp)$/i.test(file)) continue; // keep
+            const ext = path.extname(file).toLowerCase();
+            if (mediaExts.has(ext) || file === 'video-plan.json') {
+                try { fs.unlinkSync(path.join(folderPath, file)); cleaned++; } catch (e) {}
+            }
+        }
+        if (cleaned > 0) console.log(`   🧹 Cleaned ${cleaned} old files from ${label} (kept scene media for resume)`);
+        console.log(`   ♻️  Resume mode: ${files.filter(f => /^scene-\d+\.(mp4|jpg|jpeg|png|webp)$/i.test(f)).length} scene file(s) preserved`);
+        return;
+    }
+
     for (const file of files) {
         const ext = path.extname(file).toLowerCase();
         if (mediaExts.has(ext) || file === 'video-plan.json') {
@@ -158,6 +174,22 @@ async function buildDumbVideo(transcription, audioFile, directorsBrief) {
     const publicDir = path.join(PROJECT_DIR, 'public');
     if (!fs.existsSync(publicDir)) fs.mkdirSync(publicDir, { recursive: true });
 
+    // Validate: fix any mediaType/mediaExtension contradictions before writing plan
+    // (e.g. resume detection or provider errors can leave mediaType='image' + mediaExtension='.mp4')
+    const _videoExts = new Set(['.mp4', '.webm', '.mov', '.mkv']);
+    const _imageExts = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif']);
+    let _mediaTypeFixes = 0;
+    for (const scene of videoPlan.scenes || []) {
+        if (!scene.mediaExtension) continue;
+        const ext = scene.mediaExtension.toLowerCase();
+        if (_videoExts.has(ext) && scene.mediaType === 'image') {
+            scene.mediaType = 'video'; _mediaTypeFixes++;
+        } else if (_imageExts.has(ext) && scene.mediaType === 'video') {
+            scene.mediaType = 'image'; _mediaTypeFixes++;
+        }
+    }
+    if (_mediaTypeFixes > 0) console.log(`   ✅ Fixed ${_mediaTypeFixes} mediaType contradictions before writing plan`);
+
     // Save plan
     const planPath = path.join(config.paths.temp, 'video-plan.json');
     fs.writeFileSync(planPath, JSON.stringify(videoPlan, (k, v) => k === '_fileIndex' ? undefined : v, 2));
@@ -259,12 +291,56 @@ async function buildVideo() {
     if (directorsBrief.presetPacing) log.kv('Pacing', directorsBrief.presetPacing);
     if (directorsBrief.freeInstructions) log.kv('Instructions', `"${directorsBrief.freeInstructions.substring(0, 80)}${directorsBrief.freeInstructions.length > 80 ? '...' : ''}"`);
     if (directorsBrief.audienceHint) log.kv('Audience', `"${directorsBrief.audienceHint}"`);
+    if (directorsBrief.styleProfile) {
+        const sp = directorsBrief.styleProfile;
+        log.kv('🎨 Style Profile', `"${sp.name || 'unnamed'}"`);
+        const detailParts = [];
+        if (sp.pacing?.avgSceneDuration) detailParts.push(`avg ${sp.pacing.avgSceneDuration.toFixed(1)}s/scene`);
+        if (sp.pacing?.cutsPerMinute)    detailParts.push(`${sp.pacing.cutsPerMinute} cuts/min`);
+        if (sp.pacing?.rhythm)           detailParts.push(`${sp.pacing.rhythm} rhythm`);
+        if (detailParts.length) log.kv('   pacing', detailParts.join(', '));
+        const fParts = [];
+        if (sp.footage?.stockVsReal)        fParts.push(sp.footage.stockVsReal);
+        if (sp.footage?.videoToImageRatio)  fParts.push(`${Math.round(sp.footage.videoToImageRatio * 100)}% video`);
+        if (sp.footage?.brollPattern)       fParts.push(`${sp.footage.brollPattern} broll`);
+        if (fParts.length) log.kv('   footage', fParts.join(', '));
+        const mgParts = [];
+        if (sp.motionGraphics?.density)             mgParts.push(`${sp.motionGraphics.density} density`);
+        if (sp.motionGraphics?.frequencyPerMinute)  mgParts.push(`${sp.motionGraphics.frequencyPerMinute}/min`);
+        if (sp.motionGraphics?.preferredTypes?.length) mgParts.push(`prefer: ${sp.motionGraphics.preferredTypes.slice(0, 3).join('/')}`);
+        if (mgParts.length) log.kv('   MG', mgParts.join(', '));
+        const tParts = [];
+        if (typeof sp.transitions?.cutRatio === 'number') tParts.push(`${Math.round(sp.transitions.cutRatio * 100)}% cuts`);
+        if (sp.transitions?.avgTransitionDuration)        tParts.push(`avg ${sp.transitions.avgTransitionDuration}s`);
+        if (tParts.length) log.kv('   transitions', tParts.join(', '));
+        const eParts = [];
+        if (sp.effects?.grain && sp.effects.grain !== 'none')         eParts.push(`grain:${sp.effects.grain}`);
+        if (sp.effects?.vignette && sp.effects.vignette !== 'none')   eParts.push(`vignette:${sp.effects.vignette}`);
+        if (sp.effects?.colorTemperature)                              eParts.push(sp.effects.colorTemperature);
+        if (sp.effects?.contrastLevel)                                 eParts.push(`${sp.effects.contrastLevel} contrast`);
+        if (eParts.length) log.kv('   effects', eParts.join(', '));
+    }
     log.br();
 
     // Step 2: Transcribe
     log.step('🎙️ Step 2: Transcribing audio');
     const audioPath = path.join(config.paths.input, audioFile);
-    const transcription = await transcribeAudio(audioPath);
+
+    // ── Language resolution ──
+    // BUILD_LANGUAGE can be: a valid code ('en','es','de','fr','it','ko') to force it,
+    // 'auto' (or empty) to auto-detect from Whisper, which is the default.
+    const { resolveBuildLanguage, getWhisperLanguage } = require('./language-helper');
+    const langOverride = (process.env.BUILD_LANGUAGE || 'auto').trim().toLowerCase();
+    const hintCode = langOverride !== 'auto' ? getWhisperLanguage(langOverride) : null;
+    if (hintCode) log.kv('Language override', `${langOverride} (hinting Whisper)`);
+    else log.kv('Language', 'auto (Whisper will detect)');
+
+    const transcription = await transcribeAudio(audioPath, { languageHint: hintCode });
+
+    // Resolve the final build language: explicit override wins, else Whisper's detection,
+    // else fall back to English. Stored on scriptContext so all downstream steps see it.
+    const buildLanguage = resolveBuildLanguage(langOverride, transcription.language);
+    log.kv('Build language', `${buildLanguage}${buildLanguage !== (transcription.language || 'en') && langOverride === 'auto' ? ' (unsupported auto-detect, falling back)' : ''}`);
 
     // ====================================================================
     // DUMB MODE: Skip all AI calls, use Whisper segments + random stuff
@@ -283,7 +359,15 @@ async function buildVideo() {
     // Step 3: AI Director — Scene creation + context analysis + format detection
     log.step('🎬 Step 3: AI Director (Scene Creation + Context Analysis)');
     let { scenes, scriptContext } = await analyzeAndCreateScenes(transcription, directorsBrief);
-    log.ok(`Created ${scenes.length} scenes with rich context`);
+    // Attach resolved language to scriptContext so ALL downstream AI steps + the renderer see it.
+    // This is the single place language enters the scriptContext — no other code should set it.
+    scriptContext.language = buildLanguage;
+    // Attach reference style profile (loaded by directors-brief.js) so all downstream steps can read it.
+    if (directorsBrief.styleProfile) {
+        scriptContext.styleProfile = directorsBrief.styleProfile;
+        scriptContext.styleBlock = directorsBrief.styleBlock;
+    }
+    log.ok(`Created ${scenes.length} scenes with rich context (lang=${buildLanguage})`);
     log.br();
     const actualAudioDuration = transcription.duration || (transcription.segments.length > 0 ? transcription.segments[transcription.segments.length - 1].end : 0);
 
@@ -430,7 +514,7 @@ async function buildVideo() {
     // Log clip analyzer usage stats
     const caStats = clipAnalyzer.getStats();
     if (caStats.totalFramesSent > 0) {
-        console.log(`  🎬 Clip Analyzer: ${caStats.totalFramesSent} frames sent (${caStats.remaining} remaining in budget)`);
+        console.log(`  🎬 Clip Analyzer: Omni=${caStats.omniFrames}/${caStats.omniBudget} frames | VL clip scoring=${caStats.clipAnalysisFrames} frames | Omni remaining=${caStats.omniRemaining}`);
     }
 
     // Step 5.05: Download V2 overlay images (from compositor planner)
@@ -650,6 +734,11 @@ async function buildVideo() {
         combinedInstructions += instrParts.join('\n');
     }
 
+    // Append style block (if present) as inspiration for MG placement (niche allowlist still controls types)
+    if (scriptContext.styleBlock) {
+        combinedInstructions = (combinedInstructions ? combinedInstructions + '\n\n' : '') + scriptContext.styleBlock;
+        log.info(`🎨 Style inspiration appended to MG instructions: "${scriptContext.styleProfile?.name || 'unnamed'}" (${scriptContext.styleBlock.length} chars)`);
+    }
     const mgResult = await processMotionGraphics(scenesWithKeywords, scriptContext, null, combinedInstructions);
     let allMGs = mgResult.motionGraphics || mgResult;
     const mgStyle = mgResult.mgStyle || 'clean';
@@ -922,33 +1011,6 @@ async function buildVideo() {
     }
     log.br();
 
-    // Step 6.9: Search for article images (if articleHighlight MG exists)
-    const hasArticleMG = mgScenes.some(mg => mg.type === 'articleHighlight');
-    if (hasArticleMG) {
-        log.substep('📰 Step 6.9: Article Images');
-        try {
-            const articleResult = await processArticleImages(mgScenes);
-            if (articleResult) {
-                const mg = mgScenes[articleResult.mgIndex];
-                mg.articleImageFile = articleResult.filename;
-
-                // Use AI Vision to find headline bounding box
-                const boxes = await analyzeArticleHighlights(articleResult.filePath);
-                if (boxes.length > 0) {
-                    mg.highlightBoxes = boxes;
-                }
-
-                log.ok(`Article image ready: ${articleResult.filename}${mg.highlightBoxes ? ' (headline highlight found)' : ''}`);
-            } else {
-                log.dim('No article image found, will use HTML card fallback');
-            }
-        } catch (error) {
-            log.warn(`Article image step failed: ${error.message}`);
-            log.dim('Continuing with HTML card fallback');
-        }
-        log.br();
-    }
-
     // Step 6.95: (removed — backgroundCanvas was dead code, never rendered)
 
     // Assign final scene indices (after carving, these match the file names scene-0, scene-1, etc.)
@@ -1064,17 +1126,8 @@ async function buildVideo() {
         delete v2._fileIndex;
     }
 
-    // Copy article image files (for articleHighlight image mode)
     // Copy map image files (for mapChart API mode)
     for (const mg of mgScenes) {
-        if (mg.articleImageFile) {
-            const srcArticle = path.join(config.paths.temp, mg.articleImageFile);
-            const destArticle = path.join(publicDir, mg.articleImageFile);
-            if (fs.existsSync(srcArticle)) {
-                fs.copyFileSync(srcArticle, destArticle);
-                log.dim(`📰 Copied article image: ${mg.articleImageFile}`);
-            }
-        }
         if (mg.mapImageFile) {
             const srcMap = path.join(config.paths.temp, mg.mapImageFile);
             const destMap = path.join(publicDir, mg.mapImageFile);

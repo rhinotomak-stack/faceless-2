@@ -95,6 +95,25 @@ body {
     align-items: center;
 }
 
+/* QA Studio / Agent Chat button group */
+#btn-qa-studio,
+#btn-qa-chat {
+    border-color: rgba(108, 99, 255, 0.35);
+    color: #a8a3ff;
+    transition: all 0.15s ease;
+}
+#btn-qa-studio:hover,
+#btn-qa-chat:hover {
+    background: rgba(108, 99, 255, 0.15);
+    border-color: rgba(108, 99, 255, 0.55);
+    color: #c4c0ff;
+}
+#btn-qa-studio svg,
+#btn-qa-chat svg {
+    stroke: #a8a3ff;
+    flex-shrink: 0;
+}
+
 /* Notification Center */
 .notif-center {
     position: relative;
@@ -2116,6 +2135,14 @@ select:focus {
     padding: 1px 6px;
     border-radius: 3px;
     margin-left: 6px;
+}
+.scene-qa-badge {
+    font-size: 9px;
+    color: #fff;
+    background: #e74c3c;
+    padding: 1px 4px;
+    border-radius: 3px;
+    margin-left: 4px;
 }
 
 /* ========================================

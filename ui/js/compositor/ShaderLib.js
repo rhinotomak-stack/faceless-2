@@ -49,13 +49,20 @@ void main() {
         return;
     }
 
-    // Border radius — applied in the image's UV space so it follows scale/position
+    // Border radius — fitted to the cropped region so rounding follows visible content edges
     float alpha = 1.0;
     if (u_borderRadius > 0.001) {
-        vec2 pos = uv - 0.5; // center of image UV space
-        float r = u_borderRadius * 0.5;
-        float dist = roundedBoxSDF(pos, vec2(0.5), r);
-        // Scale smoothstep edge by transform to keep consistent anti-aliasing
+        // Visible UV bounds after crop (u_crop: x=vis-bottom, y=right, z=vis-top, w=left)
+        float xMin = u_crop.w;
+        float xMax = 1.0 - u_crop.y;
+        float yMin = u_crop.x;
+        float yMax = 1.0 - u_crop.z;
+        vec2 center   = vec2((xMin + xMax) * 0.5, (yMin + yMax) * 0.5);
+        vec2 halfSize = vec2((xMax - xMin) * 0.5,  (yMax - yMin) * 0.5);
+        vec2 pos = uv - center;
+        // Radius is a fraction of the smaller dimension so corners look consistent
+        float r = u_borderRadius * min(halfSize.x, halfSize.y);
+        float dist = roundedBoxSDF(pos, halfSize, r);
         float edgeWidth = 0.003 / min(u_transform.x, u_transform.y);
         if (dist > edgeWidth) { fragColor = vec4(0.0); return; }
         alpha = 1.0 - smoothstep(0.0, edgeWidth, dist);

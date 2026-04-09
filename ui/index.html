@@ -8,6 +8,30 @@
     <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob: asset: file:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; media-src 'self' data: blob: asset: file:; img-src 'self' data: blob: asset: file: https:; connect-src 'self' data: blob: asset: file: https:; font-src 'self' data: asset: file:;">
     <title>YTA Empire WEBGL</title>
     <link rel="stylesheet" href="css/style.css?v=15">
+    <!-- ── Multi-language font declarations ──
+         Local fonts shipped in assets/fonts/. Add new @font-face blocks here
+         when adding a language that needs a non-Latin script. Name the file
+         after the font family so `resolveLanguageFonts()` can reference it.
+         Latin-script languages (en/es/de/fr/it) reuse the theme's existing fonts. -->
+    <style>
+        /* Korean — Black Han Sans (display/headings) */
+        @font-face {
+            font-family: 'Black Han Sans';
+            src: url('../assets/fonts/BlackHanSans-Regular.ttf') format('truetype');
+            font-weight: 400;
+            font-style: normal;
+            font-display: swap;
+        }
+        /* Korean — Noto Sans KR (body) — variable font, all weights in one file */
+        @font-face {
+            font-family: 'Noto Sans KR';
+            src: url('../assets/fonts/NotoSansKR-VariableFont_wght.ttf') format('truetype-variations'),
+                 url('../assets/fonts/NotoSansKR-VariableFont_wght.ttf') format('truetype');
+            font-weight: 100 900;
+            font-style: normal;
+            font-display: swap;
+        }
+    </style>
 </head>
 
 <body>
@@ -45,6 +69,8 @@
                     <option value="1">Full (Slow)</option>
                 </select>
                 <label id="legacy-export-label" style="display:none;align-items:center;gap:4px;font-size:11px;color:#aaa;cursor:pointer;" title="Use legacy per-frame seeking export (slower, for A/B hash comparison)"><input type="checkbox" id="legacy-export-toggle" style="cursor:pointer;">Legacy</label>
+                <button id="btn-qa-studio" class="btn btn-secondary" title="Open QA Studio — deep per-scene analysis" style="font-size:11px;padding:4px 10px;display:inline-flex;align-items:center;gap:5px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>QA Studio</button>
+                <button id="btn-qa-chat" class="btn btn-secondary" title="Open QA Studio with Agent Chat" style="font-size:11px;padding:4px 10px;display:inline-flex;align-items:center;gap:5px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><line x1="9" y1="10" x2="15" y2="10"/><line x1="12" y1="7" x2="12" y2="13"/></svg>Agent Chat</button>
                 <button id="btn-render" class="btn btn-primary">Render Video</button>
             </div>
         </header>
@@ -97,6 +123,10 @@
                             <option value="moondream">Moondream (Light, 1.7GB)</option>
                         </select>
                     </div>
+                    <label style="margin-top:8px">Video Title:</label>
+                    <input type="text" id="video-title" placeholder="e.g., How Monolithic Domes Are Built" style="width:100%;padding:6px 8px;border:1px solid #555;border-radius:4px;background:#2a2a2a;color:#eee;font-size:13px">
+                    <small class="ai-instructions-hint">Guides AI niche detection, keyword generation &amp; visual planning</small>
+
                     <label style="margin-top:8px">AI Instructions:</label>
                     <textarea id="ai-instructions" rows="3" placeholder="e.g., Use charts for statistics, cinematic style, prefer kinetic text for quotes..."></textarea>
                     <small class="ai-instructions-hint">Guide how AI picks footage, graphics &amp; effects</small>
@@ -123,18 +153,29 @@
                     <label style="margin-top:12px">Niche Preset:</label>
                     <select id="build-niche">
                         <option value="auto" selected>🤖 Auto-Detect</option>
-                        <option value="trueCrime">🔪 True Crime</option>
-                        <option value="military">🎖️ Military / Geopolitics</option>
-                        <option value="documentary">🎬 Nature Documentary</option>
-                        <option value="finance">💰 Finance / Business</option>
-                        <option value="luxury">💎 Luxury / Fashion</option>
-                        <option value="sports">⚽ Sports</option>
-                        <option value="tech">💻 Tech</option>
-                        <option value="history">📜 History</option>
-                        <option value="motivation">🔥 Motivation</option>
-                        <option value="news">📰 News Commentary</option>
-                        <option value="food">🍎 Food / Health</option>
-                        <option value="diy">🔧 DIY / Lifehacks</option>
+                        <optgroup label="── Explainer / Documentary ──">
+                            <option value="explainer">📽️ Explainer / Documentary</option>
+                            <option value="trueCrime">🔪 True Crime Documentary</option>
+                            <option value="documentary">🎬 Nature Documentary</option>
+                            <option value="finance">💰 Finance / Business</option>
+                            <option value="luxury">💎 Luxury / Fashion</option>
+                            <option value="sports">⚽ Sports Documentary</option>
+                            <option value="history">📜 History Documentary</option>
+                            <option value="motivation">🔥 Motivation</option>
+                            <option value="food">🍎 Food / Health</option>
+                            <option value="diy">🔧 DIY / Lifehacks</option>
+                            <option value="militaryDoc">🪖 Military Documentary</option>
+                            <option value="techExplainer">🔬 Tech Explainer</option>
+                        </optgroup>
+                        <optgroup label="── Breaking News ──">
+                            <option value="news">📰 News (Auto)</option>
+                            <option value="newsPolitics">🏛️ News / Politics</option>
+                            <option value="newsEconomy">📈 News / Economy</option>
+                            <option value="military">🎖️ Military / Geopolitics</option>
+                            <option value="newsCelebrity">⭐ News / Celebrity</option>
+                            <option value="tech">💻 Tech News</option>
+                            <option value="newsSport">🏆 Sports News</option>
+                        </optgroup>
                     </select>
                     <small style="display:block; margin-top:4px; color:#888">Sets niche, footage strategy, MG types &amp; search policy</small>
 
@@ -148,6 +189,41 @@
                         <option value="standard">⚪ Standard / Clean</option>
                     </select>
                     <small style="display:block; margin-top:4px; color:#888">Controls background, colors, MG style, fonts</small>
+
+                    <label style="margin-top:12px">Language:</label>
+                    <select id="build-language">
+                        <option value="auto" selected>🌐 Auto-Detect (from audio)</option>
+                        <!-- Options populated dynamically from src/languages.js registry.
+                             Adding a language = add one entry to languages.js; dropdown
+                             updates automatically on app reload. -->
+                    </select>
+                    <small style="display:block; margin-top:4px; color:#888">Auto-detect reads the language from your narration audio. Override to force a specific language or re-run a build in another language.</small>
+
+                    <label style="margin-top:12px">Reference Style:</label>
+                    <div style="display:flex;gap:6px;align-items:center">
+                        <select id="build-style-profile" style="flex:1">
+                            <option value="none" selected>None (AI decides)</option>
+                        </select>
+                        <button id="btn-learn-style" class="btn-small" style="padding:4px 10px;font-size:11px;background:#3a2a4a;color:#ddd;border:1px solid #5a4a6a;border-radius:4px;cursor:pointer;" title="Learn editing style from a reference YouTube video or local file">+ Learn</button>
+                    </div>
+                    <small style="display:block; margin-top:4px; color:#888">Feed a reference video → AI extracts pacing, footage style, MGs, transitions, effects → guides the entire build.</small>
+
+                    <!-- Learn Style dialog (hidden by default) -->
+                    <div id="learn-style-dialog" style="display:none;margin-top:8px;padding:10px;background:#1f1a2a;border:1px solid #4a3a5a;border-radius:6px;">
+                        <div style="font-size:12px;color:#ccc;margin-bottom:6px;">📺 Learn Style from Reference Video</div>
+                        <input type="text" id="learn-style-url" placeholder="YouTube URL (or click 'Browse' for local file)" style="width:100%;padding:6px;background:#0f0a1a;color:#ddd;border:1px solid #3a2a4a;border-radius:4px;font-size:11px;box-sizing:border-box;">
+                        <div style="display:flex;gap:6px;margin-top:6px;">
+                            <button id="learn-style-browse" style="padding:4px 10px;font-size:11px;background:#2a2a3a;color:#ccc;border:1px solid #444;border-radius:4px;cursor:pointer;">📁 Browse</button>
+                            <button id="learn-style-start" style="flex:1;padding:4px 10px;font-size:11px;background:#5a4a6a;color:#fff;border:1px solid #6a5a7a;border-radius:4px;cursor:pointer;">▶ Analyze</button>
+                            <button id="learn-style-cancel" style="padding:4px 10px;font-size:11px;background:#2a1a1a;color:#ccc;border:1px solid #4a2a2a;border-radius:4px;cursor:pointer;">✕</button>
+                        </div>
+                        <div id="learn-style-progress" style="display:none;margin-top:8px;">
+                            <div style="height:6px;background:#0f0a1a;border-radius:3px;overflow:hidden;">
+                                <div id="learn-style-bar" style="height:100%;width:0%;background:linear-gradient(90deg,#5a4a6a,#7a5a8a);transition:width 0.3s;"></div>
+                            </div>
+                            <div id="learn-style-msg" style="font-size:10px;color:#aaa;margin-top:4px;">Initializing…</div>
+                        </div>
+                    </div>
 
                     <label style="margin-top:12px">Cinematic Scale:</label>
                     <div style="display:flex;align-items:center;gap:8px">
@@ -494,6 +570,10 @@
                                 <input type="range" id="prop-crop-right" class="property-slider" min="0" max="50" step="1" value="0">
                                 <input type="text" id="prop-crop-right-val" class="property-value property-value-input" value="0%">
                             </div>
+                            <div class="property-row">
+                                <label></label>
+                                <button id="btn-fill-frame" class="btn btn-secondary" style="font-size:11px;padding:3px 10px;width:100%" title="Calculate exact scale to fill frame with current crops">Fill Frame</button>
+                            </div>
                             <!-- Round Corners -->
                             <div class="property-section-label">Round Corners</div>
                             <div class="property-row">
@@ -594,7 +674,6 @@
                                         <option value="mapChart">Map</option>
                                         <option value="kineticText">Kinetic Text</option>
                                         <option value="explainer">Explainer</option>
-                                        <option value="articleHighlight">Article Highlight</option>
                                     </optgroup>
                                 </select>
                             </div>
@@ -803,6 +882,8 @@
                                     <option value="timelineCard">Timeline Card</option>
                                     <option value="factCard">Fact Card</option>
                                     <option value="imageShowcase">Image Showcase</option>
+                                    <option value="statCard">Stat Card</option>
+                                    <option value="personIntro">Person Intro</option>
                                 </select>
                             </div>
                             <div class="property-row">
@@ -942,6 +1023,7 @@
     <script src="js/compositor/AnimationUtils.js"></script>
     <script src="js/compositor/SceneGraph.js"></script>
     <script src="js/compositor/TransitionRenderer.js"></script>
+    <script src="js/mg-theme-bridge.js"></script>
     <script src="js/compositor/MGRenderer.js"></script>
     <script src="js/compositor/Compositor.js"></script>
     <script src="js/compositor/VideoFrameSource.js"></script>

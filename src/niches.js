@@ -21,10 +21,13 @@
 // ============================================================
 
 const NICHES = {
-    // tech: MOVED to news.tech sub-niche (see below news sub-niches section)
+    // ────────────────────────────────────────────────────
+    // EXPLAINER CATEGORY — educational / documentary content
+    // ────────────────────────────────────────────────────
 
-    nature: {
-        id: 'nature',
+    'explainer.nature': {
+        id: 'explainer.nature',
+        _parent: 'explainer',
         name: 'Nature/Documentary',
         description: 'Nature, wildlife, environment, conservation',
 
@@ -34,11 +37,11 @@ const NICHES = {
 
         allowedMGs: [
             'headline', 'lowerThird', 'callout', 'mapChart', 'timeline',
-            'focusWord', 'bulletList', 'statCounter'
+            'focusWord', 'bulletList', 'statCounter', 'kineticText'
         ],
 
         footagePriority: {
-            video: ['youtube', 'vkVideo', 'reddit', 'pexels', 'pixabay'],
+            video: ['youtube', 'reddit', 'pexels', 'pixabay'],
             image: ['pexels', 'pixabay', 'unsplash', 'googleScrape', 'bing']
         },
 
@@ -81,8 +84,9 @@ const NICHES = {
         }
     },
 
-    crime: {
-        id: 'crime',
+    'explainer.crime': {
+        id: 'explainer.crime',
+        _parent: 'explainer',
         name: 'True Crime/Mystery',
         description: 'Crime, mystery, thriller, investigation',
 
@@ -91,12 +95,12 @@ const NICHES = {
         shotStyle: 'Dark moody lighting, surveillance-style angles, slow zooms on evidence/documents, grainy archival photos, night scenes with streetlights, courtroom interiors, police tape close-ups.',
 
         allowedMGs: [
-            'headline', 'lowerThird', 'callout', 'timeline', 'articleHighlight',
+            'headline', 'lowerThird', 'callout', 'timeline',
             'focusWord', 'mapChart', 'kineticText', 'typewriter'
         ],
 
         footagePriority: {
-            video: ['youtube', 'vkVideo', 'reddit', 'pexels', 'pixabay'],
+            video: ['youtube', 'reddit', 'pexels', 'pixabay'],
             image: ['googleScrape', 'bing', 'pexels', 'pixabay', 'unsplash']
         },
 
@@ -140,8 +144,9 @@ const NICHES = {
         }
     },
 
-    business: {
-        id: 'business',
+    'explainer.business': {
+        id: 'explainer.business',
+        _parent: 'explainer',
         name: 'Business/Corporate',
         description: 'Business, finance, economics, corporate',
 
@@ -151,11 +156,11 @@ const NICHES = {
 
         allowedMGs: [
             'barChart', 'donutChart', 'timeline', 'statCounter', 'bulletList',
-            'comparisonCard', 'lowerThird', 'progressBar', 'headline', 'articleHighlight'
+            'comparisonCard', 'lowerThird', 'progressBar', 'headline', 'kineticText'
         ],
 
         footagePriority: {
-            video: ['youtube', 'reddit', 'vkVideo', 'pexels', 'pixabay'],
+            video: ['youtube', 'reddit', 'pexels', 'pixabay'],
             image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash']
         },
 
@@ -201,8 +206,9 @@ const NICHES = {
         }
     },
 
-    luxury: {
-        id: 'luxury',
+    'explainer.luxury': {
+        id: 'explainer.luxury',
+        _parent: 'explainer',
         name: 'Luxury/Fashion',
         description: 'High-end, fashion, lifestyle, premium',
 
@@ -216,7 +222,7 @@ const NICHES = {
         ],
 
         footagePriority: {
-            video: ['youtube', 'vkVideo', 'reddit', 'pexels', 'pixabay'],
+            video: ['youtube', 'reddit', 'pexels', 'pixabay'],
             image: ['pexels', 'unsplash', 'pixabay', 'googleScrape', 'bing']
         },
 
@@ -260,8 +266,9 @@ const NICHES = {
         }
     },
 
-    sport: {
-        id: 'sport',
+    'explainer.sport': {
+        id: 'explainer.sport',
+        _parent: 'explainer',
         name: 'Sports/Action',
         description: 'Sports, competition, athletics, action',
 
@@ -270,11 +277,11 @@ const NICHES = {
         shotStyle: 'Fast tracking shots, dynamic wide angles, high contrast, slow-motion replays, stadium crowd shots, close-ups of athletes in action, overhead tactical views.',
 
         allowedMGs: [
-            'headline', 'lowerThird', 'statCounter', 'focusWord', 'typewriter'
+            'headline', 'lowerThird', 'statCounter', 'focusWord', 'typewriter', 'kineticText'
         ],
 
         footagePriority: {
-            video: ['reddit', 'youtube', 'vkVideo', 'pexels', 'pixabay'],
+            video: ['reddit', 'youtube', 'pexels', 'pixabay'],
             image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash']
         },
 
@@ -321,81 +328,100 @@ const NICHES = {
         }
     },
 
-    education: {
-        id: 'education',
-        name: 'Education/Explainer',
-        description: 'Educational, how-to, explainer, tutorials',
+    explainer: {
+        id: 'explainer',
+        name: 'Explainer/Documentary (Generic)',
+        description: 'Catch-all for educational documentary content. Sub-niches (explainer.nature, explainer.crime, etc.) provide more specific behavior.',
 
-        defaultTheme: 'standard',
+        defaultTheme: 'modern',
 
-        shotStyle: 'Clean well-lit scenes, diagrams and infographics, whiteboards, laboratory close-ups, book/library shots, step-by-step process footage, talking-head framing for authority.',
+        shotStyle: 'Clean well-lit B-roll, cross-section diagrams, infographics, aerial drone shots, macro close-ups of materials/processes, laboratory interiors, blueprint overlays, factory/workshop footage, before/after comparisons. NO presenters or talking heads — faceless B-roll only.',
 
+        // RICH visual treatment — all MG types available
         allowedMGs: [
-            'headline', 'bulletList', 'statCounter', 'barChart', 'timeline',
-            'comparisonCard', 'focusWord', 'callout', 'explainer', 'progressBar'
+            'headline', 'lowerThird', 'bulletList', 'statCounter', 'barChart', 'donutChart',
+            'timeline', 'comparisonCard', 'focusWord', 'callout', 'explainer', 'progressBar',
+            'rankingList', 'kineticText', 'mapChart', 'typewriter'
         ],
 
         footagePriority: {
-            video: ['youtube', 'vkVideo', 'reddit', 'pexels', 'pixabay'],
+            video: ['pexels', 'pixabay', 'youtube', 'reddit'],    // stock FIRST for clean B-roll
             image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash']
         },
 
+        // Telegram returns irrelevant news clips for explainer topics — permanently excluded
+        excludeVideoProviders: ['telegram'],
+
         defaultPacing: 'moderate',
 
-        preferredMediaType: 'image',   // education: diagrams, charts, explainer stills
+        preferredMediaType: 'mixed',   // explainer: diagrams/images + process video
 
-        keywords: ['education', 'study', 'academic', 'research', 'learn', 'teach',
-                   'school', 'university', 'science', 'history', 'explain', 'tutorial',
-                   'how to', 'guide', 'lesson', 'course', 'professor'],
+        keywords: ['explain', 'how', 'works', 'build', 'construction', 'engineer', 'engineering',
+                   'architecture', 'architect', 'design', 'structure', 'material', 'insulation',
+                   'energy', 'solar', 'panel', 'dome', 'concrete', 'steel', 'frame', 'wall',
+                   'foundation', 'roof', 'infrastructure', 'bridge', 'tunnel', 'pipeline',
+                   'process', 'method', 'technique', 'system', 'mechanism', 'principle',
+                   'science', 'physics', 'chemistry', 'biology', 'anatomy', 'molecule',
+                   'experiment', 'laboratory', 'research', 'study', 'diagram', 'cross section',
+                   'sustainable', 'renewable', 'efficiency', 'thermal', 'hydraulic', 'electric',
+                   'manufacture', 'factory', 'assembly', 'prototype', 'innovation', 'invention',
+                   'education', 'tutorial', 'lesson', 'course', 'academic', 'university',
+                   'monolithic', 'aerodynamic', 'geothermal', 'photovoltaic', 'composite'],
 
         searchPolicy: {
-            contextTerms: ['educational', 'learning', 'academic'],
-            avoidTerms: ['cartoon', 'clipart', 'meme', 'toy'],
-            fallbackKeywords: ['classroom education', 'science laboratory', 'books library', 'university campus'],
+            contextTerms: ['explained', 'how it works', 'documentary'],
+            avoidTerms: ['cartoon', 'clipart', 'meme', 'toy', 'presenter', 'talking head', 'vlog'],
+            fallbackKeywords: ['engineering cross section', 'construction process', 'science diagram', 'factory interior'],
             entityBoost: true,
-            stockMaxWords: 3,
+            stockMaxWords: 4,
         },
 
         keywordRules: {
             strategy: 'concept-visual',
             rules: [
-                'Scientific concept → keyword = visual representation (e.g., "DNA double helix", "brain neuron diagram")',
-                'Historical figure → keyword = their name (e.g., "Albert Einstein", "Marie Curie laboratory")',
-                'Process/method → keyword = concrete step visual (e.g., "chemistry lab experiment", "telescope observatory")',
-                'Abstract topic → keyword = tangible related image (e.g., "classroom whiteboard" not "learning methodology")',
-                'Always pick something a camera could photograph — avoid textbook abstractions',
+                'Specific structure/material → keyword = structure + detail (e.g., "concrete dome cross section", "fiberglass insulation wall")',
+                'Scientific concept → keyword = visual representation (e.g., "DNA double helix", "thermal imaging house")',
+                'Named person/inventor → keyword = their name + invention (e.g., "Wallace Neff architect", "Nikola Tesla coil")',
+                'Process/mechanism → keyword = concrete step visual (e.g., "spray foam insulation wall", "solar panel installation")',
+                'Abstract principle → keyword = tangible visual (e.g., "wind tunnel aerodynamics" not "energy efficiency concept")',
+                'Prefer CLEAN B-roll: close-ups of materials, cross-sections, aerial views of structures — NO people/presenters',
             ],
             examples: {
-                good: ['"DNA double helix model"', '"chemistry lab experiment"', '"space telescope Hubble"', '"ancient Rome Colosseum"'],
-                bad: ['"educational concept"', '"learning theory"', '"scientific method"'],
+                good: ['"concrete dome cross section"', '"fiberglass insulation wall frame"', '"solar panel rooftop aerial"', '"steel bridge construction"'],
+                bad: ['"educational concept"', '"how things work"', '"technology explanation"', '"scientific method"'],
             }
         },
 
         overlayPrefs: {
             v2Density: 'medium',
             explainerDensity: 'high',
-            maxOverlays: 5,
-            minGapSec: 10,
+            maxOverlays: 6,
+            minGapSec: 8,
             preferredTypes: ['explainer', 'v2'],
         }
     },
 
+    // ────────────────────────────────────────────────────
+    // NEWS CATEGORY — breaking / current events
+    // ────────────────────────────────────────────────────
+
     news: {
         id: 'news',
         name: 'News/Current Events',
-        description: 'News, politics, current events, journalism',
+        description: 'Breaking news, current events, journalism — footage-driven, minimal graphics',
 
         defaultTheme: 'modern',
 
         shotStyle: 'Press conference angles, newsroom-style framing, split-screen layouts, on-location establishing shots, document/headline close-ups, crowd footage, official building exteriors.',
 
+        // NEWS = footage-driven. Only essential MGs: lower thirds, headlines, maps
         allowedMGs: [
-            'headline', 'lowerThird', 'statCounter', 'articleHighlight', 'mapChart',
-            'timeline', 'barChart', 'bulletList', 'callout', 'focusWord', 'typewriter'
+            'headline', 'lowerThird', 'mapChart',
+            'focusWord', 'statCounter', 'typewriter'
         ],
 
         footagePriority: {
-            video: ['youtube', 'vkVideo', 'reddit', 'pexels', 'pixabay'],
+            video: ['youtube', 'reddit', 'pexels', 'pixabay'],
             image: ['bing', 'googleScrape', 'unsplash', 'pexels', 'pixabay']
         },
 
@@ -447,13 +473,19 @@ const NICHES = {
         id: 'news.politics',
         _parent: 'news',
         name: 'News / Politics & Geopolitics',
-        description: 'Political news, elections, government, geopolitics, diplomacy, sanctions',
+        description: 'Political news, elections, government, geopolitics, diplomacy, sanctions — footage-driven',
 
         shotStyle: 'Press conferences, parliament/congress floor votes, diplomatic handshakes, protest marches, government building exteriors, official portraits, world leader summits, embassy exteriors.',
 
+        // Footage-driven: only essential overlays
         allowedMGs: [
-            'headline', 'lowerThird', 'statCounter', 'articleHighlight', 'mapChart',
-            'timeline', 'barChart', 'bulletList', 'callout', 'focusWord', 'comparisonCard', 'typewriter'
+            'headline', 'lowerThird', 'mapChart',
+            'focusWord', 'statCounter', 'typewriter'
+        ],
+
+        mgRules: [
+            'LOCATION RULE: Every time a location/place/country/city/region/strait/base is mentioned → MUST use lowerThird with the location name as text. Locations are critical context in political news.',
+            'TIME RULE: Every time a specific time/date/hour is mentioned (e.g. "5:27 local time", "March 15", "Tuesday") → MUST use typewriter with the time/date as text. Timestamps anchor the news narrative.',
         ],
 
         footagePriority: {
@@ -497,17 +529,18 @@ const NICHES = {
         id: 'news.celebrity',
         _parent: 'news',
         name: 'News / Celebrity & Entertainment',
-        description: 'Celebrity news, gossip, entertainment industry, sports celebrities, pop culture',
+        description: 'Celebrity news, gossip, entertainment industry, sports celebrities, pop culture — footage-driven',
 
         shotStyle: 'Red carpet photos, paparazzi shots, award ceremony stages, studio interviews, social media screenshots, magazine covers, concert/event footage, sports press conferences.',
 
+        // Celebrity = mostly photos/clips, light MGs
         allowedMGs: [
-            'headline', 'lowerThird', 'callout', 'focusWord',
-            'articleHighlight', 'statCounter', 'timeline', 'bulletList', 'typewriter'
+            'headline', 'lowerThird', 'focusWord',
+            'typewriter'
         ],
 
         footagePriority: {
-            video: ['youtube', 'vkVideo', 'reddit', 'pixabay', 'pexels'],
+            video: ['youtube', 'reddit', 'pixabay', 'pexels'],
             image: ['bing', 'googleScrape', 'unsplash', 'pexels', 'pixabay']
         },
 
@@ -547,17 +580,18 @@ const NICHES = {
         id: 'news.economy',
         _parent: 'news',
         name: 'News / Economy & Markets',
-        description: 'Economic news, stock markets, trade, inflation, business news, central banks',
+        description: 'Economic news, stock markets, trade, inflation, business news, central banks — footage-driven',
 
         shotStyle: 'Stock market tickers, trading floor footage, central bank buildings, currency notes close-ups, oil rigs/pipelines, shipping containers, Wall Street exteriors, chart/graph overlays, factory/warehouse interiors.',
 
+        // Economy news: a bit more data viz than other news, but still light
         allowedMGs: [
-            'headline', 'lowerThird', 'statCounter', 'barChart',
-            'comparisonCard', 'callout', 'bulletList', 'timeline', 'focusWord', 'articleHighlight', 'typewriter'
+            'headline', 'lowerThird', 'statCounter', 'mapChart',
+            'focusWord', 'typewriter'
         ],
 
         footagePriority: {
-            video: ['youtube', 'reddit', 'vkVideo', 'pexels', 'pixabay'],
+            video: ['youtube', 'reddit', 'pexels', 'pixabay'],
             image: ['bing', 'googleScrape', 'unsplash', 'pexels', 'pixabay']
         },
 
@@ -604,9 +638,15 @@ const NICHES = {
 
         shotStyle: 'Satellite imagery, military vehicle footage, map animations with troop movements, night-vision style shots, naval fleet aerials, press conferences, border checkpoints, destroyed infrastructure.',
 
+        // Military: maps + headlines, footage-driven
         allowedMGs: [
-            'headline', 'lowerThird', 'mapChart', 'timeline', 'statCounter',
-            'comparisonCard', 'callout', 'focusWord', 'bulletList', 'barChart', 'typewriter'
+            'headline', 'lowerThird', 'mapChart', 'statCounter',
+            'focusWord', 'typewriter'
+        ],
+
+        mgRules: [
+            'LOCATION RULE: Every time a location/place/country/city/region/strait/base/port is mentioned → MUST use lowerThird with the location name as text. Locations are critical context in military news.',
+            'TIME RULE: Every time a specific time/date/hour is mentioned (e.g. "5:27 local time", "March 15", "0600 hours") → MUST use typewriter with the time/date as text. Timestamps anchor the news narrative.',
         ],
 
         footagePriority: {
@@ -663,13 +703,14 @@ const NICHES = {
 
         shotStyle: 'Neon-lit close-ups of screens and hardware, dark rooms with monitor glow, data visualizations, smooth tracking shots of server rooms and labs, aerial shots of tech campuses, product launch stages.',
 
+        // Tech NEWS: product launches, breakthroughs, incidents — footage-driven like all news
         allowedMGs: [
-            'headline', 'lowerThird', 'statCounter', 'barChart', 'focusWord',
-            'comparisonCard', 'callout', 'bulletList', 'kineticText', 'typewriter'
+            'headline', 'lowerThird', 'statCounter', 'focusWord',
+            'typewriter'
         ],
 
         footagePriority: {
-            video: ['youtube', 'vkVideo', 'reddit', 'pixabay', 'pexels'],
+            video: ['youtube', 'reddit', 'pixabay', 'pexels'],
             image: ['bing', 'googleScrape', 'unsplash', 'pexels', 'pixabay']
         },
 
@@ -677,9 +718,11 @@ const NICHES = {
 
         preferredMediaType: 'video',
 
-        keywords: ['tech', 'ai', 'cyber', 'hack', 'digital', 'code', 'robot', 'future',
+        // ONLY tech NEWS keywords — not explainer/how-things-work (those go to 'explainer' niche)
+        keywords: ['tech', 'ai', 'cyber', 'hack', 'digital', 'code', 'robot',
                    'virtual', 'computer', 'software', 'data', 'algorithm', 'startup',
-                   'app', 'silicon', 'processor', 'cloud', 'blockchain', 'machine learning'],
+                   'app', 'silicon', 'processor', 'cloud', 'blockchain', 'machine learning',
+                   'launch', 'release', 'update', 'patch', 'vulnerability', 'breach'],
 
         searchPolicy: {
             contextTerms: ['technology', 'digital', 'futuristic'],
@@ -704,8 +747,9 @@ const NICHES = {
         },
     },
 
-    history: {
-        id: 'history',
+    'explainer.history': {
+        id: 'explainer.history',
+        _parent: 'explainer',
         name: 'History/Documentary',
         description: 'History, historical events, civilizations, biography',
 
@@ -715,11 +759,11 @@ const NICHES = {
 
         allowedMGs: [
             'headline', 'lowerThird', 'timeline', 'mapChart', 'callout',
-            'focusWord', 'articleHighlight', 'bulletList', 'statCounter', 'kineticText', 'typewriter'
+            'focusWord', 'bulletList', 'statCounter', 'kineticText', 'typewriter'
         ],
 
         footagePriority: {
-            video: ['youtube', 'vkVideo', 'reddit', 'pexels', 'pixabay'],
+            video: ['youtube', 'reddit', 'pexels', 'pixabay'],
             image: ['googleScrape', 'bing', 'pexels', 'pixabay', 'unsplash']
         },
 
@@ -765,8 +809,9 @@ const NICHES = {
         }
     },
 
-    motivation: {
-        id: 'motivation',
+    'explainer.motivation': {
+        id: 'explainer.motivation',
+        _parent: 'explainer',
         name: 'Motivation/Self-Help',
         description: 'Motivational, self-improvement, inspirational, mindset',
 
@@ -780,7 +825,7 @@ const NICHES = {
         ],
 
         footagePriority: {
-            video: ['youtube', 'vkVideo', 'reddit', 'pexels', 'pixabay'],
+            video: ['youtube', 'reddit', 'pexels', 'pixabay'],
             image: ['pexels', 'unsplash', 'pixabay', 'googleScrape', 'bing']
         },
 
@@ -824,10 +869,9 @@ const NICHES = {
         }
     },
 
-    // military: MOVED to news.military sub-niche (see below news sub-niches section)
-
-    food: {
-        id: 'food',
+    'explainer.food': {
+        id: 'explainer.food',
+        _parent: 'explainer',
         name: 'Food/Health',
         description: 'Food, nutrition, health, diet, cooking, wellness',
 
@@ -837,11 +881,11 @@ const NICHES = {
 
         allowedMGs: [
             'headline', 'bulletList', 'statCounter', 'callout', 'focusWord',
-            'comparisonCard', 'rankingList', 'lowerThird', 'barChart', 'explainer'
+            'comparisonCard', 'rankingList', 'lowerThird', 'barChart', 'explainer', 'kineticText'
         ],
 
         footagePriority: {
-            video: ['youtube', 'vkVideo', 'reddit', 'pexels', 'pixabay'],
+            video: ['youtube', 'reddit', 'pexels', 'pixabay'],
             image: ['pexels', 'unsplash', 'pixabay', 'bing', 'googleScrape']
         },
 
@@ -886,8 +930,9 @@ const NICHES = {
         }
     },
 
-    diy: {
-        id: 'diy',
+    'explainer.diy': {
+        id: 'explainer.diy',
+        _parent: 'explainer',
         name: 'DIY/Lifehacks',
         description: 'Do-it-yourself, life hacks, home improvement, tips & tricks',
 
@@ -897,11 +942,11 @@ const NICHES = {
 
         allowedMGs: [
             'headline', 'bulletList', 'callout', 'focusWord', 'statCounter',
-            'comparisonCard', 'progressBar', 'lowerThird', 'rankingList', 'explainer'
+            'comparisonCard', 'progressBar', 'lowerThird', 'rankingList', 'explainer', 'kineticText'
         ],
 
         footagePriority: {
-            video: ['youtube', 'vkVideo', 'reddit', 'pexels', 'pixabay'],
+            video: ['youtube', 'reddit', 'pexels', 'pixabay'],
             image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash']
         },
 
@@ -946,6 +991,199 @@ const NICHES = {
         }
     },
 
+    // ────────────────────────────────────────────────────
+    // NEW EXPLAINER SUB-NICHES
+    // ────────────────────────────────────────────────────
+
+    'explainer.military': {
+        id: 'explainer.military',
+        _parent: 'explainer',
+        name: 'Military Documentary',
+        description: 'Military history, weapons technology, strategy, historical battles — high-quality documentary, NOT breaking news',
+
+        defaultTheme: 'crime',
+
+        shotStyle: 'Archival military footage, aircraft/tank/ship close-ups, war memorial shots, battlefield aerials, museum weapon exhibits, historical command maps, documentary-style talking head re-enactments (NO presenters), historical photographs.',
+
+        allowedMGs: [
+            'headline', 'lowerThird', 'mapChart', 'timeline', 'statCounter',
+            'focusWord', 'callout', 'bulletList', 'kineticText', 'typewriter'
+        ],
+
+        footagePriority: {
+            video: ['youtube', 'reddit', 'pexels', 'pixabay'],
+            image: ['googleScrape', 'bing', 'pexels', 'pixabay', 'unsplash']
+        },
+
+        // Documentary military content: NO Telegram (that's for breaking war news only)
+        excludeVideoProviders: ['telegram', 'vkVideo'],
+
+        defaultPacing: 'moderate',
+        preferredMediaType: 'video',
+
+        keywords: ['military history', 'world war', 'battle', 'warfare history', 'army history',
+                   'navy history', 'aircraft history', 'tank history', 'weapons technology',
+                   'military documentary', 'war documentary', 'historical battle', 'military strategy',
+                   'naval history', 'air force history', 'special forces history', 'cold war',
+                   'arms race', 'military technology', 'defense industry', 'military museum',
+                   'veteran', 'war memorial', 'operation history'],
+
+        searchPolicy: {
+            contextTerms: ['military', 'documentary', 'historical'],
+            avoidTerms: ['cartoon', 'game', 'fiction', 'call of duty', 'anime', 'breaking news'],
+            fallbackKeywords: ['military history documentary', 'world war aerial footage', 'tank museum', 'naval fleet historical'],
+            entityBoost: true,
+            stockMaxWords: 4,
+        },
+
+        keywordRules: {
+            strategy: 'entity-first',
+            rules: [
+                'Named operation/battle → keyword = operation or battle name (e.g., "D-Day Normandy 1944", "Battle of Midway")',
+                'Military hardware → keyword = specific equipment + era (e.g., "Spitfire WWII fighter", "M1 Abrams tank")',
+                'Historical figure → keyword = name + context (e.g., "Patton portrait", "Churchill war room")',
+                'Strategic concept → keyword = visual representation (e.g., "trench warfare WWI", "naval blockade map")',
+            ],
+            examples: {
+                good: ['"D-Day Normandy beach"', '"Spitfire WWII dogfight"', '"aircraft carrier deck historical"', '"tank Kursk battle"'],
+                bad: ['"military operation"', '"war zone news"', '"breaking conflict"'],
+            }
+        },
+
+        overlayPrefs: {
+            v2Density: 'medium',
+            explainerDensity: 'medium',
+            maxOverlays: 4,
+            minGapSec: 12,
+            preferredTypes: ['v2', 'explainer'],
+        }
+    },
+
+    'explainer.tech': {
+        id: 'explainer.tech',
+        _parent: 'explainer',
+        name: 'Tech Explainer',
+        description: 'How technology works — science, engineering, AI/ML concepts, product deep-dives, NOT breaking tech news',
+
+        defaultTheme: 'modern',
+
+        shotStyle: 'Clean studio-lit hardware shots, server room aerials, circuit board macro close-ups, software UI screencasts, factory/fab lab interiors, product cross-section diagrams, engineering blueprint overlays.',
+
+        // Rich MG treatment — educational tech gets full explainer graphics
+        allowedMGs: [
+            'headline', 'lowerThird', 'bulletList', 'statCounter', 'barChart', 'donutChart',
+            'timeline', 'comparisonCard', 'focusWord', 'callout', 'explainer',
+            'progressBar', 'rankingList', 'kineticText', 'typewriter'
+        ],
+
+        footagePriority: {
+            video: ['youtube', 'pexels', 'pixabay', 'reddit'],
+            image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash']
+        },
+
+        excludeVideoProviders: ['telegram', 'vkVideo'],
+
+        defaultPacing: 'moderate',
+        preferredMediaType: 'mixed',
+
+        keywords: ['how it works', 'technology explained', 'engineering explained', 'science explained',
+                   'how does', 'how ai works', 'machine learning explained', 'quantum computing',
+                   'semiconductor', 'processor', 'chip fabrication', 'how internet works',
+                   'blockchain explained', 'electric vehicle technology', 'how battery works',
+                   'solar panel technology', 'nuclear reactor', 'space technology', 'rocket science',
+                   'robotics', 'automation', 'neural network', 'deep learning', 'algorithm explained'],
+
+        searchPolicy: {
+            contextTerms: ['explained', 'how it works', 'technology'],
+            avoidTerms: ['cartoon', 'clipart', 'meme', 'presenter', 'talking head', 'breaking news'],
+            fallbackKeywords: ['technology explainer', 'engineering cross section', 'circuit board close up', 'data center aerial'],
+            entityBoost: true,
+            stockMaxWords: 4,
+        },
+
+        keywordRules: {
+            strategy: 'concept-visual',
+            rules: [
+                'Technology/product → keyword = specific component or process (e.g., "CPU die shot", "lithium battery cross section")',
+                'Abstract concept → keyword = visual representation (e.g., "neural network diagram", "satellite orbit animation")',
+                'Company/product mentioned → keyword = product + technical context (e.g., "Tesla battery pack", "NVIDIA GPU chip")',
+                'Prefer CLEAN B-roll: hardware close-ups, diagrams, lab footage — NO presenters',
+            ],
+            examples: {
+                good: ['"CPU silicon wafer fabrication"', '"lithium battery cross section"', '"server rack data center"', '"robot arm assembly factory"'],
+                bad: ['"tech news"', '"technology launch"', '"breaking AI update"'],
+            }
+        },
+
+        overlayPrefs: {
+            v2Density: 'medium',
+            explainerDensity: 'high',
+            maxOverlays: 6,
+            minGapSec: 8,
+            preferredTypes: ['explainer', 'v2'],
+        }
+    },
+
+    // ────────────────────────────────────────────────────
+    // NEW NEWS SUB-NICHE
+    // ────────────────────────────────────────────────────
+
+    'news.sport': {
+        id: 'news.sport',
+        _parent: 'news',
+        name: 'Sports News / Breaking',
+        description: 'Breaking sports news, transfer rumors, match results, sports scandals — footage-driven, NOT documentary',
+
+        defaultTheme: 'modern',
+
+        shotStyle: 'Press conference podiums, stadium establishing shots, athlete walkout/warm-up footage, post-match interviews, training ground clips, trophy presentations.',
+
+        allowedMGs: [
+            'headline', 'lowerThird', 'statCounter', 'focusWord', 'typewriter'
+        ],
+
+        footagePriority: {
+            video: ['youtube', 'reddit', 'pexels', 'pixabay'],
+            image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash']
+        },
+
+        excludeVideoProviders: ['telegram', 'vkVideo'],
+
+        defaultPacing: 'fast',
+        preferredMediaType: 'video',
+
+        keywords: ['transfer', 'signing', 'contract', 'fired', 'sacked', 'injured', 'injury',
+                   'ban', 'suspension', 'scandal', 'breaking sports', 'sports news', 'match result',
+                   'final score', 'champion', 'title race', 'knockout round', 'playoff', 'draft',
+                   'trade', 'free agent', 'manager sacked', 'coach fired', 'record breaking'],
+
+        searchPolicy: {
+            contextTerms: ['sports', 'breaking', 'news'],
+            avoidTerms: ['cartoon', 'anime', 'esports', 'game screenshot'],
+            fallbackKeywords: ['sports press conference', 'stadium crowd', 'athlete training', 'trophy ceremony'],
+            entityBoost: true,
+            stockMaxWords: 3,
+        },
+
+        keywordRules: {
+            strategy: 'entity-first',
+            rules: [
+                'Player/manager named → keyword = name + current context (e.g., "Mbappé Real Madrid", "Klopp Liverpool farewell")',
+                'Transfer/result → keyword = specific event (e.g., "Champions League final 2024", "NFL draft pick")',
+                'Injury/scandal → keyword = player name + event (e.g., "Ronaldo injury training", "boxing controversy")',
+                'Always use real names and current events — sports news needs specificity',
+            ],
+            examples: {
+                good: ['"Champions League trophy ceremony"', '"NFL press conference"', '"soccer training ground"', '"basketball arena crowd"'],
+                bad: ['"sports news"', '"athletic event"', '"sports competition update"'],
+            }
+        },
+    },
+
+    // ────────────────────────────────────────────────────
+    // FLAT FALLBACK
+    // ────────────────────────────────────────────────────
+
     general: {
         id: 'general',
         name: 'General/Neutral',
@@ -959,12 +1197,12 @@ const NICHES = {
         allowedMGs: [
             'headline', 'lowerThird', 'statCounter', 'callout', 'bulletList',
             'focusWord', 'progressBar', 'barChart', 'donutChart', 'comparisonCard',
-            'timeline', 'rankingList', 'kineticText', 'mapChart', 'articleHighlight',
+            'timeline', 'rankingList', 'kineticText', 'mapChart',
             'explainer', 'typewriter'
         ],
 
         footagePriority: {
-            video: ['youtube', 'vkVideo', 'reddit', 'pexels', 'pixabay'],
+            video: ['youtube', 'reddit', 'pexels', 'pixabay'],
             image: ['pexels', 'pixabay', 'unsplash', 'bing', 'googleScrape']
         },
 
@@ -1022,6 +1260,7 @@ function pickNicheFromContent(scriptContext) {
     }
 
     const text = (
+        (scriptContext.videoTitle || '') + ' ' +   // Title is strongest signal — listed first
         scriptContext.summary + ' ' +
         (scriptContext.theme || '') + ' ' +
         (scriptContext.tone || '') + ' ' +
@@ -1029,55 +1268,129 @@ function pickNicheFromContent(scriptContext) {
         (scriptContext.entities || []).join(' ')
     ).toLowerCase();
 
+    if (scriptContext.videoTitle) {
+        console.log(`      [Video title]: "${scriptContext.videoTitle}"`);
+    }
+
     // Also check the AI's explicit theme field as a strong signal
     const aiTheme = (scriptContext.theme || '').toLowerCase();
 
-    // Direct mapping from AI theme → niche (strongest signal)
+    // ── EVENT TYPE + TONE: strongest signal for news vs explainer ──
+    // AI Director outputs: eventType (real-past|real-ongoing|speculative|educational|fictional)
+    //                      tone (urgent|informative|dramatic|educational|serious|...)
+    // These distinguish "breaking news about tech" from "how tech works" better than keywords
+    const eventType = (scriptContext.eventType || '').toLowerCase();
+    const tone = (scriptContext.tone || '').toLowerCase();
+
+    // NEWS signals: real events with urgent/serious tone
+    const isNewsSignal = (eventType === 'real-ongoing' || eventType === 'real-past') &&
+                         (tone === 'urgent' || tone === 'serious' || tone === 'dramatic');
+    // EXPLAINER signals: educational content with informative tone
+    const isExplainerSignal = eventType === 'educational' ||
+                              tone === 'educational' ||
+                              (eventType === 'speculative' && tone === 'informative');
+
+    // Log the signals for debugging
+    if (isNewsSignal || isExplainerSignal) {
+        console.log(`      [Event signals]: eventType=${eventType || 'none'} tone=${tone || 'none'} → ${isNewsSignal ? 'NEWS' : ''}${isExplainerSignal ? 'EXPLAINER' : ''}`);
+    }
+
+    // Direct mapping from AI theme → parent niche category (explainer or news)
+    // Crime, history, nature etc. are ALWAYS explainer — never news regardless of tone
     const THEME_TO_NICHE = {
-        'technology': 'news',      // → sub-niche detection picks news.tech
-        'science': 'education',
-        'finance': 'business',
-        'business': 'business',
-        'economy': 'business',
-        'markets': 'business',
-        'politics': 'news',        // → sub-niche detection picks news.politics
-        'entertainment': 'news',   // → sub-niche detection picks news.celebrity
-        'celebrity': 'news',       // → sub-niche detection picks news.celebrity
-        'gossip': 'news',          // → sub-niche detection picks news.celebrity
-        'crime': 'crime',
-        'mystery': 'crime',
-        'nature': 'nature',
-        'sports': 'sport',
-        'education': 'education',
-        'lifestyle': 'luxury',
-        'travel': 'nature',
-        'health': 'food',
-        'food': 'food',
-        'nutrition': 'food',
-        'cooking': 'food',
-        'motivation': 'motivation',
-        'history': 'history',
-        'military': 'news',        // → sub-niche detection picks news.military
-        'war': 'news',             // → sub-niche detection picks news.military
-        'geopolitics': 'news',     // → sub-niche detection picks news.military
-        'defense': 'news',         // → sub-niche detection picks news.military
-        'diy': 'diy',
-        'crafts': 'diy',
-        'home improvement': 'diy',
+        // Always explainer — educational/documentary regardless of tone
+        'science': 'explainer',
+        'engineering': 'explainer',
+        'architecture': 'explainer',
+        'construction': 'explainer',
+        'education': 'explainer',
+        'documentary': 'explainer',
+        'nature': 'explainer',         // → sub-niche: explainer.nature
+        'wildlife': 'explainer',       // → sub-niche: explainer.nature
+        'travel': 'explainer',         // → sub-niche: explainer.nature
+        'crime': 'explainer',          // ALWAYS documentary — NEVER breaking news
+        'mystery': 'explainer',        // ALWAYS explainer
+        'history': 'explainer',        // ALWAYS documentary — NEVER breaking news
+        'biography': 'explainer',      // → sub-niche: explainer.history
+        'lifestyle': 'explainer',      // → sub-niche: explainer.luxury
+        'luxury': 'explainer',         // → sub-niche: explainer.luxury
+        'fashion': 'explainer',        // → sub-niche: explainer.luxury
+        'motivation': 'explainer',     // → sub-niche: explainer.motivation
+        'self-improvement': 'explainer',
+        'food': 'explainer',           // → sub-niche: explainer.food
+        'nutrition': 'explainer',      // → sub-niche: explainer.food
+        'cooking': 'explainer',        // → sub-niche: explainer.food
+        'health': 'explainer',         // → sub-niche: explainer.food
+        'diy': 'explainer',            // → sub-niche: explainer.diy
+        'crafts': 'explainer',         // → sub-niche: explainer.diy
+        'home improvement': 'explainer',
+
+        // Always news — breaking/current events
+        'politics': 'news',            // → sub-niche: news.politics
+        'entertainment': 'news',       // → sub-niche: news.celebrity
+        'celebrity': 'news',           // → sub-niche: news.celebrity
+        'gossip': 'news',              // → sub-niche: news.celebrity
+        'war': 'news',                 // → sub-niche: news.military (current conflict)
+        'geopolitics': 'news',         // → sub-niche: news.military
+
+        // Ambiguous — resolved below by event signals + keywords:
+        // 'technology', 'tech', 'military', 'defense', 'sports', 'sport',
+        // 'business', 'finance', 'economy', 'markets'
     };
 
-    // If AI gave us a direct theme match, start with that as a strong candidate
-    const directMatch = THEME_TO_NICHE[aiTheme];
+    // Ambiguous themes — one theme string can mean either category depending on content type.
+    // Key: AI theme string → { explainer parent result, news parent result, default if no signal }
+    const AMBIGUOUS_THEMES = {
+        'technology':  { ifExplainer: 'explainer', ifNews: 'news', defaultTo: null },      // null = let keyword scoring decide
+        'tech':        { ifExplainer: 'explainer', ifNews: 'news', defaultTo: null },
+        'military':    { ifExplainer: 'explainer', ifNews: 'news', defaultTo: 'news' },     // default news (most military content is breaking)
+        'defense':     { ifExplainer: 'explainer', ifNews: 'news', defaultTo: 'news' },
+        'sports':      { ifExplainer: 'explainer', ifNews: 'news', defaultTo: 'explainer' }, // default explainer (sports history/documentary)
+        'sport':       { ifExplainer: 'explainer', ifNews: 'news', defaultTo: 'explainer' },
+        'business':    { ifExplainer: 'explainer', ifNews: 'news', defaultTo: 'explainer' }, // "how businesses work" = explainer
+        'finance':     { ifExplainer: 'explainer', ifNews: 'news', defaultTo: 'explainer' },
+        'economy':     { ifExplainer: 'explainer', ifNews: 'news', defaultTo: 'news' },      // "economy" alone leans news
+        'markets':     { ifExplainer: 'explainer', ifNews: 'news', defaultTo: 'news' },
+    };
+
+    let directMatch = THEME_TO_NICHE[aiTheme];
+    if (!directMatch) {
+        const amb = AMBIGUOUS_THEMES[aiTheme];
+        if (amb) {
+            if (isExplainerSignal) {
+                directMatch = amb.ifExplainer;
+                console.log(`      [Theme resolve]: ${aiTheme} + educational signal → ${directMatch}`);
+            } else if (isNewsSignal) {
+                directMatch = amb.ifNews;
+                console.log(`      [Theme resolve]: ${aiTheme} + news signal → ${directMatch}`);
+            } else if (amb.defaultTo) {
+                directMatch = amb.defaultTo;
+                console.log(`      [Theme resolve]: ${aiTheme} + no signal → default ${directMatch}`);
+            }
+            // If no signal and no default, keyword scoring decides (no directMatch boost)
+        }
+    }
 
     // Score each TOP-LEVEL niche based on keyword matches (word-boundary aware)
-    // Sub-niches (with _parent) are scored separately after parent is selected
+    // Sub-niches (with _parent) are scored separately after parent is selected.
+    // For parent niches (explainer/news), fold in ALL sub-niche keywords so that e.g. crime or
+    // nature keywords make 'explainer' score highly even though those sub-niche keywords aren't
+    // on the parent itself.
     const scores = {};
     for (const [nicheId, niche] of Object.entries(NICHES)) {
         if (nicheId === 'general') continue;
         if (niche._parent) continue; // Skip sub-niches — handled by _detectSubNiche
 
+        // Combine parent keywords + all sub-niche keywords for scoring
+        let scoreKeywords = [...(niche.keywords || [])];
+        for (const sub of Object.values(NICHES)) {
+            if (sub._parent === nicheId && sub.keywords) {
+                scoreKeywords = scoreKeywords.concat(sub.keywords);
+            }
+        }
+
         let score = 0;
-        for (const keyword of niche.keywords) {
+        for (const keyword of scoreKeywords) {
             // Use word boundary regex to avoid partial matches (e.g. 'ai' inside 'raid')
             // Allow optional plural suffix (s, es, ed, ing) to match "missiles" for "missile" etc.
             const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -1088,6 +1401,10 @@ function pickNicheFromContent(scriptContext) {
         }
         // Boost if AI theme directly maps to this niche
         if (directMatch === nicheId) score += 3;
+
+        // Event signal boosts: strong override for ambiguous keyword scores
+        if (isExplainerSignal && nicheId === 'explainer') score += 4;
+        if (isNewsSignal && nicheId === 'news') score += 4;
 
         scores[nicheId] = score;
     }
@@ -1120,24 +1437,85 @@ function _detectSubNiche(parentId, text, aiTheme) {
     const subNiches = Object.entries(NICHES).filter(([_, n]) => n._parent === parentId);
     if (subNiches.length === 0) return null;
 
-    // AI theme direct mapping to sub-niche
+    // AI theme → sub-niche, organized by parent category.
+    // Using hierarchical map prevents a 'military' AI theme from picking news.military
+    // when the parent is 'explainer' (would pick explainer.military instead).
     const SUB_NICHE_THEME_MAP = {
-        'politics': 'news.politics',
-        'geopolitics': 'news.politics',
-        'economy': 'news.economy',
-        'finance': 'news.economy',
-        'markets': 'news.economy',
-        'celebrity': 'news.celebrity',
-        'entertainment': 'news.celebrity',
-        'gossip': 'news.celebrity',
-        'military': 'news.military',
-        'war': 'news.military',
-        'defense': 'news.military',
-        'technology': 'news.tech',
-        'tech': 'news.tech',
-        'cyber': 'news.tech',
+        explainer: {
+            'nature': 'explainer.nature',
+            'wildlife': 'explainer.nature',
+            'travel': 'explainer.nature',
+            'environment': 'explainer.nature',
+            'climate': 'explainer.nature',
+            'crime': 'explainer.crime',
+            'mystery': 'explainer.crime',
+            'true crime': 'explainer.crime',
+            'thriller': 'explainer.crime',
+            'history': 'explainer.history',
+            'biography': 'explainer.history',
+            'historical': 'explainer.history',
+            'ancient': 'explainer.history',
+            'luxury': 'explainer.luxury',
+            'lifestyle': 'explainer.luxury',
+            'fashion': 'explainer.luxury',
+            'sports': 'explainer.sport',
+            'sport': 'explainer.sport',
+            'athletic': 'explainer.sport',
+            'motivation': 'explainer.motivation',
+            'self-improvement': 'explainer.motivation',
+            'mindset': 'explainer.motivation',
+            'food': 'explainer.food',
+            'nutrition': 'explainer.food',
+            'cooking': 'explainer.food',
+            'health': 'explainer.food',
+            'diy': 'explainer.diy',
+            'crafts': 'explainer.diy',
+            'home improvement': 'explainer.diy',
+            'tutorial': 'explainer.diy',
+            'business': 'explainer.business',
+            'finance': 'explainer.business',
+            'economy': 'explainer.business',
+            'markets': 'explainer.business',
+            'corporate': 'explainer.business',
+            'military': 'explainer.military',
+            'defense': 'explainer.military',
+            'war': 'explainer.military',       // historical war = explainer
+            'technology': 'explainer.tech',
+            'tech': 'explainer.tech',
+            'engineering': 'explainer.tech',
+            'science': 'explainer.tech',
+            'cyber': 'explainer.tech',
+        },
+        news: {
+            'politics': 'news.politics',
+            'geopolitics': 'news.politics',
+            'government': 'news.politics',
+            'election': 'news.politics',
+            'economy': 'news.economy',
+            'finance': 'news.economy',
+            'markets': 'news.economy',
+            'stocks': 'news.economy',
+            'celebrity': 'news.celebrity',
+            'entertainment': 'news.celebrity',
+            'gossip': 'news.celebrity',
+            'pop culture': 'news.celebrity',
+            'military': 'news.military',
+            'war': 'news.military',            // current conflict = news
+            'defense': 'news.military',
+            'conflict': 'news.military',
+            'technology': 'news.tech',
+            'tech': 'news.tech',
+            'cyber': 'news.tech',
+            'ai': 'news.tech',
+            'sports': 'news.sport',
+            'sport': 'news.sport',
+            'football': 'news.sport',
+            'basketball': 'news.sport',
+            'soccer': 'news.sport',
+        },
     };
-    const directSub = SUB_NICHE_THEME_MAP[aiTheme];
+    const parentMap = SUB_NICHE_THEME_MAP[parentId] || {};
+    const directSub = parentMap[aiTheme];
 
     // Always score ALL sub-niches by keyword matches — even if AI theme gave a direct hit.
     // A strong keyword signal (e.g., 8 military terms) should override a weak AI theme tag.
@@ -1375,22 +1753,64 @@ function getFallbackKeywords(nicheId) {
 // HELPER FUNCTIONS
 // ============================================================
 
+// Providers that are never appropriate for educational/documentary content.
+// Telegram and VK carry breaking-news war footage — irrelevant and jarring in explainers.
+const EXPLAINER_EXCLUDED_PROVIDERS = ['telegram', 'vkVideo'];
+
+// All overlay MG types available in the system (from mg-registry.js).
+// Explainer category gets the full set — rich visual treatment.
+const ALL_OVERLAY_MGS = [
+    'headline', 'lowerThird', 'callout', 'statCounter', 'focusWord',
+    'progressBar', 'barChart', 'donutChart', 'rankingList', 'timeline',
+    'comparisonCard', 'bulletList', 'mapChart', 'explainer', 'kineticText', 'typewriter',
+];
+
+// Breaking news category: footage-first. Only minimal text overlays that don't compete
+// with the raw footage. 4 types: identity bar, typed text, callout bubble, live stat.
+const NEWS_OVERLAY_MGS = ['lowerThird', 'typewriter', 'callout', 'statCounter'];
+
 /**
  * Get niche object by ID. Supports sub-niches (e.g., 'news.politics').
  * Sub-niches merge: parent fields as base, sub-niche fields override.
- * @param {string} nicheId - e.g., 'news', 'news.politics', 'crime'
+ *
+ * Rule enforced here: ALL explainer category niches (id='explainer' or _parent='explainer')
+ * automatically exclude Telegram + VK from video providers, regardless of what each
+ * individual niche entry says. News niches keep full provider access.
+ *
+ * @param {string} nicheId - e.g., 'news', 'news.politics', 'explainer.crime'
  * @returns {Object} Niche config (merged if sub-niche)
  */
 function getNiche(nicheId) {
     // Direct match (including sub-niche entries like 'news.politics')
     if (NICHES[nicheId]) {
         const niche = NICHES[nicheId];
+        let resolved;
         // If it has a _parent, merge with parent
         if (niche._parent) {
             const parent = NICHES[niche._parent] || NICHES.general;
-            return _mergeNiche(parent, niche);
+            resolved = _mergeNiche(parent, niche);
+        } else {
+            resolved = niche;
         }
-        return niche;
+        // Enforce category-level rules at resolution time
+        const isExplainerCategory = resolved.id === 'explainer' || resolved._parentId === 'explainer';
+        const isNewsCategory      = resolved.id === 'news'      || resolved._parentId === 'news';
+
+        if (isExplainerCategory) {
+            // Explainer: all overlay MGs available + no Telegram/VK
+            const excluded = new Set(resolved.excludeVideoProviders || []);
+            EXPLAINER_EXCLUDED_PROVIDERS.forEach(p => excluded.add(p));
+            resolved = { ...resolved, allowedMGs: ALL_OVERLAY_MGS, excludeVideoProviders: [...excluded] };
+        } else if (isNewsCategory) {
+            // News: footage-first, only minimal overlay MGs.
+            // Sub-niches can define their own allowedMGs (e.g. news.military adds mapChart).
+            // Only apply the category default if the sub-niche didn't specify its own list.
+            if (!niche.allowedMGs) {
+                resolved = { ...resolved, allowedMGs: NEWS_OVERLAY_MGS };
+            }
+        }
+
+        return resolved;
     }
     return NICHES.general;
 }
@@ -1451,23 +1871,29 @@ function getAllNiches() {
  * - emoji: icon for dropdown
  */
 const NICHE_PRESETS = {
-    auto:         { nicheId: null, suggestedFormat: null, suggestedPacing: null, label: 'Auto-Detect', emoji: '🤖' },
-    trueCrime:    { nicheId: 'crime', suggestedFormat: 'documentary', suggestedPacing: 'moderate', label: 'True Crime', emoji: '🔪' },
-    military:     { nicheId: 'news.military', suggestedFormat: 'documentary', suggestedPacing: 'moderate', label: 'Military / Geopolitics', emoji: '🎖️' },
-    documentary:  { nicheId: 'nature', suggestedFormat: 'documentary', suggestedPacing: 'slow', label: 'Nature Documentary', emoji: '🎬' },
-    finance:      { nicheId: 'business', suggestedFormat: null, suggestedPacing: 'moderate', label: 'Finance / Business', emoji: '💰' },
-    luxury:       { nicheId: 'luxury', suggestedFormat: null, suggestedPacing: 'slow', label: 'Luxury / Fashion', emoji: '💎' },
-    sports:       { nicheId: 'sport', suggestedFormat: null, suggestedPacing: 'fast', label: 'Sports', emoji: '⚽' },
-    tech:         { nicheId: 'news.tech', suggestedFormat: null, suggestedPacing: 'fast', label: 'Tech / Science', emoji: '💻' },
-    history:      { nicheId: 'history', suggestedFormat: 'documentary', suggestedPacing: 'slow', label: 'History', emoji: '📜' },
-    motivation:   { nicheId: 'motivation', suggestedFormat: null, suggestedPacing: 'moderate', label: 'Motivation', emoji: '🔥' },
-    news:         { nicheId: 'news', suggestedFormat: null, suggestedPacing: 'fast', label: 'News (Auto)', emoji: '📰' },
-    newsPolitics: { nicheId: 'news.politics', suggestedFormat: null, suggestedPacing: 'fast', label: 'News / Politics', emoji: '🏛️' },
-    newsCelebrity:{ nicheId: 'news.celebrity', suggestedFormat: null, suggestedPacing: 'fast', label: 'News / Celebrity', emoji: '⭐' },
-    newsEconomy:  { nicheId: 'news.economy', suggestedFormat: null, suggestedPacing: 'fast', label: 'News / Economy', emoji: '📈' },
-    // newsMilitary and newsTech are aliases of military and tech presets above
-    food:         { nicheId: 'food', suggestedFormat: null, suggestedPacing: 'moderate', label: 'Food / Health', emoji: '🍎' },
-    diy:          { nicheId: 'diy', suggestedFormat: null, suggestedPacing: 'moderate', label: 'DIY / Lifehacks', emoji: '🔧' },
+    // ── Auto ──
+    auto:           { nicheId: null,                  suggestedFormat: null,           suggestedPacing: null,       label: 'Auto-Detect',             emoji: '🤖' },
+    // ── Explainer / Documentary category ──
+    explainer:      { nicheId: 'explainer',           suggestedFormat: 'documentary',  suggestedPacing: 'moderate', label: 'Explainer / Documentary',  emoji: '📽️' },
+    trueCrime:      { nicheId: 'explainer.crime',     suggestedFormat: 'documentary',  suggestedPacing: 'moderate', label: 'True Crime Documentary',   emoji: '🔪' },
+    documentary:    { nicheId: 'explainer.nature',    suggestedFormat: 'documentary',  suggestedPacing: 'slow',     label: 'Nature Documentary',       emoji: '🎬' },
+    finance:        { nicheId: 'explainer.business',  suggestedFormat: null,           suggestedPacing: 'moderate', label: 'Finance / Business',       emoji: '💰' },
+    luxury:         { nicheId: 'explainer.luxury',    suggestedFormat: null,           suggestedPacing: 'slow',     label: 'Luxury / Fashion',         emoji: '💎' },
+    sports:         { nicheId: 'explainer.sport',     suggestedFormat: null,           suggestedPacing: 'fast',     label: 'Sports Documentary',       emoji: '⚽' },
+    history:        { nicheId: 'explainer.history',   suggestedFormat: 'documentary',  suggestedPacing: 'slow',     label: 'History Documentary',      emoji: '📜' },
+    motivation:     { nicheId: 'explainer.motivation',suggestedFormat: null,           suggestedPacing: 'moderate', label: 'Motivation',               emoji: '🔥' },
+    food:           { nicheId: 'explainer.food',      suggestedFormat: null,           suggestedPacing: 'moderate', label: 'Food / Health',            emoji: '🍎' },
+    diy:            { nicheId: 'explainer.diy',       suggestedFormat: null,           suggestedPacing: 'moderate', label: 'DIY / Lifehacks',          emoji: '🔧' },
+    militaryDoc:    { nicheId: 'explainer.military',  suggestedFormat: 'documentary',  suggestedPacing: 'moderate', label: 'Military Documentary',     emoji: '🪖' },
+    techExplainer:  { nicheId: 'explainer.tech',      suggestedFormat: 'documentary',  suggestedPacing: 'moderate', label: 'Tech Explainer',           emoji: '🔬' },
+    // ── Breaking News category ──
+    news:           { nicheId: 'news',                suggestedFormat: null,           suggestedPacing: 'fast',     label: 'News (Auto)',              emoji: '📰' },
+    newsPolitics:   { nicheId: 'news.politics',       suggestedFormat: null,           suggestedPacing: 'fast',     label: 'News / Politics',          emoji: '🏛️' },
+    newsEconomy:    { nicheId: 'news.economy',        suggestedFormat: null,           suggestedPacing: 'fast',     label: 'News / Economy',           emoji: '📈' },
+    military:       { nicheId: 'news.military',       suggestedFormat: null,           suggestedPacing: 'moderate', label: 'Military / Geopolitics',   emoji: '🎖️' },
+    newsCelebrity:  { nicheId: 'news.celebrity',      suggestedFormat: null,           suggestedPacing: 'fast',     label: 'News / Celebrity',         emoji: '⭐' },
+    tech:           { nicheId: 'news.tech',           suggestedFormat: null,           suggestedPacing: 'fast',     label: 'Tech News',                emoji: '💻' },
+    newsSport:      { nicheId: 'news.sport',          suggestedFormat: null,           suggestedPacing: 'fast',     label: 'Sports News',              emoji: '🏆' },
 };
 
 /**
@@ -1508,25 +1934,30 @@ function resolvePreset(presetKey) {
 // ── Default template settings for all niches ──
 // Per-niche template type allowlist and density (max count).
 // Niches can override these by defining allowedTemplates/templateDensity explicitly.
-const DEFAULT_ALLOWED_TEMPLATES = ['chapterCard', 'locationCard', 'quoteCard', 'keyTakeaway', 'comparisonCard', 'timelineCard', 'factCard', 'imageShowcase'];
+const DEFAULT_ALLOWED_TEMPLATES = ['chapterCard', 'locationCard', 'quoteCard', 'keyTakeaway', 'comparisonCard', 'timelineCard', 'factCard', 'imageShowcase', 'statCard', 'personIntro'];
 const NICHE_TEMPLATE_CONFIG = {
-    nature:          { allowed: ['chapterCard', 'locationCard', 'quoteCard', 'keyTakeaway', 'factCard', 'imageShowcase'],                          density: 'low' },
-    crime:           { allowed: ['chapterCard', 'locationCard', 'quoteCard', 'keyTakeaway', 'timelineCard', 'factCard', 'imageShowcase'],          density: 'medium' },
-    business:        { allowed: ['chapterCard', 'quoteCard', 'keyTakeaway', 'comparisonCard', 'factCard', 'imageShowcase'],                        density: 'low' },
-    luxury:          { allowed: ['chapterCard', 'locationCard', 'quoteCard', 'keyTakeaway', 'imageShowcase'],                                      density: 'low' },
-    sport:           { allowed: ['chapterCard', 'quoteCard', 'keyTakeaway', 'comparisonCard', 'factCard', 'imageShowcase'],                        density: 'low' },
-    education:       { allowed: ['chapterCard', 'quoteCard', 'keyTakeaway', 'comparisonCard', 'timelineCard', 'factCard', 'imageShowcase'],        density: 'medium' },
-    news:            { allowed: ['chapterCard', 'locationCard', 'quoteCard', 'keyTakeaway', 'timelineCard', 'factCard', 'imageShowcase'],          density: 'medium' },
-    'news.politics': { allowed: ['chapterCard', 'locationCard', 'quoteCard', 'keyTakeaway', 'timelineCard', 'factCard', 'imageShowcase'],          density: 'medium' },
-    'news.celebrity':{ allowed: ['chapterCard', 'quoteCard', 'keyTakeaway', 'imageShowcase'],                                                      density: 'low' },
-    'news.economy':  { allowed: ['chapterCard', 'quoteCard', 'keyTakeaway', 'comparisonCard', 'factCard', 'imageShowcase'],                        density: 'low' },
-    'news.military': { allowed: ['chapterCard', 'locationCard', 'quoteCard', 'keyTakeaway', 'timelineCard', 'factCard', 'imageShowcase'],          density: 'medium' },
-    'news.tech':     { allowed: ['chapterCard', 'quoteCard', 'keyTakeaway', 'comparisonCard', 'factCard', 'imageShowcase'],                        density: 'low' },
-    history:         { allowed: ['chapterCard', 'locationCard', 'quoteCard', 'keyTakeaway', 'timelineCard', 'factCard', 'imageShowcase'],          density: 'medium' },
-    motivation:      { allowed: ['chapterCard', 'quoteCard', 'keyTakeaway', 'imageShowcase'],                                                      density: 'low' },
-    food:            { allowed: ['chapterCard', 'locationCard', 'keyTakeaway', 'factCard', 'imageShowcase'],                                       density: 'low' },
-    diy:             { allowed: ['chapterCard', 'keyTakeaway', 'comparisonCard', 'factCard', 'imageShowcase'],                                     density: 'low' },
-    general:         { allowed: DEFAULT_ALLOWED_TEMPLATES,                                                                                         density: 'low' },
+    // EXPLAINER parent + all sub-niches: rich visual treatment
+    explainer:               { allowed: DEFAULT_ALLOWED_TEMPLATES,                                                                                                                       density: 'high' },
+    'explainer.nature':      { allowed: ['chapterCard', 'locationCard', 'quoteCard', 'keyTakeaway', 'factCard', 'imageShowcase', 'statCard', 'personIntro'],                            density: 'medium' },
+    'explainer.crime':       { allowed: DEFAULT_ALLOWED_TEMPLATES,                                                                                                                       density: 'high' },
+    'explainer.business':    { allowed: DEFAULT_ALLOWED_TEMPLATES,                                                                                                                       density: 'high' },
+    'explainer.luxury':      { allowed: ['chapterCard', 'locationCard', 'quoteCard', 'keyTakeaway', 'imageShowcase', 'statCard', 'personIntro'],                                        density: 'medium' },
+    'explainer.sport':       { allowed: ['chapterCard', 'quoteCard', 'keyTakeaway', 'comparisonCard', 'factCard', 'imageShowcase', 'statCard', 'personIntro'],                          density: 'medium' },
+    'explainer.history':     { allowed: DEFAULT_ALLOWED_TEMPLATES,                                                                                                                       density: 'high' },
+    'explainer.motivation':  { allowed: ['chapterCard', 'quoteCard', 'keyTakeaway', 'imageShowcase', 'statCard', 'personIntro'],                                                        density: 'medium' },
+    'explainer.food':        { allowed: DEFAULT_ALLOWED_TEMPLATES,                                                                                                                       density: 'high' },
+    'explainer.diy':         { allowed: DEFAULT_ALLOWED_TEMPLATES,                                                                                                                       density: 'high' },
+    'explainer.military':    { allowed: ['chapterCard', 'locationCard', 'quoteCard', 'keyTakeaway', 'timelineCard', 'factCard', 'imageShowcase', 'statCard', 'personIntro'],            density: 'high' },
+    'explainer.tech':        { allowed: DEFAULT_ALLOWED_TEMPLATES,                                                                                                                       density: 'high' },
+    // NEWS niches: footage-driven, minimal templates
+    news:                    { allowed: ['chapterCard', 'locationCard', 'personIntro'],                                                                                                  density: 'low' },
+    'news.politics':         { allowed: ['chapterCard', 'locationCard', 'personIntro'],                                                                                                  density: 'low' },
+    'news.celebrity':        { allowed: ['personIntro'],                                                                                                                                 density: 'low' },
+    'news.economy':          { allowed: ['chapterCard', 'statCard', 'personIntro'],                                                                                                      density: 'low' },
+    'news.military':         { allowed: ['chapterCard', 'locationCard', 'personIntro'],                                                                                                  density: 'low' },
+    'news.tech':             { allowed: ['chapterCard', 'personIntro'],                                                                                                                  density: 'low' },
+    'news.sport':            { allowed: ['chapterCard', 'personIntro'],                                                                                                                  density: 'low' },
+    general:                 { allowed: DEFAULT_ALLOWED_TEMPLATES,                                                                                                                       density: 'low' },
 };
 for (const niche of Object.values(NICHES)) {
     const cfg = NICHE_TEMPLATE_CONFIG[niche.id];

@@ -298,8 +298,10 @@ class Compositor {
             }
         }
 
-        // Create all video elements upfront so they start loading in parallel
-        for (const { scene, url, key } of videoScenes) {
+        // Load videos in batches — Electron/Chrome can only actively decode ~10 at once.
+        // Loading all 140+ simultaneously causes most to stall at readyState=1 (HAVE_METADATA).
+        const VIDEO_BATCH_SIZE = 12;
+        const _loadOneVideo = ({ url, key }) => {
             const video = document.createElement('video');
             video.muted = true;
             video.preload = 'auto';
@@ -309,13 +311,8 @@ class Compositor {
             document.body.appendChild(video);
             this._videoElements[key] = video;
             video.src = url;
-        }
-
-        // Wait for all videos to reach canplaythrough (fully buffered for local files)
-        const videoPromises = videoScenes.map(({ key }) => {
-            const video = this._videoElements[key];
             return new Promise(resolve => {
-                if (video.readyState >= 3) { resolve(); return; } // HAVE_FUTURE_DATA or better
+                if (video.readyState >= 3) { resolve(); return; }
                 let resolved = false;
                 const done = () => {
                     if (resolved) return;
@@ -326,28 +323,30 @@ class Compositor {
                     clearTimeout(timer);
                     resolve();
                 };
-                const onReady = () => done();
-                const onFallback = () => {
-                    // canplaythrough might not fire for some codecs, accept loadeddata after a delay
-                    setTimeout(done, 500);
-                };
-                const onError = () => {
-                    console.warn(`[Compositor] Failed to load video for scene ${key}`);
-                    done();
-                };
+                const onReady   = () => done();
+                const onFallback = () => setTimeout(done, 200);
+                const onError   = () => { console.warn(`[Compositor] Failed to load video for scene ${key}`); done(); };
                 video.addEventListener('canplaythrough', onReady);
                 video.addEventListener('loadeddata', onFallback);
                 video.addEventListener('error', onError);
                 const timer = setTimeout(() => {
                     console.warn(`[Compositor] Timeout loading video for scene ${key} (readyState=${video.readyState})`);
                     done();
-                }, 20000);
+                }, 15000);
             });
-        });
+        };
+
+        // Process video batches sequentially — each batch loads fully before starting the next
+        let videosLoaded = 0;
+        for (let b = 0; b < videoScenes.length; b += VIDEO_BATCH_SIZE) {
+            const batch = videoScenes.slice(b, b + VIDEO_BATCH_SIZE);
+            await Promise.all(batch.map(_loadOneVideo));
+            videosLoaded += batch.length;
+        }
 
         // Wait for all images and videos
-        await Promise.all([...imagePromises, ...videoPromises]);
-        console.log(`[Compositor] Preloaded ${imagePromises.length} images and ${videoScenes.length} videos`);
+        await Promise.all(imagePromises);
+        console.log(`[Compositor] Preloaded ${imagePromises.length} images and ${videosLoaded} videos`);
     }
 
     /**
@@ -843,9 +842,22 @@ class Compositor {
                 const baseShadow = typeof scene.shadow === 'number' ? scene.shadow : 0.5;
                 const shadowOpacity = baseShadow * Math.min(1, opacity);
                 const radius = scene.borderRadius ? (scene.borderRadius / 100) : 0;
+
+                // Shrink shadow quad to match visible (post-crop) content so shadow hugs the clip, not the black bars
+                const sCropT = (scene.cropTop    || 0) / 100;
+                const sCropB = (scene.cropBottom || 0) / 100;
+                const sCropL = (scene.cropLeft   || 0) / 100;
+                const sCropR = (scene.cropRight  || 0) / 100;
+                const shadowScaleX = scaleX * (1 - sCropL - sCropR);
+                const shadowScaleY = scaleY * (1 - sCropT - sCropB);
+                // Shift center: crop more from one side than the other shifts the visible rect
+                // Y is flipped in GL so top/bottom are swapped for the offset direction
+                const shadowOX = offsetX + shadowOffX + (sCropL - sCropR) * scaleX;
+                const shadowOY = offsetY + shadowOffY + (sCropB - sCropT) * scaleY;
+
                 // Proper rounded-rect drop shadow via dedicated shader
                 this._dropShadowProgram.use();
-                this._dropShadowProgram.set4f('u_transform', scaleX, scaleY, offsetX + shadowOffX, offsetY + shadowOffY);
+                this._dropShadowProgram.set4f('u_transform', shadowScaleX, shadowScaleY, shadowOX, shadowOY);
                 this._dropShadowProgram.set1f('u_borderRadius', radius);
                 this._dropShadowProgram.set1f('u_opacity', shadowOpacity);
                 this._dropShadowProgram.set1f('u_softness', 0.035); // soft gaussian edge
@@ -1362,7 +1374,8 @@ class Compositor {
         const cropR = scene ? (scene.cropRight || 0) / 100 : 0;
         const cropB = scene ? (scene.cropBottom || 0) / 100 : 0;
         const cropL = scene ? (scene.cropLeft || 0) / 100 : 0;
-        this._blitProgram.set4f('u_crop', cropT, cropR, cropB, cropL);
+        // Textures are not Y-flipped: uv.y=0 is screen-bottom, so swap T/B so names match visual sides
+        this._blitProgram.set4f('u_crop', cropB, cropR, cropT, cropL);
 
         // Border radius: convert percentage (0-100) to fraction (0-1)
         const radius = scene ? (scene.borderRadius || 0) / 100 : 0;

@@ -1,0 +1,12 @@
+[2026-04-03 14:00:59] [QA Pool] 4 models permanently exhausted
+[2026-04-03 14:01:06] [QA Pool] 4 models permanently exhausted
+[2026-04-03 14:01:13] [QA] Provider set to: gemini (gemini-2.5-pro-preview-03-25)
+[2026-04-03 14:01:25] [QA] Provider set to: gemini (gemini-2.5-pro-preview-03-25)
+[2026-04-03 14:06:49] [QA Pool] 4 models permanently exhausted
+[2026-04-03 14:06:52] [QA Pool] 4 models permanently exhausted
+[2026-04-03 14:06:58] [QA] Provider set to: gemini (gemini-2.0-flash)
+[2026-04-03 14:07:12] [QA] Provider set to: gemini (gemini-2.0-flash)
+[2026-04-03 14:14:18] [QA Pool] 4 models permanently exhausted
+[2026-04-03 14:14:23] [QA Pool] 4 models permanently exhausted
+[2026-04-03 14:14:32] [QA] Provider set to: gemini ()
+[2026-04-03 14:14:41] [QA] Provider set to: gemini ()

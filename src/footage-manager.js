@@ -541,6 +541,18 @@ function getSmartPriority(sourceHint, mediaType, scriptContext) {
 
     // === POST-FILTERS ===
 
+    // Niche allowlist: only keep providers listed in niche's footagePriority
+    // This ensures removing telegram/vkVideo from a niche actually takes effect
+    // regardless of which priority map was used above.
+    if (nicheId) {
+        const niche = getNiche(nicheId);
+        const nicheAllowed = niche.footagePriority?.[mediaType];
+        if (nicheAllowed && nicheAllowed.length > 0) {
+            const allowedSet = new Set(nicheAllowed);
+            order = order.filter(p => allowedSet.has(p));
+        }
+    }
+
     // Niche exclusions: remove providers the niche explicitly bans
     // (e.g., sport bans telegram for video — irrelevant military/political results)
     if (nicheId && mediaType === 'video') {
@@ -565,6 +577,12 @@ function getSmartPriority(sourceHint, mediaType, scriptContext) {
 let videoProviders = [];
 let imageProviders = [];
 let scriptContextRef = null;
+/** Get video topic string — title + summary for best AI context */
+function _videoTopic() {
+    const title = scriptContextRef?.videoTitle || '';
+    const summary = scriptContextRef?.summary || '';
+    return title ? `${title} — ${summary}` : summary;
+}
 
 function getEnabledSources() {
     try {
@@ -885,6 +903,7 @@ async function downloadMedia(keyword, mediaType, filenameBase, sceneDuration = 1
             // Try multiple results from this provider (vision may reject early ones)
             const maxTries = Math.min(results.length, _visionEnabled ? 5 : 3);
             const visionRejections = []; // track what vision saw for keyword rewrite
+            let consecutiveLowScores = 0; // track consistently bad keywords
             for (let attempt = 0; attempt < maxTries; attempt++) {
                 const isOverused = (url) => _getUrlUseCount(url) >= MAX_URL_REUSE;
                 const selected = attempt === 0
@@ -946,7 +965,7 @@ async function downloadMedia(keyword, mediaType, filenameBase, sceneDuration = 1
                                 {
                                     sceneText: scene?.text || '',
                                     niche: nicheId || '',
-                                    videoTopic: scriptContextRef?.summary || '',
+                                    videoTopic: _videoTopic(),
                                     entities: scriptContextRef?.entities || [],
                                 }
                             );
@@ -979,7 +998,7 @@ async function downloadMedia(keyword, mediaType, filenameBase, sceneDuration = 1
                             context: {
                                 sceneText: scene?.text || '',
                                 niche: nicheId || '',
-                                videoTopic: scriptContextRef?.summary || '',
+                                videoTopic: _videoTopic(),
                                 theme: scriptContextRef?.themeId || scriptContextRef?.theme || '',
                                 entities: scriptContextRef?.entities || [],
                                 tone: scriptContextRef?.tone || '',
@@ -1003,7 +1022,7 @@ async function downloadMedia(keyword, mediaType, filenameBase, sceneDuration = 1
                         const visionResult = await _scoreDownloadedMedia(finalPath, finalExt, keyword, {
                             sceneText: scene?.text || '',
                             niche: nicheId || '',
-                            videoTopic: scriptContextRef?.summary || '',
+                            videoTopic: _videoTopic(),
                             theme: scriptContextRef?.themeId || scriptContextRef?.theme || '',
                             entities: scriptContextRef?.entities || [],
                             tone: scriptContextRef?.tone || '',
@@ -1019,9 +1038,18 @@ async function downloadMedia(keyword, mediaType, filenameBase, sceneDuration = 1
                                     _blacklistUrl(dlUrl, score, description);
                                 }
                                 visionRejections.push(description);
+                                consecutiveLowScores++;
+                                // If 2 consecutive results all score ≤4, the keyword is the problem — bail early
+                                if (consecutiveLowScores >= 2 && attempt < maxTries - 1) {
+                                    console.log(`  ⏩ 2 consecutive low scores — keyword "${keyword}" is likely unsearchable, skipping remaining attempts`);
+                                    try { fs.unlinkSync(finalPath); } catch {}
+                                    break;
+                                }
                                 try { fs.unlinkSync(finalPath); } catch {}
                                 continue;
                             }
+                            // Score is decent — reset low-score streak
+                            consecutiveLowScores = 0;
                         }
                     }
 
@@ -1039,7 +1067,7 @@ async function downloadMedia(keyword, mediaType, filenameBase, sceneDuration = 1
                             clipAnalysis = await clipAnalyzer.analyzeClip(finalPath, clipDur, keyword, {
                                 sceneText: scene?.text || '',
                                 niche: nicheId || '',
-                                videoTopic: scriptContextRef?.summary || '',
+                                videoTopic: _videoTopic(),
                                 entities: scriptContextRef?.entities || [],
                             });
                             if (clipAnalysis) {
@@ -1090,7 +1118,7 @@ async function downloadMedia(keyword, mediaType, filenameBase, sceneDuration = 1
                 const suggestion = await _visionSuggestKeyword(visionRejections, keyword, {
                     sceneText: scene?.text || '',
                     niche: nicheId || '',
-                    videoTopic: scriptContextRef?.summary || '',
+                    videoTopic: _videoTopic(),
                     theme: scriptContextRef?.themeId || scriptContextRef?.theme || '',
                     entities: scriptContextRef?.entities || [],
                     tone: scriptContextRef?.tone || '',
@@ -1127,7 +1155,7 @@ async function downloadMedia(keyword, mediaType, filenameBase, sceneDuration = 1
                             const retryContext = {
                                 sceneText: scene?.text || '',
                                 niche: nicheId || '',
-                                videoTopic: scriptContextRef?.summary || '',
+                                videoTopic: _videoTopic(),
                                 theme: scriptContextRef?.themeId || scriptContextRef?.theme || '',
                                 entities: scriptContextRef?.entities || [],
                                 tone: scriptContextRef?.tone || '',
@@ -1157,7 +1185,7 @@ async function downloadMedia(keyword, mediaType, filenameBase, sceneDuration = 1
                                     retryClipAnalysis = await clipAnalyzer.analyzeClip(finalPath, clipDur, suggestion.keyword, {
                                         sceneText: scene?.text || '',
                                         niche: nicheId || '',
-                                        videoTopic: scriptContextRef?.summary || '',
+                                        videoTopic: _videoTopic(),
                                         entities: scriptContextRef?.entities || [],
                                     });
                                     if (retryClipAnalysis) {
@@ -1220,7 +1248,7 @@ async function downloadAllMedia(scenes, scriptContext, options = {}) {
     // If no video providers enabled, force all scenes to image (and vice versa)
     const hasVideoProviders = videoProviders.some(p => p.isAvailable());
     const hasImageProviders = imageProviders.some(p => p.isAvailable());
-    const CONCURRENCY = 3;
+    const CONCURRENCY = 5;
 
     // ─── Log buffering for clean scene-by-scene output ─────────────
     // Scenes download in parallel (3 at a time) but their logs interleave,
@@ -1264,12 +1292,34 @@ async function downloadAllMedia(scenes, scriptContext, options = {}) {
         _originalConsoleLog.apply(console, args);
     };
 
-    const tasks = scenes.map((scene, i) => async () => {
+    // Hard per-scene timeout — if a single scene hangs (network stall, hung VL call),
+    // give up after 3 minutes and mark it failed rather than blocking the entire build.
+    const SCENE_TIMEOUT_MS = 3 * 60 * 1000;
+
+    const _makeSceneTask = (scene, i) => async () => {
         // Use scene's original index for filenames/logs (preserves alignment with fullscreen MG scenes)
         const si = scene.index !== undefined ? scene.index : i;
         // Each scene task runs inside its own AsyncLocalStorage context
         return _logStorage.run({ sceneIdx: i }, async () => {
             _sceneBuffers.set(i, []);
+
+            // ── RESUME: skip scenes already downloaded in a previous (cancelled) run ──
+            for (const ext of ['.mp4', '.jpg', '.jpeg', '.png', '.webp']) {
+                const existing = path.join(config.paths.temp, `scene-${si}${ext}`);
+                if (fs.existsSync(existing)) {
+                    console.log(`  ♻️ Scene ${si} already downloaded — skipping (resume mode)`);
+                    console.log(`  ✅ Scene ${si} DONE (resumed)`);
+                    scene.mediaFile = existing;
+                    scene.mediaExtension = ext;
+                    scene.sourceProvider = 'resumed';
+                    // Fix mediaType from actual file extension — plan may say "image" but
+                    // the previously downloaded file could be a video (or vice versa).
+                    const videoExts = new Set(['.mp4', '.webm', '.mov', '.mkv']);
+                    scene.mediaType = videoExts.has(ext) ? 'video' : 'image';
+                    _flushSceneLog(i);
+                    return;
+                }
+            }
 
             let mediaType = scene.mediaType || 'video';
             const sourceHint = scene.sourceHint || '';
@@ -1388,6 +1438,26 @@ async function downloadAllMedia(scenes, scriptContext, options = {}) {
             // Flush this scene's buffered logs as a clean block
             _flushSceneLog(i);
         });
+    };
+
+    // Wrap each task with a hard per-scene timeout so a hung download never blocks the build
+    const tasks = scenes.map((scene, i) => async () => {
+        const si = scene.index !== undefined ? scene.index : i;
+        const timeoutPromise = new Promise((_, reject) =>
+            setTimeout(() => reject(new Error(`timed out after ${SCENE_TIMEOUT_MS / 60000} min`)), SCENE_TIMEOUT_MS)
+        );
+        try {
+            await Promise.race([_makeSceneTask(scene, i)(), timeoutPromise]);
+        } catch (err) {
+            _originalConsoleLog(`  ⏱️ [Scene ${si}] TIMEOUT — skipping: ${err.message}`);
+            scene.mediaFile = null;
+            scene.mediaExtension = (scene.mediaType === 'image') ? '.jpg' : '.mp4';
+            scene.sourceProvider = null;
+            scene.mediaWidth = 0;
+            scene.mediaHeight = 0;
+            // Ensure buffered logs are flushed even on timeout
+            if (!_readyScenes.has(i)) _flushSceneLog(i);
+        }
     });
 
     await parallelWithLimit(tasks, CONCURRENCY);

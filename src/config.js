@@ -9,6 +9,7 @@ require('dotenv').config({ path: appRootEnv });
 const PROJECT_OVERRIDE_KEYS = new Set([
     'AI_PROVIDER', 'AI_INSTRUCTIONS',
     'BUILD_QUALITY_TIER', 'BUILD_FORMAT', 'BUILD_THEME', 'BUILD_NICHE',
+    'BUILD_STYLE_PROFILE',
     'CINEMATIC_SCALE', 'SMART_AI',
     'OLLAMA_MODEL', 'OLLAMA_VISION_MODEL',
 ]);
@@ -86,12 +87,16 @@ const config = {
     },
 
     // Google Gemini API settings (free tier available, text + vision)
+    // Set GEMINI_USE_VERTEX=true to route through Vertex AI (uses GCP credits)
     gemini: {
         apiKey: geminiApiKeys[0] || '',
         apiKeys: geminiApiKeys,
         baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
         model: process.env.GEMINI_MODEL || 'gemini-3.1-pro-preview',
-        visionModel: process.env.GEMINI_VISION_MODEL || 'gemini-3-flash-preview'
+        visionModel: process.env.GEMINI_VISION_MODEL || 'gemini-3-flash-preview',
+        useVertex: process.env.GEMINI_USE_VERTEX === 'true',
+        vertexProject: process.env.VERTEX_PROJECT_ID || '',
+        vertexLocation: process.env.VERTEX_LOCATION || 'us-central1',
     },
 
     // Groq API settings (ultra-fast inference)

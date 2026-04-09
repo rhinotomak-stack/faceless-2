@@ -4,6 +4,7 @@ const { callAI } = require('./ai-provider');
 const { getTheme, MG_THEME_OVERRIDES } = require('./themes');
 const { getNiche } = require('./niches');
 const { MG_REGISTRY } = require('./mg-registry');
+const { getLanguageBlock } = require('./language-helper');
 
 // Track placed MG types to avoid repetition
 let placedTypes = [];
@@ -128,7 +129,7 @@ function extractKeyPhrase(text, maxWords = 8) {
 
 // Classification: full-screen MGs go on V3, overlay MGs stay on MG track
 const FULLSCREEN_MG_TYPES = new Set([
-    'barChart', 'donutChart', 'rankingList', 'timeline', 'comparisonCard', 'bulletList', 'mapChart', 'articleHighlight', 'kineticText'
+    'barChart', 'donutChart', 'rankingList', 'timeline', 'comparisonCard', 'bulletList', 'mapChart', 'kineticText'
     // NOTE: listicleGrid removed — now handled by ai-templates.js
 ]);
 
@@ -148,7 +149,6 @@ const POSITION_MAP = {
     rankingList: 'center-left',
     kineticText: 'center',
     mapChart: 'center',
-    articleHighlight: 'center',
     explainer: 'bottom-right',
     typewriter: 'center',
 };
@@ -432,7 +432,7 @@ const PATTERN_TO_MG_TYPES = {
     comparison:  ['comparisonCard', 'barChart'],
     emphasis:    ['callout', 'kineticText', 'focusWord', 'typewriter'],
     geographic:  ['mapChart', 'barChart', 'callout'],
-    research:    ['articleHighlight', 'callout', 'typewriter'],
+    research:    ['callout', 'typewriter', 'bulletList'],
     conceptual:  ['explainer', 'bulletList', 'callout'],
     dramatic:    ['focusWord', 'kineticText', 'headline'],
 };
@@ -454,7 +454,7 @@ function parseMgHint(mgHint) {
         statcounter: 'statCounter', lowerthird: 'lowerThird', focusword: 'focusWord',
         barchart: 'barChart', donutchart: 'donutChart', comparisoncard: 'comparisonCard',
         rankinglist: 'rankingList', kinetictext: 'kineticText', mapchart: 'mapChart',
-        articlehighlight: 'articleHighlight', progressbar: 'progressBar', bulletlist: 'bulletList',
+        progressbar: 'progressBar', bulletlist: 'bulletList',
         headline: 'headline', callout: 'callout', timeline: 'timeline', explainer: 'explainer',
         typewriter: 'typewriter',
     };
@@ -475,7 +475,6 @@ const TYPE_CAPS = {
     mapChart: 1,
     kineticText: 1,
     typewriter: 2,
-    articleHighlight: 1,
 };
 
 /**
@@ -778,7 +777,6 @@ function computeSmartDuration(type, text, subtext) {
         rankingList: 6.0,
         kineticText: 5.0,
         mapChart: 6.0,
-        articleHighlight: 7.0,
         explainer: 5.0,
         typewriter: 5.0,
     };
@@ -819,22 +817,12 @@ function computeSmartDuration(type, text, subtext) {
         duration = Math.max(duration, wordStagger + ANIM_OVERHEAD + HOLD_PADDING);
         duration = Math.min(duration, 8.0);
     }
-    if (type === 'articleHighlight') {
-        // 1s blur intro + highlight sweeps (0.4s stagger per phrase) + hold
-        const highlightCount = ((subtext || '').match(/\*\*[^*]+\*\*/g) || []).length;
-        const sweepTime = 1.2 + highlightCount * 0.4 + 0.5; // delay + stagger + last sweep
-        duration = Math.max(duration, sweepTime + ANIM_OVERHEAD + HOLD_PADDING);
-    }
 
     // Clamp between minimum and max
     const min = MIN[type] || 5.0;
     const max = 10.0;
     return Math.max(min, Math.min(duration, max));
 }
-
-// ============ ARTICLE SUBTEXT FIXER ============
-// When AI picks articleHighlight but doesn't use pipe format with **highlights**,
-// auto-generate proper article subtext from the narration text.
 
 function fixArticleSubtext(subtext, sceneText, displayText) {
     // Already has pipes → assume correct format, just ensure highlights exist
@@ -993,12 +981,6 @@ function buildRuleMG(scene, sceneIndex, type) {
             }
             break;
         }
-        case 'articleHighlight': {
-            displayText = words.slice(0, Math.min(8, words.length)).join(' ');
-            subtext = fixArticleSubtext('', text, displayText);
-            triggerWord = words[Math.min(2, words.length - 1)];
-            break;
-        }
         default: {
             // Generic fallback for any type
             displayText = words.slice(0, Math.min(8, words.length)).join(' ');
@@ -1062,6 +1044,14 @@ function buildPrompt(scene, sceneIndex, totalScenes, scriptContext, sceneVisual,
     const niche = getNiche(nicheId);
     prompt += `NICHE: "${niche.name}" — You MUST pick from the candidate types listed below. Do NOT use or invent any other types.\n`;
 
+    // Niche-specific MG rules (e.g., news niches mandate lowerThird for locations, typewriter for times)
+    if (niche.mgRules?.length) {
+        prompt += `\nNICHE MG RULES (MANDATORY — override normal selection):\n`;
+        for (const rule of niche.mgRules) {
+            prompt += `⚠️ ${rule}\n`;
+        }
+    }
+
     // Narrative arc context
     if (ctx) {
         const arc = ctx.getArc(sceneIndex);
@@ -1113,11 +1103,6 @@ function buildPrompt(scene, sceneIndex, totalScenes, scriptContext, sceneVisual,
   Use real or approximate data from the narration. If no numbers mentioned, use ranking: "Canada: #4, Saudi Arabia: #1"`,
         kineticText: 'kineticText: Powerful short statement, word-by-word reveal (max 1 per video). E.g. "The Future Is Now"',
         typewriter: 'typewriter: Character-by-character text reveal with blinking cursor (max 2 per video). Best for quotes, key facts, or dramatic statements. E.g. "He never performed again"',
-        articleHighlight: `articleHighlight: News article, study, or report reference (max 1 per video).
-  WHEN: narration mentions a study, report, article, research, or finding.
-  text: the headline (max 8 words)
-  subtext: MUST use pipe format: source|author|date|excerpt with **highlighted phrases**
-  Example: "Nature|Dr. Jane Smith|Feb 2024|The study found that **AI automation** could affect **47% of jobs** in manufacturing"`,
         explainer: `explainer: Visual explainer for tools, products, or concepts (max 3 per video).
   WHEN: narration discusses a specific tool, product, app, technology, or abstract concept.
   text: search query to find an image of the thing discussed (e.g. "ChatGPT logo", "Tesla Model 3", "blockchain diagram")
@@ -1171,9 +1156,15 @@ TIMING — triggerWord:
     prompt += `\n\nReply ONLY with these 5 lines (nothing else):
 type: <${allowedTypesList}>
 text: <display text, max 8 words, extracted from narration>
-subtext: <secondary line OR "label1:value1,label2:value2" for charts, OR "source|author|date|excerpt with **highlights**" for articleHighlight, or "none">
+subtext: <secondary line OR "label1:value1,label2:value2" for charts, or "none">
 position: <center|bottom-left|bottom-right|center-left|top-right>
 triggerWord: <the exact word from narration that triggers appearance, or "none">`;
+
+    // Language instruction — written last so it overrides default English behavior.
+    // Affects: `text` and `subtext` fields (user-facing). `type`/`position`/`triggerWord`
+    // stay as machine-readable English keywords because the AI treats them as enums.
+    // `triggerWord` must be taken verbatim from narration, so it naturally matches the script language.
+    prompt += getLanguageBlock(scriptContext?.language);
 
     return prompt;
 }
@@ -1233,10 +1224,6 @@ function parseResponse(text, scene, sceneIndex) {
         'map_chart': 'mapChart',
         'map chart': 'mapChart',
         'map': 'mapChart',
-        'articlehighlight': 'articleHighlight',
-        'article_highlight': 'articleHighlight',
-        'article highlight': 'articleHighlight',
-        'article': 'articleHighlight',
         'explainer': 'explainer',
         'typewriter': 'typewriter',
         'type_writer': 'typewriter',
@@ -1303,10 +1290,6 @@ function parseResponse(text, scene, sceneIndex) {
 
     if (type === 'none') return null;
 
-    // Post-process articleHighlight: fix subtext if AI didn't use pipe format
-    if (type === 'articleHighlight') {
-        subtext = fixArticleSubtext(subtext, scene.text, displayText);
-    }
 
     // Validate lowerThird: displayed name must actually appear in the scene narration text.
     // Prevents spoiling names from broader context before they're spoken.
@@ -1402,7 +1385,12 @@ async function batchFallback(scenes, scriptContext, allowedMGs) {
 
     let prompt = `Video about: ${topic}
 Niche: "${niche.name}" — ONLY use these MG types: ${typesList}
-
+`;
+    if (niche.mgRules?.length) {
+        prompt += `\nNICHE MG RULES (MANDATORY):\n`;
+        for (const rule of niche.mgRules) prompt += `⚠️ ${rule}\n`;
+    }
+    prompt += `
 Here are the scenes:
 ${sceneList}
 
@@ -1419,6 +1407,10 @@ Only pick the most impactful scenes. Reply with ONLY the lines, nothing else.`;
     if (aiInstructionsRef) {
         prompt += `\n\nUSER INSTRUCTIONS:\n${aiInstructionsRef}`;
     }
+
+    // Language instruction for `display text` field (user-facing). Other pipe-separated
+    // fields (type, position, triggerWord) are machine-readable enums — AI keeps them English.
+    prompt += getLanguageBlock(scriptContext?.language);
 
     const rawText = await callAI(prompt);
     console.log(`    [Batch raw]: ${rawText.substring(0, 150).replace(/\n/g, ' | ')}`);
@@ -1442,8 +1434,7 @@ Only pick the most impactful scenes. Reply with ONLY the lines, nothing else.`;
                 'timeline': 'timeline', 'rankinglist': 'rankingList',
                 'ranking': 'rankingList', 'kinetictext': 'kineticText',
                 'kinetic': 'kineticText', 'mapchart': 'mapChart',
-                'map': 'mapChart', 'articlehighlight': 'articleHighlight',
-                'article': 'articleHighlight',
+                'map': 'mapChart',
                 'explainer': 'explainer', 'typewriter': 'typewriter',
                 'animatedicons': 'explainer',
                 'icons': 'explainer'
@@ -1491,8 +1482,7 @@ Only pick the most impactful scenes. Reply with ONLY the lines, nothing else.`;
                 const validPositions = ['center', 'bottom-left', 'bottom-right', 'center-left', 'top-right', 'top-left'];
                 const finalPosition = validPositions.includes(aiPosition) ? aiPosition : (POSITION_MAP[type] || 'center');
 
-                // Fix articleHighlight subtext if AI used wrong format
-                const finalData = type === 'articleHighlight' ? fixArticleSubtext(data, scene.text, finalText) : (data || '');
+                const finalData = data || '';
 
                 results.push({
                     id: `mg-${idx}`,
@@ -1523,6 +1513,10 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
     placedTypes = [];
     lastType = '';
     aiInstructionsRef = aiInstructions || '';
+
+    if (aiInstructionsRef.includes('=== REFERENCE STYLE PROFILE')) {
+        console.log(`  🎨 [MG] Style profile present in instructions: "${scriptContext?.styleProfile?.name || 'unnamed'}"`);
+    }
 
     // Pick style for the entire video
     const mgStyle = pickStyle(scriptContext);

@@ -30,7 +30,7 @@ const { searchWeb, hasAnyWebSearchCredentials } = require('./web-search-client')
  * Prompt is in its own function so it can be tweaked independently.
  */
 function buildDirectorPrompt(fullScript, audioDuration, directorsBrief, webContext = null) {
-    const { freeInstructions, format, qualityTier, audienceHint, tier } = directorsBrief;
+    const { freeInstructions, format, qualityTier, audienceHint, tier, styleBlock, styleProfile } = directorsBrief;
     const baseDensity = tier.sceneDensity || 3;
 
     // The AI will adjust this based on detected pacing
@@ -58,6 +58,12 @@ SCRIPT:
 AUDIO DURATION: ${audioDuration.toFixed(1)} seconds
 TARGET SCENE COUNT: approximately ${targetScenes} scenes (${baseDensity} scenes per minute)`;
 
+    // Video title from UI — strongest topic signal
+    const videoTitle = (process.env.VIDEO_TITLE || '').trim();
+    if (videoTitle) {
+        prompt += `\n\nVIDEO TITLE: "${videoTitle}"\nUse this title to understand the video's subject and intent. It helps distinguish between NEWS (breaking events, launches) and EXPLAINER (how things work, deep-dives).`;
+    }
+
     if (webContext) {
         prompt += `\n\nREAL-WORLD CONTEXT (from web search):
 ${webContext}
@@ -68,6 +74,12 @@ Use this context to understand the story better. If this is a real event, treat 
     if (freeInstructions) {
         prompt += `\n\nUSER INSTRUCTIONS (follow these closely, they override defaults):
 ${freeInstructions}`;
+    }
+
+    // Reference style profile (highest priority — overrides niche defaults and AI detection)
+    if (styleBlock) {
+        prompt += `\n\n${styleBlock}\n\nNOTE: The style inspiration above is a GUIDE, not an override. Use it to inform your pacing feel and shot variety. Your niche rules and format settings still take priority for scene density and structure.`;
+        console.log(`   🎨 [Director] Style inspiration injected: "${styleProfile?.name || 'unnamed'}" (${styleBlock.length} chars)`);
     }
 
     if (audienceHint) {
@@ -1322,6 +1334,12 @@ async function analyzeAndCreateScenes(transcription, directorsBrief) {
         // Parse context (legacy + new fields)
         const scriptContext = parseDirectorContext(contextPart);
 
+        // Store video title from UI (strong signal for niche detection + keyword guidance)
+        const videoTitle = (process.env.VIDEO_TITLE || '').trim();
+        if (videoTitle) {
+            scriptContext.videoTitle = videoTitle;
+        }
+
         // Store web research context so Visual Planner can use it
         if (webContext) {
             scriptContext.webContext = webContext;
@@ -1363,7 +1381,9 @@ async function analyzeAndCreateScenes(transcription, directorsBrief) {
         }
 
         // Log resolution chain
+        const category = scriptContext.nicheId.startsWith('news') ? 'NEWS (breaking)' : scriptContext.nicheId.startsWith('explainer') ? 'EXPLAINER (educational)' : 'GENERAL';
         console.log(`\n   🔗 Resolution chain:`);
+        console.log(`      Category: ${category}`);
         console.log(`      Niche: ${scriptContext.nicheId} (${nicheSource}${nicheSource === 'auto-detect' ? `, AI theme="${scriptContext.theme || '?'}"` : ''})`);
         console.log(`      Theme: ${scriptContext.themeId} (${themeSource}${themeSource === 'niche-default' ? `, niche.defaultTheme="${niche.defaultTheme}"` : ''})`);
         console.log(`      Pacing: ${scriptContext.pacing} (${pacingSource}${pacingSource === 'preset' ? `, AI was="${aiPacing}"` : ''})`);
@@ -1397,6 +1417,12 @@ async function analyzeAndCreateScenes(transcription, directorsBrief) {
         // Safety net: merge scenes under pacing-driven min (hook scenes use hookMinDur)
         const mergeHookEnd = parseFloat(scriptContext.hookEndTime) || Math.min(25, audioDuration * 0.12);
         scenes = _mergeTinyScenes(scenes, minSceneDur, mergeHookEnd, hookMinDur);
+
+        // Attach style profile early so assignTransitions can use it
+        // (build-video.js also attaches it later, but transitions happen here inside the Director)
+        if (directorsBrief.styleProfile) {
+            scriptContext.styleProfile = directorsBrief.styleProfile;
+        }
 
         // Assign transitions between scenes
         assignTransitions(scenes, scriptContext);
@@ -1511,11 +1537,31 @@ function assignTransitions(scenes, scriptContext) {
     const avoidSet = new Set(theme.transitions.avoid || []);
 
     // Pacing-driven duration multiplier — fast = snappy, slow = smooth
-    const durScale = isFast ? 0.4 : isSlow ? 1.5 : 1.0;
+    let durScale = isFast ? 0.4 : isSlow ? 1.5 : 1.0;
 
     // Cut ratio: how often to use hard cuts (pacing-driven)
     // Fast = lots of cuts, slow = very few, moderate = some
-    const cutRatio = isFast ? 0.50 : isSlow ? 0.08 : 0.25;
+    let cutRatio = isFast ? 0.50 : isSlow ? 0.08 : 0.25;
+
+    // Reference style inspiration — nudge toward reference's cut/crossfade ratio (50% blend, not full override)
+    const styleTransitions = scriptContext && scriptContext.styleProfile && scriptContext.styleProfile.transitions;
+    if (styleTransitions) {
+        const nudges = [];
+        if (typeof styleTransitions.cutRatio === 'number' && styleTransitions.cutRatio >= 0 && styleTransitions.cutRatio <= 1) {
+            const before = cutRatio;
+            cutRatio = +(cutRatio * 0.5 + styleTransitions.cutRatio * 0.5).toFixed(2); // 50/50 blend
+            nudges.push(`cutRatio ${before.toFixed(2)} → ${cutRatio.toFixed(2)} (ref: ${styleTransitions.cutRatio.toFixed(2)})`);
+        }
+        if (typeof styleTransitions.avgTransitionDuration === 'number' && styleTransitions.avgTransitionDuration > 0) {
+            const before = durScale;
+            const refScale = +(styleTransitions.avgTransitionDuration / 0.5).toFixed(2);
+            durScale = +(durScale * 0.5 + refScale * 0.5).toFixed(2); // 50/50 blend
+            nudges.push(`durScale ${before}x → ${durScale}x (ref: ${refScale}x)`);
+        }
+        if (nudges.length) {
+            console.log(`   🎨 [Transitions] Style inspiration nudge: ${nudges.join(', ')}`);
+        }
+    }
 
     // Get duration for a transition type from TRANSITION_LIBRARY, scaled by pacing
     function getDuration(type) {

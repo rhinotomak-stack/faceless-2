@@ -13,6 +13,7 @@
 
 const axios = require('axios');
 const config = require('./config');
+const vertex = require('./vertex-auth');
 const { postNvidiaChatCompletion } = require('./nvidia-client');
 
 // ============================================================
@@ -26,7 +27,31 @@ const { postNvidiaChatCompletion } = require('./nvidia-client');
  * Pools are ordered by quality (best first).
  */
 const QWEN_VL_POOL = [
-    // Best quality first — large VL models
+    // ── Tier 1: Largest / Max-tier (best quality) ──
+    'qwen3-vl-235b-a22b-instruct',      // NEW — Qwen3-VL 235B non-thinking instruct
+    'qwen-vl-max-latest',               // NEW — VL Max rolling alias
+    'qwen-vl-max-2025-08-13',           // NEW — VL Max pinned
+    'qvq-max-latest',                   // NEW — QVQ visual reasoning latest
+    'qvq-max',                          // NEW — QVQ alias
+    'qvq-max-2025-03-25',               // NEW — QVQ pinned
+    // ── Tier 2: Qwen3-VL Plus (newer gen, large mid) ──
+    'qwen3-vl-plus',                    // NEW — Qwen3-VL plus alias
+    'qwen3-vl-plus-2025-12-19',         // NEW — latest plus
+    'qwen3-vl-plus-2025-09-23',         // NEW — earlier plus
+    // ── Tier 3: Qwen-VL Plus (2.5 gen) ──
+    'qwen-vl-plus-2025-08-15',          // NEW
+    'qwen-vl-plus-2025-01-25',          // NEW
+    // ── Tier 4: Mid-size 30b/32b ──
+    'qwen3-vl-30b-a3b-instruct',        // NEW — non-thinking instruct
+    'qwen2.5-vl-32b-instruct',          // NEW — 32B dense
+    // ── Tier 5: Qwen3-VL Flash (fast, smaller) ──
+    'qwen3-vl-flash',                   // NEW — flash alias
+    'qwen3-vl-flash-2026-01-22',        // NEW
+    'qwen3-vl-flash-2025-10-15',        // NEW
+    // ── Tier 6: Small 8B ──
+    'qwen3-vl-8b-instruct',             // NEW
+    'qwen3-vl-8b-thinking',             // NEW
+    // ── Legacy pool (previously top-tier, now fallbacks — kept in case quota refreshes) ──
     'qwen-vl-max-2025-04-08',
     'qwen3-vl-235b-a22b-thinking',
     'qwen2.5-vl-72b-instruct',
@@ -34,21 +59,31 @@ const QWEN_VL_POOL = [
     'qwen-vl-plus-2025-05-07',
     'qwen3-vl-30b-a3b-thinking',
     'qwen-vl-ocr-2025-11-20',
-    // Smaller / fallback models
     'qwen2.5-vl-7b-instruct',
     'qwen2.5-vl-3b-instruct',
 ];
 
 const QWEN_OMNI_POOL = [
-    // Best quality first
-    'qwen-omni-turbo',
-    'qwen-omni-turbo-2025-03-26',
+    // Best quality first — plus > flash > turbo, non-realtime preferred for batch analysis
+    'qwen3.5-omni-plus',
+    'qwen3.5-omni-plus-2026-03-15',
     'qwen3.5-omni-flash',
     'qwen3.5-omni-flash-2026-03-15',
+    'qwen3-omni-flash',
     'qwen3-omni-flash-2025-09-15',
+    'qwen-omni-turbo',
+    'qwen-omni-turbo-2025-03-26',
+    // Realtime variants (same models, streaming-optimized — work fine for non-streaming too)
     'qwen3.5-omni-plus-realtime',
     'qwen3.5-omni-plus-realtime-2026-03-15',
     'qwen3.5-omni-flash-realtime',
+    'qwen3.5-omni-flash-realtime-2026-03-15',
+    'qwen3-omni-flash-realtime',
+    'qwen3-omni-flash-realtime-2025-09-15',
+    'qwen-omni-turbo-realtime',
+    'qwen-omni-turbo-realtime-2025-05-08',
+    // Smaller fallback
+    'qwen2.5-omni-7b',
 ];
 
 // Track exhausted models — persisted to disk so dead models stay dead across restarts
@@ -82,6 +117,10 @@ function _isQuotaError(err) {
     // 403 = quota exhausted — treat ALL 403s as quota errors for Qwen models.
     // Some 403 responses don't include "Quota" in the message body.
     if (status === 403) {
+        return 'exhausted';
+    }
+    // 404 = model deprecated/removed — permanently dead, rotate away
+    if (status === 404) {
         return 'exhausted';
     }
     // 429 = rate limited (temporary — try again in 60s)
@@ -184,7 +223,7 @@ async function _qwenVisionWithRotation(prompt, base64Image, mimeType, maxTokens)
                     'Authorization': `Bearer ${config.qwen.apiKey}`,
                     'Content-Type': 'application/json'
                 },
-                timeout: 60000
+                timeout: 25000
             });
 
             const text = response.data?.choices?.[0]?.message?.content || '';
@@ -195,9 +234,13 @@ async function _qwenVisionWithRotation(prompt, base64Image, mimeType, maxTokens)
                 return text;
             }
         } catch (err) {
+            const isTimeout = err.code === 'ECONNABORTED' || err.code === 'ETIMEDOUT' || err.message?.includes('timeout');
             const quotaErr = _isQuotaError(err);
-            if (quotaErr) {
-                _markModelExhausted(model, quotaErr);
+            const is400 = err.response?.status === 400;
+            if (quotaErr || isTimeout || is400) {
+                if (isTimeout) console.log(`  ⏱️ [Qwen VL] Timeout on ${model} — rotating`);
+                else if (is400) console.log(`  ⚠️ [Qwen VL] 400 Bad Request on ${model} — rotating to next`);
+                else _markModelExhausted(model, quotaErr);
                 continue; // try next model
             }
             throw err; // non-quota error — bubble up
@@ -235,7 +278,7 @@ async function _qwenOmniWithRotation(content, maxTokens, configuredModel) {
                     'Authorization': `Bearer ${config.qwen.apiKey}`,
                     'Content-Type': 'application/json',
                 },
-                timeout: 90000,
+                timeout: 30000,
             });
 
             const text = response.data?.choices?.[0]?.message?.content || '';
@@ -246,9 +289,11 @@ async function _qwenOmniWithRotation(content, maxTokens, configuredModel) {
                 return text;
             }
         } catch (err) {
+            const isTimeout = err.code === 'ECONNABORTED' || err.code === 'ETIMEDOUT' || err.message?.includes('timeout');
             const quotaErr = _isQuotaError(err);
-            if (quotaErr) {
-                _markModelExhausted(model, quotaErr);
+            if (quotaErr || isTimeout) {
+                if (isTimeout) console.log(`  ⏱️ [Qwen Omni] Timeout on ${model} — rotating`);
+                else _markModelExhausted(model, quotaErr);
                 continue; // try next model
             }
             throw err; // non-quota error — bubble up
@@ -698,16 +743,65 @@ function _rotateGeminiKey(reason) {
 }
 
 async function _geminiText(prompt, maxTokens, temperature, systemPrompt) {
+    const useVertex = vertex.isVertexEnabled();
     const keys = config.gemini.apiKeys;
-    if (!keys || keys.length === 0) throw new Error('Gemini API key not set in .env file');
 
+    if (!useVertex && (!keys || keys.length === 0)) {
+        throw new Error('Gemini API key not set in .env file');
+    }
+
+    // Gemini 2.5+ thinking models use max_completion_tokens for BOTH thinking + output.
+    const geminiTokens = maxTokens * 8;
+
+    // Detect if key is a Vertex AI Studio key (AQ. prefix) — needs native format, not OpenAI-compat
+    const firstKey = (keys && keys[0]) || '';
+    const useNativeFormat = useVertex || firstKey.startsWith('AQ.');
+
+    if (useNativeFormat) {
+        // Native generateContent format — works with Vertex AI keys and service accounts
+        const body = {
+            contents: [{ role: 'user', parts: [{ text: prompt }] }],
+            generationConfig: { maxOutputTokens: geminiTokens },
+        };
+        if (systemPrompt) body.systemInstruction = { parts: [{ text: systemPrompt }] };
+        if (temperature !== undefined) body.generationConfig.temperature = temperature;
+
+        const model = config.gemini.model;
+        const maxAttempts = useVertex ? 1 : keys.length;
+
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+            try {
+                let url, headers;
+                if (useVertex) {
+                    const auth = await vertex.getVertexAuth(model);
+                    url = auth.url;
+                    headers = auth.headers;
+                } else {
+                    const apiKey = _getGeminiKey();
+                    url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+                    headers = { 'Content-Type': 'application/json' };
+                }
+
+                const response = await axios.post(url, body, { headers, timeout: 120000 });
+                const text = response.data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+                if (!text) console.log(`  ⚠️ [Gemini] Empty response content`);
+                return text;
+            } catch (err) {
+                const status = err.response?.status;
+                const isTimeout = err.code === 'ECONNABORTED' || err.message?.includes('timeout');
+                if (!useVertex && (isTimeout || status === 429 || status === 401 || status === 403) && _rotateGeminiKey(isTimeout ? 'timeout' : `HTTP ${status}`)) {
+                    continue;
+                }
+                throw err;
+            }
+        }
+        throw new Error(`Gemini: all keys exhausted`);
+    }
+
+    // OpenAI-compat format — works with regular AIzaSy... keys
     const messages = [];
     if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
     messages.push({ role: 'user', content: prompt });
-
-    // Gemini 2.5+ thinking models use max_completion_tokens for BOTH thinking + output.
-    // Multiply by 8x so the actual output has room after internal reasoning.
-    const geminiTokens = maxTokens * 8;
 
     const body = {
         model: config.gemini.model,
@@ -720,7 +814,6 @@ async function _geminiText(prompt, maxTokens, temperature, systemPrompt) {
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
         const apiKey = _getGeminiKey();
         try {
-            // Gemini thinking models (2.5+, 3.x) need extra time for internal reasoning
             const response = await axios.post(`${config.gemini.baseUrl}/chat/completions`, body, {
                 headers: {
                     'Authorization': `Bearer ${apiKey}`,
@@ -729,7 +822,6 @@ async function _geminiText(prompt, maxTokens, temperature, systemPrompt) {
                 timeout: 120000
             });
 
-            // Gemini 2.5+ thinking models may return null content
             const choice = response.data.choices && response.data.choices[0];
             const text = choice?.message?.content || '';
             if (!text) console.log(`  ⚠️ [Gemini] Empty response content`);
@@ -852,12 +944,61 @@ async function _qwenVision(prompt, base64Image, mimeType, maxTokens) {
 }
 
 async function _geminiVision(prompt, base64Image, mimeType, maxTokens) {
+    const useVertex = vertex.isVertexEnabled();
     const keys = config.gemini.apiKeys;
-    if (!keys || keys.length === 0) throw new Error('Gemini API key not set');
 
-    // Gemini 2.5+ thinking models: multiply tokens for thinking room
+    if (!useVertex && (!keys || keys.length === 0)) {
+        throw new Error('Gemini API key not set');
+    }
+
     const geminiTokens = maxTokens * 8;
+    const firstKey = (keys && keys[0]) || '';
+    const useNativeFormat = useVertex || firstKey.startsWith('AQ.');
 
+    if (useNativeFormat) {
+        // Native generateContent format — works with Vertex AI keys and service accounts
+        const body = {
+            contents: [{
+                role: 'user',
+                parts: [
+                    { text: prompt },
+                    { inline_data: { mime_type: mimeType, data: base64Image } },
+                ],
+            }],
+            generationConfig: { maxOutputTokens: geminiTokens },
+        };
+
+        const model = config.gemini.visionModel;
+        const maxAttempts = useVertex ? 1 : keys.length;
+
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+            try {
+                let url, headers;
+                if (useVertex) {
+                    const auth = await vertex.getVertexAuth(model);
+                    url = auth.url;
+                    headers = auth.headers;
+                } else {
+                    const apiKey = _getGeminiKey();
+                    url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+                    headers = { 'Content-Type': 'application/json' };
+                }
+
+                const response = await axios.post(url, body, { headers, timeout: 120000 });
+                return response.data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+            } catch (err) {
+                const status = err.response?.status;
+                const isTimeout = err.code === 'ECONNABORTED' || err.message?.includes('timeout');
+                if (!useVertex && (isTimeout || status === 429 || status === 401 || status === 403) && _rotateGeminiKey(isTimeout ? 'timeout' : `HTTP ${status}`)) {
+                    continue;
+                }
+                throw err;
+            }
+        }
+        throw new Error(`Gemini vision: all keys exhausted`);
+    }
+
+    // OpenAI-compat format — works with regular AIzaSy... keys
     const body = {
         model: config.gemini.visionModel,
         messages: [{
@@ -997,18 +1138,34 @@ async function callVideoAI(prompt, frames, options = {}) {
         }
     }
 
-    // Fallback: Gemini (also supports multi-image) — with key rotation
-    if (config.gemini.apiKeys && config.gemini.apiKeys.length > 0) {
-        const geminiModel = config.gemini.visionModel || 'gemini-2.5-flash';
-        const parts = [{ text: prompt }];
-        for (const frame of frames) {
-            parts.push({
-                inline_data: {
-                    mime_type: frame.mimeType || 'image/jpeg',
-                    data: frame.base64,
-                }
+    // Fallback: Gemini (also supports multi-image) — with key rotation or Vertex AI
+    const geminiModel = config.gemini.visionModel || 'gemini-2.5-flash';
+    const parts = [{ text: prompt }];
+    for (const frame of frames) {
+        parts.push({
+            inline_data: {
+                mime_type: frame.mimeType || 'image/jpeg',
+                data: frame.base64,
+            }
+        });
+    }
+
+    if (vertex.isVertexEnabled()) {
+        try {
+            const auth = await vertex.getVertexAuth(geminiModel);
+            const response = await axios.post(auth.url, {
+                contents: [{ parts }],
+                generationConfig: { maxOutputTokens: maxTokens * 8 },
+            }, {
+                headers: auth.headers,
+                timeout: 90000,
             });
+            const text = response.data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+            if (text.trim()) return text;
+        } catch (err) {
+            console.log(`  ⚠️ [gemini/vertex] Video AI fallback failed: ${err.message}`);
         }
+    } else if (config.gemini.apiKeys && config.gemini.apiKeys.length > 0) {
         for (let attempt = 0; attempt < config.gemini.apiKeys.length; attempt++) {
             const apiKey = _getGeminiKey();
             try {

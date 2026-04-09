@@ -25,6 +25,21 @@ const SKIP_DOMAINS = [
     'wikipedia.org',
     'amazon.com',
     'pinterest.com',
+    // Paywalled / access-denied / login-wall sites — thum.io screenshots their block pages
+    'nytimes.com',
+    'wsj.com',
+    'ft.com',
+    'bloomberg.com',
+    'washingtonpost.com',
+    'economist.com',
+    'newyorker.com',
+    'theatlantic.com',
+    'wired.com',
+    'hbr.org',
+    'thetimes.co.uk',
+    'telegraph.co.uk',
+    'foreignpolicy.com',
+    'foreignaffairs.com',
 ];
 
 /**
@@ -215,4 +230,12 @@ async function processArticleImages(mgScenes) {
     }
 }
 
-module.exports = { processArticleImages };
+// Exposed for QA Replacer re-screenshot
+async function findArticleUrl(keyword, subtext) {
+    let url = null;
+    try { url = await findArticleUrlSearch(keyword, subtext); } catch (_) {}
+    if (!url) { try { url = await findArticleUrlCSE(keyword); } catch (_) {} }
+    return url;
+}
+
+module.exports = { processArticleImages, findArticleUrl, getScreenshotUrl, __SKIP_DOMAINS: SKIP_DOMAINS };

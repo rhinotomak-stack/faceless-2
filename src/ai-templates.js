@@ -10,6 +10,7 @@
 const { callAI } = require('./ai-provider');
 const { getTheme, MG_THEME_OVERRIDES, getThemeTokens, TEMPLATE_THEME_OVERRIDES } = require('./themes');
 const { getNiche } = require('./niches');
+const { getLanguageBlock } = require('./language-helper');
 
 // ============ TEMPLATE REGISTRY ============
 
@@ -115,6 +116,31 @@ const TEMPLATE_REGISTRY = {
         defaultAnimation: 'slideOpposite',
         requiresItems: true,
         contentFields: ['text', 'items'],
+        needsItemImages: true,
+        itemImageCount: 2,
+    },
+    statCard: {
+        label: 'Stat Card',
+        variants: ['sideBySide', 'stacked', 'single', 'triple'],
+        defaultVariant: 'sideBySide',
+        minDur: 3,
+        maxDur: 6,
+        animations: ['countUp', 'staggerSlide', 'fadeScale'],
+        defaultAnimation: 'countUp',
+        requiresItems: true,
+        contentFields: ['text', 'items'],
+        needsBackground: true,
+    },
+    personIntro: {
+        label: 'Person Intro',
+        variants: ['standard', 'cinematic', 'minimal'],
+        defaultVariant: 'standard',
+        minDur: 4,
+        maxDur: 8,
+        animations: ['slideRight', 'fadeSlide', 'springScale'],
+        defaultAnimation: 'slideRight',
+        requiresItems: true,
+        contentFields: ['text', 'subText', 'items'],
         needsItemImages: true,
         itemImageCount: 2,
     },
@@ -333,7 +359,8 @@ async function _aiSelectTemplates(candidates, scenes, scriptContext, mgScenes, v
         .map(c => `SCENE ${c.sceneIndex} [hint: ${c.hintType}] (${c.startTime.toFixed(1)}s-${c.endTime.toFixed(1)}s): "${(c.scene.text || '').substring(0, 100)}"${c.hintContent ? ` [suggested: ${c.hintContent}]` : ''}`)
         .join('\n');
 
-    const prompt = `You are a visual template designer for a ${format} video (${totalDuration.toFixed(0)}s) about "${summary}".
+    const videoTitle = scriptContext.videoTitle || '';
+    let prompt = `You are a visual template designer for a ${format} video (${totalDuration.toFixed(0)}s)${videoTitle ? ` titled "${videoTitle}"` : ''} about "${summary}".
 Theme: ${themeId} | Niche: ${nicheName}
 
 AVAILABLE TEMPLATE TYPES:
@@ -345,6 +372,8 @@ AVAILABLE TEMPLATE TYPES:
 - timelineCard: Chronological event markers. Use when dates/events form a sequence.
 - factCard: Fact panel with 4 layout variants (splitPanel: image left + bullet panel right | overlay: floating card over full image | sidebar: narrow strip on right | numbered: large numbers beside each point). Use when narration lists multiple facts, features, or details about a topic. Needs 3-5 bullet items.
 - imageShowcase: Dual-image showcase with typewriter title. Two images slide in from opposite sides. Use when narration references two related concepts, people, places, or contrasting visuals. Needs exactly 2 items describing the images.
+- statCard: Icon + big number + label infographic (like TV news stats). Use when narration mentions 1-3 specific numbers, percentages, or statistics. Items format: "iconHint number label" per stat. Icon hints: energy, shield, home, money, people, globe, chart, clock, building, car, health, tech. Example: items: "shield -90% Insurance Premiums; energy -75% Energy Bills"
+- personIntro: Person introduction card — portrait photo + big name + role/date + optional context image. Use when a NAMED PERSON is introduced for the FIRST TIME. Shows their portrait on one side, name + details on the other, then a context image appears. text=person name, subText=role/title/year, items="person portrait description; context image description". Example: text: "Wallace Neff" | subText: "Architect, 1941" | items: "Wallace Neff portrait photo 1940s; Wallace Neff bubble house dome 1941"
 
 CANDIDATE SCENES (Visual Planner flagged these):
 ${candidateStr}
@@ -362,9 +391,14 @@ RULES:
 - NEVER overlap with V3 occupied ranges listed above
 - text should be punchy and visual (what appears on screen), not the narration
 - subText provides context or subtitle
-- items for comparisonCard (left; right), timelineCard (date: event; date: event), factCard (fact1; fact2; fact3; fact4), or imageShowcase (image1 description; image2 description)
+- items for comparisonCard (left; right), timelineCard (date: event; date: event), factCard (fact1; fact2; fact3; fact4), imageShowcase (image1 description; image2 description), statCard (iconHint number label; iconHint number label), or personIntro (person portrait description; context image description)
 - Confidence: 0.9+ = perfect fit, 0.7-0.89 = good, below 0.7 = skip it
 - Prefer scenes where a template adds visual impact vs just showing footage`;
+
+    // Language instruction — affects text/subText/items (user-facing).
+    // Template `type` stays English (it's an enum: factCard|statCard|etc.), as does
+    // `iconHint` inside items (maps to icon registry). Confidence/idx are numbers.
+    prompt += getLanguageBlock(scriptContext?.language);
 
     const response = await callAI(prompt, { temperature: 0.3 });
     return _parseAIResponse(response, candidates, scenes, themeId);

@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>QA Studio</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+    --bg:        #0a0a0a;
+    --bg2:       #111111;
+    --bg3:       #181818;
+    --bg4:       #202020;
+    --border:    #2a2a2a;
+    --text:      #e8e8e8;
+    --text2:     #999;
+    --text3:     #555;
+    --accent:    #6c63ff;
+    --pass:      #22c55e;
+    --review:    #f59e0b;
+    --reject:    #ef4444;
+    --error:     #f97316;
+}
+
+html, body { height: 100%; background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; font-size: 13px; overflow: hidden; }
+
+/* ── TOP BAR ── */
+#topbar {
+    display: flex; align-items: center; gap: 12px;
+    padding: 0 16px; height: 52px;
+    background: var(--bg2); border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+}
+#topbar .logo { font-size: 15px; font-weight: 700; color: var(--accent); letter-spacing: 0.5px; }
+#topbar .project-name { color: var(--text2); font-size: 12px; }
+#topbar .spacer { flex: 1; }
+#topbar select, #topbar button { height: 32px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg3); color: var(--text); cursor: pointer; font-size: 12px; padding: 0 12px; }
+#topbar select:focus, #topbar button:focus { outline: 1px solid var(--accent); }
+#btn-run { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; padding: 0 18px; }
+#btn-run:disabled { opacity: 0.45; cursor: not-allowed; }
+#btn-stop { background: var(--bg4); color: var(--reject); border-color: var(--reject); display: none; }
+#topbar .readonly-badge { background: #1a1a2e; border: 1px solid #6c63ff44; color: var(--accent); font-size: 10px; padding: 3px 8px; border-radius: 4px; letter-spacing: 0.5px; }
+#topbar .writes-badge { background: #0f2a1a; border: 1px solid #16a34a55; color: #22c55e; font-size: 10px; padding: 3px 8px; border-radius: 4px; letter-spacing: 0.5px; }
+
+/* ── MAIN LAYOUT ── */
+#layout { display: flex; height: calc(100vh - 52px - 42px); overflow: hidden; }
+
+/* ── SCENE LIST ── */
+#scene-list-panel {
+    width: 220px; flex-shrink: 0;
+    background: var(--bg2); border-right: 1px solid var(--border);
+    display: flex; flex-direction: column;
+}
+#scene-list-panel .panel-header { padding: 10px 12px; font-size: 10px; font-weight: 600; letter-spacing: 1px; color: var(--text3); text-transform: uppercase; border-bottom: 1px solid var(--border); }
+#scene-list { flex: 1; overflow-y: auto; padding: 4px; }
+#scene-list::-webkit-scrollbar { width: 4px; }
+#scene-list::-webkit-scrollbar-track { background: transparent; }
+#scene-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+.scene-card {
+    padding: 8px 10px; border-radius: 6px; cursor: pointer; margin-bottom: 2px;
+    border: 1px solid transparent; transition: background 0.1s, border-color 0.1s;
+    display: flex; align-items: center; gap: 8px;
+}
+.scene-card:hover { background: var(--bg3); }
+.scene-card.active { background: var(--bg4); border-color: var(--accent); }
+.scene-card.pending { opacity: 0.5; }
+.scene-card.analyzing { opacity: 1; }
+
+.scene-thumb {
+    width: 44px; height: 28px; border-radius: 3px; flex-shrink: 0;
+    background: var(--bg4); object-fit: cover; border: 1px solid var(--border);
+}
+.scene-thumb-placeholder { width: 44px; height: 28px; border-radius: 3px; background: var(--bg4); border: 1px solid var(--border); flex-shrink: 0; display: flex; align-items: center; justify-content: center; color: var(--text3); font-size: 9px; }
+
+.scene-card-info { flex: 1; min-width: 0; }
+.scene-card-info .idx { font-size: 9px; color: var(--text3); }
+.scene-card-info .kw { font-size: 11px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.3; }
+.scene-card-info .time { font-size: 9px; color: var(--text3); }
+
+.score-badge {
+    width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 10px; font-weight: 700;
+}
+.score-badge.pass { background: #14532d; color: var(--pass); }
+.score-badge.review { background: #451a03; color: var(--review); }
+.score-badge.reject { background: #450a0a; color: var(--reject); }
+.score-badge.pending { background: var(--bg4); color: var(--text3); }
+.score-badge.analyzing { background: var(--bg4); color: var(--accent); }
+
+/* ── MAIN AREA ── */
+#main-area { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+
+/* ── PREVIEW ── */
+#preview-panel {
+    flex-shrink: 0; background: #000; position: relative;
+    display: flex; align-items: center; justify-content: center;
+    height: 260px; border-bottom: 1px solid var(--border);
+}
+#preview-canvas { max-height: 100%; max-width: 100%; object-fit: contain; }
+#preview-label {
+    position: absolute; bottom: 8px; left: 50%; transform: translateX(-50%);
+    background: rgba(0,0,0,0.7); color: var(--text2); font-size: 10px; padding: 2px 8px; border-radius: 3px;
+    pointer-events: none;
+}
+#preview-frames { position: absolute; bottom: 8px; right: 8px; display: flex; gap: 3px; }
+.preview-frame-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text3); transition: background 0.2s; }
+.preview-frame-dot.active { background: var(--accent); }
+
+/* ── ANALYSIS PANEL ── */
+#analysis-panel { flex: 1; overflow-y: auto; padding: 16px; }
+#analysis-panel::-webkit-scrollbar { width: 4px; }
+#analysis-panel::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+#analysis-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; color: var(--text3); gap: 8px; }
+#analysis-empty .icon { font-size: 40px; opacity: 0.3; }
+
+.analysis-header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 16px; }
+.analysis-score-big { font-size: 40px; font-weight: 800; line-height: 1; }
+.analysis-score-big.pass { color: var(--pass); }
+.analysis-score-big.review { color: var(--review); }
+.analysis-score-big.reject { color: var(--reject); }
+.analysis-verdict { font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+.analysis-verdict.pass { background: #14532d; color: var(--pass); }
+.analysis-verdict.review { background: #451a03; color: var(--review); }
+.analysis-verdict.reject { background: #450a0a; color: var(--reject); }
+.analysis-keyword { font-size: 14px; font-weight: 600; color: var(--text); }
+.analysis-time { font-size: 11px; color: var(--text2); }
+
+.analysis-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 16px; }
+.analysis-field { background: var(--bg2); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; }
+.analysis-field .label { font-size: 9px; font-weight: 600; letter-spacing: 0.8px; text-transform: uppercase; color: var(--text3); margin-bottom: 4px; }
+.analysis-field .value { font-size: 12px; color: var(--text); line-height: 1.4; }
+.analysis-field.ok .value { color: var(--pass); }
+.analysis-field.warn .value { color: var(--review); }
+.analysis-field.bad .value { color: var(--reject); }
+
+.analysis-issues { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 16px; }
+.issue-tag { font-size: 10px; padding: 3px 8px; border-radius: 4px; font-weight: 600; background: #450a0a; color: var(--reject); border: 1px solid #7f1d1d; }
+
+.analysis-recommendation { background: var(--bg2); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 6px; padding: 12px; margin-bottom: 12px; }
+.analysis-recommendation .label { font-size: 9px; font-weight: 600; letter-spacing: 0.8px; text-transform: uppercase; color: var(--text3); margin-bottom: 6px; }
+.analysis-recommendation .value { font-size: 12px; color: var(--text); line-height: 1.5; }
+
+.analysis-notes { background: var(--bg2); border: 1px solid var(--border); border-radius: 6px; padding: 12px; }
+.analysis-notes .label { font-size: 9px; font-weight: 600; letter-spacing: 0.8px; text-transform: uppercase; color: var(--text3); margin-bottom: 6px; }
+.analysis-notes .value { font-size: 11px; color: var(--text2); line-height: 1.5; }
+
+.scene-info-block {
+    background: var(--bg2); border: 1px solid var(--border);
+    border-radius: 6px; margin-bottom: 12px; overflow: hidden;
+}
+.scene-info-label {
+    font-size: 9px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase;
+    color: var(--text3); padding: 8px 12px; cursor: pointer; user-select: none;
+    list-style: none; display: flex; align-items: center; gap: 6px;
+}
+.scene-info-label::before { content: '▸'; transition: transform 0.15s; }
+details[open] .scene-info-label::before { transform: rotate(90deg); }
+.scene-info-grid {
+    display: grid; grid-template-columns: 1fr 1fr;
+    gap: 1px; background: var(--border); border-top: 1px solid var(--border);
+}
+.si-row {
+    display: flex; flex-direction: column; gap: 2px;
+    padding: 7px 12px; background: var(--bg3);
+}
+.si-row.si-full { grid-column: span 2; }
+.si-key { font-size: 9px; font-weight: 600; letter-spacing: 0.7px; text-transform: uppercase; color: var(--text3); }
+.si-val { font-size: 11px; color: var(--text); line-height: 1.4; word-break: break-word; }
+.si-val.si-highlight { color: var(--accent); }
+
+.scene-summary-block {
+    background: #0e0e1a;
+    border: 1px solid #6c63ff33;
+    border-left: 3px solid var(--accent);
+    border-radius: 6px;
+    padding: 12px 14px;
+    margin-bottom: 16px;
+}
+.scene-summary-label {
+    font-size: 9px; font-weight: 700; letter-spacing: 1px;
+    color: var(--accent); text-transform: uppercase; margin-bottom: 7px;
+}
+.scene-summary-text {
+    font-size: 12px; color: var(--text); line-height: 1.65;
+}
+
+/* ── SUMMARY SIDEBAR ── */
+#summary-panel {
+    width: 200px; flex-shrink: 0;
+    background: var(--bg2); border-left: 1px solid var(--border);
+    display: flex; flex-direction: column;
+}
+#summary-panel .panel-header { padding: 10px 12px; font-size: 10px; font-weight: 600; letter-spacing: 1px; color: var(--text3); text-transform: uppercase; border-bottom: 1px solid var(--border); }
+#summary-content { padding: 12px; flex: 1; overflow-y: auto; }
+
+.stat-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--border); }
+.stat-row:last-child { border-bottom: none; }
+.stat-row .stat-label { font-size: 11px; color: var(--text2); }
+.stat-row .stat-value { font-size: 13px; font-weight: 700; }
+.stat-row .stat-value.pass { color: var(--pass); }
+.stat-row .stat-value.review { color: var(--review); }
+.stat-row .stat-value.reject { color: var(--reject); }
+.stat-row .stat-value.neutral { color: var(--text); }
+
+.issue-breakdown { margin-top: 12px; }
+.issue-breakdown .section-label { font-size: 9px; font-weight: 600; letter-spacing: 0.8px; text-transform: uppercase; color: var(--text3); margin-bottom: 8px; }
+.issue-row { display: flex; justify-content: space-between; align-items: center; padding: 3px 0; }
+.issue-row .name { font-size: 11px; color: var(--text2); }
+.issue-row .count { font-size: 11px; font-weight: 700; color: var(--reject); }
+.issue-row .count.zero { color: var(--text3); }
+
+/* ── PROGRESS BAR ── */
+#progress-bar-container {
+    height: 42px; background: var(--bg2); border-top: 1px solid var(--border);
+    display: flex; align-items: center; padding: 0 16px; gap: 12px; flex-shrink: 0;
+}
+#progress-bar-track { flex: 1; height: 4px; background: var(--bg4); border-radius: 2px; overflow: hidden; }
+#progress-bar-fill { height: 100%; width: 0%; background: var(--accent); border-radius: 2px; transition: width 0.3s; }
+#progress-text { font-size: 11px; color: var(--text2); white-space: nowrap; min-width: 200px; }
+#progress-count { font-size: 11px; color: var(--text3); white-space: nowrap; }
+
+/* ── CHAT PANEL ── */
+#chat-panel {
+    width: 0; flex-shrink: 0; overflow: hidden;
+    background: var(--bg2); border-left: 1px solid var(--border);
+    display: flex; flex-direction: column;
+    transition: width 0.2s ease;
+}
+#chat-panel.open { width: 320px; }
+
+#chat-panel .panel-header {
+    padding: 10px 12px; font-size: 10px; font-weight: 600; letter-spacing: 1px;
+    color: var(--text3); text-transform: uppercase; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between; flex-shrink: 0;
+}
+#chat-panel .panel-header .close-chat {
+    background: none; border: none; color: var(--text3); cursor: pointer; font-size: 14px; padding: 0 2px; line-height: 1;
+}
+#chat-panel .panel-header .close-chat:hover { color: var(--text); }
+
+#chat-context-bar {
+    flex-shrink: 0; padding: 7px 10px;
+    background: #0e0e1a; border-bottom: 1px solid #6c63ff22;
+    font-size: 10px; color: var(--text2); line-height: 1.5; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis;
+}
+#chat-context-bar span { color: var(--accent); }
+
+#chat-messages {
+    flex: 1; overflow-y: auto; padding: 8px;
+    display: flex; flex-direction: column; gap: 6px;
+}
+#chat-messages::-webkit-scrollbar { width: 4px; }
+#chat-messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+.chat-sys { font-size: 10px; color: var(--text3); text-align: center; padding: 4px 0; }
+
+.chat-msg { display: flex; gap: 6px; align-items: flex-start; }
+.chat-msg.user { flex-direction: row-reverse; }
+.chat-avatar { width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0; font-size: 11px; display: flex; align-items: center; justify-content: center; }
+.chat-msg.user  .chat-avatar { background: #1e1b4b; }
+.chat-msg.model .chat-avatar { background: #1a1a1a; }
+.chat-bubble {
+    max-width: 220px; padding: 7px 9px; border-radius: 10px;
+    font-size: 11px; line-height: 1.5; word-break: break-word;
+}
+.chat-msg.user  .chat-bubble { background: #1e1b4b; color: #e0d9ff; border-bottom-right-radius: 3px; }
+.chat-msg.model .chat-bubble { background: var(--bg3); color: var(--text); border-bottom-left-radius: 3px; border: 1px solid var(--border); }
+.chat-bubble code { background: rgba(108,99,255,0.15); padding: 1px 4px; border-radius: 3px; font-size: 10px; }
+
+.chat-typing { display: flex; gap: 4px; align-items: center; padding: 8px 10px; }
+.chat-typing-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); opacity: 0.5; animation: chatDot 1.2s ease-in-out infinite; }
+.chat-typing-dot:nth-child(2) { animation-delay: 0.2s; }
+.chat-typing-dot:nth-child(3) { animation-delay: 0.4s; }
+@keyframes chatDot { 0%,60%,100%{transform:translateY(0);opacity:0.5} 30%{transform:translateY(-5px);opacity:1} }
+
+#chat-input-area {
+    flex-shrink: 0; border-top: 1px solid var(--border);
+    padding: 8px; display: flex; gap: 6px; align-items: flex-end;
+}
+#chat-input {
+    flex: 1; background: var(--bg3); border: 1px solid var(--border); color: var(--text);
+    border-radius: 8px; padding: 7px 10px; font-size: 11px; font-family: inherit;
+    resize: none; max-height: 80px; min-height: 32px; line-height: 1.4; outline: none;
+}
+#chat-input:focus { border-color: var(--accent); }
+#chat-send-btn {
+    width: 32px; height: 32px; border-radius: 8px; background: var(--accent);
+    border: none; color: #fff; font-size: 14px; cursor: pointer; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+}
+#chat-send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+#btn-chat { background: var(--bg3); border-color: var(--border); color: var(--text2); }
+#btn-chat.active { background: #1e1b4b; border-color: var(--accent); color: var(--accent); }
+
+/* ── SPINNER ── */
+@keyframes spin { to { transform: rotate(360deg); } }
+.spinner { width: 12px; height: 12px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; display: inline-block; }
+
+/* ── LOADING STATE ── */
+#loading-overlay { position: fixed; inset: 0; background: var(--bg); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; z-index: 100; }
+#loading-overlay .spinner { width: 32px; height: 32px; border-width: 3px; }
+#loading-overlay .msg { color: var(--text2); font-size: 13px; }
+</style>
+</head>
+<body>
+
+<!-- Loading overlay (shown while compositor initializes) -->
+<div id="loading-overlay">
+    <div class="spinner"></div>
+    <div class="msg">Initializing QA Studio...</div>
+</div>
+
+<!-- Top bar -->
+<div id="topbar">
+    <span class="logo" style="display:inline-flex;align-items:center;gap:6px;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>QA Studio</span>
+    <span class="project-name" id="project-name">Loading...</span>
+    <span id="readonly-badge" class="readonly-badge">READ ONLY</span>
+    <div class="spacer"></div>
+    <select id="qa-provider-select" title="AI Provider">
+        <option value="gemini">Gemini Flash</option>
+        <option value="qwen">Qwen Omni</option>
+    </select>
+    <button id="btn-stop">■ Stop</button>
+    <button id="btn-apply" style="display:none; background:#16a34a; border-color:#16a34a; color:#fff; font-weight:600; padding:0 18px;">✓ Apply Fixes</button>
+    <button id="btn-reset-qa" title="Remove all QA-applied crop/framing/flag data from plan so you can re-test" style="background:#374151; border-color:#4b5563; color:#9ca3af; padding:0 12px;">↺ Reset QA</button>
+    <button id="btn-run">▶ Run QA Analysis</button>
+    <button id="btn-chat" title="Open agent chat for this project" style="display:inline-flex;align-items:center;gap:5px;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>Chat</button>
+</div>
+
+<!-- Main layout -->
+<div id="layout">
+
+    <!-- Scene list (left) -->
+    <div id="scene-list-panel">
+        <div class="panel-header">Scenes <span id="scene-count" style="color:var(--text2);font-weight:400"></span></div>
+        <div id="scene-list"></div>
+    </div>
+
+    <!-- Center: preview + analysis -->
+    <div id="main-area">
+        <div id="preview-panel">
+            <canvas id="preview-canvas"></canvas>
+            <div id="preview-label">Select a scene</div>
+            <div id="preview-frames"></div>
+        </div>
+        <div id="analysis-panel">
+            <div id="analysis-empty">
+                <div class="icon">🔍</div>
+                <div>Run QA Analysis to see results</div>
+                <div style="font-size:11px">Full video clips per scene — audio + animations + effects</div>
+            </div>
+            <div id="analysis-content" style="display:none"></div>
+        </div>
+    </div>
+
+    <!-- Summary (right) -->
+    <div id="summary-panel">
+        <div class="panel-header">Summary</div>
+        <div id="summary-content">
+            <div class="stat-row"><span class="stat-label">Total scenes</span><span class="stat-value neutral" id="stat-total">—</span></div>
+            <div class="stat-row"><span class="stat-label">Analyzed</span><span class="stat-value neutral" id="stat-analyzed">—</span></div>
+            <div class="stat-row"><span class="stat-label">Pass</span><span class="stat-value pass" id="stat-pass">—</span></div>
+            <div class="stat-row"><span class="stat-label">Review</span><span class="stat-value review" id="stat-review">—</span></div>
+            <div class="stat-row"><span class="stat-label">Reject</span><span class="stat-value reject" id="stat-reject">—</span></div>
+            <div class="stat-row"><span class="stat-label">Avg score</span><span class="stat-value neutral" id="stat-avg">—</span></div>
+            <div class="issue-breakdown">
+                <div class="section-label">Issues Found</div>
+                <div class="issue-row"><span class="name">Watermark</span><span class="count zero" id="issue-watermark">0</span></div>
+                <div class="issue-row"><span class="name">Face</span><span class="count zero" id="issue-face">0</span></div>
+                <div class="issue-row"><span class="name">Context</span><span class="count zero" id="issue-context">0</span></div>
+                <div class="issue-row"><span class="name">Animation</span><span class="count zero" id="issue-animation">0</span></div>
+                <div class="issue-row"><span class="name">Quality</span><span class="count zero" id="issue-quality">0</span></div>
+                <div class="issue-row"><span class="name">MG Text</span><span class="count zero" id="issue-mg">0</span></div>
+            </div>
+        </div>
+    </div>
+
+
+    <!-- Agent Chat (right, collapsible) -->
+    <div id="chat-panel">
+        <div class="panel-header">
+            <span>Agent Chat</span>
+            <button class="close-chat" id="btn-chat-close" title="Close chat">✕</button>
+        </div>
+        <div id="chat-context-bar">Loading project...</div>
+        <div id="chat-messages">
+            <div class="chat-sys">Ask the agent about this project, QA results, niche rules, or anything about the app.</div>
+        </div>
+        <div id="chat-input-area">
+            <textarea id="chat-input" placeholder="Ask anything..." rows="1"></textarea>
+            <button id="chat-send-btn" title="Send">➤</button>
+        </div>
+    </div>
+
+</div>
+
+<!-- Progress bar -->
+<div id="progress-bar-container">
+    <div id="progress-bar-track"><div id="progress-bar-fill"></div></div>
+    <div id="progress-text">Ready — click Run QA Analysis to start</div>
+    <div id="progress-count"></div>
+</div>
+
+<!-- Hidden compositor canvas -->
+<canvas id="qa-compositor-canvas" style="display:none; position:absolute; left:-9999px;"></canvas>
+
+<!-- Compositor scripts -->
+<script src="js/lib/mp4box.all.min.js"></script>
+<script src="js/compositor/ShaderLib.js"></script>
+<script src="js/compositor/TextureManager.js"></script>
+<script src="js/compositor/AnimationUtils.js"></script>
+<script src="js/compositor/SceneGraph.js"></script>
+<script src="js/compositor/TransitionRenderer.js"></script>
+<script src="js/mg-theme-bridge.js"></script>
+<script src="js/compositor/MGRenderer.js"></script>
+<script src="js/compositor/Compositor.js"></script>
+<script src="js/compositor/VideoFrameSource.js"></script>
+<script src="js/compositor/ExportPipeline.js"></script>
+<script src="js/qa-studio-app.js"></script>
+</body>
+</html>

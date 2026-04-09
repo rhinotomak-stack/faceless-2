@@ -183,12 +183,25 @@ Example format: [{"label": "trade deficit", "box_2d": [250, 100, 290, 350]}, {"l
 
 // Generic prompt for non-Gemini providers (percentage-based)
 function buildGenericArticlePrompt() {
-    return `Look at this news article screenshot. Find the main headline text.
-Pick the 2-3 most important phrases from that headline (1-3 words each, words that carry the most meaning).
-For each phrase, estimate where it appears in the image as percentages (0-100) of the image dimensions.
-x = left edge %, y = top edge %, w = width %, h = height %.
-Return ONLY a JSON array, nothing else.
-Example: [{"label": "trade deficit", "x": 10, "y": 25, "w": 18, "h": 4}, {"label": "record high", "x": 40, "y": 25, "w": 15, "h": 4}]`;
+    return `You are looking at a news article screenshot. Your task: find the ARTICLE HEADLINE and output bounding boxes for its key phrases.
+
+STEP 1 — Identify the page structure:
+- What is the site name/logo at the top? (e.g. "Yahoo Finance", "Bloomberg", "BBC") — this is the PAGE HEADER, ignore it entirely.
+- What navigation tabs or menu items appear? (e.g. "Markets", "Finance", "Politics") — PAGE NAV, ignore.
+- What is the main bold article title below the header? THIS is the headline you want.
+
+STEP 2 — The article headline has these characteristics:
+- It describes a specific news event or story in a sentence or phrase
+- It appears BELOW the site logo and navigation area
+- It is the largest/boldest text in the article body (not the site name)
+- Examples: "Saudi East-West pipeline hits 7 mln bpd amid Hormuz disruption", "King Khalid orders construction of new oil pipeline", "Iran seizes tanker in Gulf of Oman"
+
+STEP 3 — From the headline you identified, pick 2-3 key phrases (1-4 words each, most newsworthy/specific words).
+For each phrase, estimate its bounding box as percentages (0-100) of the full image dimensions.
+x = left edge %, y = top edge %, w = width %, h = height %
+
+Output ONLY a JSON array. If the page shows no article headline (only login walls, error pages, dashboards, or pure nav), output [].
+Example: [{"label": "pipeline hits", "x": 8, "y": 38, "w": 20, "h": 4}, {"label": "7 mln bpd", "x": 8, "y": 43, "w": 16, "h": 4}]`;
 }
 
 function parseArticleVisionResponse(rawText, isBoxFormat) {
@@ -220,7 +233,8 @@ function parseArticleVisionResponse(rawText, isBoxFormat) {
                 continue;
             }
 
-            // Sanity check
+            // Sanity check only — no hardcoded positional filter.
+            // The AI prompt instructs it to skip headers/nav/logos semantically.
             if (x >= 0 && x <= 100 && y >= 0 && y <= 100 && w > 0 && w <= 80 && h > 0 && h <= 30) {
                 boxes.push({ text: item.label, x, y, w, h });
             }
@@ -330,6 +344,7 @@ PERSON KEYWORDS: If the keyword contains a person's name, a photo or portrait of
 
 AUTOMATIC PENALTIES (hard caps, override all other scoring):
 - News anchor / presenter reading news at a studio desk → MAX score 3 (unusable for faceless video)
+- YouTuber/presenter talking to camera or standing in front of subject → MAX score 5 (this is a FACELESS video — no visible presenters)
 - Studio set with desk, microphones, teleprompter → MAX score 3
 - Text-heavy screen (headlines, tickers, lower thirds filling >30% of frame) → MAX score 3
 - Any visible watermark, channel logo, or agency stamp (e.g., IRNA, AFP, Getty, Reuters logo) → MAX score 3

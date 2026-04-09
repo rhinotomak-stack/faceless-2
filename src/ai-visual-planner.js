@@ -158,6 +158,16 @@ function buildBatchPrompt(scenes, scriptContext, directorsBrief, options = {}) {
     const niche = getNiche(nicheId);
     const searchPolicy = getSearchPolicy(nicheId);
 
+    if (scriptContext && scriptContext.styleBlock) {
+        console.log(`   🎨 [VisualPlanner] Style profile injected into batch prompt: "${scriptContext.styleProfile?.name || 'unnamed'}" (${scriptContext.styleBlock.length} chars)`);
+    }
+
+    // Resolve build language for display-text enforcement
+    const _langNames = { de: 'German', es: 'Spanish', fr: 'French', it: 'Italian', ko: 'Korean', pt: 'Portuguese', nl: 'Dutch', pl: 'Polish', ru: 'Russian', ja: 'Japanese', zh: 'Chinese', ar: 'Arabic', tr: 'Turkish', hi: 'Hindi', sv: 'Swedish', da: 'Danish', fi: 'Finnish', no: 'Norwegian', cs: 'Czech', ro: 'Romanian', hu: 'Hungarian', el: 'Greek', th: 'Thai', vi: 'Vietnamese', id: 'Indonesian', ms: 'Malay', uk: 'Ukrainian' };
+    const buildLang = scriptContext.language || 'en';
+    const buildLangName = _langNames[buildLang] || buildLang;
+    const isNonEnglish = buildLang && buildLang !== 'en';
+
     // Build scene list with timing info
     let sceneList = '';
     for (const scene of scenes) {
@@ -174,9 +184,13 @@ function buildBatchPrompt(scenes, scriptContext, directorsBrief, options = {}) {
     const webContext = scriptContext.webContext || '';
     const eventType = scriptContext.eventType || '';
     const eventAnchor = scriptContext.eventAnchor || '';
+    const videoTitle = scriptContext.videoTitle || '';
     let topicBlock = '';
-    if (summary || webContext) {
+    if (summary || webContext || videoTitle) {
         topicBlock = `\nTOPIC CONTEXT (use this to stay on-topic and pick relevant visuals):`;
+        if (videoTitle) {
+            topicBlock += `\n- VIDEO TITLE: "${videoTitle}" — This is the video's title. Use it to understand the overall subject and guide your keyword choices.`;
+        }
         if (summary) {
             topicBlock += `\n- Summary: ${summary}`;
         }
@@ -217,11 +231,24 @@ The AI Director has analyzed this script and provided deep context. Your job is 
 3. Use the ENTITIES and context to be specific (not generic)
 4. Consider the story arc (hook → body → CTA)
 5. INTELLIGENTLY mix sources: stock video, YouTube clips, and web images
-${topicBlock}
+${isNonEnglish ? `
+🔴🔴🔴 MANDATORY LANGUAGE RULE — THIS VIDEO IS IN ${buildLangName.toUpperCase()} 🔴🔴🔴
+ALL viewer-facing text you write MUST be in ${buildLangName}. This applies to:
+- mgHint content text (e.g., "statCounter: 75% Energieeinsparung" NOT "75% Energy Savings")
+- fullscreenMG data text (e.g., "comparisonCard: Öffentliches Bild vs Private Realität")
+- templateHint content text (e.g., "statCard: Energie -75% Stromrechnung")
+- Any labels, titles, descriptions that will appear ON SCREEN
+The ONLY exception: keyword, stockQuery, webQuery stay in ENGLISH (search engines need English).
+This rule applies to EVERY scene — do NOT switch to English for any display text.
+🔴🔴🔴 END LANGUAGE RULE 🔴🔴🔴
+` : ''}${topicBlock}
 ${directorsBrief.freeInstructions ? `\n🔥 USER INSTRUCTIONS (HIGHEST PRIORITY — OVERRIDE ALL DEFAULTS):
 ${directorsBrief.freeInstructions}
 
 ↑ These instructions are MANDATORY. Follow them exactly, even if they conflict with the rules below.\n` : ''}
+${(scriptContext && scriptContext.styleBlock) ? `\n${scriptContext.styleBlock}
+
+↑ Use this as INSPIRATION for footage variety and shot composition. Niche rules and theme settings below still take priority for MG types and effects.\n` : ''}
 ${chunkBlock}
 DIRECTOR'S ANALYSIS:
 - Theme: ${theme || 'general'}
@@ -452,12 +479,12 @@ ${tier.allowVideo
    - DO NOT just default everything to one source. Each scene should use the BEST source for its specific content.
    - Be SPECIFIC, not generic! Use the entity names we found!
 
-   **VAGUE/ABSTRACT NARRATION (CRITICAL):**
-   - When a scene's narration is ABSTRACT or VAGUE (e.g., "sustained behaviors", "documented interviews", "contemporaries verified"), do NOT just keyword the narration literally.
-   - Instead, use the TOPIC CONTEXT and ENTITIES above to pick a CONCRETE, SEARCHABLE visual that relates to the story.
-   - Example: If the topic is about "Sammy Davis Jr naming racist stars" and the narration says "documented interviews" → keyword should be "Sammy Davis Jr interview 1960s", NOT "documented interviews".
-   - Example: If the topic is about a crime and narration says "the evidence was compelling" → keyword should be "courtroom evidence table", NOT "compelling evidence".
-   - ALWAYS ground abstract narration in the SPECIFIC topic, people, places, and era from the TOPIC CONTEXT.
+   **VAGUE/ABSTRACT NARRATION (for scenes with no concrete visual):**
+   - This rule ONLY applies when the narration is truly ABSTRACT (e.g., "sustained behaviors", "documented interviews", "contemporaries verified") with NO concrete visual.
+   - In that case, use the TOPIC CONTEXT to pick a CONCRETE, SEARCHABLE visual that relates to the story.
+   - Example: topic "Sammy Davis Jr" + narration "documented interviews" → keyword: "Sammy Davis Jr interview 1960s"
+   - ⚠️ This rule does NOT apply when the narration IS concrete. If scene says "cuts energy bills by 75%" → that IS concrete → keyword should be about energy bills, NOT the broader topic.
+   - TEST: Does this scene's text describe something a viewer could picture? If YES → keyword from the scene text. If NO → use topic context.
 
    **NO SPOILERS — keyword must match what the VIEWER knows (CRITICAL):**
    - The keyword must reflect what the NARRATION actually says in THIS scene, not what you know from context.
@@ -557,6 +584,15 @@ ${(() => {
    The keyword is NOT a shot description. Save cinematic details for visualIntent.
    If the scene names a person, the keyword MUST be that person's name (+ optional context word).
 
+   ⚠️ KEYWORD MUST MATCH THIS SCENE'S NARRATION (CRITICAL):
+   - Read ONLY this scene's quoted text. The keyword must reflect what THIS scene says, not the broader video topic.
+   - If scene says "It cuts energy bills by up to 75 percent" → keyword: "energy bill savings home", NOT "thermal imaging house energy"
+   - If scene says "insurance premiums by up to 90" → keyword: "home insurance policy document", NOT "monolithic dome insulation"
+   - If scene says "and can last for centuries" → keyword: "ancient stone building centuries old", NOT "dome construction materials"
+   - The VIDEO TOPIC gives context, but the keyword must match what the NARRATOR IS SAYING in this specific 2-5 second clip.
+   - ASK: "If I mute everything else and ONLY hear this scene's text, what footage would I show?" THAT is your keyword.
+   - When a scene states a NUMBER or PERCENTAGE, consider whether an mgHint (statCounter) or fullscreenMG is BETTER than footage.
+
    CRITICAL — NEVER use abstract, metaphorical, or conceptual keywords:
    - BAD: "warfare principles Sun Tzu analogy", "lighthouse emission analogy", "elegance of collapse", "paper defense strategy", "physics trap principle", "no-win battery dilemma"
    - These return ZERO useful footage on any search engine. They are concepts, not visual things.
@@ -610,13 +646,17 @@ ${(() => {
 
 14. MG HINT (OVERLAY motion graphic — appears ON TOP of footage):
    - Format: "<mgType>: <brief content description>" or "none"
-   - Overlay MGs appear over the footage. Default is "none".
+   - Overlay MGs appear over the footage. Default is "none".${isNonEnglish ? `\n   - ⚠️ LANGUAGE: The content description text MUST be in ${buildLangName}. Example: "statCounter: 75% Energieeinsparung" NOT "75% Energy Savings"` : ''}
    - ONLY add when the narration has a clear CONTENT SIGNAL:
-     • A SPECIFIC NUMBER or STATISTIC → "statCounter: 5 million members"
+     • A SPECIFIC NUMBER, PERCENTAGE, or STATISTIC → "statCounter: 75% energy savings" — THIS IS HIGH PRIORITY. When the narrator says a number, the viewer NEEDS to see it on screen.
+       Examples: "cuts bills by 75 percent" → "statCounter: 75% Energy Bill Reduction"
+                 "over a million new houses" → "statCounter: 1,000,000+ Houses Built Annually"
+                 "less than 900 of these homes" → "statCounter: <900 Monolithic Domes in America"
      • A NEW PERSON INTRODUCED BY NAME + TITLE → "lowerThird: DW Griffith, Film Director"
        (Do NOT repeat for the same person in later scenes)
      • A DIRECT QUOTE spoken verbatim → "callout: I believe in white supremacy"
    - Overlay types: lowerThird, headline, statCounter, callout, focusWord, progressBar
+   - statCounter is the MOST underused MG — every time you see a number in the narration, strongly consider it
    - Most scenes are pure storytelling — they should have NO MG
    - Do NOT cluster MGs — leave gaps of 2-4 scenes between MGs
    - **NO SPOILER MGs**: A lowerThird must ONLY appear on the scene where the person is FIRST NAMED in the narration text. If a scene says "but first, the man who..." without naming anyone → NO lowerThird. The lowerThird goes on the NEXT scene where the name is actually spoken.
@@ -624,7 +664,7 @@ ${(() => {
 15. FULLSCREEN MG (REPLACES footage — no download needed for this scene):
    - Format: "<mgType>: <content data>" or "none"
    - When set, this scene becomes a FULLSCREEN motion graphic — NO footage is downloaded.
-   - This is BETTER than footage when the scene's narration is data-heavy or abstract.
+   - This is BETTER than footage when the scene's narration is data-heavy or abstract.${isNonEnglish ? `\n   - ⚠️ LANGUAGE: ALL content data (labels, titles, items, comparisons) MUST be in ${buildLangName}. Example: "comparisonCard: Öffentliches Bild vs Private Realität" NOT English.` : ''}
    - USE fullscreenMG WHEN:
      • Scene lists MULTIPLE data points, dates, or items → "bulletList: Point 1 | Point 2 | Point 3"
      • Scene has a TIMELINE of events/dates → "timeline: 1915: Birth of a Nation | 1925: Rise of jazz | 1999: Legacy"
@@ -638,22 +678,38 @@ ${(() => {
    - Do NOT overuse — max ~15% of scenes. Most scenes should be footage.
    - NEVER use on HOOK or CTA scenes — those need strong visual footage.
 
-16. TEMPLATE HINT (fullscreen template card on V3 — separate system from MGs):
-   - Format: "<templateType>: <brief content>" or "none"
-   - Template types: chapterCard, locationCard, quoteCard, keyTakeaway, comparisonCard, timelineCard, factCard, imageShowcase
+16. TEMPLATE HINT (fullscreen template card on V3 — IMPORTANT visual system):
+   - Format: "<templateType>: <brief content>" or "none"${isNonEnglish ? `\n   - ⚠️ LANGUAGE: ALL template content text MUST be in ${buildLangName}. Example: "statCard: Energie -75% Stromrechnung" NOT English.` : ''}
+   - Template types: chapterCard, locationCard, quoteCard, keyTakeaway, comparisonCard, timelineCard, factCard, imageShowcase, statCard, personIntro
+   - ⚠️ TEMPLATES ARE BETTER THAN BAD FOOTAGE. When a scene's narration is about numbers, data, comparisons, or abstract concepts that won't produce good search results — USE A TEMPLATE instead of forcing a keyword search.
    - USE templateHint WHEN:
+     • Narration mentions NUMBERS or PERCENTAGES (1-3 stats) → "statCard: -90% Insurance | -75% Energy Bills" — THIS IS THE MOST IMPORTANT TEMPLATE. Icon+number infographics look professional. Use for: "cuts bills by 75%", "saves up to 90%", "less than 900 homes", etc.
+     • Narration mentions MANY stats/numbers (4+) → "factCard: Title | fact1; fact2; fact3; fact4"
      • Narration transitions to a NEW MAJOR SECTION/TOPIC → "chapterCard: Chapter Title"
      • A NEW SPECIFIC LOCATION is introduced for the first time → "locationCard: Place Name, Country"
      • A DIRECT QUOTE is spoken that deserves visual emphasis → "quoteCard: The quote text"
      • In the final 20% of video, a key insight/conclusion → "keyTakeaway: Main point"
      • An explicit COMPARISON (X vs Y) in narration → "comparisonCard: Thing A vs Thing B"
      • Dates/events forming a chronological sequence → "timelineCard: Date1: Event | Date2: Event"
-     • Narration lists multiple facts/features/details about a topic → "factCard: Title | fact1; fact2; fact3; fact4"
      • Narration references two related concepts/people/places worth visualizing → "imageShowcase: Title | image1 desc; image2 desc"
-   - Max 3-4 per video — these are premium visual moments, not filler
+     • A NAMED PERSON is introduced for the FIRST TIME → "personIntro: Person Name | Role/Title, Year" — Shows portrait + name + context image. MUCH better than just downloading a portrait photo. Use for: "Wallace Neff", "Buckminster Fuller", "David South", etc. Only on FIRST mention — not for every scene about them.
+   - personIntro FORMAT: "personIntro: Person Name | Role/Title, Year"
+     Examples:
+     • "Wallace Neff, an architect..." → "personIntro: Wallace Neff | Architect, 1941"
+     • "Buckminster Fuller invented..." → "personIntro: Buckminster Fuller | Inventor & Architect"
+     • "David South, the founder..." → "personIntro: David South | Founder, Monolithic Dome Institute"
+   - statCard FORMAT: "statCard: <icon hint> <number> <label> | <icon hint> <number> <label>"
+     Examples:
+     • "cuts energy bills by 75%" → "statCard: energy -75% Energy Bills"
+     • "insurance premiums by 90%" → "statCard: shield -90% Insurance Premiums"
+     • "75% energy, 90% insurance" (same scene, 2 stats) → "statCard: energy -75% Energy Bills; shield -90% Insurance"
+     • "less than 900 homes exist" → "statCard: home <900 Dome Homes in USA"
+     Icon hints: energy, shield, home, money, people, globe, chart, clock, building, car, health, tech
+     Separate multiple stats with semicolons (;), NOT pipes (|)
+   - Aim for 3-5 templates per video — they make the video look PROFESSIONAL
    - NEVER on HOOK or CTA scenes
    - Can't be same scene as fullscreenMG (choose one or the other)
-   - Default is "none" for most scenes
+   - Default is "none" for most scenes — but ACTIVELY LOOK for template opportunities in every scene
 
 OUTPUT FORMAT (one line per scene):
 
@@ -665,7 +721,21 @@ CRITICAL: YOU MUST OUTPUT EXACTLY ${scenes.length} LINES (one per scene).
 Each keyword must be UNIQUE, SEARCHABLE, and SHORT (3-6 words). When a person is named in the scene, keyword = their name.
 When fullscreenMG is set, keyword/stockQuery/webQuery can be "none" (footage won't be downloaded).
 Do NOT put cinematic shot descriptions in keyword — that goes in visualIntent.
-stockQuery and webQuery must BOTH be provided for every footage scene.`;
+stockQuery and webQuery must BOTH be provided for every footage scene.
+
+⚠️ MANDATORY — DO NOT SKIP mgHint AND templateHint FIELDS:
+You MUST evaluate EVERY scene for mgHint and templateHint. Do NOT default everything to "none".
+- Any scene with a NUMBER/PERCENTAGE → must have mgHint: statCounter OR templateHint: statCard
+- Any scene with a named person + title → must have mgHint: lowerThird
+- Any scene transitioning to a new major section → consider templateHint: chapterCard
+- Any scene with a direct quote → consider templateHint: quoteCard or mgHint: callout
+- Expect at LEAST 3-5 mgHints and 2-4 templateHints per video. If you output zero, you are doing it wrong.
+- statCard templates save API calls by replacing bad-keyword scenes — use them for stat-heavy narration!${isNonEnglish ? `
+
+🔴 FINAL LANGUAGE REMINDER: This video is in ${buildLangName} (lang=${buildLang}).
+ALL on-screen text in mgHint, fullscreenMG, and templateHint MUST be written in ${buildLangName}.
+keyword/stockQuery/webQuery stay in English (for search engines). Everything else = ${buildLangName}.
+Do NOT write English display text. Do NOT switch to English mid-output. EVERY scene, ${buildLangName} only.` : ''}`;
 
     return prompt;
 }

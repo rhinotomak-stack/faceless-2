@@ -22,7 +22,7 @@ const config = require('./config');
 
 const DEFAULTS = {
     // Frame extraction
-    framesPerClip: 8,          // frames to extract from a clip (more = better understanding, more tokens)
+    framesPerClip: 3,          // frames to extract from a clip (3 is enough for a 3-6s clip)
     frameScale: 512,           // scale frames to this width (lower = fewer tokens)
     frameQuality: 4,           // JPEG quality (2=best, 5=decent, higher=worse)
     frameTimeout: 10000,       // ms per frame extraction
@@ -32,24 +32,28 @@ const DEFAULTS = {
     timeout: 90000,            // ms for the AI call
 
     // Smart segment
-    segmentFrames: 6,          // frames for segment analysis (6 balances accuracy vs budget)
-    segmentMinDuration: 30,    // minimum video duration to bother with segment analysis
+    segmentFrames: 3,          // frames for segment analysis (3 is fast; 6 was too slow for 150+ scene builds)
+    segmentMinDuration: 60,    // minimum video duration to bother with segment analysis (skip short clips)
 
     // Cost control
     enabled: true,             // master switch
     maxFramesPerBuild: 200,    // max total frames sent across all clips in one build
 };
 
-// Track frame budget across a build session
-let _frameBudget = DEFAULTS.maxFramesPerBuild;
-let _totalFramesSent = 0;
+// Track frame budgets across a build session
+// Omni budget = for findBestSegment (smart trim) — the expensive multi-frame calls
+// Clip analysis (VL single-frame scoring) has its own separate counter — doesn't eat Omni budget
+let _omniBudget = DEFAULTS.maxFramesPerBuild;
+let _omniFramesSent = 0;
+let _clipAnalysisFrames = 0; // tracked for stats only, no budget limit
 
 /**
  * Reset frame budget (call at start of each build).
  */
 function resetBudget(maxFrames) {
-    _frameBudget = maxFrames || DEFAULTS.maxFramesPerBuild;
-    _totalFramesSent = 0;
+    _omniBudget = maxFrames || DEFAULTS.maxFramesPerBuild;
+    _omniFramesSent = 0;
+    _clipAnalysisFrames = 0;
 }
 
 /**
@@ -59,7 +63,7 @@ function isAvailable() {
     if (config.clipAnalyzer?.enabled === false) return false;
     if (!DEFAULTS.enabled) return false;
     if (!config.qwen?.apiKey && !config.gemini?.apiKey) return false;
-    if (_totalFramesSent >= _frameBudget) return false;
+    if (_omniFramesSent >= _omniBudget) return false;
     return true;
 }
 
@@ -215,7 +219,7 @@ async function analyzeClip(filePath, duration, keyword, context = {}) {
     const frames = await extractFrames(filePath, duration, numFrames);
     if (frames.length < 2) return null;
 
-    _totalFramesSent += frames.length;
+    _clipAnalysisFrames += frames.length; // clip analysis uses VL, separate from Omni budget
 
     const contextBlock = [
         context.videoTopic ? `Video topic: "${context.videoTopic}"` : '',
@@ -394,21 +398,24 @@ GOOD FOOTAGE for this niche:
 - Underwater footage, storm footage, natural phenomena`;
     }
 
-    // ── Education / Science niche ──
-    if (n === 'education') {
-        return `NICHE RULES (education — relaxed on text):
-DISQUALIFIERS for this niche:
+    // ── Explainer / Education / Science niche ──
+    if (n === 'education' || n === 'explainer') {
+        return `NICHE RULES (explainer — clean B-roll, NO presenters):
+DISQUALIFIERS for this niche (REJECT these):
+- YouTuber/presenter talking to camera (this is for FACELESS video — no faces)
+- Person standing in front of subject explaining (talking head)
 - News anchor / studio talking head
 - Visible watermarks or channel logos
-- Completely unrelated content
+- Comedy/meme/entertainment clips
 
 GOOD FOOTAGE for this niche:
-- Clean diagrams, infographics, educational charts (text is OK if educational)
+- Clean B-roll: close-ups of materials, cross-sections, aerial views of structures
+- Diagrams, infographics, educational charts (text is OK if educational)
+- Process footage: construction, assembly, manufacturing (hands OK, faces NOT OK)
 - Laboratory footage, experiments, scientific equipment
-- Documentary-style footage explaining concepts
-- Animations or visualizations of scientific processes
-- Real-world demonstrations, lectures at universities (not news studios)
-- Historical or archival footage relevant to the topic`;
+- Documentary-style footage without visible presenter
+- Architectural/engineering footage, interiors, exteriors
+- Macro close-ups of textures, mechanisms, materials`;
     }
 
     // ── Business / Economy niche ──
@@ -545,7 +552,7 @@ async function findBestSegment(streamUrl, totalDuration, neededDuration, keyword
     }
 
     console.log(`  🔍 [clip-analyzer] findBestSegment: ${Math.round(totalDuration)}s video, need ${Math.round(neededDuration)}s, keyword="${keyword}"`);
-    console.log(`  🔍 [clip-analyzer] Budget: ${_totalFramesSent}/${DEFAULTS.maxFramesPerBuild} frames used`);
+    console.log(`  🔍 [clip-analyzer] Omni budget: ${_omniFramesSent}/${_omniBudget} frames used`);
 
     // Skip first 8% and last 10% (intro/outro)
     const safeStart = Math.max(3, Math.floor(totalDuration * 0.08));
@@ -562,8 +569,8 @@ async function findBestSegment(streamUrl, totalDuration, neededDuration, keyword
         return null;
     }
 
-    _totalFramesSent += frames.length;
-    console.log(`  🔍 [clip-analyzer] Extracted ${frames.length} frames → sending to Omni (callVideoAI) | budget now ${_totalFramesSent}/${DEFAULTS.maxFramesPerBuild}`);
+    _omniFramesSent += frames.length;
+    console.log(`  🔍 [clip-analyzer] Extracted ${frames.length} frames → sending to Omni (callVideoAI) | budget now ${_omniFramesSent}/${_omniBudget}`);
 
     const timestamps = frames.map(f => f.timestamp);
     const frameList = frames.map((f, i) => `Frame ${i + 1} (at ${f.timestamp.toFixed(0)}s)`).join(', ');
@@ -585,6 +592,14 @@ ${contextBlock ? `\nCONTEXT:\n${contextBlock}` : ''}
 
 This footage will play as B-roll while narration plays over it.
 
+KEYWORD MATCHING (CRITICAL — be STRICT):
+Read the keyword carefully. Every word matters. The footage must match the SPECIFIC thing described, not just the general category.
+- "wooden frame house construction" → MUST show wooden framing/timber of a HOUSE. Road work, concrete pouring, street construction = REJECT (-1).
+- "monolithic dome interior concrete" → MUST show the INSIDE of a dome. Exterior shots of domes = REJECT (-1).
+- "solar panel rooftop installation" → MUST show panels on a ROOF. Ground-mounted solar farm = poor match.
+- If the keyword says "interior" → exterior is WRONG. If keyword says "aerial" → ground-level is WRONG.
+ASK: "Does this frame show the SPECIFIC thing the keyword describes?" If it only matches the GENERAL CATEGORY (e.g. 'construction' when keyword says 'wooden frame house'), return START_AT: -1.
+
 TOPIC RELEVANCE (CRITICAL):
 The footage MUST make sense in a video about the stated topic. Judge every frame against the VIDEO TOPIC, not just the keyword.
 ${context.videoTopic ? `This video is about: "${context.videoTopic}". If a frame shows something unrelated to this topic, it is UNUSABLE even if it superficially matches the keyword.` : ''}
@@ -593,16 +608,18 @@ Example: keyword "hurricane aftermath" in a video about dome homes → destroyed
 
 UNIVERSAL DISQUALIFIERS — frames with ANY of these are ALWAYS unusable:
 - Content that does NOT belong in a video about the stated topic (wrong subject matter)
+- Content that matches the general CATEGORY but not the SPECIFIC keyword (e.g. road construction for "house construction")
 - Visible watermarks, channel logos, or agency stamps (Reuters, AFP, CNN, BBC, Getty etc.)
 - Foreign-language subtitle or text overlay burned into the footage
 - AI-generated or illustrated content when real footage exists
 - Completely unrelated content (e.g. cat video for a politics keyword)
+- Comedy/meme/entertainment clips when serious footage is needed
 
 ${nicheRules}
 
 Analyze ALL ${frames.length} frames. For each, note if it has any disqualifier.
-Then pick the best frame that has NO disqualifiers AND fits the video topic.
-If ALL frames are off-topic or have disqualifiers, reply START_AT: -1
+Then pick the best frame that has NO disqualifiers AND specifically matches the KEYWORD (not just the general topic).
+If NO frame specifically matches what the keyword describes, you MUST reply START_AT: -1. Do NOT pick the "least bad" frame — reject the whole video instead.
 
 Reply in this EXACT format (3 lines):
 BEST_FRAME: <frame number> at <timestamp>s — <what it shows and why it's best>
@@ -670,9 +687,11 @@ function _parseSegmentResponse(response, timestamps, neededDuration, maxEnd) {
  */
 function getStats() {
     return {
-        totalFramesSent: _totalFramesSent,
-        frameBudget: _frameBudget,
-        remaining: Math.max(0, _frameBudget - _totalFramesSent),
+        totalFramesSent: _omniFramesSent + _clipAnalysisFrames,
+        omniFrames: _omniFramesSent,
+        clipAnalysisFrames: _clipAnalysisFrames,
+        omniBudget: _omniBudget,
+        omniRemaining: Math.max(0, _omniBudget - _omniFramesSent),
         available: isAvailable(),
     };
 }

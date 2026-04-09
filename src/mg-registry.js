@@ -222,16 +222,6 @@ const MG_REGISTRY = {
         fields: ['text', 'subtext', 'position'],
     },
 
-    articleHighlight: {
-        label: 'Article Highlight',
-        group: 'fullscreen',
-        types: {
-            standard:  { label: 'Standard',       animation: 'fadeSlide' },
-        },
-        animations: ['fadeSlide'],
-        defaultType: 'standard',
-        fields: ['text', 'subtext'],
-    },
 
     // ── Listicle MGs ──
     listicleCounter: {

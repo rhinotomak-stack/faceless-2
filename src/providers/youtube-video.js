@@ -39,6 +39,7 @@ const QUERY_STRATEGIES = {
     science:       (kw) => [`${kw} explained`, `${kw} experiment`, `${kw} documentary`],
     health:        (kw) => [`${kw} medical`, `${kw} footage`, `${kw} stock footage`],
     education:     (kw) => [`${kw} explained`, `${kw} lecture`, `${kw} educational`],
+    explainer:     (kw) => [`${kw} explained`, `${kw} how it works`, `${kw} documentary`, `${kw} process`],
     crime:         (kw) => [`${kw} footage`, `${kw} surveillance`, `${kw} raw video`],
     documentary:   (kw) => [`${kw} documentary`, `${kw} real footage`, `${kw} investigation`],
     motivation:    (kw) => [`${kw} motivational`, `${kw} inspirational`, `${kw} stock footage`],

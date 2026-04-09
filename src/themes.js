@@ -1120,6 +1120,8 @@ const TEMPLATE_THEME_OVERRIDES = {
         timelineCard:   { variant: 'cinematic', animation: 'cascade' },
         factCard:       { variant: 'splitPanel', animation: 'slideRight' },
         imageShowcase:  { variant: 'cinematic', animation: 'slideOpposite' },
+        statCard:       { variant: 'sideBySide', animation: 'countUp' },
+        personIntro:    { variant: 'standard',  animation: 'slideRight' },
     },
     history: {
         chapterCard:     { variant: 'standard',  animation: 'fadeSlide' },
@@ -1130,6 +1132,8 @@ const TEMPLATE_THEME_OVERRIDES = {
         timelineCard:    { variant: 'standard',  animation: 'cascade' },
         factCard:        { variant: 'numbered',   animation: 'staggerSlide' },
         imageShowcase:   { variant: 'standard',  animation: 'slideOpposite' },
+        statCard:        { variant: 'stacked',    animation: 'countUp' },
+        personIntro:     { variant: 'cinematic',  animation: 'fadeSlide' },
     },
     modern: {
         chapterCard:     { variant: 'minimal',   animation: 'springScale' },
@@ -1140,6 +1144,8 @@ const TEMPLATE_THEME_OVERRIDES = {
         timelineCard:    { variant: 'minimal',   animation: 'staggerSlide' },
         factCard:        { variant: 'overlay',    animation: 'fadeUp' },
         imageShowcase:   { variant: 'minimal',   animation: 'slideOpposite' },
+        statCard:        { variant: 'sideBySide', animation: 'fadeScale' },
+        personIntro:     { variant: 'minimal',   animation: 'springScale' },
     },
     minimal: {
         chapterCard:     { variant: 'minimal',   animation: 'fadeSlide' },
@@ -1150,6 +1156,8 @@ const TEMPLATE_THEME_OVERRIDES = {
         timelineCard:    { variant: 'minimal',   animation: 'staggerSlide' },
         factCard:        { variant: 'sidebar',    animation: 'slideRight' },
         imageShowcase:   { variant: 'minimal',   animation: 'fadeSlide' },
+        statCard:        { variant: 'single',     animation: 'countUp' },
+        personIntro:     { variant: 'minimal',   animation: 'fadeSlide' },
     },
     standard: {
         chapterCard:     { variant: 'standard',  animation: 'fadeSlide' },
@@ -1160,6 +1168,8 @@ const TEMPLATE_THEME_OVERRIDES = {
         timelineCard:    { variant: 'standard',  animation: 'cascade' },
         factCard:        { variant: 'splitPanel', animation: 'slideRight' },
         imageShowcase:   { variant: 'standard',  animation: 'slideOpposite' },
+        statCard:        { variant: 'sideBySide', animation: 'countUp' },
+        personIntro:     { variant: 'standard',  animation: 'slideRight' },
     },
 };
 

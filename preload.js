@@ -49,6 +49,54 @@ try {
     console.warn('Effect presets not available:', e.message);
 }
 
+// Expose Language registry + helpers to renderer (multi-language support)
+// The renderer uses these to: resolve language-specific font stacks for MGRenderer,
+// populate the language dropdown in the build settings panel, and load Google Fonts
+// for non-Latin scripts (e.g. Korean) on demand.
+try {
+    const languages = require('./src/languages');
+    const langHelper = require('./src/language-helper');
+    window._languages = {
+        LANGUAGES: languages.LANGUAGES,
+        DEFAULT_LANGUAGE: languages.DEFAULT_LANGUAGE,
+        getLanguage: languages.getLanguage,
+        isValidLanguage: languages.isValidLanguage,
+        getSupportedLanguages: languages.getSupportedLanguages,
+        getLanguageList: languages.getLanguageList,
+    };
+    window._languageHelper = {
+        resolveLanguageFonts: langHelper.resolveLanguageFonts,
+        getGoogleFontsUrl: langHelper.getGoogleFontsUrl,
+        isRTL: langHelper.isRTL,
+        resolveBuildLanguage: langHelper.resolveBuildLanguage,
+    };
+} catch (e) {
+    console.warn('Language registry not available:', e.message);
+}
+
+// Expose QA Studio Agent to renderer (deep per-scene analysis — separate window)
+try {
+    window._qaStudioAgent = require('./src/qa-studio-agent');
+} catch (e) {
+    console.warn('QA Studio Agent not available:', e.message);
+}
+
+// Expose QA Chat Agent to renderer (developer chat to test niche knowledge)
+try {
+    window._qaChatAgent = require('./src/qa-chat-agent');
+} catch (e) {
+    console.warn('QA Chat Agent not available:', e.message);
+}
+
+// Expose QA Replacer to renderer (surgical scene re-download + article re-screenshot on Apply Fixes)
+try {
+    const qaReplacer = require('./src/qa-replacer');
+    window._qaReplacer = qaReplacer; // { replaceSceneMedia, rescreenhotArticle }
+} catch (e) {
+    console.warn('QA Replacer not available:', e.message);
+}
+
+
 // Expose Electron IPC methods to the renderer process
 window.electronAPI = {
     // Copy file to project folder
@@ -70,6 +118,16 @@ window.electronAPI = {
     saveVideoPlan: (plan) => {
         return ipcRenderer.invoke('save-video-plan', plan);
     },
+
+    // QA results persistence — auto-save/load so closing QA Studio doesn't lose analysis
+    saveQAResults: (data) => ipcRenderer.invoke('save-qa-results', data),
+    loadQAResults: () => ipcRenderer.invoke('load-qa-results'),
+
+    // Push QA-fixed plan to main window memory (called from QA Studio after applying fixes)
+    pushPlanToMain: (plan) => ipcRenderer.invoke('push-plan-to-main', plan),
+
+    // Main window listens for QA Studio pushing fixes (called in app.js)
+    onQAPlanUpdated: (callback) => ipcRenderer.on('qa-plan-updated', (event, plan) => callback(plan)),
 
     // Get scene video path (backward compat)
     getSceneVideoPath: (sceneIndex) => {
@@ -203,6 +261,15 @@ window.electronAPI = {
     qwenPoolStatus: () => ipcRenderer.invoke('qwen-pool-status'),
     qwenPoolReset: () => ipcRenderer.invoke('qwen-pool-reset'),
 
+    // Style Learner — analyze reference video, scan saved profiles, pick local file
+    learnStyle: (input) => ipcRenderer.invoke('learn-style', input),
+    scanStyleProfiles: () => ipcRenderer.invoke('scan-style-profiles'),
+    pickVideoFile: () => ipcRenderer.invoke('pick-video-file'),
+    onLearnStyleProgress: (callback) => {
+        ipcRenderer.removeAllListeners('learn-style-progress');
+        ipcRenderer.on('learn-style-progress', (event, data) => callback(data));
+    },
+
     // Project file (.fvp) save/load
     saveProjectFile: (data) => ipcRenderer.invoke('save-project-file', data),
     loadProjectFile: () => ipcRenderer.invoke('load-project-file'),
@@ -244,6 +311,12 @@ window.electronAPI = {
     muxAudio: (videoFile, outputFile, audioTrimStartSec, audioTrimEndSec) => {
         return ipcRenderer.invoke('mux-audio', videoFile, outputFile, audioTrimStartSec, audioTrimEndSec);
     },
+
+    // Open QA Studio in a separate window
+    openQAStudio: () => ipcRenderer.invoke('open-qa-studio'),
+
+    // Open QA Chat (developer niche knowledge tester)
+    openQAChat: () => ipcRenderer.invoke('open-qa-chat'),
 };
 
 console.log('✅ Electron preload script loaded');

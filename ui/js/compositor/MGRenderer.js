@@ -66,6 +66,8 @@ class MGRenderer {
             timelineCard:    (ctx, f, fps, mg, s, a, sc) => { this._ensureTemplateMedia(mg); this._renderTimelineCard(ctx, f, fps, mg, s, a); },
             factCard:        (ctx, f, fps, mg, s, a, sc) => { this._ensureTemplateMedia(mg); this._ensureTemplateBgImage(mg); this._renderFactCard(ctx, f, fps, mg, s, a); },
             imageShowcase:   (ctx, f, fps, mg, s, a, sc) => { this._ensureTemplateMedia(mg); this._ensureGridThumbnails(mg); this._renderImageShowcase(ctx, f, fps, mg, s, a); },
+            statCard:        (ctx, f, fps, mg, s, a, sc) => { this._ensureTemplateMedia(mg); this._ensureTemplateBgImage(mg); this._renderStatCard(ctx, f, fps, mg, s, a); },
+            personIntro:     (ctx, f, fps, mg, s, a, sc) => { this._ensureGridThumbnails(mg); this._renderPersonIntro(ctx, f, fps, mg, s, a); },
         };
 
         // Variant renderers: 'category:variant' → function(ctx, mg, s, anim, a, setup)
@@ -6537,6 +6539,599 @@ class MGRenderer {
         }
 
         ctx.restore();
+    }
+
+    // ── STAT CARD — icon + big number + label infographic ──
+    // Variants: sideBySide (2 stats horizontal), stacked (2 stats vertical),
+    //           single (1 big stat centered), triple (3 stats in a row)
+
+    /** Parse stat items from mg.items. Each item: "iconHint number label" */
+    _statCardItems(mg) {
+        const raw = mg.items || mg._items || [];
+        return raw.slice(0, 3).map(item => {
+            const text = typeof item === 'string' ? item : (item.text || item.event || '');
+            if (!text) return null;
+            // Parse: "energy -75% Energy Bills" or "-75% Energy Bills" or "75%"
+            const match = text.match(/^(?:(energy|shield|home|money|people|globe|chart|clock|building|car|health|tech)\s+)?([<>~±+\-]?\d[\d,.]*%?)\s*(.*)/i);
+            if (match) {
+                return { icon: (match[1] || 'chart').toLowerCase(), number: match[2], label: match[3] || '' };
+            }
+            return { icon: 'chart', number: text, label: '' };
+        }).filter(Boolean);
+    }
+
+    /** Draw a simple icon by name */
+    _drawStatIcon(ctx, icon, cx, cy, size, color) {
+        ctx.save();
+        ctx.fillStyle = color;
+        ctx.strokeStyle = color;
+        ctx.lineWidth = size * 0.06;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        const r = size * 0.45;
+
+        switch (icon) {
+            case 'energy': {
+                // Lightning bolt
+                ctx.beginPath();
+                ctx.moveTo(cx + r * 0.15, cy - r);
+                ctx.lineTo(cx - r * 0.4, cy + r * 0.05);
+                ctx.lineTo(cx + r * 0.05, cy + r * 0.05);
+                ctx.lineTo(cx - r * 0.15, cy + r);
+                ctx.lineTo(cx + r * 0.4, cy - r * 0.05);
+                ctx.lineTo(cx - r * 0.05, cy - r * 0.05);
+                ctx.closePath();
+                ctx.fill();
+                break;
+            }
+            case 'shield': {
+                // Shield with house
+                ctx.beginPath();
+                ctx.moveTo(cx, cy - r);
+                ctx.quadraticCurveTo(cx + r, cy - r * 0.7, cx + r, cy);
+                ctx.quadraticCurveTo(cx + r, cy + r * 0.8, cx, cy + r);
+                ctx.quadraticCurveTo(cx - r, cy + r * 0.8, cx - r, cy);
+                ctx.quadraticCurveTo(cx - r, cy - r * 0.7, cx, cy - r);
+                ctx.closePath();
+                ctx.stroke();
+                // Inner house
+                const hs = r * 0.4;
+                ctx.beginPath();
+                ctx.moveTo(cx, cy - hs * 0.6);
+                ctx.lineTo(cx + hs, cy + hs * 0.2);
+                ctx.lineTo(cx + hs * 0.6, cy + hs * 0.2);
+                ctx.lineTo(cx + hs * 0.6, cy + hs * 0.7);
+                ctx.lineTo(cx - hs * 0.6, cy + hs * 0.7);
+                ctx.lineTo(cx - hs * 0.6, cy + hs * 0.2);
+                ctx.lineTo(cx - hs, cy + hs * 0.2);
+                ctx.closePath();
+                ctx.fill();
+                break;
+            }
+            case 'home': {
+                // House
+                ctx.beginPath();
+                ctx.moveTo(cx, cy - r * 0.8);
+                ctx.lineTo(cx + r, cy);
+                ctx.lineTo(cx + r * 0.7, cy);
+                ctx.lineTo(cx + r * 0.7, cy + r * 0.7);
+                ctx.lineTo(cx - r * 0.7, cy + r * 0.7);
+                ctx.lineTo(cx - r * 0.7, cy);
+                ctx.lineTo(cx - r, cy);
+                ctx.closePath();
+                ctx.fill();
+                break;
+            }
+            case 'money': {
+                // Dollar circle
+                ctx.beginPath();
+                ctx.arc(cx, cy, r * 0.8, 0, Math.PI * 2);
+                ctx.stroke();
+                MGRenderer._setFont(ctx, '700', size * 0.5, 'Arial');
+                ctx.fillStyle = color;
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText('$', cx, cy);
+                break;
+            }
+            case 'people': {
+                // Two people silhouette
+                ctx.beginPath();
+                ctx.arc(cx - r * 0.25, cy - r * 0.35, r * 0.25, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.beginPath();
+                ctx.arc(cx - r * 0.25, cy + r * 0.35, r * 0.45, Math.PI, 0);
+                ctx.fill();
+                ctx.beginPath();
+                ctx.arc(cx + r * 0.35, cy - r * 0.25, r * 0.2, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.beginPath();
+                ctx.arc(cx + r * 0.35, cy + r * 0.4, r * 0.35, Math.PI, 0);
+                ctx.fill();
+                break;
+            }
+            case 'clock': {
+                ctx.beginPath();
+                ctx.arc(cx, cy, r * 0.75, 0, Math.PI * 2);
+                ctx.stroke();
+                ctx.beginPath();
+                ctx.moveTo(cx, cy);
+                ctx.lineTo(cx, cy - r * 0.45);
+                ctx.moveTo(cx, cy);
+                ctx.lineTo(cx + r * 0.35, cy + r * 0.1);
+                ctx.stroke();
+                break;
+            }
+            default: {
+                // Generic chart bars
+                const bw = r * 0.35;
+                const gap = r * 0.12;
+                ctx.fillRect(cx - bw * 1.5 - gap, cy, bw, -r * 0.5);
+                ctx.fillRect(cx - bw * 0.5, cy, bw, -r * 0.9);
+                ctx.fillRect(cx + bw * 0.5 + gap, cy, bw, -r * 0.7);
+                // Baseline
+                ctx.fillRect(cx - r, cy, r * 2, size * 0.04);
+                break;
+            }
+        }
+        ctx.restore();
+    }
+
+    _renderStatCard(ctx, frame, fps, mg, s, anim) {
+        const variant = this._resolveVariant(mg, s, 'statCard') || 'sideBySide';
+        const { springValue, interpolate } = AnimationUtils;
+        const W = 1920, H = 1080;
+        const ts = this._getTemplateStyle(mg, s);
+        const totalFrames = Math.round((mg.duration || 5) * fps);
+        const exitDur = Math.round(fps * 0.5);
+        const isExiting = frame > totalFrames - exitDur;
+        const exitAlpha = isExiting ? interpolate(frame - (totalFrames - exitDur), [0, exitDur], [1, 0]) : 1;
+
+        // Background
+        if (!this._drawTemplateBg(ctx, mg, W, H, Math.min(anim.opacity, exitAlpha))) {
+            // Soft gradient background
+            const bgGrad = ctx.createLinearGradient(0, 0, W, H);
+            bgGrad.addColorStop(0, ts.gridBg || '#1a1a2e');
+            bgGrad.addColorStop(1, ts.cardBg || '#16213e');
+            ctx.fillStyle = bgGrad;
+            ctx.fillRect(0, 0, W, H);
+        }
+
+        ctx.save();
+        ctx.globalAlpha = Math.min(anim.opacity, exitAlpha);
+
+        const items = this._statCardItems(mg);
+        if (items.length === 0) {
+            ctx.restore();
+            return;
+        }
+
+        // Title at top
+        const title = mg.text || '';
+        if (title) {
+            const titleSpring = springValue(frame, fps, { damping: 14, stiffness: 100 });
+            const titleSlide = interpolate(titleSpring, [0, 1], [30, 0]);
+            ctx.save();
+            ctx.globalAlpha *= titleSpring;
+            MGRenderer._setFont(ctx, ts.titleWeight, ts.titleSize - 4, ts.fontHeading);
+            ctx.fillStyle = ts.text;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'top';
+            ctx.shadowColor = 'rgba(0,0,0,0.4)';
+            ctx.shadowBlur = 10;
+            ctx.fillText(title, W / 2, 80 + titleSlide);
+            ctx.shadowColor = 'transparent';
+            ctx.shadowBlur = 0;
+            ctx.restore();
+        }
+
+        // Layout stat blocks based on variant and item count
+        const count = Math.min(items.length, variant === 'triple' ? 3 : variant === 'single' ? 1 : 2);
+        const isVertical = variant === 'stacked';
+        const blockW = isVertical ? 700 : Math.min(500, (W - 200) / count);
+        const blockH = isVertical ? 220 : 450;
+        const iconSize = isVertical ? 70 : 120;
+        const numberSize = isVertical ? 72 : 110;
+        const labelSize = isVertical ? 26 : 32;
+
+        const totalW = isVertical ? blockW : (blockW * count + 80 * (count - 1));
+        const startX = (W - totalW) / 2;
+        const centerY = title ? H * 0.52 : H * 0.48;
+
+        for (let i = 0; i < count; i++) {
+            const item = items[i];
+            const delay = Math.round(fps * 0.15 * i);
+            const itemSpring = springValue(Math.max(0, frame - delay), fps, { damping: 12, stiffness: 80 });
+            const itemScale = interpolate(itemSpring, [0, 1], [0.7, 1]);
+            const itemAlpha = itemSpring;
+
+            // Position
+            let bx, by;
+            if (isVertical) {
+                bx = startX + blockW / 2;
+                by = centerY + (i - (count - 1) / 2) * (blockH + 30);
+            } else {
+                bx = startX + i * (blockW + 80) + blockW / 2;
+                by = centerY;
+            }
+
+            ctx.save();
+            ctx.globalAlpha *= itemAlpha;
+            ctx.translate(bx, by);
+            ctx.scale(itemScale, itemScale);
+
+            // Subtle card background
+            const cardW2 = blockW - 20;
+            const cardH2 = isVertical ? blockH - 10 : blockH - 40;
+            ctx.fillStyle = 'rgba(255,255,255,0.06)';
+            ctx.beginPath();
+            MGRenderer._roundRect(ctx, -cardW2 / 2, -cardH2 / 2, cardW2, cardH2, 24);
+            ctx.fill();
+
+            // Border
+            ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            MGRenderer._roundRect(ctx, -cardW2 / 2, -cardH2 / 2, cardW2, cardH2, 24);
+            ctx.stroke();
+
+            if (isVertical) {
+                // Horizontal layout: icon left, number+label right
+                const iconCx = -cardW2 / 2 + 70;
+                this._drawStatIcon(ctx, item.icon, iconCx, 0, iconSize, ts.accent);
+
+                // Number
+                MGRenderer._setFont(ctx, '800', numberSize * 0.7, ts.fontHeading);
+                ctx.fillStyle = ts.text;
+                ctx.textAlign = 'left';
+                ctx.textBaseline = 'middle';
+                ctx.shadowColor = 'rgba(0,0,0,0.3)';
+                ctx.shadowBlur = 8;
+
+                // Count-up animation
+                const countFrame = Math.max(0, frame - delay);
+                const countDur = Math.round(fps * 1.2);
+                const countProgress = Math.min(1, countFrame / countDur);
+                const eased = 1 - Math.pow(1 - countProgress, 3);
+                const numText = this._animateStatNumber(item.number, eased);
+                ctx.fillText(numText, iconCx + 60, -12);
+
+                // Label
+                MGRenderer._setFont(ctx, '400', labelSize, ts.fontBody);
+                ctx.fillStyle = ts.textSub || 'rgba(255,255,255,0.65)';
+                ctx.fillText(item.label, iconCx + 60, 28);
+                ctx.shadowColor = 'transparent';
+                ctx.shadowBlur = 0;
+            } else {
+                // Vertical layout: icon top, number middle, label bottom
+                const iconY = -cardH2 / 2 + 80;
+                this._drawStatIcon(ctx, item.icon, 0, iconY, iconSize, ts.accent);
+
+                // Accent glow behind icon
+                if (ts.glow) {
+                    ctx.save();
+                    ctx.globalAlpha *= 0.15;
+                    ctx.beginPath();
+                    ctx.arc(0, iconY, iconSize * 0.8, 0, Math.PI * 2);
+                    ctx.fillStyle = ts.accent;
+                    ctx.fill();
+                    ctx.restore();
+                }
+
+                // Number with count-up
+                const countFrame = Math.max(0, frame - delay);
+                const countDur = Math.round(fps * 1.2);
+                const countProgress = Math.min(1, countFrame / countDur);
+                const eased = 1 - Math.pow(1 - countProgress, 3);
+                const numText = this._animateStatNumber(item.number, eased);
+
+                MGRenderer._setFont(ctx, '800', numberSize, ts.fontHeading);
+                ctx.fillStyle = ts.text;
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.shadowColor = 'rgba(0,0,0,0.4)';
+                ctx.shadowBlur = 12;
+                ctx.fillText(numText, 0, iconY + iconSize * 0.7 + 55);
+
+                // Label
+                MGRenderer._setFont(ctx, '400', labelSize, ts.fontBody);
+                ctx.fillStyle = ts.textSub || 'rgba(255,255,255,0.65)';
+                ctx.shadowColor = 'rgba(0,0,0,0.2)';
+                ctx.shadowBlur = 6;
+                const labelLines = MGRenderer._wrapTextWords(ctx, item.label, cardW2 - 40);
+                const labelStartY = iconY + iconSize * 0.7 + 55 + numberSize * 0.6 + 15;
+                for (let li = 0; li < labelLines.length; li++) {
+                    ctx.fillText(labelLines[li], 0, labelStartY + li * (labelSize + 6));
+                }
+                ctx.shadowColor = 'transparent';
+                ctx.shadowBlur = 0;
+            }
+
+            ctx.restore();
+        }
+
+        ctx.restore();
+    }
+
+    // ── PERSON INTRO — portrait + name + role + context image ──
+    // Phase 1: Portrait slides in from left + name types in
+    // Phase 2: Role/date fades in below name
+    // Phase 3: Context image appears on the right (if available)
+
+    _renderPersonIntro(ctx, frame, fps, mg, s, anim) {
+        const { springValue, interpolate } = AnimationUtils;
+        const W = 1920, H = 1080;
+        const ts = this._getTemplateStyle(mg, s);
+        const totalFrames = Math.round((mg.duration || 6) * fps);
+        const exitDur = Math.round(fps * 0.5);
+        const isExiting = frame > totalFrames - exitDur;
+        const exitAlpha = isExiting ? interpolate(frame - (totalFrames - exitDur), [0, exitDur], [1, 0]) : 1;
+
+        // Background: soft warm tone
+        const bgGrad = ctx.createLinearGradient(0, 0, W, H);
+        bgGrad.addColorStop(0, ts.gridBg || '#1a1a2e');
+        bgGrad.addColorStop(1, ts.cardBg || '#16213e');
+        ctx.fillStyle = bgGrad;
+        ctx.fillRect(0, 0, W, H);
+
+        ctx.save();
+        ctx.globalAlpha = Math.min(anim.opacity, exitAlpha);
+
+        const thumbs = mg._itemThumbnails || [];
+        const items = mg.items || [];
+        const personName = mg.text || '';
+        const role = mg.subText || mg.subtext || '';
+
+        // ── Phase 1: Portrait image (left side) ──
+        const portraitSpring = springValue(frame, fps, { damping: 12, stiffness: 70 });
+        const portraitSlideX = interpolate(portraitSpring, [0, 1], [-200, 0]);
+        const portraitAlpha = portraitSpring;
+
+        const portraitW = 480;
+        const portraitH = H * 0.75;
+        const portraitX = 80 + portraitSlideX;
+        const portraitY = (H - portraitH) / 2;
+
+        ctx.save();
+        ctx.globalAlpha *= portraitAlpha;
+
+        // Try to draw portrait image
+        const portraitThumb = thumbs[0];
+        const portraitKey = portraitThumb ? portraitThumb.replace(/^.*[/\\]/, '') : null;
+        const portraitImg = portraitKey ? this._gridThumbs?.[portraitKey] : null;
+
+        if (portraitImg) {
+            // Draw portrait with rounded corners and subtle shadow
+            ctx.save();
+            ctx.shadowColor = 'rgba(0,0,0,0.4)';
+            ctx.shadowBlur = 30;
+            ctx.shadowOffsetX = 10;
+            ctx.shadowOffsetY = 10;
+
+            ctx.beginPath();
+            MGRenderer._roundRect(ctx, portraitX, portraitY, portraitW, portraitH, 16);
+            ctx.clip();
+
+            // Cover-fit the image
+            const img = portraitImg;
+            const imgW = img.width || img.videoWidth || portraitW;
+            const imgH = img.height || img.videoHeight || portraitH;
+            const scale = Math.max(portraitW / imgW, portraitH / imgH);
+            const drawW = imgW * scale;
+            const drawH = imgH * scale;
+            const drawX = portraitX + (portraitW - drawW) / 2;
+            const drawY = portraitY + (portraitH - drawH) / 2;
+            ctx.drawImage(img, drawX, drawY, drawW, drawH);
+
+            // Subtle bottom gradient for blending
+            const fadeGrad = ctx.createLinearGradient(portraitX, portraitY + portraitH - 100, portraitX, portraitY + portraitH);
+            fadeGrad.addColorStop(0, 'transparent');
+            fadeGrad.addColorStop(1, 'rgba(0,0,0,0.3)');
+            ctx.fillStyle = fadeGrad;
+            ctx.fillRect(portraitX, portraitY + portraitH - 100, portraitW, 100);
+
+            ctx.restore();
+        } else {
+            // Placeholder silhouette
+            ctx.fillStyle = 'rgba(255,255,255,0.08)';
+            ctx.beginPath();
+            MGRenderer._roundRect(ctx, portraitX, portraitY, portraitW, portraitH, 16);
+            ctx.fill();
+
+            // Simple person silhouette
+            const cx = portraitX + portraitW / 2;
+            const cy = portraitY + portraitH * 0.35;
+            ctx.fillStyle = 'rgba(255,255,255,0.15)';
+            ctx.beginPath();
+            ctx.arc(cx, cy, 60, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.beginPath();
+            ctx.ellipse(cx, cy + 130, 80, 60, 0, Math.PI, 0);
+            ctx.fill();
+        }
+        ctx.restore();
+
+        // ── Phase 2: Name + Role (right side, staggered) ──
+        const nameDelay = Math.round(fps * 0.4);
+        const nameSpring = springValue(Math.max(0, frame - nameDelay), fps, { damping: 14, stiffness: 90 });
+        const nameSlideY = interpolate(nameSpring, [0, 1], [50, 0]);
+
+        const textX = portraitX + portraitW + 80;
+        const textMaxW = W - textX - 80;
+
+        // Name — big bold
+        ctx.save();
+        ctx.globalAlpha *= nameSpring;
+        MGRenderer._setFont(ctx, '900', 72, ts.fontHeading);
+        ctx.fillStyle = ts.text;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+        ctx.shadowColor = 'rgba(0,0,0,0.4)';
+        ctx.shadowBlur = 12;
+
+        // Typewriter effect for name
+        const typewriterDur = Math.round(fps * 1.0);
+        const nameFrame = Math.max(0, frame - nameDelay);
+        const charsVisible = Math.min(personName.length, Math.floor((nameFrame / typewriterDur) * personName.length));
+        const displayName = personName.substring(0, charsVisible).toUpperCase();
+
+        const nameY = H * 0.22 + nameSlideY;
+        const nameLines = MGRenderer._wrapTextWords(ctx, displayName, textMaxW);
+        const nameLineH = 82;
+        for (let i = 0; i < nameLines.length; i++) {
+            ctx.fillText(nameLines[i], textX, nameY + i * nameLineH);
+        }
+
+        // Typing cursor
+        if (nameFrame < typewriterDur + Math.round(fps * 0.5) && Math.floor(nameFrame / (fps * 0.25)) % 2 === 0) {
+            const lastLine = nameLines[nameLines.length - 1] || '';
+            const cursorX = textX + ctx.measureText(lastLine).width + 4;
+            const cursorY = nameY + (nameLines.length - 1) * nameLineH;
+            ctx.fillStyle = ts.accent;
+            ctx.fillRect(cursorX, cursorY + 5, 4, 65);
+        }
+
+        ctx.shadowColor = 'transparent';
+        ctx.shadowBlur = 0;
+        ctx.restore();
+
+        // Role/title — smaller, delayed more
+        const roleDelay = Math.round(fps * 1.2);
+        const roleSpring = springValue(Math.max(0, frame - roleDelay), fps, { damping: 14, stiffness: 100 });
+
+        if (role) {
+            ctx.save();
+            ctx.globalAlpha *= roleSpring;
+            MGRenderer._setFont(ctx, '400', 32, ts.fontBody);
+            ctx.fillStyle = ts.textSub || 'rgba(255,255,255,0.7)';
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'top';
+
+            const roleY = nameY + nameLines.length * nameLineH + 20 + interpolate(roleSpring, [0, 1], [20, 0]);
+            ctx.fillText(role, textX, roleY);
+
+            // Accent line above role
+            const lineSpring = springValue(Math.max(0, frame - roleDelay - Math.round(fps * 0.1)), fps, { damping: 12, stiffness: 120 });
+            const lineW = interpolate(lineSpring, [0, 1], [0, Math.min(ctx.measureText(role).width, textMaxW)]);
+            ctx.fillStyle = ts.accent;
+            ctx.fillRect(textX, roleY - 12, lineW, 3);
+
+            ctx.restore();
+        }
+
+        // ── Phase 3: Context image (right side, below name) ──
+        const contextDelay = Math.round(fps * 2.0);
+        const contextSpring = springValue(Math.max(0, frame - contextDelay), fps, { damping: 12, stiffness: 60 });
+
+        const contextThumb = thumbs[1];
+        const contextKey = contextThumb ? contextThumb.replace(/^.*[/\\]/, '') : null;
+        const contextImg = contextKey ? this._gridThumbs?.[contextKey] : null;
+
+        if (contextImg || contextThumb) {
+            const contextAlpha = contextSpring;
+            const contextScale = interpolate(contextSpring, [0, 1], [0.85, 1]);
+            const contextW = 520;
+            const contextH = 320;
+            const contextX = textX + 20;
+            const contextY = H * 0.55;
+
+            ctx.save();
+            ctx.globalAlpha *= contextAlpha;
+            ctx.translate(contextX + contextW / 2, contextY + contextH / 2);
+            ctx.scale(contextScale, contextScale);
+            ctx.translate(-(contextX + contextW / 2), -(contextY + contextH / 2));
+
+            if (contextImg) {
+                // Rounded frame with shadow
+                ctx.save();
+                ctx.shadowColor = 'rgba(0,0,0,0.5)';
+                ctx.shadowBlur = 20;
+                ctx.shadowOffsetX = 5;
+                ctx.shadowOffsetY = 5;
+
+                // Frame border
+                ctx.fillStyle = 'rgba(255,255,255,0.15)';
+                ctx.beginPath();
+                MGRenderer._roundRect(ctx, contextX - 4, contextY - 4, contextW + 8, contextH + 8, 14);
+                ctx.fill();
+
+                ctx.beginPath();
+                MGRenderer._roundRect(ctx, contextX, contextY, contextW, contextH, 12);
+                ctx.clip();
+
+                const cImg = contextImg;
+                const cImgW = cImg.width || cImg.videoWidth || contextW;
+                const cImgH = cImg.height || cImg.videoHeight || contextH;
+                const cScale = Math.max(contextW / cImgW, contextH / cImgH);
+                const cDrawW = cImgW * cScale;
+                const cDrawH = cImgH * cScale;
+                ctx.drawImage(cImg, contextX + (contextW - cDrawW) / 2, contextY + (contextH - cDrawH) / 2, cDrawW, cDrawH);
+
+                // Subtle vignette
+                const vig = ctx.createRadialGradient(contextX + contextW / 2, contextY + contextH / 2, contextW * 0.3, contextX + contextW / 2, contextY + contextH / 2, contextW * 0.7);
+                vig.addColorStop(0, 'transparent');
+                vig.addColorStop(1, 'rgba(0,0,0,0.2)');
+                ctx.fillStyle = vig;
+                ctx.fillRect(contextX, contextY, contextW, contextH);
+
+                ctx.restore();
+            } else {
+                // Placeholder
+                ctx.fillStyle = 'rgba(255,255,255,0.06)';
+                ctx.beginPath();
+                MGRenderer._roundRect(ctx, contextX, contextY, contextW, contextH, 12);
+                ctx.fill();
+            }
+
+            // Date/year label above context image (from items[1] if it contains a year)
+            const contextDesc = typeof items[1] === 'string' ? items[1] : '';
+            const yearMatch = contextDesc.match(/\b(1[5-9]\d{2}|20[0-2]\d)\b/);
+            if (yearMatch) {
+                const yearSpring = springValue(Math.max(0, frame - contextDelay - Math.round(fps * 0.3)), fps, { damping: 10, stiffness: 120 });
+                ctx.save();
+                ctx.globalAlpha *= yearSpring;
+                MGRenderer._setFont(ctx, '900', 64, ts.fontHeading);
+                ctx.fillStyle = ts.text;
+                ctx.textAlign = 'left';
+                ctx.textBaseline = 'bottom';
+                ctx.shadowColor = 'rgba(0,0,0,0.4)';
+                ctx.shadowBlur = 10;
+                ctx.fillText(yearMatch[0], contextX + 10, contextY - 10);
+                ctx.shadowColor = 'transparent';
+                ctx.shadowBlur = 0;
+                ctx.restore();
+            }
+
+            ctx.restore();
+        }
+
+        ctx.restore();
+    }
+
+    /** Animate a stat number string with count-up effect */
+    _animateStatNumber(numStr, progress) {
+        // Extract numeric part and prefix/suffix
+        const match = numStr.match(/^([<>~±+\-]?)(\d[\d,.]*)(%?)$/);
+        if (!match) return numStr;
+        const prefix = match[1];
+        const numPart = match[2].replace(/,/g, '');
+        const suffix = match[3];
+        const targetNum = parseFloat(numPart);
+        if (isNaN(targetNum)) return numStr;
+        const currentNum = targetNum * progress;
+        // Format with commas if original had them
+        const hasCommas = match[2].includes(',');
+        let formatted;
+        if (numPart.includes('.')) {
+            const decimals = numPart.split('.')[1].length;
+            formatted = currentNum.toFixed(decimals);
+        } else {
+            formatted = Math.round(currentNum).toString();
+        }
+        if (hasCommas) {
+            formatted = formatted.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+        }
+        return prefix + formatted + suffix;
     }
 
     /**

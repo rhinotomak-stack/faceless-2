@@ -839,6 +839,10 @@ ipcMain.handle('run-build', async (event, options) => {
             if (options.footageSources) {
                 buildEnv.FOOTAGE_SOURCES = JSON.stringify(options.footageSources);
             }
+            // Pass video title for AI guidance (niche detection, keyword gen, visual planning)
+            if (options.videoTitle) {
+                buildEnv.VIDEO_TITLE = options.videoTitle;
+            }
             // Pass AI instructions for prompt guidance
             if (options.aiInstructions) {
                 buildEnv.AI_INSTRUCTIONS = options.aiInstructions;
@@ -855,6 +859,15 @@ ipcMain.handle('run-build', async (event, options) => {
             }
             if (options.buildTheme) {
                 buildEnv.BUILD_THEME = options.buildTheme;
+            }
+            // Multi-language support: 'auto' = Whisper auto-detects from audio,
+            // or a language code ('en','es','de','fr','it','ko') to force it.
+            // build-video.js reads BUILD_LANGUAGE + resolves via src/language-helper.js.
+            if (options.buildLanguage) {
+                buildEnv.BUILD_LANGUAGE = options.buildLanguage;
+            }
+            if (options.buildStyleProfile && options.buildStyleProfile !== 'none') {
+                buildEnv.BUILD_STYLE_PROFILE = options.buildStyleProfile;
             }
             if (options.cinematicScale) {
                 buildEnv.CINEMATIC_SCALE = options.cinematicScale;
@@ -903,8 +916,11 @@ ipcMain.handle('run-build', async (event, options) => {
             });
 
             buildProcess.stderr.on('data', (data) => {
-                errorOutput += data.toString();
-                console.error(data.toString());
+                const text = data.toString();
+                errorOutput += text;
+                // Suppress ffmpeg banner/config noise (always writes to stderr, not a real error)
+                if (/^(ffmpeg version|built with gcc|configuration:|lib(av|sw|post)|Input #|Output #|Stream #|Stream mapping|Press \[q\]|size=|frame=|\[out#|Duration:|Metadata:|major_brand|minor_version|compatible_brands|creation_time|handler_name|vendor_id|encoder)/m.test(text.trim())) return;
+                console.error(text);
             });
 
             buildProcess.on('close', (code) => {
@@ -1004,6 +1020,40 @@ ipcMain.handle('save-video-plan', async (event, plan) => {
         console.error('❌ Failed to save plan:', error);
         return { success: false, error: error.message };
     }
+});
+
+// ── QA Results persistence ──────────────────────────────────────────────────
+// Saves analysis results so closing QA Studio doesn't lose work
+ipcMain.handle('save-qa-results', async (event, data) => {
+    try {
+        const filePath = path.join(TEMP_PATH, 'qa-results.json');
+        if (!fs.existsSync(TEMP_PATH)) fs.mkdirSync(TEMP_PATH, { recursive: true });
+        fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+        return { success: true };
+    } catch (error) {
+        console.error('❌ Failed to save QA results:', error.message);
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('load-qa-results', async () => {
+    try {
+        const filePath = path.join(TEMP_PATH, 'qa-results.json');
+        if (!fs.existsSync(filePath)) return { success: true, data: null };
+        const raw = fs.readFileSync(filePath, 'utf-8');
+        return { success: true, data: JSON.parse(raw) };
+    } catch (error) {
+        console.error('❌ Failed to load QA results:', error.message);
+        return { success: true, data: null };
+    }
+});
+
+// Push QA-fixed plan into the main window's memory so auto-save picks it up
+ipcMain.handle('push-plan-to-main', async (event, plan) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('qa-plan-updated', plan);
+    }
+    return { success: true };
 });
 
 // ========================================
@@ -1940,6 +1990,87 @@ ipcMain.handle('qwen-pool-reset', async () => {
     }
 });
 
+// ============ STYLE LEARNER IPC ============
+// Reference video → Gemini multimodal analysis → structured style profile JSON.
+// Profiles live under PROJECT_DIR/styles/ and are picked from a dropdown in build settings.
+
+function _styleProfilesDir() {
+    const dir = path.join(PROJECT_DIR, 'styles');
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    return dir;
+}
+
+ipcMain.handle('learn-style', async (event, input) => {
+    try {
+        if (!input || typeof input !== 'string') {
+            return { success: false, error: 'No input provided' };
+        }
+        const styleLearner = require('./src/style-learner');
+        const saveDir = _styleProfilesDir();
+
+        const sendProgress = (percent, message) => {
+            if (mainWindow && !mainWindow.isDestroyed()) {
+                mainWindow.webContents.send('learn-style-progress', { percent, message });
+            }
+        };
+
+        const profile = await styleLearner.analyzeStyle(input, {
+            saveDir,
+            onProgress: sendProgress
+        });
+
+        // analyzeStyle attaches savedPath to the returned profile.
+        return { success: true, profile, path: profile.savedPath };
+    } catch (e) {
+        console.error('[learn-style] Failed:', e);
+        return { success: false, error: e.message || String(e) };
+    }
+});
+
+ipcMain.handle('scan-style-profiles', async () => {
+    try {
+        const dir = _styleProfilesDir();
+        const files = fs.readdirSync(dir).filter(f => f.endsWith('.style.json'));
+        const profiles = [];
+        for (const f of files) {
+            try {
+                const full = path.join(dir, f);
+                const json = JSON.parse(fs.readFileSync(full, 'utf8'));
+                profiles.push({
+                    path: full,
+                    name: json.name || f.replace('.style.json', ''),
+                    videoDuration: json.videoDuration || null,
+                    createdAt: json.createdAt || null
+                });
+            } catch (e) { /* skip malformed */ }
+        }
+        // Newest first
+        profiles.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+        return profiles;
+    } catch (e) {
+        console.error('[scan-style-profiles] Failed:', e);
+        return [];
+    }
+});
+
+ipcMain.handle('pick-video-file', async () => {
+    try {
+        const result = await dialog.showOpenDialog(mainWindow, {
+            title: 'Choose reference video',
+            properties: ['openFile'],
+            filters: [
+                { name: 'Video files', extensions: ['mp4', 'mkv', 'mov', 'webm', 'avi', 'm4v'] },
+                { name: 'All files', extensions: ['*'] }
+            ]
+        });
+        if (result.canceled || !result.filePaths.length) return null;
+        return result.filePaths[0];
+    } catch (e) {
+        console.error('[pick-video-file] Failed:', e);
+        return null;
+    }
+});
+
 // Launch a new instance with a new project folder
 // options: { projectName, location } — if provided, creates named subfolder
 ipcMain.handle('launch-new-instance', async (event, options) => {
@@ -2336,6 +2467,77 @@ function updateEnvFileAt(envPath, key, value) {
 }
 
 
+
+// ========================================
+// QA Studio — Separate Window
+// ========================================
+let qaStudioWindow = null;
+
+ipcMain.handle('open-qa-studio', async (event, options) => {
+    const openChat = options?.openChat || false;
+    const htmlFile = path.join(__dirname, 'ui', 'qa-studio.html');
+    const query = openChat ? '?chat=1' : '';
+
+    // Re-open: reload the page so it re-reads the latest video-plan.json from disk
+    if (qaStudioWindow && !qaStudioWindow.isDestroyed()) {
+        qaStudioWindow.loadFile(htmlFile, { query: openChat ? 'chat=1' : '' });
+        qaStudioWindow.focus();
+        return;
+    }
+    qaStudioWindow = new BrowserWindow({
+        width: 1300,
+        height: 860,
+        minWidth: 900,
+        minHeight: 600,
+        backgroundColor: '#0a0a0a',
+        title: 'QA Studio',
+        webPreferences: {
+            nodeIntegration: false,
+            contextIsolation: false,
+            sandbox: false,
+            preload: path.join(__dirname, 'preload.js'),
+        },
+        icon: getWindowIconPath() || undefined,
+        parent: mainWindow || undefined,
+    });
+    qaStudioWindow.loadFile(htmlFile, { query: openChat ? 'chat=1' : '' });
+    qaStudioWindow.on('closed', () => { qaStudioWindow = null; });
+});
+
+// Agent Chat button → opens QA Studio with chat panel expanded (no separate window)
+ipcMain.handle('open-qa-chat', async () => {
+    // Redirect to QA Studio with chat auto-opened
+    if (qaStudioWindow && !qaStudioWindow.isDestroyed()) {
+        // QA Studio already open — just tell it to open chat
+        qaStudioWindow.webContents.executeJavaScript(
+            `document.getElementById('chat-panel')?.classList.add('open'); document.getElementById('btn-chat-toggle')?.click?.();`
+        ).catch(() => {});
+        qaStudioWindow.focus();
+        return;
+    }
+    // QA Studio not open — open it with chat=1
+    ipcMain.emit('handle-open-qa-studio');
+    // Use the handler directly
+    const htmlFile = path.join(__dirname, 'ui', 'qa-studio.html');
+    qaStudioWindow = new BrowserWindow({
+        width: 1300,
+        height: 860,
+        minWidth: 900,
+        minHeight: 600,
+        backgroundColor: '#0a0a0a',
+        title: 'QA Studio',
+        webPreferences: {
+            nodeIntegration: false,
+            contextIsolation: false,
+            sandbox: false,
+            preload: path.join(__dirname, 'preload.js'),
+        },
+        icon: getWindowIconPath() || undefined,
+        parent: mainWindow || undefined,
+    });
+    qaStudioWindow.loadFile(htmlFile, { query: 'chat=1' });
+    qaStudioWindow.on('closed', () => { qaStudioWindow = null; });
+});
 
 // ========================================
 // Error Handling

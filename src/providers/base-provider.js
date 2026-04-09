@@ -3,6 +3,12 @@ const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
 
+// In Electron renderer/preload context axios auto-picks the XHR adapter (XMLHttpRequest is defined),
+// which returns ArrayBuffer instead of a Node.js stream — .pipe() fails and User-Agent/Referer are blocked.
+// Force the Node.js http adapter so downloads always stream correctly regardless of which process calls us.
+// axios v1.x accepts the adapter name as a string ('http' | 'xhr' | 'fetch').
+const _HTTP_ADAPTER = 'http';
+
 // Domains known to serve watermarked preview images
 const WATERMARK_DOMAINS = [
     'shutterstock.com', 'gettyimages.com', 'istockphoto.com', 'dreamstime.com',
@@ -88,6 +94,7 @@ class BaseProvider {
             url,
             method: 'GET',
             responseType: 'stream',
+            adapter: _HTTP_ADAPTER, // force Node.js http adapter (avoids XHR adapter in Electron renderer)
             timeout: 30000,
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
