@@ -7,6 +7,9 @@
  * MapTiler's static maps API requires a paid plan, so we download individual
  * 512×512 tiles and stitch them into a 1920×1080 image using @napi-rs/canvas.
  *
+ * Geocoding: MapTiler free tier includes geocoding (100K req/day).
+ * Converts city/landmark names → exact lat/lng with dynamic zoom.
+ *
  * Usage: downloadMapForMG(mg, scriptContext, tempDir) → saves PNG, sets mg.mapImageFile
  */
 
@@ -14,6 +17,9 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 const config = require('./config');
+
+// ── Geocoding cache (avoids repeat API calls within same build) ──
+const _geocodeCache = new Map();
 
 // ── MapTiler style mapping (primary) ──
 const MAPTILER_STYLE_MAP = {
@@ -93,24 +99,156 @@ function httpsDownload(url, timeout = 15000) {
     });
 }
 
+// ══════════════════════════════════════════════════════════════════
+// Geocoding — MapTiler free tier (100K req/day)
+// Converts "Berlin", "Tokyo Tower", "Sahara Desert" → exact lon/lat
+// ══════════════════════════════════════════════════════════════════
+
+/**
+ * Geocode a place name → { lon, lat, type, name, zoom }.
+ * type: 'city' | 'country' | 'region' | 'landmark' | 'unknown'
+ * zoom: suggested zoom level based on place type.
+ * Returns null if geocoding fails or no results.
+ */
+async function geocodePlace(placeName, apiKey) {
+    if (!placeName || !apiKey) return null;
+
+    const cacheKey = placeName.trim().toLowerCase();
+    if (_geocodeCache.has(cacheKey)) return _geocodeCache.get(cacheKey);
+
+    // Check hardcoded coords first (instant, no API call) — case-insensitive
+    const hardcoded = GEO_COORDS[placeName] || GEO_COORDS[placeName.charAt(0).toUpperCase() + placeName.slice(1).toLowerCase()]
+        || Object.entries(GEO_COORDS).find(([k]) => k.toLowerCase() === cacheKey)?.[1];
+    if (hardcoded) {
+        const result = { lon: hardcoded[0], lat: hardcoded[1], zoom: hardcoded[2] || 5, type: 'country', name: placeName };
+        _geocodeCache.set(cacheKey, result);
+        return result;
+    }
+
+    try {
+        const query = encodeURIComponent(placeName.trim());
+        // Request multiple results and prefer city/country over street-level matches
+        const url = `https://api.maptiler.com/geocoding/${query}.json?key=${apiKey}&limit=5&language=en`;
+        const buf = await httpsDownload(url, 8000);
+        const data = JSON.parse(buf.toString());
+
+        if (!data.features || data.features.length === 0) {
+            _geocodeCache.set(cacheKey, null);
+            return null;
+        }
+
+        // Prefer city/country/region over street-level results
+        // MapTiler sometimes returns a street named "Tokyo" before the city Tokyo
+        const RANK = { country: 1, region: 2, subregion: 3, county: 4, municipality: 5, city: 5, town: 6, village: 7, neighbourhood: 8, poi: 9, address: 10 };
+        const ranked = data.features.map(f => {
+            const pt = f.place_type?.[0] || f.properties?.place_type?.[0] || 'address';
+            return { feat: f, rank: RANK[pt] || 10, placeType: pt };
+        }).sort((a, b) => a.rank - b.rank);
+
+        // If best result is still a street/POI and the original query had no numbers
+        // (not an address), take it but bump zoom down to reasonable level
+        let feat = ranked[0].feat;
+        const bestType = ranked[0].placeType;
+        if ((bestType === 'address' || bestType === 'poi') && ranked.length > 1) {
+            // Check if there's a city/region result anywhere
+            const better = ranked.find(r => r.rank <= 7);
+            if (better) feat = better.feat;
+        }
+        const [lon, lat] = feat.center || feat.geometry?.coordinates || [0, 0];
+        const placeType = feat.place_type?.[0] || feat.properties?.place_type?.[0] || 'unknown';
+
+        // Map MapTiler place_type → zoom level
+        const ZOOM_BY_TYPE = {
+            'country':       5,
+            'region':        7,
+            'subregion':     8,
+            'county':        9,
+            'municipality':  10,
+            'city':          11,
+            'town':          11,
+            'village':       13,
+            'neighbourhood': 14,
+            'address':       15,
+            'poi':           14,
+            'landmark':      14,
+        };
+
+        // Cap zoom at 12 for video maps — higher zooms show too much street detail
+        const rawZoom = ZOOM_BY_TYPE[placeType] || 10;
+        const zoom = Math.min(rawZoom, 12);
+        const type = ['country'].includes(placeType) ? 'country'
+            : ['region', 'subregion', 'county'].includes(placeType) ? 'region'
+            : ['city', 'town', 'municipality'].includes(placeType) ? 'city'
+            : ['poi', 'landmark', 'address', 'neighbourhood', 'village'].includes(placeType) ? 'landmark'
+            : 'unknown';
+
+        const result = {
+            lon, lat, zoom, type,
+            name: placeName,  // Always preserve the user's original query name
+            geoName: feat.text || feat.place_name || placeName,
+            fullName: feat.place_name || placeName,
+        };
+        _geocodeCache.set(cacheKey, result);
+        return result;
+    } catch (err) {
+        console.log(`      ⚠️ Geocode failed for "${placeName}": ${err.message}`);
+        _geocodeCache.set(cacheKey, null);
+        return null;
+    }
+}
+
+/**
+ * Geocode multiple place names in parallel. Returns array of results (nulls filtered out).
+ */
+async function geocodePlaces(placeNames, apiKey) {
+    const results = await Promise.all(
+        placeNames.map(name => geocodePlace(name, apiKey))
+    );
+    return results.filter(Boolean);
+}
+
 /**
  * Compute map center and zoom from a list of entity names.
- * The first entity is treated as the primary subject — when entities span
- * the globe, the view centers on the primary with a moderate zoom instead
- * of zooming all the way out to fit everything.
+ * Uses geocoding for precise coordinates when API key is available.
+ * Falls back to hardcoded GEO_COORDS dictionary.
  */
-function computeMapView(entities) {
-    const resolved = entities
-        .map(e => ({ name: e, coords: GEO_COORDS[e] }))
-        .filter(r => r.coords);
+async function computeMapView(entities, apiKey) {
+    // Try geocoding first if we have an API key
+    let resolved = [];
+    if (apiKey && entities.length > 0) {
+        const geocoded = await geocodePlaces(entities, apiKey);
+        resolved = geocoded.map(g => ({
+            name: g.name,
+            coords: [g.lon, g.lat, g.zoom],
+            type: g.type,
+            fullName: g.fullName,
+        }));
+    }
+
+    // Fall back to hardcoded for any entities not geocoded
+    if (resolved.length === 0) {
+        resolved = entities
+            .map(e => ({ name: e, coords: GEO_COORDS[e], type: 'country' }))
+            .filter(r => r.coords);
+    }
 
     if (resolved.length === 0) {
-        return { lon: 0, lat: 20, zoom: 2 };
+        return { lon: 0, lat: 20, zoom: 2, pins: [] };
     }
+
+    // Build pin data for the renderer
+    const pins = resolved.map((r, i) => ({
+        name: r.name,
+        fullName: r.fullName || r.name,
+        lon: r.coords[0],
+        lat: r.coords[1],
+        type: r.type || 'country',
+        zoom: r.coords[2] || 5,
+    }));
 
     if (resolved.length === 1) {
         const c = resolved[0].coords;
-        return { lon: c[0], lat: c[1], zoom: c[2] || 5 };
+        return { lon: c[0], lat: c[1], zoom: c[2] || 5, pins };
     }
 
     let minLon = Infinity, maxLon = -Infinity;
@@ -139,7 +277,6 @@ function computeMapView(entities) {
     const primary = resolved[0].coords;
     let centerLon, centerLat;
     if (zoom <= 2) {
-        // 60% weight to primary entity, 40% to geometric center
         const geoLon = (minLon + maxLon) / 2;
         const geoLat = (minLat + maxLat) / 2;
         centerLon = primary[0] * 0.6 + geoLon * 0.4;
@@ -149,7 +286,7 @@ function computeMapView(entities) {
         centerLat = (minLat + maxLat) / 2;
     }
 
-    return { lon: centerLon, lat: centerLat, zoom };
+    return { lon: centerLon, lat: centerLat, zoom, pins };
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -233,12 +370,14 @@ function downloadTile(style, z, x, y, apiKey) {
  * Stitch MapTiler tiles into a 1920×1080 PNG. Returns Buffer.
  * Uses @napi-rs/canvas for compositing.
  */
-async function stitchMapTilerTiles(view, mapStyle, apiKey) {
+async function stitchMapTilerTiles(view, mapStyle, apiKey, outW, outH) {
     const { createCanvas, loadImage } = require('@napi-rs/canvas');
     const style = MAPTILER_STYLE_MAP[mapStyle] || MAPTILER_STYLE_MAP.dark;
+    const canvasW = outW || OUT_W;
+    const canvasH = outH || OUT_H;
 
-    const { tiles, z } = computeTileGrid(view);
-    console.log(`      MapTiler: stitching ${tiles.length} tiles at z=${z} (${style})`);
+    const { tiles, z } = computeTileGrid(view, canvasW, canvasH);
+    console.log(`      MapTiler: stitching ${tiles.length} tiles at z=${z} ${canvasW}×${canvasH} (${style})`);
 
     // Download all tiles in parallel (batched to avoid hammering)
     const BATCH_SIZE = 6;
@@ -270,7 +409,7 @@ async function stitchMapTilerTiles(view, mapStyle, apiKey) {
     console.log(`      Downloaded ${tileImages.size}/${tiles.length} tiles`);
 
     // Stitch onto canvas
-    const canvas = createCanvas(OUT_W, OUT_H);
+    const canvas = createCanvas(canvasW, canvasH);
     const ctx = canvas.getContext('2d');
 
     // Fill background matching the map style (covers missing/OOB tiles)
@@ -279,7 +418,7 @@ async function stitchMapTilerTiles(view, mapStyle, apiKey) {
         light: '#e8e8e8', political: '#aad3df',
     };
     ctx.fillStyle = BG_COLORS[mapStyle] || '#1a1a2e';
-    ctx.fillRect(0, 0, OUT_W, OUT_H);
+    ctx.fillRect(0, 0, canvasW, canvasH);
 
     // Draw tiles (512px native from MapTiler /512/ endpoint)
     for (const tile of tiles) {
@@ -300,25 +439,49 @@ function buildGeoapifyUrl(view, mapStyle, apiKey) {
 }
 
 /**
- * Extract entity names from an MG scene + scriptContext.
+ * Extract location names from an MG scene + scriptContext.
+ * Parses the AI-generated subtext format: "Berlin: 3.6M, Tokyo: 13.9M, ..."
+ * Also falls back to scriptContext.entities and GEO_COORDS dictionary scan.
  */
 function extractEntities(mg, scriptContext) {
     let entities = [];
-    if (scriptContext?.entities) {
-        entities = [...scriptContext.entities];
-    }
-    const textToScan = `${mg.text || ''} ${mg.subtext || ''}`;
-    for (const name of Object.keys(GEO_COORDS)) {
-        if (name.length > 2 && textToScan.toLowerCase().includes(name.toLowerCase())) {
-            if (!entities.includes(name)) entities.push(name);
+
+    // 1. Parse subtext "Location: value" pairs — these are the most specific
+    const subtext = mg.subtext || '';
+    if (subtext) {
+        // Pattern: "Berlin: 3.6M" or "Saudi Arabia: 12M bpd" or "Canada: #4"
+        const pairs = subtext.split(',').map(s => s.trim()).filter(Boolean);
+        for (const pair of pairs) {
+            const colonIdx = pair.indexOf(':');
+            if (colonIdx > 0) {
+                const location = pair.substring(0, colonIdx).trim();
+                if (location.length >= 2) entities.push(location);
+            }
         }
     }
+
+    // 2. If no subtext locations, check mg.text for place names
+    if (entities.length === 0 && mg.text) {
+        const textToScan = mg.text;
+        for (const name of Object.keys(GEO_COORDS)) {
+            if (name.length > 2 && textToScan.toLowerCase().includes(name.toLowerCase())) {
+                if (!entities.includes(name)) entities.push(name);
+            }
+        }
+    }
+
+    // 3. Fall back to scriptContext.entities
+    if (entities.length === 0 && scriptContext?.entities) {
+        entities = [...scriptContext.entities];
+    }
+
     return entities;
 }
 
 /**
  * Download a static map image for a mapChart MG.
  * Tries MapTiler (tile stitching) first, then Geoapify (static API).
+ * Now with geocoding: resolves city/landmark names → exact coordinates.
  */
 async function downloadMapForMG(mg, scriptContext, tempDir) {
     const maptilerKey = config.maptiler?.apiKey;
@@ -331,15 +494,97 @@ async function downloadMapForMG(mg, scriptContext, tempDir) {
     }
 
     const entities = extractEntities(mg, scriptContext);
-    const view = computeMapView(entities);
+
+    // Use geocoding for precise coordinates (async — MapTiler free tier)
+    const view = await computeMapView(entities, maptilerKey);
     const mapStyle = mg.mapStyle || 'dark';
     const filename = `map-${mapStyle}-${Date.now()}.png`;
     const filePath = path.join(tempDir, filename);
 
     console.log(`   🗺️ Downloading map: ${mapStyle} style, center=[${view.lon.toFixed(1)},${view.lat.toFixed(1)}], zoom=${view.zoom}`);
     console.log(`      Entities: ${entities.length > 0 ? entities.join(', ') : '(none — world view)'}`);
+    if (view.pins?.length) {
+        for (const pin of view.pins) {
+            console.log(`      📍 ${pin.name} (${pin.type}) → [${pin.lon.toFixed(2)}, ${pin.lat.toFixed(2)}] z${pin.zoom}`);
+        }
+    }
 
-    // Provider 1: MapTiler tile stitching
+    // Fetch OSM boundary polygons for country + city highlighting
+    try {
+        const boundaryNames = new Set(entities);
+        // Extract country names from geocoded pin fullNames + add city names
+        if (view.pins?.length) {
+            for (const pin of view.pins) {
+                // Add the city/location name itself
+                if (pin.name) boundaryNames.add(pin.name);
+                const parts = (pin.fullName || '').split(',').map(s => s.trim());
+                // Last part is the country
+                if (parts.length > 1) boundaryNames.add(parts[parts.length - 1]);
+            }
+        }
+        if (boundaryNames.size > 0) {
+            const osmBounds = await fetchOSMBoundaries([...boundaryNames]);
+            if (osmBounds.length > 0) {
+                mg._osmBoundaries = osmBounds;
+                console.log(`      🗺️ OSM boundaries: ${osmBounds.map(b => b.name).join(', ')}`);
+            }
+        }
+    } catch (e) {
+        console.log(`      ⚠️ OSM boundary fetch failed: ${e.message}`);
+    }
+
+    // ── Big map mode: single large tile for waypoint animations ──
+    const useBigMap = mg._mapBigMap && mg._mapWaypoints && mg._mapWaypoints.length > 0 && view.pins?.length > 0;
+
+    if (useBigMap && maptilerKey) {
+        try {
+            // Compute bounding box of all waypoint locations
+            const wpCoords = [];
+            for (const wp of mg._mapWaypoints) {
+                const wpLower = wp.name.toLowerCase();
+                const pin = view.pins.find(p => p.name.toLowerCase() === wpLower)
+                    || view.pins.find(p => p.name.toLowerCase().includes(wpLower) || wpLower.includes(p.name.toLowerCase()));
+                if (pin) {
+                    wpCoords.push({ name: wp.name, lon: pin.lon, lat: pin.lat });
+                }
+            }
+
+            if (wpCoords.length > 0) {
+                const wpLons = wpCoords.map(w => w.lon);
+                const wpLats = wpCoords.map(w => w.lat);
+                const centerLon = (Math.min(...wpLons) + Math.max(...wpLons)) / 2;
+                const centerLat = (Math.min(...wpLats) + Math.max(...wpLats)) / 2;
+
+                // Tile zoom: low enough that country fits at minimum per-wp camScale
+                const minWpZoom = Math.min(...mg._mapWaypoints.map(w => w.zoom ?? 1.0));
+                let bigZoom = Math.floor(Math.log2(1920 / (minWpZoom * 512 * 80 / 360)));
+                bigZoom = Math.max(3, Math.min(bigZoom, 5));
+
+                const BIG_W = 1920 * 3; // 5760
+                const BIG_H = 1080 * 3; // 3240
+                const bigView = { lon: centerLon, lat: centerLat, zoom: bigZoom, pins: view.pins };
+
+                console.log(`      Big map mode: ${BIG_W}x${BIG_H}, zoom ${bigZoom}, center [${centerLon.toFixed(1)},${centerLat.toFixed(1)}]`);
+                const buffer = await stitchMapTilerTiles(bigView, mapStyle, maptilerKey, BIG_W, BIG_H);
+
+                if (buffer.length > 5000) {
+                    fs.writeFileSync(filePath, buffer);
+                    mg.mapImageFile = filename;
+                    mg._mapView = bigView;
+                    mg._mapPins = view.pins;
+                    mg._bigMapSize = { w: BIG_W, h: BIG_H };
+                    mg._wpCoords = wpCoords;
+                    console.log(`   ✅ Big map saved: ${filename} (${(buffer.length / 1024).toFixed(0)} KB)`);
+                    return true;
+                }
+                console.log(`      ⚠️ Big map too small (${buffer.length} bytes) — falling back to standard`);
+            }
+        } catch (err) {
+            console.log(`      ⚠️ Big map download failed: ${err.message} — falling back to standard`);
+        }
+    }
+
+    // Provider 1: MapTiler tile stitching (standard single view)
     if (maptilerKey) {
         try {
             console.log(`      Trying MapTiler (tile stitching)...`);
@@ -351,6 +596,7 @@ async function downloadMapForMG(mg, scriptContext, tempDir) {
                 fs.writeFileSync(filePath, buffer);
                 mg.mapImageFile = filename;
                 mg._mapView = view;
+                if (view.pins?.length) mg._mapPins = view.pins;
                 console.log(`   ✅ Map saved via MapTiler: ${filename} (${(buffer.length / 1024).toFixed(0)} KB)`);
                 return true;
             }
@@ -372,6 +618,7 @@ async function downloadMapForMG(mg, scriptContext, tempDir) {
                 fs.writeFileSync(filePath, buffer);
                 mg.mapImageFile = filename;
                 mg._mapView = view;
+                if (view.pins?.length) mg._mapPins = view.pins;
                 console.log(`   ✅ Map saved via Geoapify: ${filename} (${(buffer.length / 1024).toFixed(0)} KB)`);
                 return true;
             }
@@ -399,7 +646,119 @@ async function downloadMapsForMGs(allMGs, scriptContext, tempDir) {
     return downloaded;
 }
 
+// ══════════════════════════════════════════════════════════════════
+// OSM Boundary Fetcher — Nominatim API
+// MapTiler renders OSM data, so Nominatim polygons align PERFECTLY
+// with the tile borders (unlike Natural Earth which is offset).
+// ══════════════════════════════════════════════════════════════════
+
+const _osmBoundaryCache = new Map();
+
+/**
+ * Fetch the OSM boundary polygon for a country/region via Nominatim.
+ * Returns GeoJSON Feature with geometry (Polygon/MultiPolygon) or null.
+ *
+ * Nominatim usage policy: max 1 req/sec, must include User-Agent.
+ * We cache aggressively so repeated calls for the same place are instant.
+ */
+async function fetchOSMBoundary(placeName) {
+    if (!placeName) return null;
+    const cacheKey = placeName.trim().toLowerCase();
+    if (_osmBoundaryCache.has(cacheKey)) return _osmBoundaryCache.get(cacheKey);
+
+    // Nominatim aliases for common abbreviations
+    const ALIASES = {
+        'usa': 'United States of America', 'us': 'United States of America',
+        'united states': 'United States of America',
+        'uk': 'United Kingdom', 'britain': 'United Kingdom', 'england': 'United Kingdom',
+        'uae': 'United Arab Emirates', 'south korea': 'Republic of Korea',
+        'north korea': "Democratic People's Republic of Korea",
+        'czech republic': 'Czechia', 'russia': 'Russian Federation',
+    };
+    const query = ALIASES[cacheKey] || placeName.trim();
+
+    // Helper: fetch from Nominatim with given URL
+    const _fetchNominatim = (url) => new Promise((resolve, reject) => {
+        const urlObj = new (require('url').URL)(url);
+        const options = {
+            hostname: urlObj.hostname,
+            path: urlObj.pathname + urlObj.search,
+            headers: { 'User-Agent': 'YTAEmpire/1.0 (video-generator)' },
+            timeout: 12000,
+        };
+        const req = require('https').get(options, (res) => {
+            if (res.statusCode !== 200) { reject(new Error(`HTTP ${res.statusCode}`)); res.resume(); return; }
+            const chunks = [];
+            res.on('data', chunk => chunks.push(chunk));
+            res.on('end', () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString())); } catch (e) { reject(e); } });
+        });
+        req.on('error', reject);
+        req.on('timeout', () => { req.destroy(); reject(new Error('Timeout')); });
+    });
+
+    const _extractPoly = (data) => {
+        if (!data?.features?.length) return null;
+        const feat = data.features[0];
+        return (feat.geometry && (feat.geometry.type === 'Polygon' || feat.geometry.type === 'MultiPolygon')) ? feat : null;
+    };
+
+    try {
+        const encoded = encodeURIComponent(query);
+        const base = `https://nominatim.openstreetmap.org/search?q=${encoded}&format=geojson&polygon_geojson=1&polygon_threshold=0.001&limit=1`;
+
+        // 1. Try country first
+        let feat = _extractPoly(await _fetchNominatim(`${base}&featuretype=country`));
+
+        // 2. Try city (gets municipal boundary, not province)
+        if (!feat) {
+            await new Promise(r => setTimeout(r, 1100)); // rate limit
+            feat = _extractPoly(await _fetchNominatim(`${base}&featuretype=city`));
+        }
+
+        // 3. Unrestricted fallback (landmarks, regions, etc.)
+        if (!feat) {
+            await new Promise(r => setTimeout(r, 1100));
+            feat = _extractPoly(await _fetchNominatim(base));
+        }
+
+        if (feat) {
+            _osmBoundaryCache.set(cacheKey, feat);
+            const level = feat.properties?.type || feat.properties?.osm_type || 'unknown';
+            console.log(`      [OSM] Boundary for "${placeName}": ${feat.geometry.type} (${level}, ${JSON.stringify(feat.geometry).length} bytes)`);
+            return feat;
+        }
+
+        _osmBoundaryCache.set(cacheKey, null);
+        return null;
+    } catch (err) {
+        console.log(`      ⚠️ OSM boundary fetch failed for "${placeName}": ${err.message}`);
+        _osmBoundaryCache.set(cacheKey, null);
+        return null;
+    }
+}
+
+/**
+ * Fetch OSM boundaries for multiple places (sequential — Nominatim 1 req/sec policy).
+ * Returns array of { name, feature } objects (nulls filtered out).
+ */
+async function fetchOSMBoundaries(placeNames) {
+    const results = [];
+    for (let i = 0; i < placeNames.length; i++) {
+        const feat = await fetchOSMBoundary(placeNames[i]);
+        if (feat) {
+            results.push({ name: placeNames[i], feature: feat });
+        }
+        // Respect Nominatim rate limit: 1 req/sec (skip delay for cached results)
+        if (i < placeNames.length - 1 && !_osmBoundaryCache.has(placeNames[i + 1]?.trim().toLowerCase())) {
+            await new Promise(r => setTimeout(r, 1100));
+        }
+    }
+    return results;
+}
+
 module.exports = {
     downloadMapForMG, downloadMapsForMGs, computeMapView, GEO_COORDS,
     stitchMapTilerTiles, MAPTILER_STYLE_MAP, GEOAPIFY_STYLE_MAP,
+    geocodePlace, geocodePlaces, fetchOSMBoundary, fetchOSMBoundaries,
+    extractEntities,
 };

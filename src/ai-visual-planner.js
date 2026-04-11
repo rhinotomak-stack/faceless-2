@@ -324,6 +324,7 @@ ${niche.allowedMGs.join(', ')}
 - NOT every scene needs an MG — use "none" for scenes that work best as pure footage.
 - Fullscreen MGs (focusWord, kineticText) replace the footage entirely — use sparingly for impact.
 - Overlay MGs (lowerThird, headline, statCounter, barChart, etc.) appear ON TOP of footage.
+${niche.allowedMGs.includes('mapChart') ? `- ⚠️ mapChart IS AVAILABLE for this niche. When the narration discusses geographic regions, borders, straits, trade routes, military positions, or mentions 2+ countries/locations — use fullscreenMG: "mapChart: Location1: label, Location2: label". Maps are MORE impactful than generic footage for geographic content. Pick the BEST scene for it (usually the one introducing locations).` : ''}
 
 SCENES TO PLAN (${scenes.length} total):
 
@@ -671,7 +672,9 @@ ${(() => {
      • Scene makes an explicit COMPARISON (X vs Y) → "comparisonCard: Public Image vs Private Reality"
      • Scene has chart-worthy data → "barChart: Category1:Value1 | Category2:Value2 | Category3:Value3"
      • Scene discusses an article/document/book → "articleHighlight: Title of Article"
-     • Scene describes a SPECIFIC LOCATION → "mapChart: Atlanta, Georgia — 1915"
+     • Scene mentions GEOGRAPHIC LOCATIONS, borders, routes, or geopolitical regions → "mapChart: Location1: label, Location2: label"
+     • Scene describes a SPECIFIC LOCATION being introduced → "mapChart: Atlanta, Georgia — 1915"
+     • IMPORTANT: For narration about straits, trade routes, military positions, borders, or multiple countries — mapChart is STRONGLY preferred over footage. Use it when 2+ locations are mentioned.
      • Scene has a RANKING or ordered list → "rankingList: #1 Item | #2 Item | #3 Item"
    - Fullscreen MG types: articleHighlight, timeline, bulletList, barChart, donutChart, comparisonCard, rankingList, mapChart
    - When fullscreenMG is set, keyword/stockQuery/webQuery are IGNORED (set to "none")

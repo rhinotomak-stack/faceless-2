@@ -188,6 +188,21 @@ class MGRenderer {
             console.warn(`[MGRenderer] Failed to load map image: ${file}`);
         };
         img.src = url;
+
+        // Also load per-waypoint tile images
+        const wpTileUrls = mg._wpTileUrls || {};
+        for (const key of Object.keys(wpTileUrls)) {
+            const wpFile = `__map_wp_${key}.png`;
+            if (this._mapImages[wpFile] || this._mapImageLoading[wpFile]) continue;
+            this._mapImageLoading[wpFile] = true;
+            const wpImg = new Image();
+            wpImg.onload = () => {
+                this._mapImages[wpFile] = wpImg;
+                delete this._mapImageLoading[wpFile];
+            };
+            wpImg.onerror = () => { delete this._mapImageLoading[wpFile]; };
+            wpImg.src = wpTileUrls[key];
+        }
     }
 
     /**
@@ -3091,10 +3106,32 @@ class MGRenderer {
     // ========================================================================
 
     _renderMapChart(ctx, frame, fps, mg, s, anim, scriptContext) {
+        // Resolve map data from mgData if not on the scene object directly
+        const _mgd = mg.mgData || mg;
+        if (!mg._bigMapSize && _mgd._bigMapSize) mg._bigMapSize = _mgd._bigMapSize;
+        if (!mg._mapWaypoints && _mgd._mapWaypoints) mg._mapWaypoints = _mgd._mapWaypoints;
+        if (!mg._wpCoords && _mgd._wpCoords) mg._wpCoords = _mgd._wpCoords;
+        if (!mg._mapBigMap && _mgd._mapBigMap) mg._mapBigMap = _mgd._mapBigMap;
+        if (!mg._osmBoundaries && _mgd._osmBoundaries) mg._osmBoundaries = _mgd._osmBoundaries;
         const { opacity, enterProgress } = anim;
         const W = 1920, H = 1080;
         const elapsed = frame / fps;
         const speed = mg._animationSpeed || 1;
+        const totalDuration = (mg._durationFrames || (fps * 5)) / fps;
+        const zoomSpd = mg._mapZoomSpeed || 1;
+        const polySpd = mg._mapPolySpeed || 1;
+        const easingMode = mg._mapEasing || 'cubic';
+
+        // Easing functions
+        const _ease = (t, mode) => {
+            t = Math.min(1, Math.max(0, t));
+            switch (mode) {
+                case 'elastic': { const c4 = (2 * Math.PI) / 3; return t === 0 ? 0 : t === 1 ? 1 : Math.pow(2, -10 * t) * Math.sin((t * 10 - 0.75) * c4) + 1; }
+                case 'expo':    return t === 1 ? 1 : 1 - Math.pow(2, -10 * t);
+                case 'linear':  return t;
+                default:        return 1 - Math.pow(1 - t, 3); // cubic
+            }
+        };
 
         // ── Overlay color palettes per map style ──
         const OVERLAY_STYLES = {
@@ -3105,6 +3142,7 @@ class MGRenderer {
                 titleBg: 'rgba(8,18,35,0.88)', titleBorder: '#00d4ff', titleText: '#ffffff',
                 vignette: 'rgba(0,0,0,0.35)', dataCard: 'rgba(10,22,45,0.9)',
                 rankBadge: '#00d4ff', rankText: '#0b1426',
+                highlight: 'rgba(0,212,255,0.12)', highlightRing: 'rgba(0,212,255,0.3)',
             },
             natural: {
                 pin: '#f0c040', pinGlow: 'rgba(240,192,64,0.35)', pinRing: 'rgba(240,192,64,0.5)',
@@ -3113,6 +3151,7 @@ class MGRenderer {
                 titleBg: 'rgba(12,28,18,0.88)', titleBorder: '#90d070', titleText: '#ffffff',
                 vignette: 'rgba(0,15,5,0.3)', dataCard: 'rgba(15,35,22,0.9)',
                 rankBadge: '#f0c040', rankText: '#12301a',
+                highlight: 'rgba(240,192,64,0.1)', highlightRing: 'rgba(240,192,64,0.25)',
             },
             satellite: {
                 pin: '#00ffaa', pinGlow: 'rgba(0,255,170,0.35)', pinRing: 'rgba(0,255,170,0.5)',
@@ -3121,6 +3160,7 @@ class MGRenderer {
                 titleBg: 'rgba(3,8,12,0.9)', titleBorder: '#00ffaa', titleText: '#e0f0e8',
                 vignette: 'rgba(0,0,0,0.45)', dataCard: 'rgba(5,12,18,0.9)',
                 rankBadge: '#00ffaa', rankText: '#030a14',
+                highlight: 'rgba(0,255,170,0.1)', highlightRing: 'rgba(0,255,170,0.25)',
             },
             light: {
                 pin: '#d04030', pinGlow: 'rgba(208,64,48,0.3)', pinRing: 'rgba(208,64,48,0.45)',
@@ -3129,6 +3169,7 @@ class MGRenderer {
                 titleBg: 'rgba(255,255,255,0.92)', titleBorder: '#2060a0', titleText: '#1a2a3a',
                 vignette: 'rgba(100,120,140,0.12)', dataCard: 'rgba(255,255,255,0.94)',
                 rankBadge: '#2060a0', rankText: '#ffffff',
+                highlight: 'rgba(208,64,48,0.08)', highlightRing: 'rgba(208,64,48,0.2)',
             },
             political: {
                 pin: '#b83020', pinGlow: 'rgba(184,48,32,0.35)', pinRing: 'rgba(184,48,32,0.5)',
@@ -3137,11 +3178,35 @@ class MGRenderer {
                 titleBg: 'rgba(240,228,208,0.92)', titleBorder: '#8b4513', titleText: '#1c1008',
                 vignette: 'rgba(60,40,20,0.18)', dataCard: 'rgba(240,228,208,0.92)',
                 rankBadge: '#8b4513', rankText: '#f0e8d0',
+                highlight: 'rgba(184,48,32,0.08)', highlightRing: 'rgba(184,48,32,0.2)',
             },
         };
         const pal = OVERLAY_STYLES[mg.mapStyle || 'dark'] || OVERLAY_STYLES.dark;
 
-        // ── Country coordinates (lon, lat) for pin placement ──
+        // ── Polygon color palettes ──
+        const POLY_COLORS = {
+            dark:      { fill: '#00d4ff', fillEdge: '#0088cc', stroke: '#00d4ff', glow: 'rgba(0,212,255,0.6)' },
+            natural:   { fill: '#f0c040', fillEdge: '#c09020', stroke: '#d0a830', glow: 'rgba(240,192,64,0.5)' },
+            satellite: { fill: '#00ffaa', fillEdge: '#009966', stroke: '#00ffaa', glow: 'rgba(0,255,170,0.5)' },
+            light:     { fill: '#d04030', fillEdge: '#a02820', stroke: '#c03828', glow: 'rgba(208,64,48,0.5)' },
+            political: { fill: '#b83020', fillEdge: '#801810', stroke: '#a02818', glow: 'rgba(184,48,32,0.5)' },
+        };
+        const POLY_COLOR_OVERRIDES = {
+            cyan:    { fill: '#00d4ff', fillEdge: '#0088cc', stroke: '#00d4ff', glow: 'rgba(0,212,255,0.6)' },
+            red:     { fill: '#ff3030', fillEdge: '#cc1818', stroke: '#ff3030', glow: 'rgba(255,48,48,0.6)' },
+            green:   { fill: '#30ff60', fillEdge: '#18cc40', stroke: '#30ff60', glow: 'rgba(48,255,96,0.6)' },
+            gold:    { fill: '#f0c040', fillEdge: '#c09020', stroke: '#f0c040', glow: 'rgba(240,192,64,0.6)' },
+            magenta: { fill: '#ff40ff', fillEdge: '#cc20cc', stroke: '#ff40ff', glow: 'rgba(255,64,255,0.6)' },
+            orange:  { fill: '#ff8020', fillEdge: '#cc6010', stroke: '#ff8020', glow: 'rgba(255,128,32,0.6)' },
+            white:   { fill: '#ffffff', fillEdge: '#bbbbbb', stroke: '#ffffff', glow: 'rgba(255,255,255,0.5)' },
+            blue:    { fill: '#4080ff', fillEdge: '#2050cc', stroke: '#4080ff', glow: 'rgba(64,128,255,0.6)' },
+        };
+        const polyColorKey = mg._mapPolyColor || 'auto';
+        const polyPal = (polyColorKey !== 'auto' && POLY_COLOR_OVERRIDES[polyColorKey])
+            ? POLY_COLOR_OVERRIDES[polyColorKey]
+            : (POLY_COLORS[mg.mapStyle || 'dark'] || POLY_COLORS.dark);
+
+        // ── Country coordinates (lon, lat) fallback for pin placement ──
         const MAP_COORDS = {
             'China': [104, 35], 'United States': [-98, 39], 'USA': [-98, 39], 'US': [-98, 39],
             'India': [78, 22], 'Japan': [138, 36], 'Germany': [10.5, 51.2],
@@ -3172,52 +3237,279 @@ class MGRenderer {
             'Qatar': [51, 25.3], 'UAE': [54, 24], 'Kuwait': [48, 29.5],
             'Oman': [57, 21], 'Yemen': [48, 15.5], 'Jordan': [36, 31],
             'Lebanon': [35.8, 33.9], 'Syria': [38, 35],
-            'Windsor': [-83, 42.3], 'Detroit': [-83.05, 42.3], 'Michigan': [-84.5, 44.3],
-            'Ontario': [-85, 50], 'Alberta': [-114, 52],
         };
 
         // ── Determine map view (center + zoom) ──
+        const cinematicMode = mg._mapCinematic || false;
+        const variant = mg.subType || 'standard';
+        const multiPin = (mg._mapPins || []).length >= 2;
+
+        // ── Keyframe time (shared by tilt + zoom) ──
+        const kfT = Math.min(1, elapsed / totalDuration);
+        const kfEased = _ease(kfT, easingMode);
+
+        // ── Projection: single map for everything (big map for waypoints) ──
+        const bigMapSize = mg._bigMapSize || null;
+        const IMG_W = bigMapSize ? bigMapSize.w : W;
+        const IMG_H = bigMapSize ? bigMapSize.h : H;
         const mapView = mg._mapView || null;
 
-        // ── Helper: lon/lat → pixel position on the map image ──
-        // When we have _mapView (from MapTiler), use Mercator projection matching the tile
-        // Otherwise fall back to simple equirectangular for the polygon fallback
         let toX, toY;
         if (mapView) {
-            // Mercator projection: lon/lat → pixel, matching MapTiler's static map
-            const centerLon = mapView.lon;
-            const centerLat = mapView.lat;
-            const zoom = mapView.zoom;
-            const scale = Math.pow(2, zoom) * 256; // pixels per world at this zoom
-            const cx = W / 2;
-            const cy = H / 2;
-            const mercY = (lat) => Math.log(Math.tan(Math.PI / 4 + (lat * Math.PI / 180) / 2));
-            const centerMercY = mercY(centerLat);
-            toX = (lon) => cx + (lon - centerLon) / 360 * scale;
-            toY = (lat) => cy - (mercY(lat) - centerMercY) / (2 * Math.PI) * scale;
+            const TILE_SZ = 512;
+            const z = Math.max(2, Math.floor(mapView.zoom));
+            const n = Math.pow(2, z);
+            const cTileX = ((mapView.lon + 180) / 360) * n;
+            const cLatRad = mapView.lat * Math.PI / 180;
+            const cTileY = (1 - Math.log(Math.tan(cLatRad) + 1 / Math.cos(cLatRad)) / Math.PI) / 2 * n;
+            const originPx = cTileX * TILE_SZ - IMG_W / 2;
+            const originPy = cTileY * TILE_SZ - IMG_H / 2;
+            toX = (lon) => ((lon + 180) / 360) * n * TILE_SZ - originPx;
+            toY = (lat) => { const latR = lat * Math.PI / 180; return (1 - Math.log(Math.tan(latR) + 1 / Math.cos(latR)) / Math.PI) / 2 * n * TILE_SZ - originPy; };
         } else {
             toX = (lon) => ((lon + 180) / 360) * W * 0.88 + W * 0.06;
             toY = (lat) => ((90 - lat) / 180) * H * 0.82 + H * 0.06;
         }
 
-        // ── 1. BACKGROUND: API map image or polygon fallback ──
+        // ═══ WAYPOINT SYSTEM ═══
+        const _waypoints = mg._mapWaypoints || null;
+        const _wpPins = mg._mapPins || [];
+        const _wpCoords = mg._wpCoords || [];
+        let activeWpIdx = -1, wpTransition = 0, wpCamX = IMG_W / 2, wpCamY = IMG_H / 2;
+        let prevWpIdx = -1;
+
+        const hasWaypoints = _waypoints && _waypoints.length > 0;
+        const wpPositions = [];
+        if (hasWaypoints) {
+            for (const wp of _waypoints) {
+                const wpLower = wp.name.toLowerCase();
+                let coord = _wpCoords.find(c => c.name.toLowerCase() === wpLower);
+                if (!coord) {
+                    let pin = _wpPins.find(p => p.name.toLowerCase() === wpLower);
+                    if (!pin) pin = _wpPins.find(p => p.name.toLowerCase().includes(wpLower) || wpLower.includes(p.name.toLowerCase()));
+                    if (pin) coord = { lon: pin.lon, lat: pin.lat };
+                }
+                if (coord) {
+                    wpPositions.push({ ...wp, lon: coord.lon, lat: coord.lat, px: toX(coord.lon), py: toY(coord.lat) });
+                } else {
+                    wpPositions.push({ ...wp, lon: 0, lat: 0, px: IMG_W / 2, py: IMG_H / 2 });
+                }
+            }
+
+            for (let wi = wpPositions.length - 1; wi >= 0; wi--) {
+                if (elapsed >= wpPositions[wi].startTime) { activeWpIdx = wi; break; }
+            }
+            if (activeWpIdx < 0) activeWpIdx = 0;
+            prevWpIdx = activeWpIdx > 0 ? activeWpIdx - 1 : -1;
+
+            const awp = wpPositions[activeWpIdx];
+            const wpElapsed = elapsed - awp.startTime;
+            const transitionDur = 1.2 / zoomSpd;
+            wpTransition = Math.min(1, wpElapsed / transitionDur);
+            const wpEase = _ease(wpTransition, easingMode);
+
+            if (prevWpIdx >= 0 && wpTransition < 1) {
+                const prev = wpPositions[prevWpIdx];
+                wpCamX = prev.px + (awp.px - prev.px) * wpEase;
+                wpCamY = prev.py + (awp.py - prev.py) * wpEase;
+            } else {
+                wpCamX = awp.px;
+                wpCamY = awp.py;
+            }
+        }
+
+        // ── Camera ──
+        let camScale, driftX, driftY, tiltAmount;
+        let wpBigMapCamera = false;
+
+        if (hasWaypoints && wpPositions.length > 0) {
+            // ═══ WAYPOINT CAMERA ═══
+            const globalZS = mg._mapZoomKfStart ?? (bigMapSize ? 1.2 : 0.8);
+            const globalZE = mg._mapZoomKfEnd ?? (bigMapSize ? 1.8 : 1.2);
+            const awp = wpPositions[activeWpIdx];
+            const hasPerWpZoom = wpPositions.some(wp => wp.zoom != null);
+
+            if (hasPerWpZoom && bigMapSize) {
+                const curZoom = awp.zoom ?? globalZS;
+                if (prevWpIdx >= 0 && wpTransition < 1) {
+                    const prevZoom = wpPositions[prevWpIdx].zoom ?? globalZS;
+                    camScale = prevZoom + (curZoom - prevZoom) * _ease(wpTransition, easingMode);
+                } else {
+                    const wpDur = awp.endTime - awp.startTime;
+                    const wpLocalT = Math.min(1, (elapsed - awp.startTime) / Math.max(0.1, wpDur));
+                    camScale = curZoom + curZoom * 0.05 * wpLocalT;
+                }
+            } else {
+                camScale = globalZS + (globalZE - globalZS) * kfEased;
+            }
+
+            if (bigMapSize) {
+                wpBigMapCamera = true;
+                driftX = 0;
+                driftY = 0;
+            } else {
+                driftX = (W / 2 - wpCamX);
+                driftY = (H / 2 - wpCamY);
+            }
+
+            const hasPerWpTilt = wpPositions.some(wp => wp.tilt != null);
+            if (hasPerWpTilt) {
+                const curTilt = awp.tilt ?? 0;
+                if (prevWpIdx >= 0 && wpTransition < 1) {
+                    const prevTilt = wpPositions[prevWpIdx].tilt ?? 0;
+                    tiltAmount = prevTilt + (curTilt - prevTilt) * _ease(wpTransition, easingMode);
+                } else {
+                    tiltAmount = curTilt;
+                }
+            } else {
+                const tiltS = mg._mapTiltStart || 0;
+                const tiltE2 = mg._mapTiltEnd ?? tiltS;
+                tiltAmount = tiltS + (tiltE2 - tiltS) * kfEased;
+            }
+
+        } else if (cinematicMode) {
+            // ═══ CINEMATIC 3-PHASE CAMERA ═══
+            const p1End = 0.20, p2End = 0.50;
+            const progress = kfT;
+            if (progress <= p1End) {
+                const t1 = progress / p1End;
+                const e1 = _ease(t1, easingMode);
+                camScale = 0.7 + e1 * 0.05;
+                driftX = (1 - e1) * 15;
+                driftY = (1 - e1) * 8;
+                tiltAmount = 0;
+            } else if (progress <= p2End) {
+                const t2 = (progress - p1End) / (p2End - p1End);
+                const e2 = _ease(t2, easingMode);
+                camScale = 0.75 + e2 * 0.75;
+                driftX = e2 * -10;
+                driftY = e2 * -5;
+                tiltAmount = e2 * 0.15;
+            } else {
+                const t3 = (progress - p2End) / (1 - p2End);
+                const e3 = _ease(t3, easingMode);
+                camScale = 1.5 + e3 * 0.15;
+                tiltAmount = 0.15 + e3 * 0.45;
+                const orbitAngle = t3 * Math.PI * 0.6;
+                const orbitRadius = 30 + e3 * 15;
+                driftX = -10 + Math.sin(orbitAngle) * orbitRadius;
+                driftY = -5 + Math.cos(orbitAngle) * orbitRadius * 0.4;
+            }
+        } else {
+            // ═══ STANDARD KEYFRAME CAMERA ═══
+            const zKfS = mg._mapZoomKfStart ?? 0.8;
+            const zKfE = mg._mapZoomKfEnd ?? 1.0;
+            camScale = zKfS + (zKfE - zKfS) * kfEased;
+            if (variant === 'locator' || variant === 'regionHighlight') {
+                const driftT = Math.min(1, elapsed / (0.8 / zoomSpd));
+                driftX = (1 - _ease(driftT, easingMode)) * 30;
+                driftY = (1 - _ease(driftT, easingMode)) * 18;
+            } else if (variant === 'route') {
+                const ZOOM_DUR = 1.0 / zoomSpd;
+                const panT = Math.min(1, Math.max(0, (elapsed - ZOOM_DUR) / Math.max(1, totalDuration - ZOOM_DUR)));
+                const panE = panT * panT * (3 - 2 * panT);
+                driftX = panE * 15 - 8;
+                driftY = panE * 10 - 5;
+            } else {
+                const driftT = Math.min(1, elapsed / (1.2 / zoomSpd));
+                const dE = _ease(driftT, easingMode);
+                driftX = (1 - dE) * 20;
+                driftY = (1 - dE) * 12;
+            }
+            const tiltS = mg._mapTiltStart || 0;
+            const tiltE2 = mg._mapTiltEnd ?? tiltS;
+            tiltAmount = tiltS + (tiltE2 - tiltS) * kfEased;
+        }
+
+        // ── Pan keyframes ──
+        const panXS = mg._mapPanXStart || 0;
+        const panXE = mg._mapPanXEnd || 0;
+        const panYS = mg._mapPanYStart || 0;
+        const panYE = mg._mapPanYEnd || 0;
+        if (panXS !== 0 || panXE !== 0 || panYS !== 0 || panYE !== 0) {
+            driftX += panXS + (panXE - panXS) * kfEased;
+            driftY += panYS + (panYE - panYS) * kfEased;
+        }
+
+        // ── Per-waypoint bearing & orbit ──
+        let bearingDeg = 0;
+        if (hasWaypoints && wpPositions.length > 0) {
+            const hasPerWpBearing = wpPositions.some(wp => wp.bearing != null || wp.orbit != null);
+            if (hasPerWpBearing) {
+                const awpCam = wpPositions[activeWpIdx];
+                const curBearing = awpCam.bearing ?? 0;
+                const curOrbit = awpCam.orbit ?? 0;
+                const wpLocalElapsed = elapsed - awpCam.startTime;
+                let targetBearing = curBearing + curOrbit * wpLocalElapsed;
+                if (prevWpIdx >= 0 && wpTransition < 1) {
+                    const prevWp = wpPositions[prevWpIdx];
+                    const prevBearing = prevWp.bearing ?? 0;
+                    const prevOrbit = prevWp.orbit ?? 0;
+                    const prevLocalElapsed = elapsed - prevWp.startTime;
+                    const prevTotal = prevBearing + prevOrbit * prevLocalElapsed;
+                    bearingDeg = prevTotal + (targetBearing - prevTotal) * _ease(wpTransition, easingMode);
+                } else {
+                    bearingDeg = targetBearing;
+                }
+            }
+        }
+        const bearingRad = bearingDeg * Math.PI / 180;
+        const useBearing = Math.abs(bearingDeg) > 0.1;
+
+        // ── 3D PERSPECTIVE TILT ──
+        const useTilt = tiltAmount > 0.01;
+        const _mainCtx = ctx;
+
+        if (useTilt || useBearing) {
+            if (!this._mapOffscreen || this._mapOffscreen.width !== W) {
+                this._mapOffscreen = document.createElement('canvas');
+                this._mapOffscreen.width = W;
+                this._mapOffscreen.height = H;
+            }
+            this._mapOffscreen.getContext('2d').clearRect(0, 0, W, H);
+            ctx = this._mapOffscreen.getContext('2d');
+        }
+
+        // ── 1. BACKGROUND: API map image or polygon fallback (with camera animation) ──
         const hasMapImage = mg.mapImageFile && this._mapImages && this._mapImages[mg.mapImageFile];
+
+        ctx.save();
+        const tiltCompScale = 1; // strips now fill full width, no compensation needed
+        if (wpBigMapCamera) {
+            ctx.translate(W / 2, H / 2);
+            if (useBearing) ctx.rotate(bearingRad);
+            ctx.scale(camScale * tiltCompScale, camScale * tiltCompScale);
+            ctx.translate(-wpCamX, -wpCamY);
+        } else {
+            ctx.translate(W / 2 + driftX, H / 2 + driftY);
+            if (useBearing) ctx.rotate(bearingRad);
+            ctx.scale(camScale * tiltCompScale, camScale * tiltCompScale);
+            ctx.translate(-W / 2, -H / 2);
+        }
+
         if (hasMapImage) {
-            // Draw the pre-loaded MapTiler image as background
             const mapImg = this._mapImages[mg.mapImageFile];
             ctx.globalAlpha = opacity * Math.min(1, enterProgress * 2);
-            ctx.drawImage(mapImg, 0, 0, W, H);
+            ctx.drawImage(mapImg, 0, 0, IMG_W, IMG_H);
             ctx.globalAlpha = opacity;
         } else {
-            // Polygon fallback (no API key or image not loaded)
             this._renderMapChartFallbackBg(ctx, mg, W, H, opacity, enterProgress, pal);
         }
 
-        // ── 2. Gather pin entities ──
+        // ── 2. Gather pin entities (use geocoded _mapPins when available) ──
         let items = MGRenderer._parseKeyValuePairs(mg.subtext || '');
+
+        // Build geocoded pin lookup from _mapPins (set by map-provider geocoding)
+        const geocodedPins = {};
+        if (mg._mapPins && Array.isArray(mg._mapPins)) {
+            for (const gp of mg._mapPins) {
+                geocodedPins[gp.name.toLowerCase()] = gp;
+            }
+        }
+
         if (items.length === 0 && scriptContext?.entities) {
             items = scriptContext.entities
-                .filter(e => MAP_COORDS[e])
+                .filter(e => MAP_COORDS[e] || geocodedPins[e.toLowerCase()])
                 .map(e => ({ label: e, value: '' }));
         }
         if (items.length === 0 && mg.text) {
@@ -3228,254 +3520,647 @@ class MGRenderer {
         }
 
         const pinPositions = items.slice(0, 10).map((item, i) => {
-            const coords = MAP_COORDS[item.label];
-            let x, y;
-            if (coords) {
-                x = toX(coords[0]);
-                y = toY(coords[1]);
+            // Try geocoded pin first, then fallback to hardcoded MAP_COORDS
+            const geoPin = geocodedPins[item.label.toLowerCase()];
+            let x, y, pinType;
+            if (geoPin) {
+                x = toX(geoPin.lon);
+                y = toY(geoPin.lat);
+                pinType = geoPin.type || 'country';
             } else {
-                const hash = (item.label || '').split('').reduce((a, c) => a + c.charCodeAt(0), 0);
-                x = W * 0.12 + ((hash * 7 + i * 137) % 76) / 100 * W;
-                y = H * 0.15 + ((hash * 13 + i * 89) % 60) / 100 * H;
+                const coords = MAP_COORDS[item.label];
+                if (coords) {
+                    x = toX(coords[0]);
+                    y = toY(coords[1]);
+                    pinType = 'country';
+                } else {
+                    const hash = (item.label || '').split('').reduce((a, c) => a + c.charCodeAt(0), 0);
+                    x = W * 0.12 + ((hash * 7 + i * 137) % 76) / 100 * W;
+                    y = H * 0.15 + ((hash * 13 + i * 89) % 60) / 100 * H;
+                    pinType = 'unknown';
+                }
             }
-            return { ...item, x, y, i };
+            return { ...item, x, y, i, pinType };
         });
 
-        // ── 3. Animated route lines between pins ──
-        if (pinPositions.length >= 2) {
-            const routeReveal = Math.min(1, Math.max(0, (enterProgress - 0.3) * 2.5));
-            if (routeReveal > 0) {
-                ctx.globalAlpha = opacity * routeReveal * 0.7;
+        // ── 2b. Country polygon fills (Natural Earth land boundaries — no maritime zones) ──
+        const preloaded = mg._countryFeatures || [];
+        const countryGeo = window._countryGeoJSON;
 
-                // Route glow
-                ctx.strokeStyle = pal.routeGlow;
-                ctx.lineWidth = 8;
-                for (let i = 0; i < pinPositions.length - 1; i++) {
-                    const a = pinPositions[i], b = pinPositions[i + 1];
-                    const cpY = Math.min(a.y, b.y) - 40 - Math.abs(a.x - b.x) * 0.1;
-                    ctx.beginPath();
-                    ctx.moveTo(a.x, a.y);
-                    ctx.quadraticCurveTo((a.x + b.x) / 2, cpY, b.x, b.y);
-                    ctx.stroke();
-                }
+        const boundaryFeatures = [];
+        if (preloaded.length > 0) {
+            for (const b of preloaded) {
+                if (b.feature && b.feature.geometry) boundaryFeatures.push(b);
+            }
+        }
+        // Match pin labels to Natural Earth features
+        if (boundaryFeatures.length === 0 && countryGeo && countryGeo.features) {
+            const ALIASES = {
+                'usa': 'United States of America', 'us': 'United States of America', 'united states': 'United States of America',
+                'uk': 'United Kingdom', 'britain': 'United Kingdom', 'england': 'United Kingdom',
+                'uae': 'United Arab Emirates', 'south korea': 'South Korea', 'north korea': 'North Korea',
+                'czech republic': 'Czechia', 'czechia': 'Czechia',
+            };
+            for (const pin of pinPositions) {
+                const label = pin.label?.toLowerCase();
+                if (!label) continue;
+                const resolved = ALIASES[label] || label;
+                const feat = countryGeo.features.find(f =>
+                    f.properties.name?.toLowerCase() === resolved ||
+                    f.properties.nameLong?.toLowerCase() === resolved ||
+                    f.properties.name?.toLowerCase() === label ||
+                    f.properties.nameLong?.toLowerCase() === label ||
+                    f.properties.sov?.toLowerCase() === label
+                );
+                if (feat && feat.geometry) boundaryFeatures.push({ name: pin.label, feature: feat });
+            }
+        }
 
-                // Dashed animated route line
-                ctx.strokeStyle = pal.route;
-                ctx.lineWidth = 2.5;
-                ctx.setLineDash([8, 6]);
-                ctx.lineDashOffset = -elapsed * 40 * speed;
-                for (let i = 0; i < pinPositions.length - 1; i++) {
-                    const a = pinPositions[i], b = pinPositions[i + 1];
-                    const cpY = Math.min(a.y, b.y) - 40 - Math.abs(a.x - b.x) * 0.1;
-                    ctx.beginPath();
-                    ctx.moveTo(a.x, a.y);
-                    ctx.quadraticCurveTo((a.x + b.x) / 2, cpY, b.x, b.y);
-                    ctx.stroke();
+        // Helper: build polygon path from GeoJSON coordinates
+        const _tracePoly = (polys) => {
+            for (const polygon of polys) {
+                for (const ring of polygon) {
+                    if (ring.length < 3) continue;
+                    ctx.moveTo(toX(ring[0][0]), toY(ring[0][1]));
+                    for (let ri = 1; ri < ring.length; ri++) ctx.lineTo(toX(ring[ri][0]), toY(ring[ri][1]));
+                    ctx.closePath();
                 }
-                ctx.setLineDash([]);
+            }
+        };
+        // Helper: compute polygon bounding box in pixel space
+        const _polyBounds = (polys) => {
+            let mnX = Infinity, mnY = Infinity, mxX = -Infinity, mxY = -Infinity;
+            for (const polygon of polys) { for (const ring of polygon) { for (const pt of ring) { const px = toX(pt[0]), py = toY(pt[1]); if (px < mnX) mnX = px; if (py < mnY) mnY = py; if (px > mxX) mxX = px; if (py > mxY) mxY = py; } } }
+            return { x: mnX, y: mnY, w: mxX - mnX, h: mxY - mnY, cx: (mnX + mxX) / 2, cy: (mnY + mxY) / 2 };
+        };
+
+        // Helper: match a name to a waypoint (exact then partial)
+        const _findWpMatch = (name) => {
+            if (!wpPositions.length) return null;
+            const lower = (name || '').toLowerCase();
+            let m = wpPositions.find(wp => wp.name.toLowerCase() === lower);
+            if (!m) m = wpPositions.find(wp => wp.name.toLowerCase().includes(lower) || lower.includes(wp.name.toLowerCase()));
+            return m || null;
+        };
+
+        // Per-polygon color cycle for multiple locations
+        const POLY_CYCLE = [
+            { fill: '#00d4ff', fillEdge: '#0088cc', stroke: '#00d4ff', glow: 'rgba(0,212,255,0.6)' },
+            { fill: '#ff6040', fillEdge: '#cc3820', stroke: '#ff6040', glow: 'rgba(255,96,64,0.6)' },
+            { fill: '#40ff90', fillEdge: '#20cc60', stroke: '#40ff90', glow: 'rgba(64,255,144,0.6)' },
+            { fill: '#f0c040', fillEdge: '#c09020', stroke: '#f0c040', glow: 'rgba(240,192,64,0.6)' },
+            { fill: '#a060ff', fillEdge: '#7030cc', stroke: '#a060ff', glow: 'rgba(160,96,255,0.6)' },
+            { fill: '#ff40a0', fillEdge: '#cc2070', stroke: '#ff40a0', glow: 'rgba(255,64,160,0.6)' },
+            { fill: '#40c0ff', fillEdge: '#2090cc', stroke: '#40c0ff', glow: 'rgba(64,192,255,0.6)' },
+            { fill: '#ff8020', fillEdge: '#cc6010', stroke: '#ff8020', glow: 'rgba(255,128,32,0.6)' },
+        ];
+        const usePolyCycle = boundaryFeatures.length > 1 && polyColorKey === 'auto';
+
+        for (let bi = 0; bi < boundaryFeatures.length; bi++) {
+            const bf = boundaryFeatures[bi];
+            const feat = bf.feature;
+            const geom = feat.geometry;
+            if (!geom) continue;
+            const cpPal = usePolyCycle ? POLY_CYCLE[bi % POLY_CYCLE.length] : polyPal;
+
+            let polyDelay;
+            const wpMatch = _findWpMatch(bf.name);
+            if (wpPositions.length > 0) {
+                if (wpMatch) {
+                    polyDelay = wpMatch.startTime + 0.2;
+                    if (!bigMapSize) {
+                        const wpIdx = wpPositions.indexOf(wpMatch);
+                        if (wpIdx !== activeWpIdx && wpIdx !== prevWpIdx) continue;
+                    }
+                } else {
+                    polyDelay = (0.15 + bi * 0.25) / polySpd;
+                }
+            } else {
+                polyDelay = (0.15 + bi * 0.25) / polySpd;
+            }
+            const polyT = Math.min(1, Math.max(0, (elapsed - polyDelay) / (0.7 / polySpd)));
+            if (polyT <= 0) continue;
+            const polyEase = _ease(polyT, easingMode);
+            const pulse = (Math.sin(elapsed * 1.5 * polySpd + bi * 0.8) + 1) / 2;
+
+            const polys = geom.type === 'Polygon' ? [geom.coordinates] : geom.type === 'MultiPolygon' ? geom.coordinates : [];
+            const bounds = _polyBounds(polys);
+
+            // ── PHASE 1: Mask reveal — circular wipe expanding from polygon center ──
+            ctx.save();
+            if (polyEase < 1) {
+                // Expanding circular clip from center
+                const maxR = Math.sqrt(bounds.w * bounds.w + bounds.h * bounds.h) * 0.6;
+                const revealR = maxR * polyEase;
+                ctx.beginPath();
+                ctx.arc(bounds.cx, bounds.cy, revealR, 0, Math.PI * 2);
+                ctx.clip();
+            }
+
+            // Clip to polygon boundary
+            ctx.beginPath();
+            _tracePoly(polys);
+            ctx.clip('evenodd');
+
+            // ── PHASE 2: Gradient fill (radial gradient from center) ──
+            const gradR = Math.max(bounds.w, bounds.h) * 0.7;
+            const fillGrad = ctx.createRadialGradient(bounds.cx, bounds.cy, 0, bounds.cx, bounds.cy, gradR);
+            fillGrad.addColorStop(0, cpPal.fill);
+            fillGrad.addColorStop(1, cpPal.fillEdge);
+            ctx.globalAlpha = opacity * polyEase * (0.25 + pulse * 0.08);
+            ctx.fillStyle = fillGrad;
+            ctx.fillRect(0, 0, IMG_W, IMG_H);
+
+            // Inner highlight shimmer (subtle moving light)
+            const shimmerX = bounds.cx + Math.sin(elapsed * 0.7 * polySpd + bi) * bounds.w * 0.3;
+            const shimmerY = bounds.cy + Math.cos(elapsed * 0.5 * polySpd + bi) * bounds.h * 0.2;
+            const shimGrad = ctx.createRadialGradient(shimmerX, shimmerY, 0, shimmerX, shimmerY, gradR * 0.5);
+            shimGrad.addColorStop(0, 'rgba(255,255,255,0.08)');
+            shimGrad.addColorStop(1, 'rgba(255,255,255,0.0)');
+            ctx.globalAlpha = opacity * polyEase * 0.6;
+            ctx.fillStyle = shimGrad;
+            ctx.fillRect(0, 0, IMG_W, IMG_H);
+
+            ctx.restore();
+
+            // ── PHASE 3: Progressive stroke animation (border draws on over time) ──
+            ctx.save();
+            ctx.globalAlpha = opacity * polyEase * (0.5 + pulse * 0.25);
+            ctx.strokeStyle = cpPal.stroke;
+            ctx.lineWidth = 3;
+            ctx.shadowColor = cpPal.glow;
+            ctx.shadowBlur = 10 + pulse * 10;
+
+            // Draw partial border based on progress (stroke reveal)
+            const strokeProgress = Math.min(1, Math.max(0, (elapsed - polyDelay - 0.2 / polySpd) / (1.0 / polySpd)));
+            const strokeEase = _ease(strokeProgress, easingMode);
+
+            if (strokeEase >= 1) {
+                // Full border — just draw normally
+                ctx.beginPath();
+                _tracePoly(polys);
+                ctx.stroke();
+            } else if (strokeEase > 0) {
+                // Progressive draw: use lineDash to reveal portion of border
+                // Estimate total perimeter
+                let totalLen = 0;
+                for (const polygon of polys) { for (const ring of polygon) { for (let ri = 1; ri < ring.length; ri++) { const dx = toX(ring[ri][0]) - toX(ring[ri-1][0]); const dy = toY(ring[ri][1]) - toY(ring[ri-1][1]); totalLen += Math.sqrt(dx*dx + dy*dy); } } }
+                const drawLen = totalLen * strokeEase;
+                ctx.setLineDash([drawLen, totalLen]);
                 ctx.lineDashOffset = 0;
+                ctx.beginPath();
+                _tracePoly(polys);
+                ctx.stroke();
+                ctx.setLineDash([]);
+            }
 
-                // Traveling dot along each route segment
-                for (let i = 0; i < pinPositions.length - 1; i++) {
-                    const dotT = ((elapsed * 0.4 * speed) + i * 0.3) % 1;
-                    const a = pinPositions[i], b = pinPositions[i + 1];
-                    const cpY = Math.min(a.y, b.y) - 40 - Math.abs(a.x - b.x) * 0.1;
-                    const t = dotT;
-                    const dotX = (1 - t) * (1 - t) * a.x + 2 * (1 - t) * t * ((a.x + b.x) / 2) + t * t * b.x;
-                    const dotY = (1 - t) * (1 - t) * a.y + 2 * (1 - t) * t * cpY + t * t * b.y;
+            // Second glow pass (wider, fainter) for neon effect
+            if (strokeEase > 0.3) {
+                ctx.globalAlpha = opacity * polyEase * pulse * 0.15;
+                ctx.lineWidth = 8;
+                ctx.shadowBlur = 25;
+                ctx.beginPath();
+                _tracePoly(polys);
+                ctx.stroke();
+            }
 
-                    // Trail glow
-                    const trailGrad = ctx.createRadialGradient(dotX, dotY, 0, dotX, dotY, 12);
-                    trailGrad.addColorStop(0, pal.pin);
-                    trailGrad.addColorStop(1, 'transparent');
-                    ctx.fillStyle = trailGrad;
-                    ctx.beginPath();
-                    ctx.arc(dotX, dotY, 12, 0, Math.PI * 2);
-                    ctx.fill();
+            ctx.shadowBlur = 0;
+            ctx.restore();
+            ctx.globalAlpha = opacity;
+        }
 
-                    // Dot
-                    ctx.fillStyle = pal.pin;
-                    ctx.shadowColor = pal.pin;
-                    ctx.shadowBlur = 10;
-                    ctx.beginPath();
-                    ctx.arc(dotX, dotY, 4, 0, Math.PI * 2);
-                    ctx.fill();
-                    ctx.shadowBlur = 0;
+        // ── 3. Radius / impact circles (expanding radar rings + glow) ──
+        for (const pin of pinPositions) {
+            if (pin.pinType === 'unknown') continue;
+            let highlightDelay;
+            if (wpPositions.length > 0) {
+                const wpMatch = _findWpMatch(pin.label);
+                if (wpMatch) {
+                    highlightDelay = wpMatch.startTime + 0.3;
+                    if (!bigMapSize) {
+                        const wpIdx = wpPositions.indexOf(wpMatch);
+                        if (wpIdx !== activeWpIdx && wpIdx !== prevWpIdx) continue;
+                    }
+                } else {
+                    highlightDelay = 0.2 + pin.i * 0.12;
                 }
+            } else {
+                highlightDelay = 0.2 + pin.i * 0.12;
+            }
+            const highlightT = Math.min(1, Math.max(0, (elapsed - highlightDelay) / 0.8));
+            if (highlightT <= 0) continue;
 
+            const easeHL = 1 - Math.pow(1 - highlightT, 2);
+            const baseRadius = pin.pinType === 'city' ? 40 : pin.pinType === 'landmark' ? 30 : 60;
+            const hlRadius = baseRadius * easeHL;
+            const pulse = (Math.sin(elapsed * 2 * speed + pin.i) + 1) / 2;
+
+            // Expanding radar ring
+            const radarT = ((elapsed * 0.6 * speed + pin.i * 0.4) % 2) / 2;
+            const radarR = hlRadius * 0.5 + hlRadius * 1.5 * radarT;
+            ctx.globalAlpha = opacity * easeHL * (1 - radarT) * 0.3;
+            ctx.strokeStyle = pal.highlightRing;
+            ctx.lineWidth = 2;
+            ctx.beginPath(); ctx.arc(pin.x, pin.y, radarR, 0, Math.PI * 2); ctx.stroke();
+
+            // Inner glow
+            const outerR = hlRadius + pulse * 12;
+            ctx.globalAlpha = opacity * easeHL * 0.5;
+            const hlGrad = ctx.createRadialGradient(pin.x, pin.y, hlRadius * 0.2, pin.x, pin.y, outerR);
+            hlGrad.addColorStop(0, pal.highlight);
+            hlGrad.addColorStop(0.5, pal.highlight);
+            hlGrad.addColorStop(1, 'transparent');
+            ctx.fillStyle = hlGrad;
+            ctx.beginPath(); ctx.arc(pin.x, pin.y, outerR, 0, Math.PI * 2); ctx.fill();
+
+            // Static ring
+            ctx.strokeStyle = pal.highlightRing;
+            ctx.lineWidth = 1.5;
+            ctx.globalAlpha = opacity * easeHL * 0.4;
+            ctx.beginPath(); ctx.arc(pin.x, pin.y, hlRadius, 0, Math.PI * 2); ctx.stroke();
+            ctx.globalAlpha = opacity;
+        }
+
+        // ── 4. Flight arcs (progressive reveal + traveling dot) ──
+        if (pinPositions.length >= 2) {
+            for (let i = 0; i < pinPositions.length - 1; i++) {
+                const a = pinPositions[i], b = pinPositions[i + 1];
+                const dist = Math.hypot(b.x - a.x, b.y - a.y);
+                const arcHeight = dist * 0.35;
+                const midX = (a.x + b.x) / 2;
+                const midY = (a.y + b.y) / 2 - arcHeight;
+
+                // Progressive arc reveal
+                let arcDelay;
+                if (wpPositions.length > 0) {
+                    const wpB = _findWpMatch(b.label);
+                    arcDelay = wpB ? wpB.startTime + 0.3 : 0.8 + i * 0.5;
+                } else {
+                    arcDelay = 0.8 + i * 0.5;
+                }
+                const arcDur = 1.0 / speed;
+                const arcT = Math.min(1, Math.max(0, (elapsed - arcDelay) / arcDur));
+                if (arcT <= 0) continue;
+                const arcE = 1 - Math.pow(1 - arcT, 2);
+
+                const SEGS = 60;
+                const drawSegs = Math.ceil(SEGS * arcE);
+
+                // Glow layer
+                ctx.globalAlpha = opacity * 0.3;
+                ctx.strokeStyle = pal.routeGlow;
+                ctx.lineWidth = 10;
+                ctx.beginPath();
+                for (let s = 0; s <= drawSegs; s++) {
+                    const t = s / SEGS;
+                    const px = (1-t)*(1-t)*a.x + 2*(1-t)*t*midX + t*t*b.x;
+                    const py = (1-t)*(1-t)*a.y + 2*(1-t)*t*midY + t*t*b.y;
+                    if (s === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+                }
+                ctx.stroke();
+
+                // Main arc
+                ctx.globalAlpha = opacity * 0.85;
+                ctx.strokeStyle = pal.pin;
+                ctx.lineWidth = 3;
+                ctx.shadowColor = pal.pin;
+                ctx.shadowBlur = 8;
+                ctx.beginPath();
+                for (let s = 0; s <= drawSegs; s++) {
+                    const t = s / SEGS;
+                    const px = (1-t)*(1-t)*a.x + 2*(1-t)*t*midX + t*t*b.x;
+                    const py = (1-t)*(1-t)*a.y + 2*(1-t)*t*midY + t*t*b.y;
+                    if (s === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+                }
+                ctx.stroke();
+                ctx.shadowBlur = 0;
+
+                // Traveling dot (after arc fully drawn)
+                if (arcE >= 0.99) {
+                    const dotT = ((elapsed - arcDelay - arcDur) * 0.5 * speed + i * 0.3) % 1;
+                    const dx = (1-dotT)*(1-dotT)*a.x + 2*(1-dotT)*dotT*midX + dotT*dotT*b.x;
+                    const dy = (1-dotT)*(1-dotT)*a.y + 2*(1-dotT)*dotT*midY + dotT*dotT*b.y;
+                    const tg = ctx.createRadialGradient(dx, dy, 0, dx, dy, 14);
+                    tg.addColorStop(0, pal.pin); tg.addColorStop(1, 'transparent');
+                    ctx.globalAlpha = opacity * 0.8;
+                    ctx.fillStyle = tg; ctx.beginPath(); ctx.arc(dx, dy, 14, 0, Math.PI * 2); ctx.fill();
+                    ctx.fillStyle = pal.pin; ctx.shadowColor = pal.pin; ctx.shadowBlur = 12;
+                    ctx.beginPath(); ctx.arc(dx, dy, 5, 0, Math.PI * 2); ctx.fill(); ctx.shadowBlur = 0;
+                }
                 ctx.globalAlpha = opacity;
             }
         }
 
-        // ── 4. Pin markers with labels ──
+        // ── 5. Pin markers with labels ──
         const pinEnterDur = 0.4 / speed;
         for (const pin of pinPositions) {
-            const pinDelay = 0.4 + pin.i * 0.18;
+            let pinDelay;
+            if (wpPositions.length > 0) {
+                const wpMatch = _findWpMatch(pin.label);
+                if (wpMatch) {
+                    pinDelay = wpMatch.startTime + 0.5;
+                    if (!bigMapSize) {
+                        const wpIdx = wpPositions.indexOf(wpMatch);
+                        if (wpIdx !== activeWpIdx && wpIdx !== prevWpIdx) continue;
+                    }
+                } else {
+                    pinDelay = 0.5 + pin.i * 0.22;
+                }
+            } else {
+                pinDelay = 0.5 + pin.i * 0.22;
+            }
             const pinProgress = Math.min(1, Math.max(0, (elapsed - pinDelay) / pinEnterDur));
             if (pinProgress <= 0) continue;
 
             const eased = 1 - Math.pow(1 - pinProgress, 3);
-            const bounce = pinProgress < 1 ? (1 - pinProgress) * 12 : 0;
+            const bounce = pinProgress < 1 ? (1 - pinProgress) * 16 : 0;
             const py = pin.y - bounce;
             const pinAlpha = eased * opacity;
             ctx.globalAlpha = pinAlpha;
 
-            // Expanding ripple ring (continuous pulse after enter)
+            // Expanding ripple rings (continuous pulse after enter)
             if (pinProgress >= 1) {
                 const pulse = (Math.sin(elapsed * 3 * speed + pin.i * 1.5) + 1) / 2;
-                const pulseR = 18 + pulse * 14;
+                const pulseR = 20 + pulse * 16;
                 ctx.strokeStyle = pal.pinRing;
-                ctx.lineWidth = 1.5;
-                ctx.globalAlpha = pinAlpha * (0.12 + pulse * 0.22);
+                ctx.lineWidth = 2;
+                ctx.globalAlpha = pinAlpha * (0.15 + pulse * 0.25);
                 ctx.beginPath();
                 ctx.arc(pin.x, py, pulseR, 0, Math.PI * 2);
                 ctx.stroke();
-                // Second ripple (offset phase)
                 const pulse2 = (Math.sin(elapsed * 3 * speed + pin.i * 1.5 + Math.PI) + 1) / 2;
-                const pulseR2 = 24 + pulse2 * 10;
-                ctx.globalAlpha = pinAlpha * (0.06 + pulse2 * 0.12);
+                const pulseR2 = 28 + pulse2 * 12;
+                ctx.globalAlpha = pinAlpha * (0.08 + pulse2 * 0.14);
                 ctx.beginPath();
                 ctx.arc(pin.x, py, pulseR2, 0, Math.PI * 2);
                 ctx.stroke();
                 ctx.globalAlpha = pinAlpha;
             }
 
-            // Glow halo
-            const glowGrad = ctx.createRadialGradient(pin.x, py, 0, pin.x, py, 28);
+            // Glow halo (bigger for cities/landmarks)
+            const glowR = pin.pinType === 'city' || pin.pinType === 'landmark' ? 36 : 28;
+            const glowGrad = ctx.createRadialGradient(pin.x, py, 0, pin.x, py, glowR);
             glowGrad.addColorStop(0, pal.pinGlow);
             glowGrad.addColorStop(1, 'transparent');
             ctx.fillStyle = glowGrad;
             ctx.beginPath();
-            ctx.arc(pin.x, py, 28, 0, Math.PI * 2);
+            ctx.arc(pin.x, py, glowR, 0, Math.PI * 2);
             ctx.fill();
 
-            // Pin dot (filled circle)
+            // Pin dot
+            const pinDotR = pin.pinType === 'city' || pin.pinType === 'landmark' ? 9 : 7;
             ctx.fillStyle = pal.pin;
             ctx.shadowColor = pal.pin;
-            ctx.shadowBlur = 16;
+            ctx.shadowBlur = 18;
             ctx.beginPath();
-            ctx.arc(pin.x, py, 7 * eased, 0, Math.PI * 2);
+            ctx.arc(pin.x, py, pinDotR * eased, 0, Math.PI * 2);
             ctx.fill();
             ctx.shadowBlur = 0;
 
-            // Outer ring (enter animation)
+            // Outer ring
             ctx.strokeStyle = pal.pin;
             ctx.lineWidth = 2;
-            const ringRadius = 12 + (1 - eased) * 14;
+            const ringRadius = 14 + (1 - eased) * 14;
             ctx.globalAlpha = pinAlpha * eased;
             ctx.beginPath();
             ctx.arc(pin.x, py, ringRadius, 0, Math.PI * 2);
             ctx.stroke();
             ctx.globalAlpha = pinAlpha;
 
-            // ── Label card ──
+            // ── Label tag (GEOlayers-style: compact pill, small font, anchored to pin) ──
             const labelText = pin.label || '';
             const valueText = pin.value && pin.value !== '0' ? pin.value : '';
-            const font = s.fontFamily || 'Arial';
-            ctx.font = `bold 22px ${font}`;
-            const labelW = ctx.measureText(labelText).width;
-            const valueW = valueText ? ctx.measureText(valueText).width : 0;
-            const boxW = Math.max(labelW, valueW) + 32;
-            const boxH = valueText ? 62 : 40;
-            const boxX = pin.x - boxW / 2;
-            const boxY = py - 34 - boxH;
+            const font = s.fontFamily || '"Segoe UI", Arial, sans-serif';
 
-            // Card shadow + background
-            ctx.shadowColor = 'rgba(0,0,0,0.35)';
-            ctx.shadowBlur = 12;
-            ctx.shadowOffsetY = 3;
-            ctx.fillStyle = pal.labelBg;
+            const labelDelay = pinDelay + 0.15;
+            const labelT = Math.min(1, Math.max(0, (elapsed - labelDelay) / 0.35));
+            const labelEased = 1 - Math.pow(1 - labelT, 3);
+            if (labelT <= 0) continue;
+            ctx.globalAlpha = pinAlpha * labelEased;
+
+            // Compact label: small font, tight pill shape, offset to the right of pin
+            const labelFont = `bold 13px ${font}`;
+            ctx.font = labelFont;
+            const labelW = ctx.measureText(labelText).width;
+            const tagH = 22;
+            const tagPad = 8;
+            const tagW = labelW + tagPad * 2;
+            const tagX = pin.x + 16;
+            const tagY = py - tagH / 2 - 2;
+
+            // Thin leader line from pin to tag
+            ctx.strokeStyle = pal.pin;
+            ctx.lineWidth = 1;
+            ctx.globalAlpha = pinAlpha * labelEased * 0.5;
             ctx.beginPath();
-            MGRenderer._roundRect(ctx, boxX, boxY, boxW, boxH, 8);
+            ctx.moveTo(pin.x + pinDotR + 2, py);
+            ctx.lineTo(tagX, py - 1);
+            ctx.stroke();
+            ctx.globalAlpha = pinAlpha * labelEased;
+
+            // Tag background (dark pill with slight transparency)
+            ctx.fillStyle = 'rgba(10,15,30,0.75)';
+            ctx.shadowColor = 'rgba(0,0,0,0.3)';
+            ctx.shadowBlur = 6;
+            ctx.shadowOffsetY = 2;
+            const tagR = tagH / 2;
+            ctx.beginPath();
+            ctx.moveTo(tagX + tagR, tagY);
+            ctx.lineTo(tagX + tagW - tagR, tagY);
+            ctx.arc(tagX + tagW - tagR, tagY + tagR, tagR, -Math.PI / 2, Math.PI / 2);
+            ctx.lineTo(tagX + tagR, tagY + tagH);
+            ctx.arc(tagX + tagR, tagY + tagR, tagR, Math.PI / 2, -Math.PI / 2);
             ctx.fill();
             ctx.shadowBlur = 0;
             ctx.shadowOffsetY = 0;
 
-            // Rank badge (numbered circle on the left)
-            const badgeR = 14;
-            const badgeX = boxX + badgeR + 6;
-            const badgeY = boxY + boxH / 2;
-            ctx.fillStyle = pal.rankBadge;
-            ctx.beginPath();
-            ctx.arc(badgeX, badgeY, badgeR, 0, Math.PI * 2);
-            ctx.fill();
-            ctx.fillStyle = pal.rankText;
-            ctx.font = `bold 14px ${font}`;
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
-            ctx.fillText(String(pin.i + 1), badgeX, badgeY);
-
-            // Pointer triangle
-            ctx.fillStyle = pal.labelBg;
-            ctx.beginPath();
-            ctx.moveTo(pin.x - 6, boxY + boxH);
-            ctx.lineTo(pin.x + 6, boxY + boxH);
-            ctx.lineTo(pin.x, boxY + boxH + 8);
-            ctx.closePath();
-            ctx.fill();
+            // Subtle left accent
+            ctx.fillStyle = pal.pin;
+            ctx.globalAlpha = pinAlpha * labelEased * 0.7;
+            ctx.fillRect(tagX + 3, tagY + 4, 2, tagH - 8);
+            ctx.globalAlpha = pinAlpha * labelEased;
 
             // Label text
-            ctx.fillStyle = pal.label;
-            ctx.textAlign = 'center';
+            ctx.fillStyle = '#e8ecf0';
+            ctx.textAlign = 'left';
             ctx.textBaseline = 'middle';
-            ctx.font = `bold 22px ${font}`;
-            ctx.fillText(labelText, pin.x + 8, boxY + (valueText ? 20 : boxH / 2));
+            ctx.font = labelFont;
+            ctx.fillText(labelText, tagX + tagPad, tagY + tagH / 2 + 1);
 
-            // Value text
+            // Value (if any) — small, below the tag
             if (valueText) {
+                ctx.font = `11px ${font}`;
                 ctx.fillStyle = pal.pin;
-                ctx.font = `bold 18px ${font}`;
-                ctx.fillText(valueText, pin.x + 8, boxY + 44);
+                ctx.globalAlpha = pinAlpha * labelEased * 0.8;
+                ctx.fillText(valueText, tagX + tagPad, tagY + tagH + 12);
             }
 
             ctx.globalAlpha = 1;
         }
 
-        // ── 5. Title bar ──
-        const title = mg.text || '';
-        if (title) {
-            ctx.globalAlpha = opacity * Math.min(1, enterProgress * 3);
-            const font = s.fontFamily || 'Arial';
-            ctx.font = `bold 40px ${font}`;
-            const titleW = ctx.measureText(title).width;
-            const barW = titleW + 70;
-            const barH = 64;
-            const barX = (W - barW) / 2;
-            const barY = 28;
+        ctx.restore(); // End camera zoom transform
 
-            // Title card shadow + background
-            ctx.shadowColor = 'rgba(0,0,0,0.35)';
-            ctx.shadowBlur = 18;
-            ctx.shadowOffsetY = 4;
-            ctx.fillStyle = pal.titleBg;
-            ctx.beginPath();
-            MGRenderer._roundRect(ctx, barX, barY, barW, barH, 12);
-            ctx.fill();
-            ctx.shadowBlur = 0;
-            ctx.shadowOffsetY = 0;
-
-            // Accent border (bottom + left stripe)
-            ctx.fillStyle = pal.titleBorder;
-            ctx.fillRect(barX + 12, barY + barH - 3, barW - 24, 3);
-            ctx.beginPath();
-            MGRenderer._roundRect(ctx, barX, barY, 5, barH, 12);
-            ctx.fill();
-            ctx.fillRect(barX + 2, barY, 5, barH);
-
-            // Title text
-            ctx.fillStyle = pal.titleText;
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
-            ctx.fillText(title, W / 2, barY + barH / 2);
-
-            ctx.globalAlpha = opacity;
+        // ── Bearing-only (no tilt): composite rotated offscreen ──
+        if (useBearing && !useTilt && this._mapOffscreen) {
+            ctx = _mainCtx;
+            ctx.drawImage(this._mapOffscreen, 0, 0);
         }
 
-        // ── 6. Vignette overlay ──
+        // ── PERSPECTIVE WARP: After Effects-style 3D camera tilt ──
+        // Pivot at BOTTOM edge, camera looks down at an angle.
+        // Bottom of map stays wide & anchored, top recedes to vanishing point.
+        if (useTilt) {
+            ctx = _mainCtx;
+            const src = this._mapOffscreen;
+            const tilt = tiltAmount;
+            const STRIPS = 220;
+            const srcStripH = H / STRIPS;
+
+            const angle = tilt * 70 * (Math.PI / 180);
+            const cosA = Math.cos(angle);
+            const sinA = Math.sin(angle);
+            const focalLen = 1.4;
+
+            const projY = new Float32Array(STRIPS + 1);
+            const projScale = new Float32Array(STRIPS + 1);
+
+            for (let i = 0; i <= STRIPS; i++) {
+                const t = 1 - (i / STRIPS);
+                const z = t * sinA + focalLen;
+                const scale = focalLen / z;
+                const yProj = t * cosA / z;
+                projScale[i] = scale;
+                projY[i] = yProj;
+            }
+
+            const bottomScreen = H * 0.92;
+            const projMax = projY[0];
+            const projMin = projY[STRIPS];
+            const projRange = projMax - projMin;
+            const visibleH = H * (0.85 - tilt * 0.15);
+
+            const screenY = new Float32Array(STRIPS + 1);
+            for (let i = 0; i <= STRIPS; i++) {
+                const norm = (projY[i] - projMin) / projRange;
+                screenY[i] = bottomScreen - norm * visibleH;
+            }
+
+            const bgColor = (mg.mapStyle === 'light' || mg.mapStyle === 'political') ? '#b8c4d0' : '#060a14';
+            ctx.fillStyle = bgColor;
+            ctx.fillRect(0, 0, W, H);
+
+            for (let i = 0; i < STRIPS; i++) {
+                const srcY = i * srcStripH;
+                const dstY = screenY[i];
+                const dstH = Math.abs(screenY[i + 1] - screenY[i]) + 0.5;
+                const avgScale = (projScale[i] + projScale[i + 1]) / 2;
+                // Always fill full width — scale source crop wider for narrowed strips
+                const dstW = W;
+                const srcCropW = W / avgScale; // wider source crop to compensate perspective narrowing
+                const srcX = (W - srcCropW) / 2; // center the wider crop
+
+                ctx.drawImage(src, Math.max(0, srcX), srcY, Math.min(srcCropW, W), srcStripH + 1,
+                    0, dstY, dstW, dstH);
+            }
+
+            const hazeBottom = screenY[0];
+            const hazeH = Math.max(hazeBottom * 0.6, 30);
+            if (tilt > 0.1) {
+                const haze = ctx.createLinearGradient(0, hazeBottom - hazeH * 0.3, 0, hazeBottom + hazeH);
+                const hazeBase = (mg.mapStyle === 'light' || mg.mapStyle === 'political') ? '180,190,200' : '8,14,28';
+                haze.addColorStop(0, `rgba(${hazeBase},${0.6 * tilt})`);
+                haze.addColorStop(0.4, `rgba(${hazeBase},${0.25 * tilt})`);
+                haze.addColorStop(1, `rgba(${hazeBase},0)`);
+                ctx.fillStyle = haze;
+                ctx.fillRect(0, 0, W, hazeBottom + hazeH);
+            }
+
+            const floorH = H * 0.04;
+            const floor = ctx.createLinearGradient(0, H - floorH, 0, H);
+            floor.addColorStop(0, 'rgba(0,0,0,0)');
+            floor.addColorStop(1, `rgba(0,0,0,${0.15 * tilt})`);
+            ctx.fillStyle = floor;
+            ctx.fillRect(0, H - floorH, W, floorH);
+        }
+
+        // ── 6. Title bar (OUTSIDE camera transform — stays fixed at top) ──
+        const title = mg.text || '';
+        if (title) {
+            const titleDelay = 0.1;
+            const titleT = Math.min(1, Math.max(0, (elapsed - titleDelay) / 0.5));
+            const titleEased = 1 - Math.pow(1 - titleT, 3);
+            if (titleT > 0) {
+                ctx.globalAlpha = opacity * titleEased;
+                const font = s.fontFamily || 'Arial';
+                ctx.font = `bold 42px ${font}`;
+                const titleW = ctx.measureText(title).width;
+                const barW = titleW + 80;
+                const barH = 68;
+                const barX = (W - barW) / 2;
+                const barY = 24 - (1 - titleEased) * 30; // Slide down from top
+
+                // Card background with strong shadow
+                ctx.shadowColor = 'rgba(0,0,0,0.5)';
+                ctx.shadowBlur = 20;
+                ctx.shadowOffsetY = 5;
+                ctx.fillStyle = pal.titleBg;
+                ctx.beginPath();
+                MGRenderer._roundRect(ctx, barX, barY, barW, barH, 14);
+                ctx.fill();
+                ctx.shadowBlur = 0;
+                ctx.shadowOffsetY = 0;
+
+                // Bottom accent line
+                ctx.fillStyle = pal.titleBorder;
+                ctx.fillRect(barX + 14, barY + barH - 4, barW - 28, 4);
+
+                // Left accent stripe
+                ctx.beginPath();
+                MGRenderer._roundRect(ctx, barX, barY, 5, barH, 14);
+                ctx.fill();
+                ctx.fillRect(barX + 2, barY, 5, barH);
+
+                // Title text
+                ctx.fillStyle = pal.titleText;
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(title, W / 2, barY + barH / 2);
+
+                ctx.globalAlpha = opacity;
+            }
+        }
+
+        // ── 7. Location indicator (bottom-left, shows pin count + source) ──
+        if (pinPositions.length > 0) {
+            const indicatorT = Math.min(1, Math.max(0, (elapsed - 0.8) / 0.4));
+            if (indicatorT > 0) {
+                const iEased = 1 - Math.pow(1 - indicatorT, 2);
+                ctx.globalAlpha = opacity * iEased * 0.7;
+                const font = s.fontFamily || 'Arial';
+                const geocodedCount = pinPositions.filter(p => p.pinType !== 'unknown' && p.pinType !== 'country').length;
+                const locText = geocodedCount > 0
+                    ? `${pinPositions.length} location${pinPositions.length > 1 ? 's' : ''}`
+                    : `${pinPositions.length} region${pinPositions.length > 1 ? 's' : ''}`;
+                ctx.font = `600 16px ${font}`;
+                const tw = ctx.measureText(locText).width;
+                const ix = 32, iy = H - 38;
+                ctx.fillStyle = pal.titleBg;
+                MGRenderer._roundRect(ctx, ix, iy, tw + 24, 28, 6);
+                ctx.fill();
+                ctx.fillStyle = pal.pin;
+                ctx.textAlign = 'left';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(locText, ix + 12, iy + 14);
+                ctx.globalAlpha = 1;
+            }
+        }
+
+        // ── 8. Vignette overlay ──
         const vignetteGrad = ctx.createRadialGradient(W / 2, H / 2, W * 0.25, W / 2, H / 2, W * 0.7);
         vignetteGrad.addColorStop(0, 'transparent');
         vignetteGrad.addColorStop(1, pal.vignette);
         ctx.fillStyle = vignetteGrad;
+        ctx.globalAlpha = opacity;
         ctx.fillRect(0, 0, W, H);
 
         ctx.globalAlpha = 1;

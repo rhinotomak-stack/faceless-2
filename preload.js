@@ -97,6 +97,22 @@ try {
 }
 
 
+// Expose Map Provider to renderer (geocoding + tile stitching for map test preview)
+try {
+    const mapProvider = require('./src/map-provider');
+    const appConfig = require('./src/config');
+    window._mapProvider = mapProvider;
+    window._appConfig = appConfig;
+    // Load country boundary GeoJSON for polygon highlighting
+    const geoPath = _nodePath.join(__dirname, 'assets', 'geo', 'countries-slim.json');
+    if (_nodeFs.existsSync(geoPath)) {
+        window._countryGeoJSON = JSON.parse(_nodeFs.readFileSync(geoPath, 'utf8'));
+        console.log(`[Geo] Loaded ${window._countryGeoJSON.features.length} country boundaries`);
+    }
+} catch (e) {
+    console.warn('Map Provider not available:', e.message);
+}
+
 // Expose Electron IPC methods to the renderer process
 window.electronAPI = {
     // Copy file to project folder

@@ -168,7 +168,11 @@ const MG_REGISTRY = {
         label: 'Map',
         group: 'fullscreen',
         types: {
-            standard:  { label: 'Standard',       animation: 'fadeSlide' },
+            standard:       { label: 'Standard',         animation: 'fadeSlide' },
+            locator:        { label: 'Locator',           animation: 'fadeSlide' },
+            route:          { label: 'Route / Flight',    animation: 'fadeSlide' },
+            regionHighlight:{ label: 'Region Highlight',  animation: 'fadeSlide' },
+            comparison:     { label: 'Comparison',        animation: 'fadeSlide' },
         },
         animations: ['fadeSlide'],
         defaultType: 'standard',

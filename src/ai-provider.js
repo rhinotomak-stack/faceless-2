@@ -29,8 +29,7 @@ const { postNvidiaChatCompletion } = require('./nvidia-client');
 const QWEN_VL_POOL = [
     // ── Tier 1: Largest / Max-tier (best quality) ──
     'qwen3-vl-235b-a22b-instruct',      // NEW — Qwen3-VL 235B non-thinking instruct
-    'qwen-vl-max-latest',               // NEW — VL Max rolling alias
-    'qwen-vl-max-2025-08-13',           // NEW — VL Max pinned
+    // qwen-vl-max-latest / qwen-vl-max-2025-08-13 — REMOVED: not free-tier, would bill
     'qvq-max-latest',                   // NEW — QVQ visual reasoning latest
     'qvq-max',                          // NEW — QVQ alias
     'qvq-max-2025-03-25',               // NEW — QVQ pinned
@@ -52,7 +51,7 @@ const QWEN_VL_POOL = [
     'qwen3-vl-8b-instruct',             // NEW
     'qwen3-vl-8b-thinking',             // NEW
     // ── Legacy pool (previously top-tier, now fallbacks — kept in case quota refreshes) ──
-    'qwen-vl-max-2025-04-08',
+    // qwen-vl-max-2025-04-08 — REMOVED: not free-tier, would bill
     'qwen3-vl-235b-a22b-thinking',
     'qwen2.5-vl-72b-instruct',
     'qwen-vl-plus-latest',
@@ -87,22 +86,39 @@ const QWEN_OMNI_POOL = [
 ];
 
 // Track exhausted models — persisted to disk so dead models stay dead across restarts
+// File stores: { _apiKeyHash: "abc123", modelName: true|timestamp, ... }
+// When user changes QWEN_API_KEY in .env → hash changes → file resets (new key = fresh quotas)
 const _exhaustedModelsFile = require('path').join(__dirname, '..', '.qwen-exhausted-models.json');
-let _exhaustedModels = {}; // { modelName: timestamp_when_exhausted }
+let _exhaustedModels = {}; // { modelName: true (permanent) | timestamp (cooldown expiry) }
 
-// Load persisted state on startup
+function _hashApiKey(key) {
+    if (!key) return '';
+    return require('crypto').createHash('md5').update(key).digest('hex').substring(0, 12);
+}
+
+// Load persisted state on startup — reset if API key changed
 try {
     const fs = require('fs');
+    const currentKeyHash = _hashApiKey(config.qwen?.apiKey);
     if (fs.existsSync(_exhaustedModelsFile)) {
-        _exhaustedModels = JSON.parse(fs.readFileSync(_exhaustedModelsFile, 'utf8'));
-        const count = Object.keys(_exhaustedModels).filter(k => _exhaustedModels[k] === true).length;
-        if (count > 0) console.log(`  🔄 [Qwen Pool] ${count} models permanently exhausted (loaded from disk)`);
+        const saved = JSON.parse(fs.readFileSync(_exhaustedModelsFile, 'utf8'));
+        if (saved._apiKeyHash && saved._apiKeyHash !== currentKeyHash) {
+            console.log(`  🔄 [Qwen Pool] API key changed — resetting all exhausted models (fresh quotas)`);
+            _exhaustedModels = {};
+            fs.writeFileSync(_exhaustedModelsFile, JSON.stringify({ _apiKeyHash: currentKeyHash }, null, 2));
+        } else {
+            delete saved._apiKeyHash;
+            _exhaustedModels = saved;
+            const count = Object.keys(_exhaustedModels).filter(k => _exhaustedModels[k] === true).length;
+            if (count > 0) console.log(`  🔄 [Qwen Pool] ${count} models permanently exhausted (loaded from disk)`);
+        }
     }
 } catch (e) { /* fresh start */ }
 
 function _saveExhaustedModels() {
     try {
-        require('fs').writeFileSync(_exhaustedModelsFile, JSON.stringify(_exhaustedModels, null, 2));
+        const toSave = { _apiKeyHash: _hashApiKey(config.qwen?.apiKey), ..._exhaustedModels };
+        require('fs').writeFileSync(_exhaustedModelsFile, JSON.stringify(toSave, null, 2));
     } catch (e) { /* non-fatal */ }
 }
 
@@ -122,6 +138,14 @@ function _isQuotaError(err) {
     // 404 = model deprecated/removed — permanently dead, rotate away
     if (status === 404) {
         return 'exhausted';
+    }
+    // 400 = bad request — model doesn't accept this input format or is disabled, mark as exhausted
+    if (status === 400) {
+        return 'exhausted';
+    }
+    // 500/502/503 = server error — model is broken right now, treat as temporary (60s cooldown)
+    if (status === 500 || status === 502 || status === 503) {
+        return 'rate_limited';
     }
     // 429 = rate limited (temporary — try again in 60s)
     if (status === 429) {
@@ -208,7 +232,9 @@ async function _qwenVisionWithRotation(prompt, base64Image, mimeType, maxTokens)
         tried.add(model);
 
         try {
-            const response = await axios.post(`${baseUrl}/chat/completions`, {
+            // QVQ models REQUIRE stream:true — non-streaming returns 400
+            const isQvq = model.startsWith('qvq');
+            const body = {
                 model,
                 messages: [{
                     role: 'user',
@@ -217,16 +243,42 @@ async function _qwenVisionWithRotation(prompt, base64Image, mimeType, maxTokens)
                         { type: 'image_url', image_url: { url: `data:${mimeType};base64,${base64Image}` } }
                     ]
                 }],
-                max_tokens: maxTokens
-            }, {
-                headers: {
-                    'Authorization': `Bearer ${config.qwen.apiKey}`,
-                    'Content-Type': 'application/json'
-                },
-                timeout: 25000
-            });
+                max_tokens: maxTokens,
+            };
+            if (isQvq) body.stream = true;
 
-            const text = response.data?.choices?.[0]?.message?.content || '';
+            let text = '';
+            if (isQvq) {
+                // Stream response — collect chunks
+                const response = await axios.post(`${baseUrl}/chat/completions`, body, {
+                    headers: {
+                        'Authorization': `Bearer ${config.qwen.apiKey}`,
+                        'Content-Type': 'application/json'
+                    },
+                    timeout: 60000,
+                    responseType: 'text',
+                });
+                // Parse SSE lines: "data: {...}"
+                const lines = (response.data || '').split('\n');
+                for (const line of lines) {
+                    if (!line.startsWith('data: ') || line.includes('[DONE]')) continue;
+                    try {
+                        const chunk = JSON.parse(line.slice(6));
+                        const delta = chunk.choices?.[0]?.delta?.content || '';
+                        text += delta;
+                    } catch (_) { /* skip malformed chunks */ }
+                }
+            } else {
+                const response = await axios.post(`${baseUrl}/chat/completions`, body, {
+                    headers: {
+                        'Authorization': `Bearer ${config.qwen.apiKey}`,
+                        'Content-Type': 'application/json'
+                    },
+                    timeout: 25000,
+                });
+                text = response.data?.choices?.[0]?.message?.content || '';
+            }
+
             if (text.trim()) {
                 if (model !== configuredModel) {
                     console.log(`  👁️ [Qwen VL] Used rotated model: ${model}`);
@@ -236,10 +288,8 @@ async function _qwenVisionWithRotation(prompt, base64Image, mimeType, maxTokens)
         } catch (err) {
             const isTimeout = err.code === 'ECONNABORTED' || err.code === 'ETIMEDOUT' || err.message?.includes('timeout');
             const quotaErr = _isQuotaError(err);
-            const is400 = err.response?.status === 400;
-            if (quotaErr || isTimeout || is400) {
+            if (quotaErr || isTimeout) {
                 if (isTimeout) console.log(`  ⏱️ [Qwen VL] Timeout on ${model} — rotating`);
-                else if (is400) console.log(`  ⚠️ [Qwen VL] 400 Bad Request on ${model} — rotating to next`);
                 else _markModelExhausted(model, quotaErr);
                 continue; // try next model
             }

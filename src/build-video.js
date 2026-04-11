@@ -873,6 +873,24 @@ async function buildVideo() {
         log.br();
     }
 
+    // Step 6.05: AI Map Animation Planner — enrich mapChart MGs with waypoints
+    const mapMGsForPlanning = allMGs.filter(mg => mg.type === 'mapChart');
+    if (mapMGsForPlanning.length > 0) {
+        log.step('🗺️ Step 6.05: Map Animation Planner');
+        try {
+            const { planMapAnimations } = require('./ai-map-planner');
+            const enriched = await planMapAnimations(allMGs, scriptContext, combinedInstructions);
+            if (enriched > 0) {
+                log.ok(`Planned ${enriched} map animation(s) with waypoints`);
+            } else {
+                log.dim('No map animations enriched (no locations found)');
+            }
+        } catch (e) {
+            log.warn(`Map planner failed: ${e.message} — maps will use basic animation`);
+        }
+        log.br();
+    }
+
     // Step 6.06: Download static map images for mapChart MGs (via MapTiler API)
     const mapMGs = allMGs.filter(mg => mg.type === 'mapChart');
     if (mapMGs.length > 0) {
@@ -890,15 +908,22 @@ async function buildVideo() {
         }
         log.br();
 
-        // Propagate mapImageFile + _mapView from allMGs to mgScenes (mgScenes are copies)
+        // Propagate map data from allMGs to mgScenes (mgScenes are copies)
         for (const mg of fullscreenMGs) {
+            if (mg.type !== 'mapChart') continue;
+            const target = mgScenes.find(s => s.type === mg.type && s.startTime === mg.startTime);
+            if (!target) continue;
             if (mg.mapImageFile) {
-                const target = mgScenes.find(s => s.type === mg.type && s.startTime === mg.startTime);
-                if (target) {
-                    target.mapImageFile = mg.mapImageFile;
-                    target._mapView = mg._mapView;
-                }
+                target.mapImageFile = mg.mapImageFile;
+                target._mapView = mg._mapView;
+                if (mg._mapPins) target._mapPins = mg._mapPins;
+                if (mg._osmBoundaries) target._osmBoundaries = mg._osmBoundaries;
             }
+            // Waypoint animation data (from ai-map-planner.js)
+            if (mg._mapWaypoints) target._mapWaypoints = mg._mapWaypoints;
+            if (mg._bigMapSize) target._bigMapSize = mg._bigMapSize;
+            if (mg._wpCoords) target._wpCoords = mg._wpCoords;
+            if (mg._mapBigMap) target._mapBigMap = mg._mapBigMap;
         }
     }
 

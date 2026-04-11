@@ -381,6 +381,8 @@ async function preBuildReview(scenes, scriptContext) {
 
     const fullscreenMGTypes = [...FULLSCREEN_MG_TYPES].filter(t => allowed.has(t));
 
+    const userInstructions = scriptContext.directorsBrief?.freeInstructions || '';
+
     const prompt = `You are a video production orchestrator reviewing a scene plan BEFORE footage downloads begin.
 You are an expert in the "${niche.name}" niche. You deeply understand what visuals work for this type of content, what keywords will actually find good footage, and what pitfalls to avoid.
 
@@ -389,6 +391,7 @@ VIDEO CONTEXT:
 - Format: ${format} | Total scenes: ${scenes.length}
 - Entities: ${entities.join(', ') || 'none'}
 - Theme: ${themeId} | Web context available: ${scriptContext.webContext ? 'yes' : 'no'}
+${userInstructions ? `\n🔥 USER INSTRUCTIONS (HIGHEST PRIORITY — respect these):\n${userInstructions}\n` : ''}
 
 ═══════════════════════════════════════════
 NICHE PROFILE — "${niche.name}" (you MUST enforce ALL of these rules)
@@ -418,6 +421,7 @@ RULES:
 - NEVER make hook scenes (first 3-4 scenes) fullscreen MGs — they need strong visuals
 - NEVER make conclusion/CTA scenes fullscreen MGs
 - Prefer footage over fullscreen MGs when the subject is visually concrete (real products, places, people)
+- EXCEPTION: mapChart fullscreenMG should NEVER be removed. Maps are the BEST way to show geographic locations, borders, straits, trade routes, military positions, regions, and multi-country topics. If the Visual Planner assigned mapChart, KEEP IT — do NOT replace with footage.
 - If a scene lists 3+ data points or compares X vs Y with no visual subject → fullscreen MG is better
 
 KEYWORD RULES (CRITICAL — read carefully):
@@ -539,6 +543,12 @@ Output ONLY fix lines or "PLAN OK". No explanations, no summaries.`;
                     }
                     case 'REMOVE_FULLSCREEN': {
                         if (!scene.fullscreenMG) { skipped++; break; }
+                        // NEVER remove mapChart — maps are the best visual for geographic content
+                        if (scene.fullscreenMG.startsWith('mapChart')) {
+                            console.log(`      ⛔ Blocked REMOVE_FULLSCREEN for mapChart on S${sceneIdx} — maps are protected`);
+                            skipped++;
+                            break;
+                        }
                         const oldMG = scene.fullscreenMG;
                         scene.fullscreenMG = null;
                         scene.mediaType = 'video';

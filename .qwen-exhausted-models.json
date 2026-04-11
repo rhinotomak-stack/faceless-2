@@ -1,21 +1,7 @@
 {
-  "qwen-vl-ocr-2025-11-20": true,
-  "qwen-vl-max-2025-04-08": true,
-  "qwen3-vl-235b-a22b-thinking": true,
-  "qwen2.5-vl-72b-instruct": true,
-  "qwen-omni-turbo": true,
-  "qwen3.5-omni-plus": true,
-  "qwen3.5-omni-plus-2026-03-15": true,
-  "qwen3.5-omni-flash": true,
-  "qwen3.5-omni-flash-2026-03-15": true,
-  "qwen-vl-plus-latest": true,
-  "qwen3-omni-flash": true,
-  "qwen-vl-plus-2025-05-07": true,
-  "qwen3-vl-30b-a3b-thinking": true,
-  "qwen2.5-vl-7b-instruct": true,
-  "qwen2.5-vl-3b-instruct": true,
-  "qwen3-vl-235b-a22b-instruct": true,
+  "_apiKeyHash": "9b6a79d99927",
   "qwen-vl-max-latest": true,
-  "qwen-vl-max-2025-08-13": 1775647936852,
-  "qvq-max-latest": true
+  "qwen3-vl-235b-a22b-instruct": true,
+  "qvq-max-latest": true,
+  "qwen-omni-turbo": true
 }

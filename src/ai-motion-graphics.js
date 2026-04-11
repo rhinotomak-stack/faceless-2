@@ -1097,10 +1097,21 @@ function buildPrompt(scene, sceneIndex, totalScenes, scriptContext, sceneVisual,
         donutChart: 'donutChart: Percentage breakdown (max 1 per video). E.g. "market share"',
         timeline: 'timeline: Historical progression (max 1 per video). E.g. "from 2010 to 2024"',
         mapChart: `mapChart: Geographic data with locations/regions (max 1 per video).
+  VARIANTS (pick best fit via mapVariant field):
+  - "locator": Single location spotlight with country highlight + pin (best for "where is X?")
+  - "route": Flight arcs between 2+ locations (best for travel, trade routes, military movements)
+  - "regionHighlight": Country/region polygon fill (best for "this country...", borders, territories)
+  - "comparison": Multiple locations with values side by side (best for rankings, statistics)
+  If no mapVariant specified, renderer auto-detects from pin count.
   text: Main topic as title (max 8 words). E.g. "Top oil producers worldwide"
   subtext: MUST list locations with data as "Location: value" pairs, comma-separated.
-  Example: "Saudi Arabia: 12M bpd, United States: 11.3M bpd, Russia: 10.8M bpd, Canada: 5.3M bpd"
-  Use real or approximate data from the narration. If no numbers mentioned, use ranking: "Canada: #4, Saudi Arabia: #1"`,
+  IMPORTANT: Use the MOST SPECIFIC location name possible — cities > countries.
+  - If narration mentions "Berlin" → use "Berlin" not "Germany"
+  - If narration mentions "Silicon Valley" → use "Silicon Valley" not "United States"
+  - If narration mentions "Tokyo" → use "Tokyo" not "Japan"
+  - Only use country names when no specific city/region is mentioned.
+  Example: "Riyadh: 12M bpd, Houston: 11.3M bpd, Moscow: 10.8M bpd, Calgary: 5.3M bpd"
+  Use real or approximate data from the narration. If no numbers mentioned, use ranking: "Calgary: #4, Riyadh: #1"`,
         kineticText: 'kineticText: Powerful short statement, word-by-word reveal (max 1 per video). E.g. "The Future Is Now"',
         typewriter: 'typewriter: Character-by-character text reveal with blinking cursor (max 2 per video). Best for quotes, key facts, or dramatic statements. E.g. "He never performed again"',
         explainer: `explainer: Visual explainer for tools, products, or concepts (max 3 per video).
@@ -1153,12 +1164,15 @@ TIMING — triggerWord:
     }
 
     const allowedTypesList = [...candidateTypes, 'none'].join('|');
-    prompt += `\n\nReply ONLY with these 5 lines (nothing else):
+    prompt += `\n\nReply ONLY with these lines (nothing else):
 type: <${allowedTypesList}>
 text: <display text, max 8 words, extracted from narration>
 subtext: <secondary line OR "label1:value1,label2:value2" for charts, or "none">
 position: <center|bottom-left|bottom-right|center-left|top-right>
 triggerWord: <the exact word from narration that triggers appearance, or "none">`;
+    if (candidateTypes.includes('mapChart')) {
+        prompt += `\nmapVariant: <locator|route|regionHighlight|comparison> (ONLY if type is mapChart)`;
+    }
 
     // Language instruction — written last so it overrides default English behavior.
     // Affects: `text` and `subtext` fields (user-facing). `type`/`position`/`triggerWord`
@@ -1176,6 +1190,7 @@ function parseResponse(text, scene, sceneIndex) {
     let subtext = '';
     let aiPosition = '';
     let triggerWord = '';
+    let mapVariant = '';
 
     const typeMap = {
         'headline': 'headline',
@@ -1273,6 +1288,14 @@ function parseResponse(text, scene, sceneIndex) {
             triggerWord = triggerMatch[1].trim().replace(/['"*]/g, '');
             if (triggerWord.toLowerCase() === 'none' || triggerWord === '-') triggerWord = '';
         }
+
+        // Map variant (optional, only for mapChart)
+        const variantMatch = lower.match(/^map\s*-?\s*variant\s*[:=\-]\s*(.+)/);
+        if (variantMatch) {
+            const v = variantMatch[1].trim().replace(/['"*]/g, '').toLowerCase();
+            const variantMap = { locator: 'locator', route: 'route', regionhighlight: 'regionHighlight', region_highlight: 'regionHighlight', comparison: 'comparison' };
+            mapVariant = variantMap[v] || '';
+        }
     }
 
     // Fallback: scan full text for type keywords if parser missed them
@@ -1355,7 +1378,7 @@ function parseResponse(text, scene, sceneIndex) {
     const validPositions = ['center', 'bottom-left', 'bottom-right', 'center-left', 'top-right', 'top-left'];
     const finalPosition = validPositions.includes(aiPosition) ? aiPosition : (POSITION_MAP[type] || 'center');
 
-    return {
+    const result = {
         id: `mg-${sceneIndex}`,
         type: type,
         category: FULLSCREEN_MG_TYPES.has(type) ? 'fullscreen' : 'overlay',
@@ -1367,6 +1390,8 @@ function parseResponse(text, scene, sceneIndex) {
         sceneIndex: sceneIndex,
         style: 'clean' // will be overridden by chosen style
     };
+    if (type === 'mapChart' && mapVariant) result.mapVariant = mapVariant;
+    return result;
 }
 
 // ============ BATCH FALLBACK ============
@@ -1587,7 +1612,7 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
             mg.subType = catOverride?.style || reg.defaultType;
             if (catOverride?.anim) mg.animation = catOverride.anim;
         }
-        if (mgType === 'mapChart') mg.mapStyle = mapStyle;
+        if (mgType === 'mapChart') { mg.mapStyle = mapStyle; if (mg.mapVariant) mg.subType = mg.mapVariant; }
 
         results.push(mg);
         fullscreenMGSceneIndices.add(i);
@@ -1723,6 +1748,7 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
                     mg.subType = catOverride?.style || reg.defaultType;
                     if (catOverride?.anim) mg.animation = catOverride.anim;
                 }
+                if (mg.type === 'mapChart' && mg.mapVariant) mg.subType = mg.mapVariant;
 
                 // Post-process explainer: set search query and label
                 if (mg.type === 'explainer') {
@@ -1813,6 +1839,7 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
                     mg.subType = catOvr?.style || catReg.defaultType;
                     if (catOvr?.anim) mg.animation = catOvr.anim;
                 }
+                if (mg.type === 'mapChart' && mg.mapVariant) mg.subType = mg.mapVariant;
                 if (mg.startTime + mg.duration > totalDuration) {
                     mg.duration = Math.max(1, totalDuration - mg.startTime);
                 }

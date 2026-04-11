@@ -454,7 +454,7 @@ let mainWindow;
 // ========================================
 // Create Window
 // ========================================
-function createWindow() {
+async function createWindow() {
     mainWindow = new BrowserWindow({
         width: 1400,
         height: 900,
@@ -472,7 +472,8 @@ function createWindow() {
     });
 
     // Disable caching so CSS/JS changes are picked up immediately
-    mainWindow.webContents.session.clearCache().catch(() => {});
+    await mainWindow.webContents.session.clearCache().catch(() => {});
+    await mainWindow.webContents.session.clearCodeCaches({}).catch(() => {});
 
     // Set window title with project name
     if (PROJECT_NAME) {

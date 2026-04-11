@@ -225,6 +225,111 @@
                         </div>
                     </div>
 
+                    <!-- Map Test Panel (dev tool) -->
+                    <div style="margin-top:12px;padding:10px;background:#0f1a1a;border:1px solid #1a3a3a;border-radius:6px;">
+                        <div style="font-size:12px;color:#00d4ff;margin-bottom:8px;cursor:pointer;" onclick="document.getElementById('map-test-body').style.display=document.getElementById('map-test-body').style.display==='none'?'block':'none'">🗺️ Map Preview Test ▾</div>
+                        <div id="map-test-body" style="display:none;">
+                            <input type="text" id="map-test-locations" placeholder="Iran 0-6, Strait of Hormuz 6-14, USA 14-20  (or just: Berlin, Tokyo)" style="width:100%;padding:6px;background:#0a0f1a;color:#ddd;border:1px solid #1a3a4a;border-radius:4px;font-size:11px;box-sizing:border-box;">
+                            <div style="display:flex;gap:6px;margin-top:6px;align-items:center;">
+                                <select id="map-test-style" style="flex:1;padding:4px;background:#0a0f1a;color:#ddd;border:1px solid #1a3a4a;border-radius:4px;font-size:11px;">
+                                    <option value="dark">Dark</option>
+                                    <option value="natural">Natural</option>
+                                    <option value="satellite">Satellite</option>
+                                    <option value="light">Light</option>
+                                    <option value="political">Political</option>
+                                </select>
+                                <input type="text" id="map-test-title" placeholder="Title (optional)" style="flex:2;padding:4px;background:#0a0f1a;color:#ddd;border:1px solid #1a3a4a;border-radius:4px;font-size:11px;">
+                                <button id="btn-map-test" style="padding:4px 14px;font-size:11px;background:#0a2a3a;color:#00d4ff;border:1px solid #00d4ff44;border-radius:4px;cursor:pointer;white-space:nowrap;">▶ Preview</button>
+                            </div>
+                            <div style="display:flex;align-items:center;gap:6px;margin-top:6px;">
+                                <span style="font-size:10px;color:#888;min-width:54px;">Duration</span>
+                                <input type="range" id="map-duration" min="5" max="30" step="1" value="7" style="flex:1;accent-color:#00d4ff;height:14px;">
+                                <span id="map-duration-val" style="font-size:10px;color:#00d4ff;min-width:28px;text-align:right;">7s</span>
+                            </div>
+                            <div id="map-test-status" style="font-size:10px;color:#666;margin-top:4px;"></div>
+                            <!-- Map animation sliders -->
+                            <div style="margin-top:8px;display:flex;flex-direction:column;gap:4px;">
+                                <div style="display:flex;align-items:center;gap:6px;">
+                                    <span style="font-size:10px;color:#888;min-width:72px;">Zoom Speed</span>
+                                    <input type="range" id="map-zoom-speed" min="0.3" max="3" step="0.1" value="1" style="flex:1;accent-color:#00d4ff;height:14px;">
+                                    <span id="map-zoom-speed-val" style="font-size:10px;color:#00d4ff;min-width:28px;text-align:right;">1.0×</span>
+                                </div>
+                                <div style="display:flex;align-items:center;gap:6px;">
+                                    <span style="font-size:10px;color:#888;min-width:72px;">Polygon Speed</span>
+                                    <input type="range" id="map-poly-speed" min="0.3" max="3" step="0.1" value="1" style="flex:1;accent-color:#00d4ff;height:14px;">
+                                    <span id="map-poly-speed-val" style="font-size:10px;color:#00d4ff;min-width:28px;text-align:right;">1.0×</span>
+                                </div>
+                                <div style="display:flex;align-items:center;gap:6px;">
+                                    <span style="font-size:10px;color:#888;min-width:72px;">Easing</span>
+                                    <select id="map-easing" style="flex:1;padding:3px;background:#0a0f1a;color:#ddd;border:1px solid #1a3a4a;border-radius:4px;font-size:10px;">
+                                        <option value="cubic">Cubic (smooth)</option>
+                                        <option value="elastic">Elastic (bounce)</option>
+                                        <option value="expo">Expo (snappy)</option>
+                                        <option value="linear">Linear</option>
+                                    </select>
+                                </div>
+                                <div style="display:flex;align-items:center;gap:6px;">
+                                    <span style="font-size:10px;color:#888;min-width:72px;">Poly Color</span>
+                                    <select id="map-poly-color" style="flex:1;padding:3px;background:#0a0f1a;color:#ddd;border:1px solid #1a3a4a;border-radius:4px;font-size:10px;">
+                                        <option value="auto">Auto (match style)</option>
+                                        <option value="cyan" style="color:#00d4ff;">Cyan</option>
+                                        <option value="red" style="color:#ff3030;">Red</option>
+                                        <option value="green" style="color:#30ff60;">Green</option>
+                                        <option value="gold" style="color:#f0c040;">Gold</option>
+                                        <option value="magenta" style="color:#ff40ff;">Magenta</option>
+                                        <option value="orange" style="color:#ff8020;">Orange</option>
+                                        <option value="white" style="color:#ffffff;">White</option>
+                                        <option value="blue" style="color:#4080ff;">Blue</option>
+                                    </select>
+                                </div>
+                                <div style="font-size:10px;color:#666;margin-top:4px;margin-bottom:2px;">Keyframes (Start → End)</div>
+                                <div style="display:flex;align-items:center;gap:6px;">
+                                    <span style="font-size:10px;color:#888;min-width:72px;">3D Tilt</span>
+                                    <input type="range" id="map-tilt-start" min="0" max="1" step="0.05" value="0" style="flex:1;accent-color:#00d4ff;height:14px;" title="Start tilt">
+                                    <span style="font-size:10px;color:#555;">→</span>
+                                    <input type="range" id="map-tilt-end" min="0" max="1" step="0.05" value="0.5" style="flex:1;accent-color:#00d4ff;height:14px;" title="End tilt">
+                                    <span id="map-tilt-val" style="font-size:10px;color:#00d4ff;min-width:48px;text-align:right;">0→50%</span>
+                                </div>
+                                <div style="display:flex;align-items:center;gap:6px;">
+                                    <span style="font-size:10px;color:#888;min-width:72px;">Zoom</span>
+                                    <input type="range" id="map-zoom-start" min="0.5" max="1.5" step="0.05" value="0.8" style="flex:1;accent-color:#00d4ff;height:14px;" title="Start zoom">
+                                    <span style="font-size:10px;color:#555;">→</span>
+                                    <input type="range" id="map-zoom-end" min="0.5" max="1.5" step="0.05" value="1.0" style="flex:1;accent-color:#00d4ff;height:14px;" title="End zoom">
+                                    <span id="map-zoom-kf-val" style="font-size:10px;color:#00d4ff;min-width:48px;text-align:right;">.8→1.0</span>
+                                </div>
+                                <div style="display:flex;align-items:center;gap:6px;">
+                                    <span style="font-size:10px;color:#888;min-width:72px;">Pan X</span>
+                                    <input type="range" id="map-pan-x-start" min="-200" max="200" step="5" value="0" style="flex:1;accent-color:#00d4ff;height:14px;" title="Start pan X">
+                                    <span style="font-size:10px;color:#555;">→</span>
+                                    <input type="range" id="map-pan-x-end" min="-200" max="200" step="5" value="0" style="flex:1;accent-color:#00d4ff;height:14px;" title="End pan X">
+                                    <span id="map-pan-x-val" style="font-size:10px;color:#00d4ff;min-width:48px;text-align:right;">0→0</span>
+                                </div>
+                                <div style="display:flex;align-items:center;gap:6px;">
+                                    <span style="font-size:10px;color:#888;min-width:72px;">Pan Y</span>
+                                    <input type="range" id="map-pan-y-start" min="-200" max="200" step="5" value="0" style="flex:1;accent-color:#00d4ff;height:14px;" title="Start pan Y">
+                                    <span style="font-size:10px;color:#555;">→</span>
+                                    <input type="range" id="map-pan-y-end" min="-200" max="200" step="5" value="0" style="flex:1;accent-color:#00d4ff;height:14px;" title="End pan Y">
+                                    <span id="map-pan-y-val" style="font-size:10px;color:#00d4ff;min-width:48px;text-align:right;">0→0</span>
+                                </div>
+                                <div style="display:flex;align-items:center;gap:6px;">
+                                    <span style="font-size:10px;color:#888;min-width:72px;">Variant</span>
+                                    <select id="map-variant" style="flex:1;padding:3px;background:#0a0f1a;color:#ddd;border:1px solid #1a3a4a;border-radius:4px;font-size:10px;">
+                                        <option value="auto">Auto-detect</option>
+                                        <option value="locator">Locator</option>
+                                        <option value="route">Route</option>
+                                        <option value="regionHighlight">Region Highlight</option>
+                                        <option value="comparison">Comparison</option>
+                                    </select>
+                                </div>
+                                <div style="display:flex;align-items:center;gap:6px;margin-top:4px;">
+                                    <label style="font-size:10px;color:#888;min-width:72px;cursor:pointer;" for="map-cinematic">Cinematic</label>
+                                    <input type="checkbox" id="map-cinematic" style="accent-color:#00d4ff;cursor:pointer;">
+                                    <span style="font-size:9px;color:#555;">Overview → Fast zoom → 3D orbit</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
                     <label style="margin-top:12px">Cinematic Scale:</label>
                     <div style="display:flex;align-items:center;gap:8px">
                         <input type="range" id="cinematic-scale" min="0.4" max="1" step="0.05" value="0.65" style="flex:1">
