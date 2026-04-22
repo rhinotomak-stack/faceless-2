@@ -14,11 +14,18 @@ class MGRenderer {
         this._canvas.width = 1920;
         this._canvas.height = 1080;
         this._ctx = this._canvas.getContext('2d', { willReadFrequently: false });
+        this._shadowCanvas = document.createElement('canvas');
+        this._shadowCanvas.width = 1920;
+        this._shadowCanvas.height = 1080;
+        this._shadowCtx = this._shadowCanvas.getContext('2d', { willReadFrequently: false });
         // Preview scale (1.0 = full, 0.5 = half-res for faster Canvas2D)
         this._previewScale = 1.0;
         // Cache for loaded map images (mapImageFile → HTMLImageElement)
         this._mapImages = {};
         this._mapImageLoading = {};
+        // Cache for loaded map waypoint icons (keyword → HTMLImageElement)
+        this._mapIcons = {};
+        this._mapIconLoading = {};
         // Cache for loaded explainer images (explainerImageFile → HTMLImageElement)
         this._explainerImages = {};
         this._explainerImageLoading = {};
@@ -50,7 +57,7 @@ class MGRenderer {
             kineticText:    (ctx, f, fps, mg, s, a, sc) => this._renderKineticText(ctx, f, fps, mg, s, a),
             typewriter:     (ctx, f, fps, mg, s, a, sc) => this._renderTypewriter(ctx, f, fps, mg, s, a),
             subscribeCTA:   (ctx, f, fps, mg, s, a, sc) => this._renderSubscribeCTA(ctx, f, fps, mg, s, a),
-            mapChart:       (ctx, f, fps, mg, s, a, sc) => { this._ensureMapImage(mg); this._renderMapChart(ctx, f, fps, mg, s, a, sc); },
+            mapChart:       (ctx, f, fps, mg, s, a, sc) => { this._ensureMapImage(mg); this._ensureMapIcons(mg); this._renderMapChart(ctx, f, fps, mg, s, a, sc); },
             explainer:      (ctx, f, fps, mg, s, a, sc) => { this._ensureExplainerImage(mg); this._renderExplainer(ctx, f, fps, mg, s, a, sc); },
             articleHighlight: (ctx, f, fps, mg, s, a, sc) => { this._ensureArticleImage(mg); this._renderArticleHighlight(ctx, f, fps, mg, s, a); },
             listicleCounter: (ctx, f, fps, mg, s, a, sc) => this._renderListicleCounter(ctx, f, fps, mg, s, a),
@@ -68,6 +75,8 @@ class MGRenderer {
             imageShowcase:   (ctx, f, fps, mg, s, a, sc) => { this._ensureTemplateMedia(mg); this._ensureGridThumbnails(mg); this._renderImageShowcase(ctx, f, fps, mg, s, a); },
             statCard:        (ctx, f, fps, mg, s, a, sc) => { this._ensureTemplateMedia(mg); this._ensureTemplateBgImage(mg); this._renderStatCard(ctx, f, fps, mg, s, a); },
             personIntro:     (ctx, f, fps, mg, s, a, sc) => { this._ensureGridThumbnails(mg); this._renderPersonIntro(ctx, f, fps, mg, s, a); },
+            splitScreen:     (ctx, f, fps, mg, s, a, sc) => { this._ensureGridThumbnails(mg); this._renderSplitScreen(ctx, f, fps, mg, s, a); },
+            infographic:     (ctx, f, fps, mg, s, a, sc) => { this._ensureGridThumbnails(mg); this._renderInfographic(ctx, f, fps, mg, s, a); },
         };
 
         // Variant renderers: 'category:variant' → function(ctx, mg, s, anim, a, setup)
@@ -165,6 +174,12 @@ class MGRenderer {
             this._canvas.height = h;
             console.log(`[MGRenderer] Canvas resized to ${w}x${h} (scale: ${this._previewScale})`);
         }
+        // Shadow canvas must match so the shadow pass doesn't pack content into the top-left
+        // (overlay MGs were rendering small + at 0,0 when shadow canvas stayed at 1920×1080)
+        if (this._shadowCanvas && (this._shadowCanvas.width !== w || this._shadowCanvas.height !== h)) {
+            this._shadowCanvas.width = w;
+            this._shadowCanvas.height = h;
+        }
     }
 
     /**
@@ -202,6 +217,34 @@ class MGRenderer {
             };
             wpImg.onerror = () => { delete this._mapImageLoading[wpFile]; };
             wpImg.src = wpTileUrls[key];
+        }
+    }
+
+    /**
+     * Lazily load map waypoint icons. Non-blocking.
+     * Uses _mapIcons from build pipeline (file paths) or icon URLs.
+     */
+    _ensureMapIcons(mg) {
+        const icons = mg._mapIcons;
+        if (!icons || typeof icons !== 'object') return;
+        for (const [name, iconPath] of Object.entries(icons)) {
+            const key = `__mapicon_${name}`;
+            if (this._mapIcons[key] || this._mapIconLoading[key]) continue;
+            this._mapIconLoading[key] = true;
+            const img = new Image();
+            img.onload = () => {
+                this._mapIcons[key] = img;
+                delete this._mapIconLoading[key];
+            };
+            img.onerror = () => { delete this._mapIconLoading[key]; };
+            // iconPath is a local file path or URL
+            if (iconPath.startsWith('http') || iconPath.startsWith('data:') || iconPath.startsWith('file:')) {
+                img.src = iconPath;
+            } else if (window.electronAPI?.getFileUrl) {
+                window.electronAPI.getFileUrl(iconPath).then(url => { if (url) img.src = url; });
+            } else {
+                img.src = `file:///${iconPath.replace(/\\/g, '/')}`;
+            }
         }
     }
 
@@ -507,7 +550,8 @@ class MGRenderer {
 
         // Upload the canvas to a WebGL texture
         const texId = `mg-${mg.type}-${mg._startFrame || 0}`;
-        return this.textureManager.createOrUpdate(texId, this._canvas);
+        const finalCanvas = this._applyOverlayShadowPass(mg) || this._canvas;
+        return this.textureManager.createOrUpdate(texId, finalCanvas);
     }
 
     // ========================================================================
@@ -525,7 +569,16 @@ class MGRenderer {
         if (typeof getStyledThemeColors === 'function') {
             styled = getStyledThemeColors(styleName);
         }
-        const s = styled ? { ...baseS, ...styled } : { ...baseS };
+        // When the user manually picks a style from the dropdown, the MG_STYLES
+        // preset colors (bold=red/yellow, cinematic=gold/silver, neon=green/magenta)
+        // must dominate over the theme's modified colors — otherwise every style
+        // just looks like a slightly different tint of the same theme hue and the
+        // dropdown appears "stuck".
+        // Auto-placed MGs keep the existing behavior (theme dominates) so they
+        // blend with the theme's color identity.
+        const s = styled
+            ? (mg?.styleManual ? { ...styled, ...baseS } : { ...baseS, ...styled })
+            : { ...baseS };
 
         if (typeof getActiveThemeFonts === 'function') {
             const tf = getActiveThemeFonts();
@@ -556,6 +609,76 @@ class MGRenderer {
         }
 
         return s;
+    }
+
+    _getCategoryOverride(mg, s, category) {
+        const ov = s._mgOverrides?.[category];
+        if (!ov) return null;
+        return ov;
+    }
+
+    _shouldIgnoreThemeVariant(mg, ov) {
+        return !!(mg?.styleManual && !mg?.variantManual && ov?.style && mg?.subType === ov.style);
+    }
+
+    _shouldIgnoreThemeAnimation(mg, ov) {
+        return !!(mg?.styleManual && !mg?.animationManual && ov?.anim && mg?.animation === ov.anim);
+    }
+
+    _shouldApplyOverlayShadow(mg) {
+        if (!MGRenderer._overlayShadowExcludedTypes) {
+            MGRenderer._overlayShadowExcludedTypes = new Set([
+                'barChart', 'donutChart', 'rankingList', 'timeline', 'comparisonCard', 'bulletList',
+                'mapChart', 'articleHighlight', 'kineticText', 'listicleGrid',
+                'chapterCard', 'locationCard', 'quoteCard', 'keyTakeaway', 'timelineCard',
+                'factCard', 'imageShowcase', 'statCard', 'personIntro', 'splitScreen', 'infographic',
+            ]);
+        }
+        return !mg?.isMGScene && !mg?.templateType && !MGRenderer._overlayShadowExcludedTypes.has(mg?.type);
+    }
+
+    _getOverlayShadowStrength(mg) {
+        const raw = mg?.overlayShadowStrength ?? mg?._overlayShadowStrength;
+        const parsed = Number.parseFloat(raw);
+        if (!Number.isFinite(parsed)) return 0.55;
+        return Math.max(0, Math.min(1, parsed));
+    }
+
+    _applyOverlayShadowPass(mg) {
+        if (!this._shouldApplyOverlayShadow(mg)) return null;
+        const strength = this._getOverlayShadowStrength(mg);
+        if (strength <= 0.001) return null;
+
+        const ctx = this._shadowCtx;
+        // Identity transform — shadow canvas is sized to match _canvas (1920*s × 1080*s),
+        // so we copy pixel-for-pixel and scale shadow params by preview scale to keep
+        // the visual weight consistent across Full/Half previews.
+        const s_ = this._previewScale || 1.0;
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.clearRect(0, 0, this._shadowCanvas.width, this._shadowCanvas.height);
+        ctx.globalCompositeOperation = 'source-over';
+
+        // Pass 1 — wide soft halo (ambient occlusion feel)
+        ctx.shadowColor = `rgba(0,0,0,${(0.20 + strength * 0.35).toFixed(3)})`;
+        ctx.shadowBlur = (24 + strength * 56) * s_;    // 24 → 80 px (in 1920 coords)
+        ctx.shadowOffsetX = 0;
+        ctx.shadowOffsetY = (6 + strength * 14) * s_;  // 6 → 20 px
+        ctx.drawImage(this._canvas, 0, 0);
+
+        // Pass 2 — tighter contact shadow (grounds the card)
+        ctx.shadowColor = `rgba(0,0,0,${(0.12 + strength * 0.25).toFixed(3)})`;
+        ctx.shadowBlur = (6 + strength * 14) * s_;
+        ctx.shadowOffsetX = 0;
+        ctx.shadowOffsetY = (2 + strength * 4) * s_;
+        ctx.drawImage(this._canvas, 0, 0);
+
+        // Final pass — content itself, no shadow
+        ctx.shadowColor = 'transparent';
+        ctx.shadowBlur = 0;
+        ctx.shadowOffsetX = 0;
+        ctx.shadowOffsetY = 0;
+        ctx.drawImage(this._canvas, 0, 0);
+        return this._shadowCanvas;
     }
 
     // ========================================================================
@@ -878,14 +1001,15 @@ class MGRenderer {
     _renderHeadline(ctx, frame, fps, mg, s, anim) {
         const variant = this._resolveVariant(mg, s, 'headline');
         const animType = this._resolveAnimation(mg, s, 'headline');
-        const colors = this._resolveColors(s, 'headline');
+        const colors = this._resolveColors(s, 'headline', mg);
+        const ls = this._getHeadlineStyle(mg);
 
         // Shared position computation
         const position = mg.position || 'center';
         const isLeft = position.includes('left');
         const isRight = position.includes('right');
 
-        MGRenderer._setFont(ctx, '900', 72, s.fontHeading);
+        MGRenderer._setFont(ctx, ls.titleWeight, ls.titleSize, s.fontHeading);
         const textW = ctx.measureText(mg.text || '').width;
         const contentW = Math.max(800, textW + 40);
         const pos = MGRenderer._getPosXY(position, contentW, 200);
@@ -909,7 +1033,7 @@ class MGRenderer {
         ctx.globalAlpha = Math.min(1, anim.isExiting ? anim.exitProgress : anim.opacity);
 
         this._dispatchVariant(ctx, 'headline', variant, mg, s, anim, a,
-            { cx, cy, textAlign, contentW, colors, frame, fps });
+            { cx, cy, textAlign, contentW, colors, ls, frame, fps });
 
         ctx.restore();
     }
@@ -922,33 +1046,43 @@ class MGRenderer {
         const blur = a.blur || 0;
         const barWidth = (a.barSpring || 0) * 300;
         const subOpacity = isExiting ? exitProgress : (a.subSpring || 0);
+        const ls = p.ls;
 
         ctx.translate(p.cx, p.cy + translateY);
         ctx.scale(scale * idleScale, scale * idleScale);
 
         if (blur > 0.5) ctx.filter = `blur(${blur.toFixed(1)}px)`;
 
-        ctx.fillStyle = p.colors?.textFill || s.text;
+        ctx.fillStyle = ls.textFill || p.colors?.textFill || s.text;
         ctx.textAlign = p.textAlign;
         ctx.textBaseline = 'middle';
-        MGRenderer._setFont(ctx, '900', 72, s.fontHeading);
-        MGRenderer._drawTextShadowed(ctx, mg.text || '', 0, -30, s, true);
+        MGRenderer._setFont(ctx, ls.titleWeight, ls.titleSize, s.fontHeading);
+
+        // Optional outline stroke (bold style) behind the shadowed fill
+        if (ls.outline && ls.outlineWidth > 0) {
+            ctx.strokeStyle = ls.outline;
+            ctx.lineWidth = ls.outlineWidth;
+            ctx.lineJoin = 'round';
+            ctx.miterLimit = 2;
+            ctx.strokeText(mg.text || '', 0, -30);
+        }
+        MGRenderer._drawHeadlineText(ctx, mg.text || '', 0, -30, ls, false);
 
         ctx.filter = 'none';
 
         if (barWidth > 1) {
             const barX = p.textAlign === 'right' ? -barWidth : p.textAlign === 'center' ? -barWidth / 2 : 0;
-            const barC1 = p.colors?.accentFill || s.primary;
-            const barC2 = p.colors?.accentFill || s.accent;
+            const barC1 = ls.accentFill || p.colors?.accentFill || s.primary;
+            const barC2 = ls.accentFill || p.colors?.accentFill || s.accent;
             MGRenderer._drawGradientRect(ctx, barX, 15, barWidth, 4, barC1, barC2);
         }
 
         if (mg.subtext && subOpacity > 0.01) {
             ctx.globalAlpha = Math.min(1, opacity) * subOpacity;
-            MGRenderer._setFont(ctx, '500', 26, s.fontBody);
-            ctx.fillStyle = p.colors?.accentFill || s.accent;
+            MGRenderer._setFont(ctx, ls.subWeight, ls.subSize, s.fontBody);
+            ctx.fillStyle = ls.subFill || p.colors?.accentFill || s.accent;
             ctx.textAlign = p.textAlign;
-            MGRenderer._drawTextShadowed(ctx, mg.subtext, 0, 50, s, false);
+            MGRenderer._drawHeadlineText(ctx, mg.subtext, 0, 50, ls, true);
         }
     }
 
@@ -959,26 +1093,30 @@ class MGRenderer {
         const stampScale = a.stampScale || 1;
         const stampAlpha = a.stampAlpha || 1;
         const subOpacity = isExiting ? exitProgress : (a.subSpring || 0);
+        const ls = p.ls;
+        // Stamp is always bolder and bigger than standard
+        const tWeight = '900';
+        const tSize = Math.max(ls.titleSize, 82);
 
         ctx.translate(p.cx, p.cy);
         ctx.scale(stampScale * idleScale, stampScale * idleScale);
         ctx.globalAlpha = Math.min(1, opacity) * stampAlpha;
 
-        // Bold outline/shadow for stamp effect
-        const accentColor = p.colors?.accentFill || s.primary;
-        MGRenderer._setFont(ctx, '900', 82, s.fontHeading);
+        const accentColor = ls.accentFill || p.colors?.accentFill || s.primary;
+        MGRenderer._setFont(ctx, tWeight, tSize, s.fontHeading);
         ctx.textAlign = p.textAlign;
         ctx.textBaseline = 'middle';
 
-        // Thick stroke outline
-        ctx.strokeStyle = accentColor;
-        ctx.lineWidth = 6;
+        // Thick stroke outline (accent color by default — hallmark of Stamp)
+        ctx.strokeStyle = ls.outline || accentColor;
+        ctx.lineWidth = ls.outlineWidth && ls.outlineWidth > 0 ? Math.max(ls.outlineWidth, 6) : 6;
         ctx.lineJoin = 'round';
+        ctx.miterLimit = 2;
         ctx.strokeText(mg.text || '', 0, -20);
 
-        // Fill
-        ctx.fillStyle = p.colors?.textFill || s.text;
-        ctx.fillText(mg.text || '', 0, -20);
+        // Shadowed fill on top
+        ctx.fillStyle = ls.textFill || p.colors?.textFill || s.text;
+        MGRenderer._drawHeadlineText(ctx, mg.text || '', 0, -20, ls, false);
 
         // Accent line below
         const lineW = ctx.measureText(mg.text || '').width * 0.8;
@@ -988,10 +1126,10 @@ class MGRenderer {
 
         if (mg.subtext && subOpacity > 0.01) {
             ctx.globalAlpha = Math.min(1, opacity) * subOpacity;
-            MGRenderer._setFont(ctx, '600', 28, s.fontBody);
-            ctx.fillStyle = p.colors?.accentFill || s.accent;
+            MGRenderer._setFont(ctx, ls.subWeight, Math.max(ls.subSize, 28), s.fontBody);
+            ctx.fillStyle = ls.subFill || p.colors?.accentFill || s.accent;
             ctx.textAlign = p.textAlign;
-            ctx.fillText(mg.subtext, 0, 60);
+            MGRenderer._drawHeadlineText(ctx, mg.subtext, 0, 60, ls, true);
         }
     }
 
@@ -1003,15 +1141,19 @@ class MGRenderer {
         const charCount = Math.floor(fullText.length * Math.min(1, revealPct));
         const visibleText = fullText.substring(0, charCount);
         const subOpacity = isExiting ? exitProgress : (a.subSpring || 0);
+        const ls = p.ls;
+        // Typewriter uses a slightly lighter weight than standard headline
+        const tWeight = (ls.titleWeight === '900') ? '700' : ls.titleWeight;
+        const tSize = Math.round(ls.titleSize * 0.94);
 
         ctx.translate(p.cx, p.cy);
         ctx.scale(idleScale, idleScale);
 
-        MGRenderer._setFont(ctx, '700', 68, s.fontHeading);
-        ctx.fillStyle = p.colors?.textFill || s.text;
+        MGRenderer._setFont(ctx, tWeight, tSize, s.fontHeading);
+        ctx.fillStyle = ls.textFill || p.colors?.textFill || s.text;
         ctx.textAlign = p.textAlign;
         ctx.textBaseline = 'middle';
-        MGRenderer._drawTextShadowed(ctx, visibleText, 0, -25, s, true);
+        MGRenderer._drawHeadlineText(ctx, visibleText, 0, -25, ls, false);
 
         // Blinking cursor
         const cursorW = ctx.measureText(visibleText).width;
@@ -1021,17 +1163,17 @@ class MGRenderer {
                 const cursorX = p.textAlign === 'left' ? cursorW + 4
                     : p.textAlign === 'right' ? 4
                     : cursorW / 2 + 4;
-                ctx.fillStyle = p.colors?.accentFill || s.primary;
+                ctx.fillStyle = ls.accentFill || p.colors?.accentFill || s.primary;
                 ctx.fillRect(cursorX, -55, 3, 60);
             }
         }
 
         if (mg.subtext && subOpacity > 0.01) {
             ctx.globalAlpha = Math.min(1, opacity) * subOpacity;
-            MGRenderer._setFont(ctx, '500', 26, s.fontBody);
-            ctx.fillStyle = p.colors?.accentFill || s.accent;
+            MGRenderer._setFont(ctx, ls.subWeight, ls.subSize, s.fontBody);
+            ctx.fillStyle = ls.subFill || p.colors?.accentFill || s.accent;
             ctx.textAlign = p.textAlign;
-            MGRenderer._drawTextShadowed(ctx, mg.subtext, 0, 50, s, false);
+            MGRenderer._drawHeadlineText(ctx, mg.subtext, 0, 50, ls, true);
         }
     }
 
@@ -1072,11 +1214,11 @@ class MGRenderer {
     }
 
     // ── Resolve variant for any category ──
-    // Priority: mg.subType (user) > theme override > style preset > registry default
+    // Priority: manual/user variant > theme override > style preset > registry default
     _resolveVariant(mg, s, category) {
-        if (mg.subType) return mg.subType;
-        const ov = s._mgOverrides?.[category];
-        if (ov?.style) return ov.style;
+        const ov = this._getCategoryOverride(mg, s, category);
+        if (mg.subType && !this._shouldIgnoreThemeVariant(mg, ov)) return mg.subType;
+        if (!mg.styleManual && ov?.style) return ov.style;
         // Category-specific style preset fallback (lowerThird has lowerThirdStyle)
         if (category === 'lowerThird' && s.lowerThirdStyle) return s.lowerThirdStyle;
         // Registry default
@@ -1086,9 +1228,9 @@ class MGRenderer {
 
     // ── Resolve animation for any category ──
     _resolveAnimation(mg, s, category) {
-        if (mg.animation) return mg.animation;
-        const ov = s._mgOverrides?.[category];
-        if (ov?.anim) return ov.anim;
+        const ov = this._getCategoryOverride(mg, s, category);
+        if (mg.animation && !this._shouldIgnoreThemeAnimation(mg, ov)) return mg.animation;
+        if (!mg.styleManual && ov?.anim) return ov.anim;
         if (category === 'lowerThird' && s.lowerThirdAnimation) return s.lowerThirdAnimation;
         const reg = window._mgRegistry?.registry?.[category];
         const subType = this._resolveVariant(mg, s, category);
@@ -1096,7 +1238,8 @@ class MGRenderer {
     }
 
     // ── Resolve colors for any category ──
-    _resolveColors(s, category) {
+    _resolveColors(s, category, mg) {
+        if (mg?.styleManual) return null;
         return s._mgOverrides?.[category]?.colors || null;
     }
 
@@ -1147,13 +1290,13 @@ class MGRenderer {
         const speed = anim.speed;
         const r = {};
         r.clipAmount = interpolate(anim.enterSpring, [0, 1], [0, 100]);
-        r.barScaleY = springValue(Math.max(0, frame - Math.round((0.15 / speed) * fps)), fps, { damping: 20, stiffness: 120, durationInFrames: Math.round((0.35 / speed) * fps) });
-        const td = Math.round((0.2 / speed) * fps);
-        r.textSpring = springValue(Math.max(0, frame - td), fps, { damping: 18, stiffness: 100, durationInFrames: Math.round((0.3 / speed) * fps) });
-        r.textSlideX = interpolate(r.textSpring, [0, 1], [-15, 0]);
-        r.subSpring = springValue(Math.max(0, frame - Math.round((0.35 / speed) * fps)), fps, { damping: 18, stiffness: 100 });
+        r.barScaleY = springValue(Math.max(0, frame - Math.round((0.18 / speed) * fps)), fps, { damping: 22, stiffness: 108, durationInFrames: Math.round((0.42 / speed) * fps) });
+        const td = Math.round((0.24 / speed) * fps);
+        r.textSpring = springValue(Math.max(0, frame - td), fps, { damping: 20, stiffness: 92, durationInFrames: Math.round((0.36 / speed) * fps) });
+        r.textSlideX = interpolate(r.textSpring, [0, 1], [-10, 0]);
+        r.subSpring = springValue(Math.max(0, frame - Math.round((0.42 / speed) * fps)), fps, { damping: 20, stiffness: 92 });
         // Headline compat: provide scale/slideY/bar fields
-        r.scale = interpolate(anim.enterSpring, [0, 1], [0.95, 1]);
+        r.scale = interpolate(anim.enterSpring, [0, 1], [0.965, 1]);
         r.slideY = r.textSlideX; // slight slide
         r.barSpring = r.barScaleY;
         r.stampScale = r.scale;
@@ -1168,13 +1311,13 @@ class MGRenderer {
         const r = {};
         r.wipeProgress = interpolate(anim.enterSpring, [0, 1], [0, 1]);
         r.clipAmount = interpolate(anim.enterSpring, [0, 1], [0, 100]); // for bar/box clip
-        const td = Math.round((0.2 / speed) * fps);
-        r.textSpring = springValue(Math.max(0, frame - td), fps, { damping: 16, stiffness: 90, durationInFrames: Math.round((0.3 / speed) * fps) });
-        r.textSlideX = interpolate(r.textSpring, [0, 1], [-30, 0]); // more visible slide
-        r.barScaleY = springValue(Math.max(0, frame - Math.round((0.1 / speed) * fps)), fps, { damping: 18, stiffness: 120 });
-        r.subSpring = springValue(Math.max(0, frame - Math.round((0.35 / speed) * fps)), fps, { damping: 18, stiffness: 100 });
+        const td = Math.round((0.24 / speed) * fps);
+        r.textSpring = springValue(Math.max(0, frame - td), fps, { damping: 18, stiffness: 84, durationInFrames: Math.round((0.36 / speed) * fps) });
+        r.textSlideX = interpolate(r.textSpring, [0, 1], [-22, 0]);
+        r.barScaleY = springValue(Math.max(0, frame - Math.round((0.14 / speed) * fps)), fps, { damping: 20, stiffness: 108 });
+        r.subSpring = springValue(Math.max(0, frame - Math.round((0.42 / speed) * fps)), fps, { damping: 20, stiffness: 92 });
         // Headline compat
-        r.scale = interpolate(anim.enterSpring, [0, 1], [0.95, 1]);
+        r.scale = interpolate(anim.enterSpring, [0, 1], [0.965, 1]);
         r.slideY = 0;
         r.barSpring = r.textSpring;
         r.stampScale = r.scale;
@@ -1187,17 +1330,17 @@ class MGRenderer {
         const { springValue, interpolate } = AnimationUtils;
         const speed = anim.speed;
         const r = {};
-        r.scaleY = springValue(frame, fps, { damping: 10, stiffness: 160, durationInFrames: Math.round((0.45 / speed) * fps) });
+        r.scaleY = springValue(frame, fps, { damping: 14, stiffness: 120, durationInFrames: Math.round((0.5 / speed) * fps) });
         r.scale = r.scaleY;
         r.stampScale = r.scaleY;
         r.stampAlpha = interpolate(anim.enterLinear, [0, 0.1], [0, 1], { extrapolateRight: 'clamp' });
-        r.slideY = interpolate(r.scaleY, [0, 1], [80, 0]); // bigger Y travel
+        r.slideY = interpolate(r.scaleY, [0, 1], [55, 0]);
         r.clipAmount = 100; // no clip, full reveal
         r.barScaleY = r.scaleY;
-        const td = Math.round((0.12 / speed) * fps);
-        r.textSpring = springValue(Math.max(0, frame - td), fps, { damping: 16, stiffness: 120, durationInFrames: Math.round((0.3 / speed) * fps) });
+        const td = Math.round((0.16 / speed) * fps);
+        r.textSpring = springValue(Math.max(0, frame - td), fps, { damping: 18, stiffness: 105, durationInFrames: Math.round((0.36 / speed) * fps) });
         r.textSlideX = 0;
-        r.subSpring = springValue(Math.max(0, frame - Math.round((0.25 / speed) * fps)), fps, { damping: 18, stiffness: 100 });
+        r.subSpring = springValue(Math.max(0, frame - Math.round((0.3 / speed) * fps)), fps, { damping: 20, stiffness: 92 });
         r.revealProgress = interpolate(anim.enterLinear, [0, 1], [0, 1.1]);
         r.barSpring = r.textSpring;
         return r;
@@ -1208,14 +1351,14 @@ class MGRenderer {
         const speed = anim.speed;
         const r = {};
         r.fadeIn = interpolate(anim.enterLinear, [0, 0.5], [0, 1], { extrapolateRight: 'clamp' });
-        r.slideY = interpolate(anim.enterSpring, [0, 1], [60, 0]); // larger slide for visibility
-        r.textSpring = springValue(Math.max(0, frame - Math.round((0.15 / speed) * fps)), fps, { damping: 16, stiffness: 100 });
-        r.textSlideX = interpolate(r.textSpring, [0, 1], [30, 0]); // text slides right as it fades in
+        r.slideY = interpolate(anim.enterSpring, [0, 1], [42, 0]);
+        r.textSpring = springValue(Math.max(0, frame - Math.round((0.18 / speed) * fps)), fps, { damping: 18, stiffness: 92 });
+        r.textSlideX = interpolate(r.textSpring, [0, 1], [20, 0]);
         r.subSpring = interpolate(anim.enterLinear, [0.3, 0.9], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' });
         r.barScaleY = r.textSpring; // for bar variant
         r.clipAmount = interpolate(anim.enterSpring, [0, 1], [0, 100]); // clip reveal too
         // Headline compat
-        r.scale = interpolate(anim.enterSpring, [0, 1], [0.92, 1]);
+        r.scale = interpolate(anim.enterSpring, [0, 1], [0.94, 1]);
         r.barSpring = r.textSpring;
         r.stampScale = r.scale;
         r.stampAlpha = r.fadeIn;
@@ -1231,23 +1374,23 @@ class MGRenderer {
         const r = {};
         r.scale = anim.isExiting
             ? interpolate(anim.exitProgress, [0, 1], [0.97, 1])
-            : interpolate(anim.enterSpring, [0, 1], [0.88, 1]);
+            : interpolate(anim.enterSpring, [0, 1], [0.9, 1]);
         r.slideY = anim.isExiting
             ? interpolate(anim.exitProgress, [0, 1], [-12, 0])
-            : interpolate(anim.enterSpring, [0, 1], [30, 0]);
-        r.blur = anim.isExiting ? 0 : interpolate(anim.enterLinear, [0, 0.6], [6, 0], { extrapolateRight: 'clamp' });
-        const barDelay = Math.round((0.25 / speed) * fps);
+            : interpolate(anim.enterSpring, [0, 1], [22, 0]);
+        r.blur = anim.isExiting ? 0 : interpolate(anim.enterLinear, [0, 0.6], [5, 0], { extrapolateRight: 'clamp' });
+        const barDelay = Math.round((0.28 / speed) * fps);
         r.barSpring = springValue(Math.max(0, frame - barDelay), fps, {
-            damping: 20, stiffness: 100, durationInFrames: Math.round((0.3 / speed) * fps),
+            damping: 22, stiffness: 92, durationInFrames: Math.round((0.36 / speed) * fps),
         });
-        const subDelay = Math.round((0.2 / speed) * fps);
+        const subDelay = Math.round((0.24 / speed) * fps);
         r.subSpring = anim.isExiting ? anim.exitProgress
-            : springValue(Math.max(0, frame - subDelay), fps, { damping: 18, stiffness: 100 });
+            : springValue(Math.max(0, frame - subDelay), fps, { damping: 20, stiffness: 92 });
         r.textSpring = r.barSpring;
         // Stamp-specific: aggressive bounce scale for stamp variant
         r.stampScale = anim.isExiting
             ? interpolate(anim.exitProgress, [0, 1], [0.5, 1])
-            : springValue(frame, fps, { damping: 8, stiffness: 200, durationInFrames: Math.round((0.35 / speed) * fps) });
+            : springValue(frame, fps, { damping: 10, stiffness: 160, durationInFrames: Math.round((0.42 / speed) * fps) });
         r.stampAlpha = interpolate(anim.enterLinear, [0, 0.15], [0, 1], { extrapolateRight: 'clamp' });
         // Typewriter-specific: character reveal
         const revealDur = Math.round((1.2 / speed) * fps);
@@ -1624,14 +1767,30 @@ class MGRenderer {
         const { isExiting, exitProgress, opacity, idleScale, enterFrames, totalFrames, enterSpring, enterLinear } = anim;
 
         const variant = this._resolveVariant(mg, s, 'statCounter');
-        const colors = this._resolveColors(s, 'statCounter');
+        const colors = this._resolveColors(s, 'statCounter', mg);
 
         // Parse number, prefix, suffix from text
         const numberMatch = (mg.text || '').match(/[\d,.]+/);
         const targetNumber = numberMatch ? parseFloat(numberMatch[0].replace(/,/g, '')) : 0;
-        const prefix = (mg.text || '').substring(0, (mg.text || '').indexOf(numberMatch?.[0] || '')).trim();
-        const suffix = (mg.text || '').substring((mg.text || '').indexOf(numberMatch?.[0] || '') + (numberMatch?.[0]?.length || 0)).trim();
+        let prefix = (mg.text || '').substring(0, (mg.text || '').indexOf(numberMatch?.[0] || '')).trim();
+        let suffix = (mg.text || '').substring((mg.text || '').indexOf(numberMatch?.[0] || '') + (numberMatch?.[0]?.length || 0)).trim();
         const isPercent = suffix.includes('%') || prefix.includes('%');
+
+        // Abbreviate small scaled stats — "1 Million" reads poorly as a bare "1".
+        // When the raw number is < 100 AND a scale word is present, attach a short
+        // scale suffix (M/B/T/K) to the number and strip the word from prefix/suffix
+        // so the label doesn't repeat it.
+        let scaleSuffix = '';
+        if (targetNumber > 0 && targetNumber < 100) {
+            const scaleMap = { thousand: 'K', million: 'M', billion: 'B', trillion: 'T' };
+            const scaleRe = /\b(thousand|million|billion|trillion)s?\b/i;
+            const sMatch = (mg.text || '').match(scaleRe);
+            if (sMatch) {
+                scaleSuffix = scaleMap[sMatch[1].toLowerCase()] || '';
+                prefix = prefix.replace(scaleRe, '').replace(/\s+/g, ' ').trim();
+                suffix = suffix.replace(scaleRe, '').replace(/\s+/g, ' ').trim();
+            }
+        }
 
         // Smooth count-up with easeOutQuart (slower decel than cubic)
         const countStart = Math.round(enterFrames * 0.3);
@@ -1656,7 +1815,7 @@ class MGRenderer {
         if (variant === 'ticker') {
             // Short prefix stays with number; long prefix moves to label
             const shortPfx = prefix.length <= 3 ? prefix : '';
-            const numText = `${shortPfx}${targetNumber % 1 !== 0 ? targetNumber.toFixed(1) : Math.round(targetNumber).toLocaleString()}`;
+            const numText = `${shortPfx}${targetNumber % 1 !== 0 ? targetNumber.toFixed(1) : Math.round(targetNumber).toLocaleString()}${scaleSuffix}`;
             // Build label same way as the ticker renderer
             const extraLbl = prefix.length > 3 ? prefix.trim() : '';
             const baseLbl = suffix || mg.subtext || '';
@@ -1677,7 +1836,7 @@ class MGRenderer {
 
         this._dispatchVariant(ctx, 'statCounter', variant, mg, s, anim, null, {
             bx: pos.x, by: pos.y, bw: boxW, bh: boxH, colors,
-            currentNumber, prefix, suffix, countProgress, targetNumber, isPercent,
+            currentNumber, prefix, suffix, scaleSuffix, countProgress, targetNumber, isPercent,
             scale, entSlideY, entBlur, labelSpring, idleScale,
             label: suffix || mg.subtext || '',
         });
@@ -1687,7 +1846,7 @@ class MGRenderer {
 
     // ── StatCounter variant: Standard (big centered number + label below) ──
     _renderSC_Standard(ctx, mg, s, anim, _a, setup) {
-        const { bx, by, bw, bh, colors, currentNumber, prefix, label,
+        const { bx, by, bw, bh, colors, currentNumber, prefix, label, scaleSuffix,
                 scale, entSlideY, entBlur, labelSpring, idleScale } = setup;
         const { opacity } = anim;
 
@@ -1709,7 +1868,7 @@ class MGRenderer {
         ctx.shadowColor = 'rgba(0,0,0,0.85)';
         ctx.shadowBlur = 12;
         ctx.shadowOffsetY = 4;
-        ctx.fillText(`${prefix}${currentNumber}`, 0, -10);
+        ctx.fillText(`${prefix}${currentNumber}${scaleSuffix || ''}`, 0, -10);
         ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
 
         ctx.filter = 'none';
@@ -1728,7 +1887,7 @@ class MGRenderer {
 
     // ── StatCounter variant: Ticker (horizontal card — number left, label right) ──
     _renderSC_Ticker(ctx, mg, s, anim, _a, setup) {
-        const { bx, by, bw, bh, colors, currentNumber, prefix, label,
+        const { bx, by, bw, bh, colors, currentNumber, prefix, label, scaleSuffix,
                 scale, entSlideY, entBlur, labelSpring, idleScale } = setup;
         const { opacity } = anim;
 
@@ -1762,7 +1921,7 @@ class MGRenderer {
         // Ticker layout: big number on left, context label on right
         // Short prefix (1-2 chars like "$", "~") stays with the number; long prefix goes to label
         const shortPrefix = prefix.length <= 3 ? prefix : '';
-        const numDisplay = `${shortPrefix}${currentNumber}`;
+        const numDisplay = `${shortPrefix}${currentNumber}${scaleSuffix || ''}`;
         // Build label: long prefix + suffix/subtext
         const extraLabel = prefix.length > 3 ? prefix.trim() : '';
         const baseLabel = label || '';
@@ -1806,7 +1965,7 @@ class MGRenderer {
 
     // ── StatCounter variant: Ring (circular progress arc around number) ──
     _renderSC_Ring(ctx, mg, s, anim, _a, setup) {
-        const { bx, by, bw, bh, colors, currentNumber, prefix, label, countProgress,
+        const { bx, by, bw, bh, colors, currentNumber, prefix, label, scaleSuffix, countProgress,
                 targetNumber, isPercent, scale, entSlideY, entBlur, labelSpring, idleScale } = setup;
         const { opacity } = anim;
 
@@ -1853,7 +2012,7 @@ class MGRenderer {
         ctx.textBaseline = 'middle';
         ctx.shadowColor = 'rgba(0,0,0,0.7)';
         ctx.shadowBlur = 8;
-        ctx.fillText(`${prefix}${currentNumber}`, 0, 0);
+        ctx.fillText(`${prefix}${currentNumber}${scaleSuffix || ''}`, 0, 0);
         ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
 
         // Label below ring
@@ -1876,7 +2035,7 @@ class MGRenderer {
     _renderCallout(ctx, frame, fps, mg, s, anim) {
         const variant = this._resolveVariant(mg, s, 'callout');
         const animType = this._resolveAnimation(mg, s, 'callout');
-        const colors = this._resolveColors(s, 'callout');
+        const colors = this._resolveColors(s, 'callout', mg);
 
         // Measure text for dynamic box sizing
         MGRenderer._setFont(ctx, 'italic 600', 34, s.fontHeading);
@@ -2754,7 +2913,7 @@ class MGRenderer {
     _renderTypewriter(ctx, frame, fps, mg, s, anim) {
         const variant = this._resolveVariant(mg, s, 'typewriter');
         const animType = this._resolveAnimation(mg, s, 'typewriter');
-        const colors = this._resolveColors(s, 'typewriter');
+        const colors = this._resolveColors(s, 'typewriter', mg);
 
         const a = this._computeAnimation(animType, frame, fps, anim, mg);
 
@@ -2986,68 +3145,316 @@ class MGRenderer {
     // 13. KINETIC TEXT
     // ========================================================================
 
-    _renderKineticText(ctx, frame, fps, mg, s, anim) {
-        const { springValue, interpolate } = AnimationUtils;
-        const { enterLinear, isExiting, exitProgress, opacity } = anim;
+    // ── Style tokens for kineticText (independent of theme `s`) ──
+    // RULE: each style uses EITHER a colored glow OR a dark drop shadow, NEVER both.
+    // Doing both meant the word got drawn twice with shadow, leaving the letter edges
+    // bumpy/smeared (that was the "still looks like that" issue). Styles listed below
+    // set exactly one of { glow, dropShadow } and null the other.
+    static _KINETIC_TEXT_STYLES = {
+        clean: {
+            text: '#ffffff',
+            glow: null, glowSize: 0,
+            dropShadow: 'rgba(0,0,0,0.7)', dropShadowBlur: 10, dropShadowY: 2,
+            outline: 'rgba(0,0,0,0.88)', outlineWidth: 3,
+            weight: '800', tracking: 0,
+        },
+        bold: {
+            // YouTube/TikTok caption look: thick pure-black outline, no red halo
+            text: '#ffffff',
+            glow: null, glowSize: 0,
+            dropShadow: 'rgba(0,0,0,0.85)', dropShadowBlur: 8, dropShadowY: 3,
+            outline: '#000000', outlineWidth: 6,
+            weight: '900', tracking: 0,
+        },
+        minimal: {
+            text: 'rgba(255,255,255,0.96)',
+            glow: null, glowSize: 0,
+            dropShadow: 'rgba(0,0,0,0.4)', dropShadowBlur: 5, dropShadowY: 1,
+            outline: null, outlineWidth: 0,
+            weight: '500', tracking: 2,
+        },
+        neon: {
+            // The COLOR is the neon. No halo, no rim-light, no edge tint.
+            // Saturated green text + dark-green drop shadow for legibility — done.
+            text: '#00ffaa',
+            glow: null, glowSize: 0,
+            dropShadow: 'rgba(0,40,26,0.65)', dropShadowBlur: 6, dropShadowY: 2,
+            outline: null, outlineWidth: 0,
+            weight: '900', tracking: 1,
+        },
+        cinematic: {
+            text: '#f5ecd0',
+            glow: null, glowSize: 0,
+            dropShadow: 'rgba(0,0,0,0.78)', dropShadowBlur: 10, dropShadowY: 2,
+            outline: 'rgba(0,0,0,0.92)', outlineWidth: 3,
+            weight: '700', tracking: 1.5,
+        },
+        elegant: {
+            // Almost invisible purple tint in the shadow. Typography carries the identity.
+            text: '#ffffff',
+            glow: null, glowSize: 0,
+            dropShadow: 'rgba(80,40,140,0.3)', dropShadowBlur: 4, dropShadowY: 2,
+            outline: null, outlineWidth: 0,
+            weight: '500', tracking: 2.5,
+        },
+    };
 
-        const words = (mg.text || '').split(/\s+/);
-        const staggerDelay = Math.round(fps * 0.08);
+    _getKineticTextStyle(mg) {
+        const name = mg.style || 'clean';
+        return MGRenderer._KINETIC_TEXT_STYLES[name] || MGRenderer._KINETIC_TEXT_STYLES.clean;
+    }
+
+    _layoutKineticText(ctx, text, ks, fontFamily, options) {
+        const words = String(text || '')
+            .trim()
+            .split(/\s+/)
+            .filter(Boolean)
+            .map(word => word.toUpperCase());
+        if (words.length === 0) return null;
+
+        const { hasAttr = false, variant = 'centered' } = options || {};
+        const maxWidth = 1920 * 0.9;
+        const maxHeight = hasAttr ? 1080 * 0.58 : 1080 * 0.68;
+        const maxRows = words.length <= 3 ? 2 : words.length <= 8 ? 3 : 4;
+        const maxFontSize = variant === 'punch'
+            ? 192
+            : words.length <= 3
+                ? 176
+                : words.length <= 6
+                    ? 156
+                    : 136;
+        const minFontSize = 60;
+
+        let best = null;
+        for (let fontSize = maxFontSize; fontSize >= minFontSize; fontSize -= 4) {
+            MGRenderer._setFont(ctx, ks.weight, fontSize, fontFamily);
+            const gap = Math.round(Math.max(20, Math.min(40, fontSize * 0.18)));
+            const rowHeight = Math.round(fontSize * 1.08);
+            const attrFontSize = Math.round(Math.max(28, Math.min(56, fontSize * 0.34)));
+            const attrMargin = hasAttr ? Math.round(Math.max(18, fontSize * 0.5)) : 0;
+
+            const rows = [];
+            let currentEntries = [];
+            let currentWidth = 0;
+
+            for (let i = 0; i < words.length; i++) {
+                const width = ctx.measureText(words[i]).width;
+                const nextWidth = currentEntries.length > 0 ? currentWidth + gap + width : width;
+                if (nextWidth > maxWidth && currentEntries.length > 0) {
+                    rows.push({ entries: currentEntries, width: currentWidth });
+                    currentEntries = [];
+                    currentWidth = 0;
+                }
+
+                currentEntries.push({ word: words[i], width, index: i });
+                currentWidth = currentEntries.length > 1 ? currentWidth + gap + width : width;
+            }
+
+            if (currentEntries.length > 0) {
+                rows.push({ entries: currentEntries, width: currentWidth });
+            }
+
+            const textHeight = rows.length * rowHeight;
+            const totalHeight = textHeight + (hasAttr ? attrMargin + attrFontSize * 1.2 : 0);
+            const widestRow = rows.reduce((max, row) => Math.max(max, row.width), 0);
+
+            best = {
+                words,
+                rows,
+                fontSize,
+                gap,
+                rowHeight,
+                attrFontSize,
+                attrMargin,
+                textHeight,
+                totalHeight,
+                widestRow,
+            };
+
+            if (rows.length <= maxRows && widestRow <= maxWidth && totalHeight <= maxHeight) {
+                return best;
+            }
+        }
+
+        return best;
+    }
+
+    _renderKineticText(ctx, frame, fps, mg, s, anim) {
+        const { interpolate } = AnimationUtils;
+        const { isExiting, exitProgress, opacity } = anim;
+
+        const ks = this._getKineticTextStyle(mg);
+        const variant = mg.subType || 'centered';
+        const animation = mg.animation || 'springStagger';
+        const fontFamily = s.fontHeading;
+        const hasAttr = !!(mg.subtext && mg.subtext !== 'none');
+        const layout = this._layoutKineticText(ctx, mg.text, ks, fontFamily, { hasAttr, variant });
+        if (!layout) return;
+        const { rows, fontSize, gap, rowHeight, attrFontSize, attrMargin, textHeight, totalHeight } = layout;
+
+        // Smooth eased curve — cubic-out with a subtle overshoot near the end
+        // (avoids the rubbery oscillation of a low-damping spring).
+        const easeOut = (t) => 1 - Math.pow(1 - Math.max(0, Math.min(1, t)), 3);
+        const easeOutBack = (t) => {
+            t = Math.max(0, Math.min(1, t));
+            const c1 = 1.32, c3 = c1 + 1;
+            return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);
+        };
+
+        const revealFrames = Math.max(8, Math.round(fps * 0.55));
+        const staggerFrames = Math.max(3, Math.round(fps * 0.075));
 
         ctx.save();
         ctx.globalAlpha = Math.min(1, opacity);
+        const cy = 1080 / 2;
+        const startY = cy - totalHeight / 2 + rowHeight / 2;
 
-        MGRenderer._setFont(ctx, '800', 60, s.fontHeading);
-        const wordWidths = words.map(w => ctx.measureText(w).width);
-        const gap = 18;
-        const maxRowW = 1920 * 0.7;
+        // Per-variant entry kinematics — returns { sx, sy, scale, alpha, blur }
+        const motionFor = (entryIdx, ri, ci) => {
+            const local = Math.max(0, frame - entryIdx * staggerFrames);
+            const t = Math.min(1, local / revealFrames);
+            const easedAlpha = easeOut(t);
+            const easedPos = easeOutBack(t);
 
-        const rows = [];
-        let currentRow = [];
-        let currentW = 0;
-        for (let i = 0; i < words.length; i++) {
-            if (currentW + wordWidths[i] + (currentRow.length > 0 ? gap : 0) > maxRowW && currentRow.length > 0) {
-                rows.push(currentRow);
-                currentRow = [];
-                currentW = 0;
+            let sx = 0, sy = 0, scale = 1, blur = 0;
+
+            if (animation === 'fadeIn') {
+                scale = interpolate(easedPos, [0, 1], [0.92, 1]);
+                blur = interpolate(t, [0, 0.6], [4, 0], { extrapolateRight: 'clamp' });
+            } else if (animation === 'slideUp') {
+                sy = interpolate(easedPos, [0, 1], [60, 0]);
+                scale = interpolate(easedPos, [0, 1], [0.96, 1]);
+                blur = interpolate(t, [0, 0.5], [3, 0], { extrapolateRight: 'clamp' });
+            } else {
+                // springStagger (default): subtle scale-down from above + fade
+                scale = interpolate(easedPos, [0, 1], [1.18, 1]);
+                blur = interpolate(t, [0, 0.5], [4, 0], { extrapolateRight: 'clamp' });
             }
-            currentRow.push({ word: words[i], width: wordWidths[i], index: i });
-            currentW += wordWidths[i] + gap;
-        }
-        if (currentRow.length > 0) rows.push(currentRow);
 
-        const rowHeight = 80;
-        const totalH = rows.length * rowHeight;
-        const startY = 1080 / 2 - totalH / 2;
+            // Variant-specific entry overrides (additive on top of animation)
+            if (variant === 'rise') {
+                sy = interpolate(easedPos, [0, 1], [80, 0]);
+                blur = Math.max(blur, interpolate(t, [0, 0.55], [5, 0], { extrapolateRight: 'clamp' }));
+            } else if (variant === 'cascade') {
+                sx = interpolate(easedPos, [0, 1], [-120 + ci * 8, 0]);
+                sy = interpolate(easedPos, [0, 1], [-30 - ri * 6, 0]);
+            } else if (variant === 'punch') {
+                scale = interpolate(easedPos, [0, 1], [1.6, 1]);
+                blur = interpolate(t, [0, 0.45], [6, 0], { extrapolateRight: 'clamp' });
+            }
+
+            // Idle micro-float on long-running scenes (very gentle, no flicker)
+            const idle = Math.sin((frame / fps + entryIdx * 0.17) * 2.0) * 1.5;
+            sy += idle * easedAlpha;
+
+            return { sx, sy, scale, alpha: easedAlpha, blur };
+        };
+
+        // Exit fade (smooth)
+        const exitAlpha = isExiting ? Math.pow(exitProgress, 1.2) : 1;
 
         rows.forEach((row, ri) => {
-            const rowW = row.reduce((a, r) => a + r.width, 0) + (row.length - 1) * gap;
-            let rx = 1920 / 2 - rowW / 2;
+            let rx = 1920 / 2 - row.width / 2;
 
-            row.forEach((entry) => {
-                const wordDelay = entry.index * staggerDelay;
-                const wordSpring = springValue(Math.max(0, frame - wordDelay), fps, { damping: 16, stiffness: 120 });
-                const wordScale = interpolate(wordSpring, [0, 1], [1.5, 1]);
-                const wordOpacity = wordSpring;
-                const wordBlur = interpolate(wordSpring, [0, 0.5], [6, 0], { extrapolateRight: 'clamp' });
+            row.entries.forEach((entry, ci) => {
+                const m = motionFor(entry.index, ri, ci);
+                if (m.alpha <= 0.001) { rx += entry.width + gap; return; }
 
                 ctx.save();
-                ctx.globalAlpha = Math.min(1, opacity) * wordOpacity * (isExiting ? exitProgress : 1);
-                ctx.translate(rx + entry.width / 2, startY + ri * rowHeight + rowHeight / 2);
-                ctx.scale(wordScale, wordScale);
-                if (wordBlur > 0.5) ctx.filter = `blur(${wordBlur.toFixed(1)}px)`;
+                ctx.globalAlpha = Math.min(1, opacity) * m.alpha * exitAlpha;
+                ctx.translate(rx + entry.width / 2 + m.sx, startY + ri * rowHeight + m.sy);
+                if (m.scale !== 1) ctx.scale(m.scale, m.scale);
+                if (m.blur > 0.4) ctx.filter = `blur(${m.blur.toFixed(1)}px)`;
 
-                MGRenderer._setFont(ctx, '800', 60, s.fontHeading);
-                ctx.fillStyle = s.text;
-                ctx.textAlign = 'center';
-                ctx.textBaseline = 'middle';
-                MGRenderer._drawTextShadowed(ctx, entry.word, 0, 0, s, true);
+                this._drawKineticWord(ctx, entry.word, ks, fontSize, fontFamily);
 
                 ctx.restore();
                 rx += entry.width + gap;
             });
         });
 
+        if (hasAttr) {
+            const attrDelayFrames = Math.round(revealFrames * 0.35 + Math.max(0, layout.words.length - 1) * staggerFrames);
+            const attrProgress = Math.max(0, Math.min(1, (frame - attrDelayFrames) / Math.max(6, Math.round(fps * 0.24))));
+            const attrAlpha = easeOut(attrProgress) * exitAlpha;
+            if (attrAlpha > 0.001) {
+                const attrText = `\u2014 ${mg.subtext}`;
+                const attrY = startY + textHeight - rowHeight / 2 + attrMargin + attrFontSize * 0.6;
+                ctx.save();
+                ctx.globalAlpha = Math.min(1, opacity) * attrAlpha;
+                ctx.translate(1920 / 2, attrY + (1 - attrProgress) * 12);
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillStyle = s.textSub || 'rgba(255,255,255,0.8)';
+                ctx.shadowColor = 'rgba(0,0,0,0.7)';
+                ctx.shadowBlur = 18;
+                ctx.shadowOffsetX = 0;
+                ctx.shadowOffsetY = 2;
+                ctx.font = `italic 600 ${attrFontSize}px ${s.fontBody || fontFamily}`;
+                ctx.fillText(attrText, 0, 0);
+                ctx.restore();
+            }
+        }
+
         ctx.restore();
+    }
+
+    _drawKineticWord(ctx, word, ks, fontSize, fontFamily) {
+        MGRenderer._setFont(ctx, ks.weight, fontSize, fontFamily);
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+
+        // Pick the ONE shadow this style uses (glow XOR dropShadow, see _KINETIC_TEXT_STYLES)
+        const shadow = (ks.glow && ks.glowSize > 0)
+            ? { color: ks.glow, blur: ks.glowSize, y: 0 }
+            : ks.dropShadow
+                ? { color: ks.dropShadow, blur: ks.dropShadowBlur, y: ks.dropShadowY || 0 }
+                : null;
+
+        // Strategy:
+        //   1) If there's an outline, stroke it WITH the shadow attached. Shadow attaches
+        //      to the outline shape (which is wider than the fill), so the halo/drop
+        //      extends cleanly out from the outer silhouette instead of being re-drawn
+        //      on top of a previous pass.
+        //   2) Reset shadow, draw the crisp fill on top. No double-draw, no bumpy edges.
+        //   3) If there's NO outline, attach the shadow directly to the single fill.
+
+        const hasOutline = !!(ks.outline && ks.outlineWidth > 0);
+
+        if (hasOutline) {
+            if (shadow) {
+                ctx.shadowColor = shadow.color;
+                ctx.shadowBlur = shadow.blur;
+                ctx.shadowOffsetX = 0;
+                ctx.shadowOffsetY = shadow.y;
+            }
+            ctx.lineWidth = ks.outlineWidth;
+            ctx.strokeStyle = ks.outline;
+            ctx.lineJoin = 'round';
+            ctx.miterLimit = 2;
+            ctx.strokeText(word, 0, 0);
+
+            // Clear shadow so the fill is crisp
+            ctx.shadowColor = 'transparent';
+            ctx.shadowBlur = 0;
+            ctx.shadowOffsetX = 0;
+            ctx.shadowOffsetY = 0;
+            ctx.fillStyle = ks.text;
+            ctx.fillText(word, 0, 0);
+        } else {
+            if (shadow) {
+                ctx.shadowColor = shadow.color;
+                ctx.shadowBlur = shadow.blur;
+                ctx.shadowOffsetX = 0;
+                ctx.shadowOffsetY = shadow.y;
+            }
+            ctx.fillStyle = ks.text;
+            ctx.fillText(word, 0, 0);
+            ctx.shadowColor = 'transparent';
+            ctx.shadowBlur = 0;
+            ctx.shadowOffsetX = 0;
+            ctx.shadowOffsetY = 0;
+        }
     }
 
     // ========================================================================
@@ -3113,6 +3520,9 @@ class MGRenderer {
         if (!mg._wpCoords && _mgd._wpCoords) mg._wpCoords = _mgd._wpCoords;
         if (!mg._mapBigMap && _mgd._mapBigMap) mg._mapBigMap = _mgd._mapBigMap;
         if (!mg._osmBoundaries && _mgd._osmBoundaries) mg._osmBoundaries = _mgd._osmBoundaries;
+        if (!mg._mapIcons && _mgd._mapIcons) mg._mapIcons = _mgd._mapIcons;
+        if (!mg._mapSwarms && _mgd._mapSwarms) mg._mapSwarms = _mgd._mapSwarms;
+        if (!mg._mapRoutePath && _mgd._mapRoutePath) mg._mapRoutePath = _mgd._mapRoutePath;
         const { opacity, enterProgress } = anim;
         const W = 1920, H = 1080;
         const elapsed = frame / fps;
@@ -3282,6 +3692,11 @@ class MGRenderer {
         const wpPositions = [];
         if (hasWaypoints) {
             for (const wp of _waypoints) {
+                // Explicit coordinates (set by the planner for synthetic overview framing) win.
+                if (typeof wp.lon === 'number' && typeof wp.lat === 'number') {
+                    wpPositions.push({ ...wp, px: toX(wp.lon), py: toY(wp.lat) });
+                    continue;
+                }
                 const wpLower = wp.name.toLowerCase();
                 let coord = _wpCoords.find(c => c.name.toLowerCase() === wpLower);
                 if (!coord) {
@@ -3397,7 +3812,7 @@ class MGRenderer {
             }
         } else {
             // ═══ STANDARD KEYFRAME CAMERA ═══
-            const zKfS = mg._mapZoomKfStart ?? 0.8;
+            const zKfS = mg._mapZoomKfStart ?? 1.0;
             const zKfE = mg._mapZoomKfEnd ?? 1.0;
             camScale = zKfS + (zKfE - zKfS) * kfEased;
             if (variant === 'locator' || variant === 'regionHighlight') {
@@ -3474,16 +3889,15 @@ class MGRenderer {
         const hasMapImage = mg.mapImageFile && this._mapImages && this._mapImages[mg.mapImageFile];
 
         ctx.save();
-        const tiltCompScale = 1; // strips now fill full width, no compensation needed
         if (wpBigMapCamera) {
             ctx.translate(W / 2, H / 2);
             if (useBearing) ctx.rotate(bearingRad);
-            ctx.scale(camScale * tiltCompScale, camScale * tiltCompScale);
+            ctx.scale(camScale, camScale);
             ctx.translate(-wpCamX, -wpCamY);
         } else {
             ctx.translate(W / 2 + driftX, H / 2 + driftY);
             if (useBearing) ctx.rotate(bearingRad);
-            ctx.scale(camScale * tiltCompScale, camScale * tiltCompScale);
+            ctx.scale(camScale, camScale);
             ctx.translate(-W / 2, -H / 2);
         }
 
@@ -3497,8 +3911,6 @@ class MGRenderer {
         }
 
         // ── 2. Gather pin entities (use geocoded _mapPins when available) ──
-        let items = MGRenderer._parseKeyValuePairs(mg.subtext || '');
-
         // Build geocoded pin lookup from _mapPins (set by map-provider geocoding)
         const geocodedPins = {};
         if (mg._mapPins && Array.isArray(mg._mapPins)) {
@@ -3506,6 +3918,12 @@ class MGRenderer {
                 geocodedPins[gp.name.toLowerCase()] = gp;
             }
         }
+
+        // Parse subtext; keep only items that resolve to a real location.
+        // Prose subtext like "World map highlighting the Persian Gulf, with a glowing red marker..."
+        // produces garbage labels when comma-split — reject them so the entity fallback can run.
+        let items = MGRenderer._parseKeyValuePairs(mg.subtext || '')
+            .filter(it => geocodedPins[it.label.toLowerCase()] || MAP_COORDS[it.label]);
 
         if (items.length === 0 && scriptContext?.entities) {
             items = scriptContext.entities
@@ -3520,7 +3938,8 @@ class MGRenderer {
         }
 
         const pinPositions = items.slice(0, 10).map((item, i) => {
-            // Try geocoded pin first, then fallback to hardcoded MAP_COORDS
+            // Try geocoded pin first, then fallback to hardcoded MAP_COORDS.
+            // If neither matches, DROP the item — do not hash-position garbage labels onto the map.
             const geoPin = geocodedPins[item.label.toLowerCase()];
             let x, y, pinType;
             if (geoPin) {
@@ -3534,14 +3953,11 @@ class MGRenderer {
                     y = toY(coords[1]);
                     pinType = 'country';
                 } else {
-                    const hash = (item.label || '').split('').reduce((a, c) => a + c.charCodeAt(0), 0);
-                    x = W * 0.12 + ((hash * 7 + i * 137) % 76) / 100 * W;
-                    y = H * 0.15 + ((hash * 13 + i * 89) % 60) / 100 * H;
-                    pinType = 'unknown';
+                    return null;
                 }
             }
             return { ...item, x, y, i, pinType };
-        });
+        }).filter(p => p !== null);
 
         // ── 2b. Country polygon fills (Natural Earth land boundaries — no maritime zones) ──
         const preloaded = mg._countryFeatures || [];
@@ -3781,8 +4197,213 @@ class MGRenderer {
             ctx.globalAlpha = opacity;
         }
 
+        // ── 3b. Animated route path (dashed line drawing between waypoints) ──
+        if (mg._mapRoutePath && hasWaypoints && wpPositions.length >= 2) {
+            ctx.save();
+            // Build ground-level path through all waypoints in order
+            const routePts = wpPositions.filter(wp => wp.px != null && wp.py != null);
+            if (routePts.length >= 2) {
+                // Total path length for dash animation
+                let totalPathLen = 0;
+                const segments = [];
+                for (let ri = 1; ri < routePts.length; ri++) {
+                    const dx = routePts[ri].px - routePts[ri - 1].px;
+                    const dy = routePts[ri].py - routePts[ri - 1].py;
+                    const len = Math.sqrt(dx * dx + dy * dy);
+                    segments.push({ from: routePts[ri - 1], to: routePts[ri], len });
+                    totalPathLen += len;
+                }
+
+                // Draw progress: path draws to current active waypoint
+                let drawLen = 0;
+                for (let ri = 0; ri < segments.length; ri++) {
+                    const seg = segments[ri];
+                    const toWp = seg.to;
+                    // Path draws when we transition TO this waypoint
+                    const segDelay = toWp.startTime;
+                    const segDur = 0.8 / speed;
+                    const segT = Math.min(1, Math.max(0, (elapsed - segDelay) / segDur));
+                    if (segT <= 0) break;
+                    const segEase = 1 - Math.pow(1 - segT, 2);
+                    drawLen += seg.len * segEase;
+                }
+
+                if (drawLen > 0) {
+                    // Glow layer
+                    ctx.globalAlpha = opacity * 0.25;
+                    ctx.strokeStyle = pal.routeGlow || pal.pin;
+                    ctx.lineWidth = 8;
+                    ctx.setLineDash([]);
+                    ctx.beginPath();
+                    ctx.moveTo(routePts[0].px, routePts[0].py);
+                    let accumulated = 0;
+                    for (const seg of segments) {
+                        const remain = drawLen - accumulated;
+                        if (remain <= 0) break;
+                        const frac = Math.min(1, remain / seg.len);
+                        const ex = seg.from.px + (seg.to.px - seg.from.px) * frac;
+                        const ey = seg.from.py + (seg.to.py - seg.from.py) * frac;
+                        ctx.lineTo(ex, ey);
+                        accumulated += seg.len;
+                        if (frac < 1) break;
+                    }
+                    ctx.stroke();
+
+                    // Dashed main line
+                    ctx.globalAlpha = opacity * 0.85;
+                    ctx.strokeStyle = pal.pin;
+                    ctx.lineWidth = 3;
+                    ctx.setLineDash([12, 8]);
+                    ctx.lineDashOffset = -elapsed * 30 * speed; // animated marching ants
+                    ctx.shadowColor = pal.pin;
+                    ctx.shadowBlur = 6;
+                    ctx.beginPath();
+                    ctx.moveTo(routePts[0].px, routePts[0].py);
+                    accumulated = 0;
+                    for (const seg of segments) {
+                        const remain = drawLen - accumulated;
+                        if (remain <= 0) break;
+                        const frac = Math.min(1, remain / seg.len);
+                        const ex = seg.from.px + (seg.to.px - seg.from.px) * frac;
+                        const ey = seg.from.py + (seg.to.py - seg.from.py) * frac;
+                        ctx.lineTo(ex, ey);
+                        accumulated += seg.len;
+                        if (frac < 1) break;
+                    }
+                    ctx.stroke();
+                    ctx.shadowBlur = 0;
+                    ctx.setLineDash([]);
+
+                    // Traveling dot at the path head
+                    let headAccum = 0;
+                    let headX = routePts[0].px, headY = routePts[0].py;
+                    for (const seg of segments) {
+                        const remain = drawLen - headAccum;
+                        if (remain <= 0) break;
+                        const frac = Math.min(1, remain / seg.len);
+                        headX = seg.from.px + (seg.to.px - seg.from.px) * frac;
+                        headY = seg.from.py + (seg.to.py - seg.from.py) * frac;
+                        headAccum += seg.len;
+                        if (frac < 1) break;
+                    }
+                    // Pulsing head dot
+                    const headPulse = (Math.sin(elapsed * 6) + 1) / 2;
+                    const headR = 6 + headPulse * 4;
+                    ctx.globalAlpha = opacity * 0.9;
+                    const headGrad = ctx.createRadialGradient(headX, headY, 0, headX, headY, headR + 8);
+                    headGrad.addColorStop(0, pal.pin);
+                    headGrad.addColorStop(1, 'transparent');
+                    ctx.fillStyle = headGrad;
+                    ctx.beginPath(); ctx.arc(headX, headY, headR + 8, 0, Math.PI * 2); ctx.fill();
+                    ctx.fillStyle = '#fff';
+                    ctx.beginPath(); ctx.arc(headX, headY, 4, 0, Math.PI * 2); ctx.fill();
+                }
+            }
+            ctx.restore();
+            ctx.globalAlpha = opacity;
+        }
+
+        // ── 3c. Icon swarms (multiple icons appear simultaneously) ──
+        if (mg._mapSwarms && mg._mapSwarms.length > 0) {
+            const swarmCoords = mg._wpCoords || [];
+            const swarmPins = mg._mapPins || [];
+
+            for (const sw of mg._mapSwarms) {
+                const swarmT = Math.min(1, Math.max(0, (elapsed - sw.startTime) / Math.max(0.5, sw.endTime - sw.startTime)));
+                if (swarmT <= 0) continue;
+
+                for (let li = 0; li < sw.locations.length; li++) {
+                    const loc = sw.locations[li];
+                    const locLower = (loc.name || '').toLowerCase();
+
+                    // Find coordinates
+                    let px, py;
+                    let coord = swarmCoords.find(c => c.name.toLowerCase() === locLower);
+                    if (!coord) coord = swarmCoords.find(c => c.name.toLowerCase().includes(locLower) || locLower.includes(c.name.toLowerCase()));
+                    if (coord) {
+                        px = toX(coord.lon); py = toY(coord.lat);
+                    } else {
+                        let pin = swarmPins.find(p => p.name.toLowerCase() === locLower);
+                        if (!pin) pin = swarmPins.find(p => p.name.toLowerCase().includes(locLower) || locLower.includes(p.name.toLowerCase()));
+                        if (pin) { px = toX(pin.lon); py = toY(pin.lat); }
+                    }
+                    if (px == null) continue;
+
+                    // Staggered pop-in: each icon pops 0.12s after the previous
+                    const stagger = li * 0.12;
+                    const iconDelay = sw.startTime + stagger;
+                    const popDur = 0.35;
+                    const popT = Math.min(1, Math.max(0, (elapsed - iconDelay) / popDur));
+                    if (popT <= 0) continue;
+
+                    // Spring overshoot: scale pops to 1.3 then settles to 1.0
+                    const spring = popT < 0.6
+                        ? (popT / 0.6) * 1.3
+                        : 1.3 - 0.3 * ((popT - 0.6) / 0.4);
+                    const iconScale = Math.min(spring, 1.3) * (popT < 1 ? 1 : 1);
+                    const iconAlpha = Math.min(1, popT * 2);
+
+                    ctx.save();
+                    ctx.globalAlpha = opacity * iconAlpha;
+                    ctx.translate(px, py);
+                    ctx.scale(iconScale, iconScale);
+
+                    // Try to find the icon image
+                    let iconImg = this._mapIcons[`__mapicon_${loc.name}`];
+                    if (!iconImg) iconImg = this._mapIcons[`__mapicon_${loc.icon}`];
+
+                    const iconSize = 36;
+                    if (iconImg && iconImg.complete && iconImg.naturalWidth > 0) {
+                        // Circular background + icon
+                        ctx.shadowColor = pal.pin;
+                        ctx.shadowBlur = 12;
+                        ctx.fillStyle = 'rgba(10,15,30,0.8)';
+                        ctx.beginPath();
+                        ctx.arc(0, 0, iconSize / 2 + 4, 0, Math.PI * 2);
+                        ctx.fill();
+                        ctx.strokeStyle = pal.pin;
+                        ctx.lineWidth = 2.5;
+                        ctx.beginPath();
+                        ctx.arc(0, 0, iconSize / 2 + 4, 0, Math.PI * 2);
+                        ctx.stroke();
+                        ctx.shadowBlur = 0;
+                        // Clip + draw icon
+                        ctx.beginPath();
+                        ctx.arc(0, 0, iconSize / 2 + 2, 0, Math.PI * 2);
+                        ctx.clip();
+                        ctx.drawImage(iconImg, -iconSize / 2, -iconSize / 2, iconSize, iconSize);
+                    } else {
+                        // Fallback: colored dot with pulse
+                        ctx.shadowColor = pal.pin;
+                        ctx.shadowBlur = 14;
+                        ctx.fillStyle = pal.pin;
+                        ctx.beginPath();
+                        ctx.arc(0, 0, 8, 0, Math.PI * 2);
+                        ctx.fill();
+                        ctx.shadowBlur = 0;
+                    }
+
+                    ctx.restore();
+
+                    // Expanding ring on pop-in
+                    if (popT < 1) {
+                        const ringR = 20 + popT * 30;
+                        ctx.globalAlpha = opacity * (1 - popT) * 0.4;
+                        ctx.strokeStyle = pal.pin;
+                        ctx.lineWidth = 2;
+                        ctx.beginPath();
+                        ctx.arc(px, py, ringR, 0, Math.PI * 2);
+                        ctx.stroke();
+                    }
+                }
+            }
+            ctx.globalAlpha = opacity;
+        }
+
         // ── 4. Flight arcs (progressive reveal + traveling dot) ──
-        if (pinPositions.length >= 2) {
+        // Only for route/comparison variants — locator/regionHighlight should NOT draw arcs between pins.
+        const _arcVariants = new Set(['route', 'comparison']);
+        if (_arcVariants.has(variant) && pinPositions.length >= 2) {
             for (let i = 0; i < pinPositions.length - 1; i++) {
                 const a = pinPositions[i], b = pinPositions[i + 1];
                 const dist = Math.hypot(b.x - a.x, b.y - a.y);
@@ -3907,15 +4528,57 @@ class MGRenderer {
             ctx.arc(pin.x, py, glowR, 0, Math.PI * 2);
             ctx.fill();
 
-            // Pin dot
+            // Pin dot or icon — look up by pin label, then try waypoint match
+            let iconImg = this._mapIcons[`__mapicon_${pin.label}`];
+            if (!iconImg) {
+                // Try matching via waypoint: find a waypoint whose name matches this pin
+                const wps = mg._mapWaypoints || [];
+                for (const wp of wps) {
+                    if (!wp.icon) continue;
+                    const wpLow = (wp.name || '').toLowerCase();
+                    const pinLow = (pin.label || '').toLowerCase();
+                    if (wpLow === pinLow || wpLow.includes(pinLow) || pinLow.includes(wpLow)) {
+                        iconImg = this._mapIcons[`__mapicon_${wp.name}`];
+                        if (iconImg) break;
+                    }
+                }
+            }
             const pinDotR = pin.pinType === 'city' || pin.pinType === 'landmark' ? 9 : 7;
-            ctx.fillStyle = pal.pin;
-            ctx.shadowColor = pal.pin;
-            ctx.shadowBlur = 18;
-            ctx.beginPath();
-            ctx.arc(pin.x, py, pinDotR * eased, 0, Math.PI * 2);
-            ctx.fill();
-            ctx.shadowBlur = 0;
+
+            if (iconImg && iconImg.complete && iconImg.naturalWidth > 0) {
+                // Draw icon instead of pin dot — circular clipped, with glow
+                const iconSize = 40 * eased;
+                ctx.save();
+                ctx.shadowColor = pal.pin;
+                ctx.shadowBlur = 14;
+                // Draw circular background
+                ctx.fillStyle = 'rgba(10,15,30,0.7)';
+                ctx.beginPath();
+                ctx.arc(pin.x, py, iconSize / 2 + 4, 0, Math.PI * 2);
+                ctx.fill();
+                // Draw border ring
+                ctx.strokeStyle = pal.pin;
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.arc(pin.x, py, iconSize / 2 + 4, 0, Math.PI * 2);
+                ctx.stroke();
+                ctx.shadowBlur = 0;
+                // Clip to circle and draw icon
+                ctx.beginPath();
+                ctx.arc(pin.x, py, iconSize / 2 + 2, 0, Math.PI * 2);
+                ctx.clip();
+                ctx.drawImage(iconImg, pin.x - iconSize / 2, py - iconSize / 2, iconSize, iconSize);
+                ctx.restore();
+            } else {
+                // Fallback: standard pin dot
+                ctx.fillStyle = pal.pin;
+                ctx.shadowColor = pal.pin;
+                ctx.shadowBlur = 18;
+                ctx.beginPath();
+                ctx.arc(pin.x, py, pinDotR * eased, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.shadowBlur = 0;
+            }
 
             // Outer ring
             ctx.strokeStyle = pal.pin;
@@ -4033,11 +4696,11 @@ class MGRenderer {
                 projY[i] = yProj;
             }
 
-            const bottomScreen = H * 0.92;
+            const bottomScreen = H;
             const projMax = projY[0];
             const projMin = projY[STRIPS];
             const projRange = projMax - projMin;
-            const visibleH = H * (0.85 - tilt * 0.15);
+            const visibleH = H;
 
             const screenY = new Float32Array(STRIPS + 1);
             for (let i = 0; i <= STRIPS; i++) {
@@ -4737,7 +5400,7 @@ class MGRenderer {
         const { isExiting, exitProgress, opacity, idleScale, enterFrames, enterSpring, enterLinear } = anim;
 
         const variant = this._resolveVariant(mg, s, 'listicleCounter');
-        const colors = this._resolveColors(s, 'listicleCounter');
+        const colors = this._resolveColors(s, 'listicleCounter', mg);
         const cs = this._getCounterStyle(mg);
 
         // Parse "#3 Title" → number="3", title="Title"
@@ -5090,7 +5753,7 @@ class MGRenderer {
         const { isExiting, exitProgress, opacity, idleScale, enterSpring, enterLinear } = anim;
 
         const variant = this._resolveVariant(mg, s, 'progressTracker');
-        const colors = this._resolveColors(s, 'progressTracker');
+        const colors = this._resolveColors(s, 'progressTracker', mg);
 
         // Parse "2/5" or "Item 2 of 5" → current=2, total=5
         const fracMatch = (mg.text || '').match(/(\d+)\s*(?:\/|of)\s*(\d+)/i);
@@ -5326,6 +5989,101 @@ class MGRenderer {
     _getLowerThirdStyle(mg) {
         const styleName = mg.style || 'clean';
         return MGRenderer._LOWER_THIRD_STYLES[styleName] || MGRenderer._LOWER_THIRD_STYLES.clean;
+    }
+
+    // ========================================================================
+    // HEADLINE STYLE TOKENS — per-style text shadow, color, weight, glow.
+    // Parallels _LOWER_THIRD_STYLES / _COUNTER_STYLES. Selected by mg.style.
+    // ========================================================================
+    static _HEADLINE_STYLES = {
+        clean: {
+            textFill: '#ffffff', subFill: null, accentFill: null,
+            shadowColor: 'rgba(0,0,0,0.85)', shadowBlur: 24, shadowY: 4,
+            subShadowColor: 'rgba(0,0,0,0.7)', subShadowBlur: 12, subShadowY: 2,
+            glow: false, glowColor: null, glowBlur: 0,
+            titleWeight: '900', titleSize: 72, subWeight: '500', subSize: 26,
+            outline: null, outlineWidth: 0,
+        },
+        bold: {
+            textFill: '#ffffff', subFill: '#fca5a5', accentFill: '#ef4444',
+            shadowColor: 'rgba(0,0,0,0.9)', shadowBlur: 20, shadowY: 5,
+            subShadowColor: 'rgba(0,0,0,0.75)', subShadowBlur: 10, subShadowY: 2,
+            glow: false, glowColor: null, glowBlur: 0,
+            titleWeight: '900', titleSize: 76, subWeight: '700', subSize: 28,
+            outline: '#000000', outlineWidth: 5,
+        },
+        minimal: {
+            textFill: 'rgba(255,255,255,0.96)', subFill: 'rgba(255,255,255,0.7)', accentFill: null,
+            shadowColor: 'rgba(0,0,0,0.4)', shadowBlur: 6, shadowY: 1,
+            subShadowColor: 'rgba(0,0,0,0.3)', subShadowBlur: 4, subShadowY: 1,
+            glow: false, glowColor: null, glowBlur: 0,
+            titleWeight: '500', titleSize: 68, subWeight: '400', subSize: 22,
+            outline: null, outlineWidth: 0,
+        },
+        neon: {
+            textFill: '#ffffff', subFill: '#66ffbb', accentFill: '#00ff88',
+            shadowColor: 'rgba(0,0,0,0.8)', shadowBlur: 14, shadowY: 2,
+            subShadowColor: 'rgba(0,0,0,0.6)', subShadowBlur: 8, subShadowY: 1,
+            glow: true, glowColor: '#00ff88', glowBlur: 30,
+            titleWeight: '800', titleSize: 72, subWeight: '600', subSize: 26,
+            outline: null, outlineWidth: 0,
+        },
+        cinematic: {
+            textFill: '#f5ecd0', subFill: '#c8a944', accentFill: '#d4af37',
+            shadowColor: 'rgba(0,0,0,0.85)', shadowBlur: 22, shadowY: 4,
+            subShadowColor: 'rgba(0,0,0,0.7)', subShadowBlur: 10, subShadowY: 2,
+            glow: false, glowColor: null, glowBlur: 0,
+            titleWeight: '700', titleSize: 70, subWeight: '400', subSize: 25,
+            outline: null, outlineWidth: 0,
+        },
+        elegant: {
+            textFill: '#ffffff', subFill: '#c4b5fd', accentFill: '#8b5cf6',
+            shadowColor: 'rgba(80,40,140,0.45)', shadowBlur: 18, shadowY: 3,
+            subShadowColor: 'rgba(80,40,140,0.3)', subShadowBlur: 10, subShadowY: 2,
+            glow: true, glowColor: '#8b5cf6', glowBlur: 22,
+            titleWeight: '500', titleSize: 68, subWeight: '300', subSize: 24,
+            outline: null, outlineWidth: 0,
+        },
+    };
+
+    _getHeadlineStyle(mg) {
+        const styleName = mg.style || 'clean';
+        return MGRenderer._HEADLINE_STYLES[styleName] || MGRenderer._HEADLINE_STYLES.clean;
+    }
+
+    // Paint headline text with per-style shadow/glow/outline. `isSub` switches
+    // to the lighter subtext shadow tokens. Clears shadow at end, then paints a
+    // final crisp fill on top to keep letter edges sharp.
+    static _drawHeadlineText(ctx, text, x, y, ls, isSub) {
+        const blur = isSub ? ls.subShadowBlur : ls.shadowBlur;
+        const color = isSub ? ls.subShadowColor : ls.shadowColor;
+        const offY = isSub ? ls.subShadowY : ls.shadowY;
+
+        if (ls.glow && !isSub && ls.glowColor && ls.glowBlur > 0) {
+            ctx.shadowColor = color || 'rgba(0,0,0,0.85)';
+            ctx.shadowBlur = blur || 20;
+            ctx.shadowOffsetX = 0;
+            ctx.shadowOffsetY = offY || 0;
+            ctx.fillText(text, x, y);
+            ctx.shadowColor = ls.glowColor;
+            ctx.shadowBlur = ls.glowBlur;
+            ctx.shadowOffsetY = 0;
+            ctx.fillText(text, x, y);
+            ctx.shadowBlur = ls.glowBlur * 1.8;
+            ctx.fillText(text, x, y);
+        } else if (blur > 0) {
+            ctx.shadowColor = color || 'rgba(0,0,0,0.7)';
+            ctx.shadowBlur = blur;
+            ctx.shadowOffsetX = 0;
+            ctx.shadowOffsetY = offY || 0;
+            ctx.fillText(text, x, y);
+        }
+
+        ctx.shadowColor = 'transparent';
+        ctx.shadowBlur = 0;
+        ctx.shadowOffsetX = 0;
+        ctx.shadowOffsetY = 0;
+        ctx.fillText(text, x, y);
     }
 
     // ========================================================================
@@ -7086,6 +7844,12 @@ class MGRenderer {
      * Two images slide in from opposite sides, feathered edges, title types letter by letter.
      */
     _renderImageShowcase(ctx, frame, fps, mg, s, anim) {
+        // Route to collage variant if selected
+        const variant = mg.subType || 'standard';
+        if (variant === 'collage') {
+            return this._renderImageShowcaseCollage(ctx, frame, fps, mg, s, anim);
+        }
+
         const { springValue, interpolate } = AnimationUtils;
         const W = 1920, H = 1080;
         const ts = this._getTemplateStyle(mg, s);
@@ -7125,10 +7889,10 @@ class MGRenderer {
         // --- Two images ---
         const items = mg.items || [];
         const thumbs = mg._itemThumbnails || [];
-        const imgW = 380;
-        const imgH = 420;
-        const imgY = H * 0.22;
-        const gap = 80;
+        const imgW = 580;
+        const imgH = 640;
+        const imgY = H * 0.19;
+        const gap = 40;
         const leftImgX = W / 2 - gap / 2 - imgW;
         const rightImgX = W / 2 + gap / 2;
 
@@ -7226,6 +7990,164 @@ class MGRenderer {
         ctx.restore();
     }
 
+    // ── IMAGE SHOWCASE: COLLAGE VARIANT ──
+    // Images drop in with random rotation, staggered, piling on top of each other
+    // like scattered photos on a desk. Title overlays at bottom.
+
+    _renderImageShowcaseCollage(ctx, frame, fps, mg, s, anim) {
+        const { springValue, interpolate } = AnimationUtils;
+        const W = 1920, H = 1080;
+        const ts = this._getTemplateStyle(mg, s);
+        const totalFrames = Math.round((mg.duration || 6) * fps);
+        const exitDur = Math.round(fps * 0.6);
+        const isExiting = frame > totalFrames - exitDur;
+        const exitAlpha = isExiting ? interpolate(frame - (totalFrames - exitDur), [0, exitDur], [1, 0]) : 1;
+
+        // Dark background
+        ctx.fillStyle = ts.gridBg || '#111115';
+        ctx.fillRect(0, 0, W, H);
+
+        ctx.save();
+        ctx.globalAlpha = Math.min(anim.opacity, exitAlpha);
+
+        const thumbs = mg._itemThumbnails || [];
+        const items = mg.items || [];
+        const count = Math.min(thumbs.length || items.length, 3);
+
+        // Deterministic "random" layout per card — seeded from mg text hash
+        const seed = (mg.text || '').split('').reduce((a, c) => a + c.charCodeAt(0), 0);
+        const _rng = (i) => {
+            const x = Math.sin(seed * 9301 + i * 4973) * 49297;
+            return x - Math.floor(x);
+        };
+
+        // Generate scatter positions for each photo
+        // Photos are arranged in a loose pile around the center
+        const imgW = 420, imgH = 500;
+        const centerX = W / 2, centerY = H * 0.42;
+        const scatterRadius = 220;
+
+        const cards = [];
+        for (let i = 0; i < count; i++) {
+            const angle = _rng(i * 3) * Math.PI * 2;
+            const dist = scatterRadius * (0.3 + _rng(i * 3 + 1) * 0.7);
+            const rotation = (_rng(i * 3 + 2) - 0.5) * 0.5; // -14° to +14°
+
+            cards.push({
+                x: centerX + Math.cos(angle) * dist - imgW / 2,
+                y: centerY + Math.sin(angle) * dist * 0.5 - imgH / 2, // compress Y spread
+                rotation,
+                delay: i * 0.3, // stagger: 0s, 0.3s, 0.6s
+            });
+        }
+
+        // Render each photo card (back to front — later cards on top)
+        for (let i = 0; i < cards.length; i++) {
+            const card = cards[i];
+            const file = thumbs[i];
+            const thumbKey = file ? file.replace(/^.*[/\\]/, '') : null;
+            const img = thumbKey ? this._gridThumbs[thumbKey] : null;
+
+            // Spring animation: drop from above with bounce
+            const delayFrames = Math.round(card.delay * fps);
+            const spring = springValue(Math.max(0, frame - delayFrames), fps, { damping: 10, stiffness: 50 });
+            const dropY = interpolate(spring, [0, 1], [-400, 0]);
+            const rotationSpring = interpolate(spring, [0, 1], [card.rotation * 3, card.rotation]); // exaggerated rotation on entry
+            const cardAlpha = spring;
+
+            // Exit: cards scatter outward
+            let exitX = 0, exitY = 0, exitRot = 0;
+            if (isExiting) {
+                const exitT = interpolate(frame - (totalFrames - exitDur), [0, exitDur], [0, 1]);
+                const eased = exitT * exitT;
+                exitX = (card.x - centerX + imgW / 2) * eased * 1.5;
+                exitY = eased * 300;
+                exitRot = card.rotation * eased * 4;
+            }
+
+            ctx.save();
+            ctx.globalAlpha *= cardAlpha;
+
+            // Position and rotate around card center
+            const cx = card.x + imgW / 2 + exitX;
+            const cy = card.y + imgH / 2 + dropY + exitY;
+            ctx.translate(cx, cy);
+            ctx.rotate(rotationSpring + exitRot);
+            ctx.translate(-imgW / 2, -imgH / 2);
+
+            // White photo border (polaroid-style)
+            const border = 8;
+            const borderBottom = 40; // thicker bottom border like a polaroid
+            ctx.shadowColor = 'rgba(0,0,0,0.5)';
+            ctx.shadowBlur = 20;
+            ctx.shadowOffsetY = 8;
+            ctx.fillStyle = '#f5f0e8'; // off-white paper color
+            MGRenderer._roundRect(ctx, -border, -border, imgW + border * 2, imgH + border + borderBottom, 4);
+            ctx.fill();
+            ctx.shadowColor = 'transparent';
+            ctx.shadowBlur = 0;
+            ctx.shadowOffsetY = 0;
+
+            // Image clip
+            ctx.beginPath();
+            MGRenderer._roundRect(ctx, 0, 0, imgW, imgH, 2);
+            ctx.clip();
+
+            if (img) {
+                const iw = img.naturalWidth || img.width || imgW;
+                const ih = img.naturalHeight || img.height || imgH;
+                const scale = Math.max(imgW / iw, imgH / ih);
+                const sw = imgW / scale;
+                const sh = imgH / scale;
+                const sx = (iw - sw) / 2;
+                const sy = (ih - sh) / 2;
+                ctx.drawImage(img, sx, sy, sw, sh, 0, 0, imgW, imgH);
+            } else {
+                ctx.fillStyle = 'rgba(60,55,50,0.8)';
+                ctx.fillRect(0, 0, imgW, imgH);
+                MGRenderer._setFont(ctx, '400', 14, ts.fontBody);
+                ctx.fillStyle = 'rgba(255,255,255,0.3)';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(items[i] || 'Loading...', imgW / 2, imgH / 2);
+            }
+
+            ctx.restore();
+        }
+
+        // --- Title bar at bottom ---
+        const title = mg.text || '';
+        if (title) {
+            const titleDelay = Math.round(fps * (count * 0.3 + 0.5));
+            const titleSpring = springValue(Math.max(0, frame - titleDelay), fps, { damping: 12, stiffness: 60 });
+            const titleSlideY = interpolate(titleSpring, [0, 1], [60, 0]);
+
+            ctx.save();
+            ctx.globalAlpha *= titleSpring;
+
+            // Semi-transparent bar
+            const barY = H * 0.85;
+            const barH = 80;
+            ctx.fillStyle = 'rgba(0,0,0,0.65)';
+            ctx.fillRect(0, barY + titleSlideY, W, barH);
+
+            // Title text
+            MGRenderer._setFont(ctx, ts.titleWeight, ts.titleSize + 4, ts.fontHeading);
+            ctx.fillStyle = ts.text || '#fff';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.shadowColor = 'rgba(0,0,0,0.5)';
+            ctx.shadowBlur = 8;
+            ctx.fillText(title, W / 2, barY + barH / 2 + titleSlideY);
+            ctx.shadowColor = 'transparent';
+            ctx.shadowBlur = 0;
+
+            ctx.restore();
+        }
+
+        ctx.restore();
+    }
+
     // ── STAT CARD — icon + big number + label infographic ──
     // Variants: sideBySide (2 stats horizontal), stacked (2 stats vertical),
     //           single (1 big stat centered), triple (3 stats in a row)
@@ -7233,15 +8155,25 @@ class MGRenderer {
     /** Parse stat items from mg.items. Each item: "iconHint number label" */
     _statCardItems(mg) {
         const raw = mg.items || mg._items || [];
+        const KNOWN_ICONS = new Set([
+            'energy','shield','home','money','people','globe','chart','clock',
+            'building','car','health','tech',
+        ]);
         return raw.slice(0, 3).map(item => {
             const text = typeof item === 'string' ? item : (item.text || item.event || '');
             if (!text) return null;
-            // Parse: "energy -75% Energy Bills" or "-75% Energy Bills" or "75%"
-            const match = text.match(/^(?:(energy|shield|home|money|people|globe|chart|clock|building|car|health|tech)\s+)?([<>~±+\-]?\d[\d,.]*%?)\s*(.*)/i);
+            // Parse: "iconHint number label". iconHint is any word (known or not —
+            // VP sometimes hallucinates e.g. "country_eg"; we tolerate and fall back
+            // to the 'chart' icon rather than garbling the number slot). Number can
+            // be $-prefixed and M/K/B/% suffixed (e.g., "-$500M", "340K", "-45%").
+            const match = text.match(/^(?:([a-z_][a-z0-9_]*)\s+)?([<>~±+\-]?\$?\d[\d,.]*\s*[%kKmMbB]?)\s*(.*)/i);
             if (match) {
-                return { icon: (match[1] || 'chart').toLowerCase(), number: match[2], label: match[3] || '' };
+                const rawIcon = (match[1] || '').toLowerCase();
+                const icon = KNOWN_ICONS.has(rawIcon) ? rawIcon : 'chart';
+                return { icon, number: match[2].trim(), label: (match[3] || '').trim() };
             }
-            return { icon: 'chart', number: text, label: '' };
+            // No number at all — treat whole string as label, not as number.
+            return { icon: 'chart', number: '', label: text };
         }).filter(Boolean);
     }
 
@@ -7791,6 +8723,514 @@ class MGRenderer {
         }
 
         ctx.restore();
+    }
+
+    // ========================================================================
+    // SPLIT SCREEN — Two images/videos side by side with labels
+    // ========================================================================
+
+    _renderSplitScreen(ctx, frame, fps, mg, s, anim) {
+        const { springValue, interpolate } = AnimationUtils;
+        const W = 1920, H = 1080;
+        const ts = this._getTemplateStyle(mg, s);
+        const totalFrames = Math.round((mg.duration || 6) * fps);
+        const exitDur = Math.round(fps * 0.5);
+        const isExiting = frame > totalFrames - exitDur;
+        const exitAlpha = isExiting ? interpolate(frame - (totalFrames - exitDur), [0, exitDur], [1, 0]) : 1;
+        const variant = (mg.subType || 'vertical');
+
+        // Parse items: "Left Label; Right Label"
+        let items = [];
+        if (mg.items) {
+            items = (typeof mg.items === 'string' ? mg.items.split(';') : mg.items).map(i => (typeof i === 'string' ? i.trim() : i.label || i));
+        }
+        const leftLabel = items[0] || 'A';
+        const rightLabel = items[1] || 'B';
+
+        // Thumbnail images — _ensureGridThumbnails stores on this._gridThumbs
+        // (renderer-wide cache), keyed by filename. Resolve per-slot via _itemThumbnails
+        // so we don't accidentally pick a thumb that belongs to a different scene.
+        const itemThumbs = mg._itemThumbnails || [];
+        const getImg = (idx) => {
+            const f = itemThumbs[idx];
+            if (!f) return null;
+            const key = f.replace(/^.*[/\\]/, '');
+            return this._gridThumbs?.[key] || null;
+        };
+        const leftImg = getImg(0);
+        const rightImg = getImg(1);
+
+        ctx.save();
+        ctx.globalAlpha = exitAlpha;
+
+        // Background
+        ctx.fillStyle = ts.gridBg || 'rgba(0,0,10,0.95)';
+        ctx.fillRect(0, 0, W, H);
+
+        const gap = variant === 'diagonal' ? 0 : 8;
+        const halfW = (W - gap) / 2;
+
+        // Animation: panels slide inward
+        const enterDur = Math.round(fps * 0.6);
+        const leftSpring = springValue(frame, fps, { damping: 12, stiffness: 100, durationInFrames: enterDur });
+        const rightSpring = springValue(Math.max(0, frame - Math.round(fps * 0.08)), fps, { damping: 12, stiffness: 100, durationInFrames: enterDur });
+        const leftSlide = isExiting ? interpolate(exitAlpha, [0, 1], [-halfW, 0]) : interpolate(leftSpring, [0, 1], [-halfW, 0]);
+        const rightSlide = isExiting ? interpolate(exitAlpha, [0, 1], [halfW, 0]) : interpolate(rightSpring, [0, 1], [halfW, 0]);
+
+        // ── LEFT PANEL ──
+        ctx.save();
+        if (variant === 'diagonal') {
+            ctx.beginPath();
+            ctx.moveTo(0, 0);
+            ctx.lineTo(W * 0.55, 0);
+            ctx.lineTo(W * 0.45, H);
+            ctx.lineTo(0, H);
+            ctx.clip();
+        } else {
+            ctx.beginPath();
+            ctx.rect(0, 0, halfW, H);
+            ctx.clip();
+        }
+        ctx.translate(leftSlide, 0);
+
+        if (leftImg && leftImg.complete && (leftImg.naturalWidth || leftImg.videoWidth)) {
+            const imgW = leftImg.naturalWidth || leftImg.videoWidth || halfW;
+            const imgH = leftImg.naturalHeight || leftImg.videoHeight || H;
+            const sc = Math.max(halfW / imgW, H / imgH);
+            const dw = imgW * sc, dh = imgH * sc;
+            ctx.drawImage(leftImg, (halfW - dw) / 2, (H - dh) / 2, dw, dh);
+        } else {
+            ctx.fillStyle = s.primary + '30';
+            ctx.fillRect(0, 0, halfW, H);
+        }
+
+        // Darken bottom for label
+        const leftGrad = ctx.createLinearGradient(0, H * 0.6, 0, H);
+        leftGrad.addColorStop(0, 'transparent');
+        leftGrad.addColorStop(1, 'rgba(0,0,0,0.75)');
+        ctx.fillStyle = leftGrad;
+        ctx.fillRect(0, 0, W, H);
+        ctx.restore();
+
+        // ── RIGHT PANEL ──
+        ctx.save();
+        if (variant === 'diagonal') {
+            ctx.beginPath();
+            ctx.moveTo(W * 0.55, 0);
+            ctx.lineTo(W, 0);
+            ctx.lineTo(W, H);
+            ctx.lineTo(W * 0.45, H);
+            ctx.clip();
+        } else {
+            ctx.beginPath();
+            ctx.rect(halfW + gap, 0, halfW, H);
+            ctx.clip();
+        }
+        ctx.translate(rightSlide, 0);
+
+        if (rightImg && rightImg.complete && (rightImg.naturalWidth || rightImg.videoWidth)) {
+            const imgW = rightImg.naturalWidth || rightImg.videoWidth || halfW;
+            const imgH = rightImg.naturalHeight || rightImg.videoHeight || H;
+            const sc = Math.max(halfW / imgW, H / imgH);
+            const dw = imgW * sc, dh = imgH * sc;
+            const ox = variant === 'diagonal' ? W * 0.45 : halfW + gap;
+            ctx.drawImage(rightImg, ox + (halfW - dw) / 2, (H - dh) / 2, dw, dh);
+        } else {
+            const ox = variant === 'diagonal' ? W * 0.45 : halfW + gap;
+            ctx.fillStyle = s.accent + '30';
+            ctx.fillRect(ox, 0, halfW, H);
+        }
+
+        const rightGrad = ctx.createLinearGradient(0, H * 0.6, 0, H);
+        rightGrad.addColorStop(0, 'transparent');
+        rightGrad.addColorStop(1, 'rgba(0,0,0,0.75)');
+        ctx.fillStyle = rightGrad;
+        ctx.fillRect(0, 0, W, H);
+        ctx.restore();
+
+        // ── CENTER DIVIDER ──
+        if (variant === 'diagonal') {
+            // Diagonal divider line with glow
+            ctx.save();
+            ctx.globalAlpha = exitAlpha * 0.9;
+            ctx.strokeStyle = ts.accent;
+            ctx.lineWidth = 4;
+            ctx.shadowColor = ts.accent;
+            ctx.shadowBlur = 16;
+            ctx.beginPath();
+            ctx.moveTo(W * 0.55, 0);
+            ctx.lineTo(W * 0.45, H);
+            ctx.stroke();
+            ctx.shadowBlur = 0;
+            ctx.restore();
+        } else if (gap > 0) {
+            ctx.fillStyle = ts.accent;
+            ctx.shadowColor = ts.accent;
+            ctx.shadowBlur = 12;
+            ctx.fillRect(halfW, 0, gap, H);
+            ctx.shadowBlur = 0;
+        }
+
+        // ── LABELS ──
+        const labelDelay = Math.round(fps * 0.4);
+        const labelSpring = springValue(Math.max(0, frame - labelDelay), fps, { damping: 10, stiffness: 120, durationInFrames: Math.round(fps * 0.5) });
+        const labelY = H - 80;
+
+        ctx.save();
+        ctx.globalAlpha = exitAlpha * labelSpring;
+
+        // Left label — pill
+        MGRenderer._setFont(ctx, '700', 32, ts.fontHeading);
+        const leftW = ctx.measureText(leftLabel).width + 40;
+        const pillH = 48;
+        const pillR = pillH / 2;
+        const leftPillX = halfW / 2 - leftW / 2;
+
+        ctx.fillStyle = ts.cardBg;
+        ctx.shadowColor = 'rgba(0,0,0,0.5)';
+        ctx.shadowBlur = 8;
+        MGRenderer._roundRect(ctx, leftPillX, labelY - pillH / 2, leftW, pillH, pillR);
+        ctx.fill();
+        ctx.shadowBlur = 0;
+
+        // Left accent bar
+        ctx.fillStyle = s.primary || ts.accent;
+        ctx.fillRect(leftPillX + 8, labelY - pillH / 2 + 8, 3, pillH - 16);
+
+        ctx.fillStyle = ts.text;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(leftLabel, halfW / 2, labelY);
+
+        // Right label — pill
+        const rightW = ctx.measureText(rightLabel).width + 40;
+        const rightOff = variant === 'diagonal' ? W * 0.725 : halfW + gap + halfW / 2;
+        const rightPillX = rightOff - rightW / 2;
+
+        ctx.fillStyle = ts.cardBg;
+        ctx.shadowColor = 'rgba(0,0,0,0.5)';
+        ctx.shadowBlur = 8;
+        MGRenderer._roundRect(ctx, rightPillX, labelY - pillH / 2, rightW, pillH, pillR);
+        ctx.fill();
+        ctx.shadowBlur = 0;
+
+        ctx.fillStyle = s.accent || ts.accent;
+        ctx.fillRect(rightPillX + 8, labelY - pillH / 2 + 8, 3, pillH - 16);
+
+        ctx.fillStyle = ts.text;
+        ctx.fillText(rightLabel, rightOff, labelY);
+        ctx.restore();
+
+        // ── TITLE (top center) ──
+        if (mg.text) {
+            const titleDelay = Math.round(fps * 0.25);
+            const titleSpring = springValue(Math.max(0, frame - titleDelay), fps, { damping: 10, stiffness: 120, durationInFrames: Math.round(fps * 0.4) });
+            ctx.save();
+            ctx.globalAlpha = exitAlpha * titleSpring;
+            MGRenderer._setFont(ctx, ts.titleWeight || '700', 44, ts.fontHeading);
+            ctx.fillStyle = ts.text;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.shadowColor = 'rgba(0,0,0,0.7)';
+            ctx.shadowBlur = 6;
+            ctx.fillText(mg.text, W / 2, 60);
+            ctx.shadowBlur = 0;
+            ctx.restore();
+        }
+
+        // ── VS badge (center) ──
+        if (variant !== 'reveal') {
+            const vsDelay = Math.round(fps * 0.5);
+            const vsSpring = springValue(Math.max(0, frame - vsDelay), fps, { damping: 12, stiffness: 150, durationInFrames: Math.round(fps * 0.4) });
+            ctx.save();
+            ctx.globalAlpha = exitAlpha * vsSpring;
+            ctx.translate(W / 2, H / 2);
+            ctx.scale(vsSpring, vsSpring);
+            ctx.beginPath();
+            ctx.arc(0, 0, 36, 0, Math.PI * 2);
+            const vsGrad = ctx.createLinearGradient(-36, -36, 36, 36);
+            vsGrad.addColorStop(0, s.primary || ts.accent);
+            vsGrad.addColorStop(1, s.accent || ts.accent);
+            ctx.fillStyle = vsGrad;
+            ctx.shadowColor = ts.accent;
+            ctx.shadowBlur = 20;
+            ctx.fill();
+            ctx.shadowBlur = 0;
+            MGRenderer._setFont(ctx, '900', 24, ts.fontHeading);
+            ctx.fillStyle = '#ffffff';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('VS', 0, 0);
+            ctx.restore();
+        }
+
+        ctx.restore();
+    }
+
+    // ========================================================================
+    // INFOGRAPHIC — Multi-item layout with icons, images, titles, values
+    // ========================================================================
+
+    _renderInfographic(ctx, frame, fps, mg, s, anim) {
+        const { springValue, interpolate } = AnimationUtils;
+        const W = 1920, H = 1080;
+        const ts = this._getTemplateStyle(mg, s);
+        const totalFrames = Math.round((mg.duration || 8) * fps);
+        const exitDur = Math.round(fps * 0.5);
+        const isExiting = frame > totalFrames - exitDur;
+        const exitAlpha = isExiting ? interpolate(frame - (totalFrames - exitDur), [0, exitDur], [1, 0]) : 1;
+        const variant = (mg.subType || 'grid');
+
+        // Parse items: "Title | Value | image query" separated by semicolons
+        let items = [];
+        if (mg.items) {
+            const rawItems = typeof mg.items === 'string' ? mg.items.split(';') : mg.items;
+            for (const raw of rawItems) {
+                const str = typeof raw === 'string' ? raw.trim() : '';
+                if (!str) continue;
+                const parts = str.split('|').map(p => p.trim());
+                items.push({
+                    title: parts[0] || '',
+                    value: parts[1] || '',
+                    imageQuery: parts[2] || parts[0] || '',
+                });
+            }
+        }
+        if (items.length === 0) return;
+        const count = items.length;
+
+        // Thumbnail images — _ensureGridThumbnails stores on this._gridThumbs
+        // (renderer-wide cache), keyed by filename. Resolve per-slot via _itemThumbnails
+        // so each card gets its OWN image, not whatever happened to land at thumbKeys[i].
+        const itemThumbs = mg._itemThumbnails || [];
+        const getImg = (idx) => {
+            const f = itemThumbs[idx];
+            if (!f) return null;
+            const key = f.replace(/^.*[/\\]/, '');
+            return this._gridThumbs?.[key] || null;
+        };
+
+        ctx.save();
+        ctx.globalAlpha = exitAlpha;
+
+        // Background
+        ctx.fillStyle = ts.gridBg || 'rgba(0,0,10,0.95)';
+        ctx.fillRect(0, 0, W, H);
+
+        // Subtle grid lines
+        ctx.strokeStyle = ts.gridLine || 'rgba(255,255,255,0.04)';
+        ctx.lineWidth = 1;
+        for (let gx = 0; gx < W; gx += 120) {
+            ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, H); ctx.stroke();
+        }
+        for (let gy = 0; gy < H; gy += 120) {
+            ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(W, gy); ctx.stroke();
+        }
+
+        // ── Title ──
+        if (mg.text) {
+            const titleDelay = Math.round(fps * 0.15);
+            const titleSpring = springValue(Math.max(0, frame - titleDelay), fps, { damping: 10, stiffness: 120, durationInFrames: Math.round(fps * 0.5) });
+            ctx.save();
+            ctx.globalAlpha = exitAlpha * titleSpring;
+            MGRenderer._setFont(ctx, ts.titleWeight || '700', 44, ts.fontHeading);
+            ctx.fillStyle = ts.text;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.shadowColor = 'rgba(0,0,0,0.6)';
+            ctx.shadowBlur = 4;
+            ctx.fillText(mg.text, W / 2, 60);
+            ctx.shadowBlur = 0;
+
+            // Accent underline
+            const titleW = ctx.measureText(mg.text).width;
+            ctx.fillStyle = ts.accent;
+            ctx.globalAlpha = exitAlpha * titleSpring * 0.6;
+            ctx.fillRect(W / 2 - titleW / 2, 86, titleW * titleSpring, 3);
+            ctx.restore();
+        }
+
+        // ── Layout items ──
+        const topY = 120;
+        const availH = H - topY - 40;
+        const availW = W - 120;
+
+        if (variant === 'horizontal') {
+            // Horizontal strip — items in a row
+            const itemW = Math.min(300, availW / count);
+            const itemH = availH * 0.85;
+            const totalItemW = itemW * count + 20 * (count - 1);
+            const startX = (W - totalItemW) / 2;
+
+            for (let i = 0; i < count; i++) {
+                const item = items[i];
+                const staggerDelay = Math.round(fps * (0.2 + i * 0.12));
+                const itemSpring = springValue(Math.max(0, frame - staggerDelay), fps, { damping: 10, stiffness: 100, durationInFrames: Math.round(fps * 0.5) });
+                if (itemSpring <= 0) continue;
+
+                const ix = startX + i * (itemW + 20);
+                const iy = topY + (availH - itemH) / 2;
+                const slideY = interpolate(itemSpring, [0, 1], [40, 0]);
+
+                ctx.save();
+                ctx.globalAlpha = exitAlpha * itemSpring;
+                ctx.translate(ix, iy + slideY);
+
+                this._drawInfographicItem(ctx, item, itemW, itemH, i, ts, s, getImg(i), frame, fps);
+
+                ctx.restore();
+            }
+        } else {
+            // Grid variant: 2-3 columns
+            const cols = count <= 3 ? count : count <= 4 ? 2 : 3;
+            const rows = Math.ceil(count / cols);
+            const gapX = 24, gapY = 20;
+            const itemW = (availW - gapX * (cols - 1)) / cols;
+            const itemH = Math.min(280, (availH - gapY * (rows - 1)) / rows);
+            const totalGridW = cols * itemW + (cols - 1) * gapX;
+            const totalGridH = rows * itemH + (rows - 1) * gapY;
+            const startX = (W - totalGridW) / 2;
+            const startY = topY + (availH - totalGridH) / 2;
+
+            for (let i = 0; i < count; i++) {
+                const item = items[i];
+                const col = i % cols;
+                const row = Math.floor(i / cols);
+                const staggerDelay = Math.round(fps * (0.2 + i * 0.1));
+                const itemSpring = springValue(Math.max(0, frame - staggerDelay), fps, { damping: 10, stiffness: 100, durationInFrames: Math.round(fps * 0.5) });
+                if (itemSpring <= 0) continue;
+
+                const ix = startX + col * (itemW + gapX);
+                const iy = startY + row * (itemH + gapY);
+                const slideY = interpolate(itemSpring, [0, 1], [30, 0]);
+
+                ctx.save();
+                ctx.globalAlpha = exitAlpha * itemSpring;
+                ctx.translate(ix, iy + slideY);
+
+                this._drawInfographicItem(ctx, item, itemW, itemH, i, ts, s, getImg(i), frame, fps);
+
+                ctx.restore();
+            }
+        }
+
+        // Connecting lines between items (grid variant only)
+        if (variant === 'grid' && count >= 2) {
+            // Central vertical line
+            ctx.save();
+            const lineDelay = Math.round(fps * 0.6);
+            const lineT = Math.min(1, Math.max(0, (frame - lineDelay) / (fps * 0.4)));
+            if (lineT > 0) {
+                ctx.globalAlpha = exitAlpha * lineT * 0.15;
+                ctx.strokeStyle = ts.accent;
+                ctx.lineWidth = 1;
+                ctx.setLineDash([4, 6]);
+                ctx.beginPath();
+                ctx.moveTo(W / 2, topY + 20);
+                ctx.lineTo(W / 2, topY + availH * lineT - 20);
+                ctx.stroke();
+                ctx.setLineDash([]);
+            }
+            ctx.restore();
+        }
+
+        ctx.restore();
+    }
+
+    /** Draw a single infographic item card */
+    _drawInfographicItem(ctx, item, cardW, cardH, index, ts, s, img, frame, fps) {
+        const ACCENT_COLORS = [
+            s.primary || ts.accent,
+            s.accent || '#ef4444',
+            '#10b981', '#f59e0b', '#8b5cf6', '#ec4899', '#06b6d4', '#f97316',
+        ];
+        const accentColor = ACCENT_COLORS[index % ACCENT_COLORS.length];
+        const imgSize = Math.min(cardH * 0.5, 120);
+        const hasImage = !!img;
+
+        // Card background
+        ctx.fillStyle = ts.cardBg;
+        ctx.shadowColor = ts.cardShadow || 'rgba(0,0,0,0.3)';
+        ctx.shadowBlur = ts.cardShadowBlur || 8;
+        MGRenderer._roundRect(ctx, 0, 0, cardW, cardH, ts.cardRadius || 12);
+        ctx.fill();
+        ctx.shadowBlur = 0;
+
+        // Accent left strip
+        ctx.fillStyle = accentColor;
+        ctx.fillRect(0, 12, 4, cardH - 24);
+
+        // Top accent line
+        ctx.fillStyle = accentColor;
+        ctx.globalAlpha *= 0.4;
+        ctx.fillRect(16, 0, cardW - 32, 2);
+        ctx.globalAlpha /= 0.4;
+
+        // Content layout: image on left (if available), text on right
+        const textX = hasImage ? imgSize + 24 : 20;
+        const textW = cardW - textX - 16;
+
+        // Image thumbnail (circular)
+        if (hasImage) {
+            if (img.complete && (img.naturalWidth || img.videoWidth)) {
+                const cx = 16 + imgSize / 2;
+                const cy = cardH / 2;
+                const radius = imgSize / 2 - 4;
+
+                // Circle clip + draw
+                ctx.save();
+                ctx.beginPath();
+                ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+                ctx.clip();
+                const iw = img.naturalWidth || img.videoWidth || imgSize;
+                const ih = img.naturalHeight || img.videoHeight || imgSize;
+                const sc = Math.max(imgSize / iw, imgSize / ih);
+                ctx.drawImage(img, cx - (iw * sc) / 2, cy - (ih * sc) / 2, iw * sc, ih * sc);
+                ctx.restore();
+
+                // Circle border
+                ctx.strokeStyle = accentColor;
+                ctx.lineWidth = 2.5;
+                ctx.beginPath();
+                ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+                ctx.stroke();
+            }
+        }
+
+        // Index number (small, top-right)
+        MGRenderer._setFont(ctx, '700', 16, ts.fontBody);
+        ctx.fillStyle = accentColor;
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'top';
+        ctx.fillText(`#${index + 1}`, cardW - 12, 10);
+
+        // Title
+        MGRenderer._setFont(ctx, '700', Math.min(28, ts.labelSize || 28), ts.fontHeading);
+        ctx.fillStyle = ts.text;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        const titleY = hasImage ? cardH * 0.35 : cardH * 0.38;
+        // Truncate title to fit
+        let titleText = item.title;
+        while (ctx.measureText(titleText).width > textW && titleText.length > 5) {
+            titleText = titleText.slice(0, -2) + '…';
+        }
+        ctx.shadowColor = 'rgba(0,0,0,0.5)';
+        ctx.shadowBlur = 3;
+        ctx.fillText(titleText, textX, titleY);
+        ctx.shadowBlur = 0;
+
+        // Value (big, bold, accent color)
+        if (item.value) {
+            MGRenderer._setFont(ctx, '800', Math.min(36, ts.titleSize ? ts.titleSize - 8 : 36), ts.fontHeading);
+            ctx.fillStyle = accentColor;
+            ctx.textBaseline = 'middle';
+            const valY = hasImage ? cardH * 0.65 : cardH * 0.65;
+            ctx.shadowColor = accentColor + '40';
+            ctx.shadowBlur = 8;
+            ctx.fillText(item.value, textX, valY);
+            ctx.shadowBlur = 0;
+        }
     }
 
     /** Animate a stat number string with count-up effect */

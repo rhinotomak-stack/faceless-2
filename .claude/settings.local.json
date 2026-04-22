@@ -12,7 +12,11 @@
       "Bash(where melt)",
       "Bash(where melt.exe)",
       "Bash(curl -s -o /dev/null -w \"%{http_code} %{size_download}\" -H \"User-Agent: Mozilla/5.0\" \"https://t.me/s/intelopenSource\")",
-      "WebSearch"
+      "WebSearch",
+      "Bash(node -c src/build-video.js)",
+      "Bash(awk 'NR>=3867 && NR<=4770' ui/js/compositor/MGRenderer.js)",
+      "Bash(node -c src/build-orchestrator.js)",
+      "Bash(node --check preload.js)"
     ]
   }
 }

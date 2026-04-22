@@ -469,7 +469,7 @@ function generateListicleGridMG(listicleItems, overviewSceneIndex, startTime, du
         text: title || '',
         subtext: subtextParts.join(', '),
         startTime: Math.max(0, startTime),
-        duration: Math.min(duration, 6),
+        duration: Math.max(1.0, duration),
         position: 'center',
         category: 'fullscreen',
         isListicleOverview: true,

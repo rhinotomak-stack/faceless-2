@@ -169,7 +169,12 @@ out vec4 fragColor;
 void main() {
     vec4 colorA = texture(u_textureA, v_texCoord);
     vec4 colorB = texture(u_textureB, v_texCoord);
-    fragColor = mix(colorA, colorB, u_progress);
+    // Gamma-aware blend: convert to linear space, mix, convert back
+    // Prevents the "dim midpoint" artifact in naive sRGB crossfades
+    vec3 linA = pow(colorA.rgb, vec3(2.2));
+    vec3 linB = pow(colorB.rgb, vec3(2.2));
+    vec3 blended = mix(linA, linB, u_progress);
+    fragColor = vec4(pow(blended, vec3(1.0 / 2.2)), mix(colorA.a, colorB.a, u_progress));
 }`;
 
 // ============================================================================
@@ -199,6 +204,330 @@ void main() {
     vec4 colorA = texture(u_textureA, v_texCoord);
     vec4 colorB = texture(u_textureB, v_texCoord);
     fragColor = mix(colorB, colorA, t);
+}`;
+
+// ============================================================================
+// ZOOM TRANSITION — Scene A zooms in / Scene B zooms out from center
+// ============================================================================
+const ZOOM_FRAG = `#version 300 es
+precision highp float;
+
+uniform sampler2D u_textureA;
+uniform sampler2D u_textureB;
+uniform float u_progress;
+uniform int u_mode; // 0=zoomIn, 1=zoomOut, 2=zoomRotate
+
+in vec2 v_texCoord;
+out vec4 fragColor;
+
+void main() {
+    float p = u_progress;
+    vec2 center = vec2(0.5);
+
+    // Scene A: zoom in as it exits
+    float scaleA = 1.0 + p * 0.4;
+    vec2 uvA = (v_texCoord - center) / scaleA + center;
+
+    // Scene B: zoom from big to normal as it enters
+    float scaleB = 1.0 + (1.0 - p) * 0.4;
+    vec2 uvB = (v_texCoord - center) / scaleB + center;
+
+    // Rotation for zoomRotate mode
+    if (u_mode == 2) {
+        float angle = p * 0.15;
+        float ca = cos(angle), sa = sin(angle);
+        vec2 d = v_texCoord - center;
+        uvA = vec2(d.x * ca - d.y * sa, d.x * sa + d.y * ca) / scaleA + center;
+        uvB = vec2(d.x * ca + d.y * sa, -d.x * sa + d.y * ca) / scaleB + center;
+    }
+
+    vec4 colorA = texture(u_textureA, clamp(uvA, 0.0, 1.0));
+    vec4 colorB = texture(u_textureB, clamp(uvB, 0.0, 1.0));
+
+    // Fade A out, B in — with slight overlap for smoothness
+    float fadeA = 1.0 - smoothstep(0.3, 0.7, p);
+    float fadeB = smoothstep(0.3, 0.7, p);
+
+    fragColor = colorA * fadeA + colorB * fadeB;
+}`;
+
+// ============================================================================
+// LIGHT LEAK TRANSITION — Warm light wash between scenes
+// ============================================================================
+const LIGHTLEAK_FRAG = `#version 300 es
+precision highp float;
+
+uniform sampler2D u_textureA;
+uniform sampler2D u_textureB;
+uniform float u_progress;
+uniform int u_mode; // 0=warm, 1=cool, 2=flare
+
+in vec2 v_texCoord;
+out vec4 fragColor;
+
+void main() {
+    float p = u_progress;
+    vec4 colorA = texture(u_textureA, v_texCoord);
+    vec4 colorB = texture(u_textureB, v_texCoord);
+
+    // Light leak color based on mode
+    vec3 leakColor;
+    if (u_mode == 1) leakColor = vec3(0.4, 0.6, 1.0);      // cool blue
+    else if (u_mode == 2) leakColor = vec3(1.0, 0.95, 0.8);  // white flare
+    else leakColor = vec3(1.0, 0.7, 0.3);                     // warm orange
+
+    // Leak intensity peaks at 50% progress
+    float leakIntensity = sin(p * 3.14159) * 1.2;
+    leakIntensity = clamp(leakIntensity, 0.0, 1.0);
+
+    // Spatial variation — leak sweeps from left to right
+    float sweep = smoothstep(p - 0.5, p + 0.2, v_texCoord.x);
+    float vertFade = 1.0 - abs(v_texCoord.y - 0.5) * 0.8;
+    float leak = leakIntensity * sweep * vertFade;
+
+    // Crossfade with leak overlay
+    float blend = smoothstep(0.35, 0.65, p);
+    vec3 base = mix(colorA.rgb, colorB.rgb, blend);
+
+    // Additive light leak (screen blend)
+    vec3 result = base + leakColor * leak * 0.8;
+
+    fragColor = vec4(clamp(result, 0.0, 1.0), 1.0);
+}`;
+
+// ============================================================================
+// GLITCH TRANSITION — Digital distortion with RGB split and block displacement
+// ============================================================================
+const GLITCH_FRAG = `#version 300 es
+precision highp float;
+
+uniform sampler2D u_textureA;
+uniform sampler2D u_textureB;
+uniform float u_progress;
+uniform int u_mode; // 0=standard, 1=rgbSplit, 2=dataMosh
+
+in vec2 v_texCoord;
+out vec4 fragColor;
+
+// Pseudo-random hash
+float hash(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+
+void main() {
+    float p = u_progress;
+    vec2 uv = v_texCoord;
+
+    // Glitch intensity peaks in the middle
+    float glitchI = sin(p * 3.14159);
+    glitchI = glitchI * glitchI * 0.8;
+
+    // Block displacement — horizontal slices shift randomly
+    float blockY = floor(uv.y * 20.0) / 20.0;
+    float blockRand = hash(vec2(blockY, floor(p * 8.0)));
+    float displacement = (blockRand - 0.5) * glitchI * 0.15;
+
+    // Only displace some blocks
+    if (blockRand > 0.6) {
+        uv.x += displacement;
+    }
+
+    // RGB split
+    float splitAmount = glitchI * 0.02;
+    vec2 uvR = uv + vec2(splitAmount, 0.0);
+    vec2 uvG = uv;
+    vec2 uvB = uv - vec2(splitAmount, 0.0);
+
+    // Crossfade base
+    float blend = smoothstep(0.3, 0.7, p);
+
+    vec4 aR = texture(u_textureA, clamp(uvR, 0.0, 1.0));
+    vec4 aG = texture(u_textureA, clamp(uvG, 0.0, 1.0));
+    vec4 aB = texture(u_textureA, clamp(uvB, 0.0, 1.0));
+    vec4 bR = texture(u_textureB, clamp(uvR, 0.0, 1.0));
+    vec4 bG = texture(u_textureB, clamp(uvG, 0.0, 1.0));
+    vec4 bB = texture(u_textureB, clamp(uvB, 0.0, 1.0));
+
+    float r = mix(aR.r, bR.r, blend);
+    float g = mix(aG.g, bG.g, blend);
+    float b = mix(aB.b, bB.b, blend);
+
+    // Scanline flicker
+    float scanline = 1.0 - glitchI * 0.15 * step(0.5, fract(uv.y * 300.0));
+
+    fragColor = vec4(vec3(r, g, b) * scanline, 1.0);
+}`;
+
+// ============================================================================
+// SHAPE TRANSITION — Geometric wipes (diagonal stripes, rectangles, diamonds)
+// ============================================================================
+const SHAPE_FRAG = `#version 300 es
+precision highp float;
+
+uniform sampler2D u_textureA;
+uniform sampler2D u_textureB;
+uniform float u_progress;
+uniform int u_mode;    // 0=diagonalStripes, 1=rectangles, 2=diamonds, 3=blinds, 4=circles
+uniform float u_softness;
+
+in vec2 v_texCoord;
+out vec4 fragColor;
+
+void main() {
+    float p = u_progress;
+    vec2 uv = v_texCoord;
+    float mask;
+    float soft = u_softness;
+
+    if (u_mode == 0) {
+        // Diagonal stripes — angled bars wipe across
+        float stripes = fract((uv.x + uv.y) * 5.0);
+        mask = smoothstep(p - soft, p + soft, stripes);
+    }
+    else if (u_mode == 1) {
+        // Rectangles — grid of boxes that fill in
+        vec2 grid = floor(uv * 6.0);
+        float idx = (grid.x + grid.y * 6.0) / 36.0;
+        // Stagger: boxes fill based on their index vs progress
+        mask = smoothstep(idx - soft, idx + soft, p);
+    }
+    else if (u_mode == 2) {
+        // Diamond wipe from center
+        float diamond = abs(uv.x - 0.5) + abs(uv.y - 0.5);
+        mask = smoothstep(p * 1.2 - soft, p * 1.2 + soft, 1.0 - diamond);
+    }
+    else if (u_mode == 3) {
+        // Horizontal blinds
+        float blinds = fract(uv.y * 8.0);
+        mask = smoothstep(p - soft, p + soft, blinds);
+    }
+    else {
+        // Expanding circles from center
+        float dist = length(uv - 0.5) * 1.5;
+        mask = smoothstep(p * 1.3 - soft, p * 1.3 + soft, 1.0 - dist);
+    }
+
+    vec4 colorA = texture(u_textureA, uv);
+    vec4 colorB = texture(u_textureB, uv);
+    fragColor = mix(colorA, colorB, clamp(mask, 0.0, 1.0));
+}`;
+
+// ============================================================================
+// CAMERA TRANSITION — Pan/whip/spin camera motion between scenes
+// ============================================================================
+const CAMERA_FRAG = `#version 300 es
+precision highp float;
+
+uniform sampler2D u_textureA;
+uniform sampler2D u_textureB;
+uniform float u_progress;
+uniform int u_mode; // 0=panLeft, 1=panRight, 2=panUp, 3=panDown, 4=whipPan, 5=spin
+
+in vec2 v_texCoord;
+out vec4 fragColor;
+
+void main() {
+    float p = u_progress;
+    vec2 uv = v_texCoord;
+    vec2 center = vec2(0.5);
+
+    if (u_mode <= 3) {
+        // Camera pan: scene A slides out, scene B slides in
+        vec2 dir;
+        if (u_mode == 0)      dir = vec2(-1.0, 0.0);  // pan left
+        else if (u_mode == 1) dir = vec2(1.0, 0.0);   // pan right
+        else if (u_mode == 2) dir = vec2(0.0, -1.0);  // pan up
+        else                  dir = vec2(0.0, 1.0);    // pan down
+
+        vec2 uvA = uv + dir * p;
+        vec2 uvB = uv + dir * (p - 1.0);
+
+        vec4 colorA = texture(u_textureA, clamp(uvA, 0.0, 1.0));
+        vec4 colorB = texture(u_textureB, clamp(uvB, 0.0, 1.0));
+
+        // Show A when UV is in range, B when scrolled
+        bool inA = all(greaterThanEqual(uvA, vec2(0.0))) && all(lessThanEqual(uvA, vec2(1.0)));
+        bool inB = all(greaterThanEqual(uvB, vec2(0.0))) && all(lessThanEqual(uvB, vec2(1.0)));
+
+        if (inA && inB) fragColor = mix(colorA, colorB, p);
+        else if (inA) fragColor = colorA;
+        else if (inB) fragColor = colorB;
+        else fragColor = vec4(0.0, 0.0, 0.0, 1.0);
+    }
+    else if (u_mode == 4) {
+        // Whip pan: motion blur + fast slide
+        float blur = sin(p * 3.14159) * 0.08;
+        vec2 uvA = uv + vec2(p + blur, 0.0);
+        vec2 uvB = uv + vec2(p - 1.0 - blur, 0.0);
+
+        // Sample multiple times for motion blur
+        vec4 colorA = vec4(0.0);
+        vec4 colorB = vec4(0.0);
+        for (int i = 0; i < 4; i++) {
+            float offset = float(i) * blur * 0.25;
+            colorA += texture(u_textureA, clamp(uvA + vec2(offset, 0.0), 0.0, 1.0));
+            colorB += texture(u_textureB, clamp(uvB + vec2(offset, 0.0), 0.0, 1.0));
+        }
+        colorA /= 4.0;
+        colorB /= 4.0;
+
+        bool inA = uvA.x >= 0.0 && uvA.x <= 1.0;
+        bool inB = uvB.x >= 0.0 && uvB.x <= 1.0;
+
+        if (inA && inB) fragColor = mix(colorA, colorB, p);
+        else if (inA) fragColor = colorA;
+        else if (inB) fragColor = colorB;
+        else fragColor = vec4(0.0, 0.0, 0.0, 1.0);
+    }
+    else {
+        // Spin: both scenes rotate
+        float angle = p * 1.5;
+        float ca = cos(angle), sa = sin(angle);
+        vec2 d = uv - center;
+
+        float scaleA = 1.0 + p * 0.3;
+        vec2 uvA = vec2(d.x * ca - d.y * sa, d.x * sa + d.y * ca) / scaleA + center;
+
+        float scaleB = 1.0 + (1.0 - p) * 0.3;
+        vec2 uvB = vec2(d.x * ca + d.y * sa, -d.x * sa + d.y * ca) / scaleB + center;
+
+        vec4 colorA = texture(u_textureA, clamp(uvA, 0.0, 1.0));
+        vec4 colorB = texture(u_textureB, clamp(uvB, 0.0, 1.0));
+
+        float fadeA = 1.0 - smoothstep(0.3, 0.6, p);
+        float fadeB = smoothstep(0.4, 0.7, p);
+        fragColor = colorA * fadeA + colorB * fadeB;
+    }
+}`;
+
+// ============================================================================
+// LUMA TRANSITION — Luminance-based dissolve (bright areas transition first)
+// ============================================================================
+const LUMA_FRAG = `#version 300 es
+precision highp float;
+
+uniform sampler2D u_textureA;
+uniform sampler2D u_textureB;
+uniform float u_progress;
+uniform float u_softness;
+uniform int u_mode; // 0=brightsFirst, 1=darksFirst
+
+in vec2 v_texCoord;
+out vec4 fragColor;
+
+void main() {
+    vec4 colorA = texture(u_textureA, v_texCoord);
+    vec4 colorB = texture(u_textureB, v_texCoord);
+
+    // Luminance of outgoing scene
+    float luma = dot(colorA.rgb, vec3(0.299, 0.587, 0.114));
+    if (u_mode == 1) luma = 1.0 - luma; // darks first
+
+    // Bright areas transition before dark areas
+    float threshold = u_progress * 1.4 - 0.2;
+    float mask = smoothstep(threshold - u_softness, threshold + u_softness, luma);
+
+    fragColor = mix(colorA, colorB, clamp(mask, 0.0, 1.0));
 }`;
 
 // ============================================================================
@@ -595,6 +924,12 @@ window.ShaderLib = {
     DROP_SHADOW_FRAG,
     CROSSFADE_FRAG,
     WIPE_FRAG,
+    ZOOM_FRAG,
+    LIGHTLEAK_FRAG,
+    GLITCH_FRAG,
+    SHAPE_FRAG,
+    CAMERA_FRAG,
+    LUMA_FRAG,
     EFFECTS_FRAG,
     ShaderProgram,
     compileShader,

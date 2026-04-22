@@ -169,10 +169,10 @@ function computeAnimationState(frame, fps, mg) {
     // Prefer pre-computed _totalFrames (accurate for both overlay and fullscreen MGs)
     // Fallback to duration*fps only for MGs without frame data
     const totalFrames = mg._totalFrames || Math.max(1, Math.round((mg.duration || 3) * fps));
-    const enterFrames = Math.max(1, Math.min(Math.round((0.5 / speed) * fps), Math.round(totalFrames * 0.35)));
-    const exitFrames = Math.max(1, Math.min(Math.round((0.3 / speed) * fps), Math.round(totalFrames * 0.2)));
+    const enterFrames = Math.max(1, Math.min(Math.round((0.58 / speed) * fps), Math.round(totalFrames * 0.38)));
+    const exitFrames = Math.max(1, Math.min(Math.round((0.36 / speed) * fps), Math.round(totalFrames * 0.24)));
 
-    const enterSpring = springValue(frame, fps, { damping: 18, stiffness: 100, durationInFrames: enterFrames });
+    const enterSpring = springValue(frame, fps, { damping: 20, stiffness: 92, durationInFrames: enterFrames });
     const enterLinear = clamp01(frame / enterFrames);
 
     const exitStart = totalFrames - exitFrames;
@@ -186,7 +186,7 @@ function computeAnimationState(frame, fps, mg) {
         ? interpolate(frame, [enterFrames, totalFrames - exitFrames], [0, Math.PI * 3],
             { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' })
         : 0;
-    const idleScale = 1 + Math.sin(idlePhase) * 0.003;
+    const idleScale = 1 + Math.sin(idlePhase) * 0.002;
 
     return {
         frame, fps, totalFrames, enterFrames, exitFrames,

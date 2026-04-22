@@ -489,7 +489,7 @@ const NICHES = {
         ],
 
         footagePriority: {
-            video: ['telegram', 'vkVideo', 'youtube', 'reddit', 'pexels', 'pixabay'],
+            video: ['telegram', 'youtube', 'reddit', 'pexels', 'pixabay'],
             image: ['bing', 'googleScrape', 'unsplash', 'pexels', 'pixabay']
         },
 
@@ -650,7 +650,7 @@ const NICHES = {
         ],
 
         footagePriority: {
-            video: ['telegram', 'reddit', 'youtube', 'vkVideo', 'pexels', 'pixabay'],
+            video: ['telegram', 'reddit', 'youtube', 'pexels', 'pixabay'],
             image: ['bing', 'googleScrape', 'unsplash', 'pexels', 'pixabay']
         },
 
@@ -998,25 +998,27 @@ const NICHES = {
     'explainer.military': {
         id: 'explainer.military',
         _parent: 'explainer',
-        name: 'Military Documentary',
-        description: 'Military history, weapons technology, strategy, historical battles — high-quality documentary, NOT breaking news',
+        name: 'Military & Geopolitical Explainer',
+        description: 'Military analysis, geopolitical explainers, weapons technology, defense strategy, documentary — high-quality MG-heavy, NOT breaking news',
 
         defaultTheme: 'crime',
 
-        shotStyle: 'Archival military footage, aircraft/tank/ship close-ups, war memorial shots, battlefield aerials, museum weapon exhibits, historical command maps, documentary-style talking head re-enactments (NO presenters), historical photographs.',
+        shotStyle: 'Archival military footage, aircraft/tank/ship close-ups, drone footage, satellite imagery, geopolitical maps, war memorial shots, battlefield aerials, museum weapon exhibits, historical command maps, documentary-style infographics, flags and diplomacy shots.',
 
         allowedMGs: [
             'headline', 'lowerThird', 'mapChart', 'timeline', 'statCounter',
-            'focusWord', 'callout', 'bulletList', 'kineticText', 'typewriter'
+            'focusWord', 'callout', 'bulletList', 'kineticText', 'typewriter',
+            'barChart', 'comparisonCard', 'quoteCard'
         ],
 
         footagePriority: {
-            video: ['youtube', 'reddit', 'pexels', 'pixabay'],
+            video: ['youtube', 'telegram', 'reddit', 'pexels', 'pixabay'],
             image: ['googleScrape', 'bing', 'pexels', 'pixabay', 'unsplash']
         },
 
-        // Documentary military content: NO Telegram (that's for breaking war news only)
-        excludeVideoProviders: ['telegram', 'vkVideo'],
+        // Military/geopolitical explainers: Telegram allowed (field footage of
+        // weapons, conflicts, operations). vkVideo removed (broken provider).
+        excludeVideoProviders: [],
 
         defaultPacing: 'moderate',
         preferredMediaType: 'video',
@@ -1026,12 +1028,18 @@ const NICHES = {
                    'military documentary', 'war documentary', 'historical battle', 'military strategy',
                    'naval history', 'air force history', 'special forces history', 'cold war',
                    'arms race', 'military technology', 'defense industry', 'military museum',
-                   'veteran', 'war memorial', 'operation history'],
+                   'veteran', 'war memorial', 'operation history',
+                   // Geopolitical explainer terms
+                   'geopolitics', 'geopolitical', 'alliance', 'sanctions', 'diplomacy',
+                   'superpower', 'global power', 'strategic', 'defense system', 'missile defense',
+                   'drone technology', 'drone warfare', 'cyber warfare', 'arms deal',
+                   'military aid', 'defense budget', 'military base', 'nuclear',
+                   'nato', 'indo-pacific', 'deterrence', 'escalation'],
 
         searchPolicy: {
-            contextTerms: ['military', 'documentary', 'historical'],
+            contextTerms: ['military', 'documentary', 'geopolitical', 'analysis'],
             avoidTerms: ['cartoon', 'game', 'fiction', 'call of duty', 'anime', 'breaking news'],
-            fallbackKeywords: ['military history documentary', 'world war aerial footage', 'tank museum', 'naval fleet historical'],
+            fallbackKeywords: ['military history documentary', 'geopolitical map animation', 'defense technology', 'naval fleet historical'],
             entityBoost: true,
             stockMaxWords: 4,
         },
@@ -1081,7 +1089,7 @@ const NICHES = {
             image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash']
         },
 
-        excludeVideoProviders: ['telegram', 'vkVideo'],
+        excludeVideoProviders: ['telegram'],
 
         defaultPacing: 'moderate',
         preferredMediaType: 'mixed',
@@ -1124,6 +1132,74 @@ const NICHES = {
         }
     },
 
+    'explainer.politics': {
+        id: 'explainer.politics',
+        _parent: 'explainer',
+        name: 'Politics & Policy Explainer',
+        description: 'Long-form political analysis, policy deep-dives, geopolitical explainers, speculative scenario videos, documentary-style — NOT breaking news',
+
+        defaultTheme: 'modern',
+
+        shotStyle: 'Capitol/parliament exteriors, archival policy footage, summit handshakes, chokepoint/trade-route maps, economic infographics, embassy shots, satellite imagery of strategic geography, document close-ups, policy think-tank interiors, historical presidential footage.',
+
+        allowedMGs: [
+            'headline', 'lowerThird', 'mapChart', 'timeline', 'statCounter',
+            'focusWord', 'callout', 'bulletList', 'kineticText', 'typewriter',
+            'barChart', 'comparisonCard', 'quoteCard'
+        ],
+
+        footagePriority: {
+            video: ['youtube', 'telegram', 'reddit', 'pexels', 'pixabay'],
+            image: ['googleScrape', 'bing', 'pexels', 'pixabay', 'unsplash']
+        },
+
+        excludeVideoProviders: [],
+
+        defaultPacing: 'moderate',
+        preferredMediaType: 'video',
+
+        keywords: ['policy analysis', 'political analysis', 'geopolitical analysis', 'policy explainer',
+                   'think tank', 'diplomacy history', 'sanctions regime', 'trade policy',
+                   'foreign policy', 'international relations', 'policy deep dive',
+                   'strategic chokepoint', 'trade route', 'shipping lane', 'energy policy',
+                   'oil route', 'pipeline politics', 'strait', 'canal geopolitics',
+                   'alliance history', 'treaty analysis', 'doctrine', 'hegemony',
+                   'realpolitik', 'balance of power', 'grand strategy', 'statecraft',
+                   'constitutional', 'supreme court history', 'political history',
+                   'scenario', 'speculative', 'what if', 'could change'],
+
+        searchPolicy: {
+            contextTerms: ['policy', 'geopolitical', 'analysis', 'documentary'],
+            avoidTerms: ['cartoon', 'meme', 'satire', 'parody', 'game', 'breaking news'],
+            fallbackKeywords: ['capitol building wide shot', 'world map geopolitics', 'diplomatic summit handshake', 'shipping lane aerial', 'parliament session interior'],
+            entityBoost: true,
+            stockMaxWords: 4,
+        },
+
+        keywordRules: {
+            strategy: 'entity-first',
+            rules: [
+                'Named policy/treaty → keyword = specific document + context (e.g., "JCPOA nuclear deal signing", "Paris Agreement ceremony")',
+                'Political figure → keyword = name + setting (e.g., "Kissinger oval office", "Merkel Brussels summit")',
+                'Geographic chokepoint → keyword = location + feature (e.g., "Strait of Hormuz tanker", "Suez Canal aerial")',
+                'Institution → keyword = building/chamber (e.g., "US Capitol dome", "UN Security Council chamber")',
+                'Strategic concept → keyword = visual representation (e.g., "global trade routes map", "NATO military exercise")',
+            ],
+            examples: {
+                good: ['"Strait of Hormuz oil tanker"', '"White House West Wing"', '"NATO Brussels headquarters"', '"cargo ship Suez Canal aerial"'],
+                bad: ['"political situation"', '"policy matter"', '"world leaders discussing"'],
+            }
+        },
+
+        overlayPrefs: {
+            v2Density: 'medium',
+            explainerDensity: 'medium',
+            maxOverlays: 4,
+            minGapSec: 12,
+            preferredTypes: ['v2', 'explainer'],
+        }
+    },
+
     // ────────────────────────────────────────────────────
     // NEW NEWS SUB-NICHE
     // ────────────────────────────────────────────────────
@@ -1147,7 +1223,7 @@ const NICHES = {
             image: ['bing', 'googleScrape', 'pexels', 'pixabay', 'unsplash']
         },
 
-        excludeVideoProviders: ['telegram', 'vkVideo'],
+        excludeVideoProviders: ['telegram'],
 
         defaultPacing: 'fast',
         preferredMediaType: 'video',
@@ -1252,9 +1328,15 @@ const NICHES = {
  * Pick the best niche based on script context from AI Director.
  * Uses the AI's topic analysis (summary, theme, entities) to keyword-match.
  * @param {Object} scriptContext - AI Director's analysis
+ * @param {Object} [opts] - Optional extras for stability-critical tie-breaks
+ * @param {string} [opts.fullScript] - Full transcript text. When provided, used
+ *   by the politics documentary/breaking resolver to count explanatory framing
+ *   across the whole narration rather than only the short summary.
+ * @param {number} [opts.audioDuration] - Audio duration in seconds. Longer =
+ *   stronger documentary bias. Missing → duration signal contributes 0.
  * @returns {string} nicheId
  */
-function pickNicheFromContent(scriptContext) {
+function pickNicheFromContent(scriptContext, opts = {}) {
     if (!scriptContext || !scriptContext.summary) {
         return 'general';
     }
@@ -1283,12 +1365,70 @@ function pickNicheFromContent(scriptContext) {
     const tone = (scriptContext.tone || '').toLowerCase();
 
     // NEWS signals: real events with urgent/serious tone
-    const isNewsSignal = (eventType === 'real-ongoing' || eventType === 'real-past') &&
-                         (tone === 'urgent' || tone === 'serious' || tone === 'dramatic');
+    let isNewsSignal = (eventType === 'real-ongoing' || eventType === 'real-past') &&
+                       (tone === 'urgent' || tone === 'serious' || tone === 'dramatic');
     // EXPLAINER signals: educational content with informative tone
-    const isExplainerSignal = eventType === 'educational' ||
+    let isExplainerSignal = eventType === 'educational' ||
                               tone === 'educational' ||
                               (eventType === 'speculative' && tone === 'informative');
+
+    const titleAndSummary = ((scriptContext.videoTitle || '') + ' ' + (scriptContext.summary || '')).toLowerCase();
+
+    // ── Active-conflict content gate ──
+    // When content is about a current war/military operation AND eventType=real-ongoing,
+    // it's NEWS regardless of clickbait title or documentary format. Historical military
+    // content is real-past (explainer.military) — this only fires for ongoing events.
+    const activeConflictKeywords = [
+        'putin', 'zelensky', 'kyiv', 'ukraine', 'kharkiv', 'donbas', 'crimea',
+        'israel', 'gaza', 'hamas', 'hezbollah', 'iran', 'houthi', 'red sea',
+        'taiwan', 'china invasion', 'south china sea', 'nato', 'frontline',
+        'airstrike', 'missile strike', 'drone strike', 'shahed', 'himars',
+        'invasion', 'offensive', 'counteroffensive', 'war crimes',
+    ];
+    const hasActiveConflict = activeConflictKeywords.some(k => titleAndSummary.includes(k));
+    const isOngoingConflict = eventType === 'real-ongoing' && hasActiveConflict;
+
+    // ── Content structure analysis: detect explainer/documentary patterns ──
+    // Long-form analysis about military/geopolitical topics uses documentary language,
+    // not breaking news language. These patterns override weak news signals.
+    const explainerPatterns = [
+        /\b(?:how|why)\b.*\b(?:works?|changed?|became|built|designed|explained)\b/i,
+        /\b(?:explained|analysis|deep dive|breakdown|documentary)\b/i,
+        /\b(?:history of|evolution of|future of|rise of|fall of)\b/i,
+        /\b(?:what (?:is|are|makes|happened)|how (?:did|does|do|can|to))\b/i,
+        /\b(?:everything you need to know|complete guide|full story)\b/i,
+        // NOTE: clickbait "insane/incredible/shocking" words were matching news titles
+        // like "What Japan Did for Ukraine Is INSANE..." — require a clearly educational
+        // verb (explained/works/designed) nearby, otherwise these are news headlines.
+        /\b(?:insane|incredible|unbelievable|shocking)\b.*\b(?:works?|explained|designed|built how|built to)\b/i,
+    ];
+    const explainerPatternHits = explainerPatterns.filter(p => p.test(titleAndSummary)).length;
+    if (explainerPatternHits >= 1 && !isExplainerSignal && !isOngoingConflict) {
+        isExplainerSignal = true;
+        console.log(`      [Content structure]: ${explainerPatternHits} explainer pattern(s) detected in title/summary → EXPLAINER signal`);
+    }
+
+    // ── Format signal: documentary format = explainer ──
+    // BUT: a documentary about an ONGOING conflict is still news (live war coverage,
+    // not historical/analytical). Only treat documentary format as explainer when the
+    // event isn't actively unfolding.
+    const format = (scriptContext.format || '').toLowerCase();
+    if ((format === 'documentary' || format === 'essay' || format === 'analysis') && !isExplainerSignal && !isOngoingConflict) {
+        isExplainerSignal = true;
+        console.log(`      [Format signal]: format="${format}" → EXPLAINER signal`);
+    }
+
+    // ── Tie-break: ongoing conflict always wins news ──
+    // If the content is clearly an ongoing conflict, force NEWS signal and clear explainer.
+    // Prevents "real-ongoing + dramatic + documentary format" from landing on explainer.tech
+    // when the script is actually defense/war news (Japan/Ukraine, Israel/Gaza, etc.).
+    if (isOngoingConflict) {
+        isNewsSignal = true;
+        if (isExplainerSignal) {
+            console.log(`      [Active conflict override]: eventType=real-ongoing + war keywords → NEWS wins over EXPLAINER`);
+            isExplainerSignal = false;
+        }
+    }
 
     // Log the signals for debugging
     if (isNewsSignal || isExplainerSignal) {
@@ -1326,30 +1466,35 @@ function pickNicheFromContent(scriptContext) {
         'home improvement': 'explainer',
 
         // Always news — breaking/current events
-        'politics': 'news',            // → sub-niche: news.politics
+        // 'politics' moved to AMBIGUOUS_THEMES — documentary/speculative tone flips it to explainer.politics
         'entertainment': 'news',       // → sub-niche: news.celebrity
         'celebrity': 'news',           // → sub-niche: news.celebrity
         'gossip': 'news',              // → sub-niche: news.celebrity
-        'war': 'news',                 // → sub-niche: news.military (current conflict)
-        'geopolitics': 'news',         // → sub-niche: news.military
 
         // Ambiguous — resolved below by event signals + keywords:
-        // 'technology', 'tech', 'military', 'defense', 'sports', 'sport',
-        // 'business', 'finance', 'economy', 'markets'
+        // 'technology', 'tech', 'military', 'defense', 'war', 'geopolitics',
+        // 'sports', 'sport', 'business', 'finance', 'economy', 'markets'
     };
 
     // Ambiguous themes — one theme string can mean either category depending on content type.
     // Key: AI theme string → { explainer parent result, news parent result, default if no signal }
+    // "What Japan Did for Ukraine" = explainer.military (geopolitical analysis, documentary)
+    // "Russia Attacks Kharkiv — Breaking" = news.military (urgent breaking event)
     const AMBIGUOUS_THEMES = {
-        'technology':  { ifExplainer: 'explainer', ifNews: 'news', defaultTo: null },      // null = let keyword scoring decide
+        'technology':  { ifExplainer: 'explainer', ifNews: 'news', defaultTo: null },       // null = let keyword scoring decide
         'tech':        { ifExplainer: 'explainer', ifNews: 'news', defaultTo: null },
-        'military':    { ifExplainer: 'explainer', ifNews: 'news', defaultTo: 'news' },     // default news (most military content is breaking)
-        'defense':     { ifExplainer: 'explainer', ifNews: 'news', defaultTo: 'news' },
-        'sports':      { ifExplainer: 'explainer', ifNews: 'news', defaultTo: 'explainer' }, // default explainer (sports history/documentary)
+        'military':    { ifExplainer: 'explainer', ifNews: 'news', defaultTo: 'explainer' }, // most long-form military = documentary/analysis
+        'defense':     { ifExplainer: 'explainer', ifNews: 'news', defaultTo: 'explainer' },
+        'war':         { ifExplainer: 'explainer', ifNews: 'news', defaultTo: 'news' },      // "war" alone leans news (active conflict)
+        'geopolitics': { ifExplainer: 'explainer', ifNews: 'news', defaultTo: 'explainer' }, // geopolitics analysis = usually explainer
+        'geopolitical':{ ifExplainer: 'explainer', ifNews: 'news', defaultTo: 'explainer' },
+        'politics':    { ifExplainer: 'explainer', ifNews: 'news', defaultTo: 'news' },      // breaking by default; doc/speculative tone flips to explainer.politics
+        'policy':      { ifExplainer: 'explainer', ifNews: 'news', defaultTo: 'explainer' },
+        'sports':      { ifExplainer: 'explainer', ifNews: 'news', defaultTo: 'explainer' },
         'sport':       { ifExplainer: 'explainer', ifNews: 'news', defaultTo: 'explainer' },
-        'business':    { ifExplainer: 'explainer', ifNews: 'news', defaultTo: 'explainer' }, // "how businesses work" = explainer
+        'business':    { ifExplainer: 'explainer', ifNews: 'news', defaultTo: 'explainer' },
         'finance':     { ifExplainer: 'explainer', ifNews: 'news', defaultTo: 'explainer' },
-        'economy':     { ifExplainer: 'explainer', ifNews: 'news', defaultTo: 'news' },      // "economy" alone leans news
+        'economy':     { ifExplainer: 'explainer', ifNews: 'news', defaultTo: 'news' },
         'markets':     { ifExplainer: 'explainer', ifNews: 'news', defaultTo: 'news' },
     };
 
@@ -1357,18 +1502,27 @@ function pickNicheFromContent(scriptContext) {
     if (!directMatch) {
         const amb = AMBIGUOUS_THEMES[aiTheme];
         if (amb) {
-            if (isExplainerSignal) {
-                directMatch = amb.ifExplainer;
-                console.log(`      [Theme resolve]: ${aiTheme} + educational signal → ${directMatch}`);
-            } else if (isNewsSignal) {
+            // News wins first when the content is actively unfolding — overrides any
+            // lingering isExplainerSignal that slipped through the earlier gates.
+            if (isNewsSignal) {
                 directMatch = amb.ifNews;
                 console.log(`      [Theme resolve]: ${aiTheme} + news signal → ${directMatch}`);
+            } else if (isExplainerSignal) {
+                directMatch = amb.ifExplainer;
+                console.log(`      [Theme resolve]: ${aiTheme} + educational signal → ${directMatch}`);
             } else if (amb.defaultTo) {
                 directMatch = amb.defaultTo;
                 console.log(`      [Theme resolve]: ${aiTheme} + no signal → default ${directMatch}`);
             }
             // If no signal and no default, keyword scoring decides (no directMatch boost)
         }
+    }
+
+    // Active-conflict pivot: if we detected an ongoing conflict, the AI theme is
+    // often the surface topic (tech/technology/business) while the real subject is
+    // military. Pivot to news.military so footage strategy matches.
+    if (isOngoingConflict) {
+        directMatch = 'news';
     }
 
     // Score each TOP-LEVEL niche based on keyword matches (word-boundary aware)
@@ -1418,11 +1572,164 @@ function pickNicheFromContent(scriptContext) {
         }
     }
 
-    // Sub-niche detection: if parent niche has sub-niches, pick the best one
-    const subNicheResult = _detectSubNiche(bestNiche, text, aiTheme);
-    if (subNicheResult) return subNicheResult;
+    // Active-conflict override: force news parent when war keywords + real-ongoing detected
+    if (isOngoingConflict && bestNiche !== 'news') {
+        console.log(`      [Active conflict override]: parent pivoted ${bestNiche} → news (war keywords + real-ongoing)`);
+        bestNiche = 'news';
+    }
 
-    return bestNiche;
+    // Sub-niche detection: if parent niche has sub-niches, pick the best one
+    const subNicheResult = _detectSubNiche(bestNiche, text, aiTheme, { preferMilitary: isOngoingConflict });
+    let finalNiche = subNicheResult || bestNiche;
+
+    // Politics stability resolver — only fires when choice is news.politics OR
+    // explainer.politics. Uses deterministic documentary-vs-breaking signal
+    // scoring (explanatory framing, systemic vocabulary, format, duration vs
+    // breaking-event markers) with a 1-point stability bias toward explainer.
+    // Rationale: same longform geopolitics script was flipping between the two
+    // based on noisy AI tone/eventType output, producing 65 vs 112 scenes.
+    if (finalNiche === 'news.politics' || finalNiche === 'explainer.politics') {
+        finalNiche = _resolvePoliticsAmbiguity(finalNiche, scriptContext, opts);
+    }
+
+    return finalNiche;
+}
+
+/**
+ * Documentary-vs-breaking resolver for the politics ambiguous zone.
+ * Deterministic scoring with clear tie-break.
+ * Only called when current pick is news.politics or explainer.politics.
+ *
+ * @param {string} currentChoice Current sub-niche decision.
+ * @param {Object} scriptContext AI Director output.
+ * @param {Object} opts {fullScript?, audioDuration?}
+ * @returns {string} 'news.politics' or 'explainer.politics'
+ */
+function _resolvePoliticsAmbiguity(currentChoice, scriptContext, opts) {
+    const fullScript = (opts && typeof opts.fullScript === 'string') ? opts.fullScript : '';
+    const audioDuration = (opts && typeof opts.audioDuration === 'number') ? opts.audioDuration : 0;
+
+    // Body text for pattern counting: full script when available, else title+summary.
+    const bodyText = (fullScript
+        || ((scriptContext.videoTitle || '') + ' ' + (scriptContext.summary || ''))
+    ).toLowerCase();
+
+    const titleSummary = ((scriptContext.videoTitle || '') + ' ' + (scriptContext.summary || '')).toLowerCase();
+    const format = (scriptContext.format || '').toLowerCase();
+
+    // ── Explanatory framing (documentary signal) ──
+    // Phrases that mark "this is an analytical explainer". Capped contribution
+    // so a few strong hits count without a single overloaded transcript dominating.
+    const EXPLANATORY_PATTERNS = [
+        /\bwhy\s+(?:is|are|did|does|do|this|that|has|have|was|were|would|will)\b/g,
+        /\bhow\s+(?:did|does|do|can|could|will|the|this|that|exactly)\b/g,
+        /\bwhat\s+happens\s+(?:if|when|next)\b/g,
+        /\bwhat\s+(?:this|it|that)\s+means\b/g,
+        /\bthe\s+reason\b/g,
+        /\bthis\s+means\b/g,
+        /\bconsequences?\b/g,
+        /\bimplications?\b/g,
+        /\bthe\s+system\b/g,
+        /\bthe\s+route\b/g,
+        /\bthe\s+economy\b/g,
+        /\bchokepoints?\b/g,
+        /\btrade\s+routes?\b/g,
+        /\bsupply\s+chains?\b/g,
+        /\brerout(?:e|ed|es|ing)\b/g,
+        /\bshipping\s+lanes?\b/g,
+        /\bescalation\b/g,
+        /\binfrastructure\b/g,
+        /\bstrategic(?:ally)?\b/g,
+        /\bover\s+(?:the\s+years|decades)\b/g,
+        /\bin\s+the\s+long\s+run\b/g,
+        /\bfundamental(?:ly)?\b/g,
+        /\bdeep\s+dive\b/g,
+        /\bbreakdown\b/g,
+        /\banalysis\b/g,
+    ];
+
+    let docPatternHits = 0;
+    for (const re of EXPLANATORY_PATTERNS) {
+        const m = bodyText.match(re);
+        if (m) docPatternHits += m.length;
+    }
+    // Cap so one pattern repeated 40× can't swamp the score.
+    const docPatternScore = Math.min(4, Math.floor(docPatternHits / 2));
+
+    // Format signal.
+    let docFormatScore = 0;
+    if (format === 'documentary' || format === 'essay' || format === 'analysis' || format === 'explainer') {
+        docFormatScore = 3;
+    }
+
+    // Duration signal. Thresholds chosen from real builds:
+    // good explainer run was 498s; breaking-update formats are usually <180s.
+    let docDurationScore = 0;
+    if (audioDuration >= 900) docDurationScore = 3;
+    else if (audioDuration >= 600) docDurationScore = 2;
+    else if (audioDuration >= 300) docDurationScore = 1;
+
+    const docScore = docPatternScore + docFormatScore + docDurationScore;
+
+    // ── Breaking-news markers ──
+    const BREAKING_PATTERNS = [
+        /\bbreaking\b/g,
+        /\bjust\s+(?:announced|confirmed|said|reported|released)\b/g,
+        /\bthis\s+morning\b/g,
+        /\bthis\s+afternoon\b/g,
+        /\blast\s+night\b/g,
+        /\blive\s+(?:update|coverage|from)\b/g,
+        /\bminutes?\s+ago\b/g,
+        /\bhours?\s+ago\b/g,
+        /\belection\s+results?\b/g,
+        /\bpress\s+conference\b/g,
+        /\bceasefire\b/g,
+        /\bsummit\s+(?:began|starts|ends|ended|concluded)\b/g,
+        /\b(?:president|leader|minister|senator)\s+(?:announced|confirmed|said)\b/g,
+        /\breact(?:ed|ing|ion)\s+to\b/g,
+    ];
+
+    let breakingPatternHits = 0;
+    for (const re of BREAKING_PATTERNS) {
+        const m = bodyText.match(re);
+        if (m) breakingPatternHits += m.length;
+    }
+    const breakingPatternScore = Math.min(4, breakingPatternHits);
+
+    // Title explicitly says "breaking" / "update" → strong breaking signal.
+    let breakingTitleScore = 0;
+    if (/\bbreaking\b/.test(titleSummary)) breakingTitleScore += 2;
+    if (/\bupdate\b/.test(titleSummary))  breakingTitleScore += 1;
+
+    // Short duration reinforces breaking.
+    let breakingDurationScore = 0;
+    if (audioDuration > 0 && audioDuration < 120) breakingDurationScore = 3;
+    else if (audioDuration > 0 && audioDuration < 180) breakingDurationScore = 2;
+
+    const breakingScore = breakingPatternScore + breakingTitleScore + breakingDurationScore;
+
+    // ── Tie-break ──
+    // Stability bias: when signals are close, prefer explainer.politics.
+    // If no politics-specific evidence exists in either direction, keep the
+    // current choice (trust upstream logic).
+    let winner;
+    let reason;
+    if (docScore === 0 && breakingScore === 0) {
+        winner = currentChoice;
+        reason = 'no-politics-signal';
+    } else if (docScore >= breakingScore - 1) {
+        winner = 'explainer.politics';
+        reason = (docScore > breakingScore)
+            ? 'doc>breaking'
+            : 'close-tie-stability-bias';
+    } else {
+        winner = 'news.politics';
+        reason = 'breaking-dominant';
+    }
+
+    console.log(`      [Politics resolver]: doc=${docScore} (patterns=${docPatternScore}, format=${docFormatScore}, duration=${docDurationScore}) breaking=${breakingScore} (patterns=${breakingPatternScore}, title=${breakingTitleScore}, duration=${breakingDurationScore}) dur=${audioDuration.toFixed ? audioDuration.toFixed(0) : audioDuration}s fullScript=${fullScript ? 'yes' : 'no'} [${currentChoice} → ${winner} | ${reason}]`);
+
+    return winner;
 }
 
 /**
@@ -1432,10 +1739,21 @@ function pickNicheFromContent(scriptContext) {
  * @param {string} aiTheme - AI's explicit theme string
  * @returns {string|null} Sub-niche ID (e.g., 'news.politics') or null to keep parent
  */
-function _detectSubNiche(parentId, text, aiTheme) {
+function _detectSubNiche(parentId, text, aiTheme, opts = {}) {
     // Find all sub-niches for this parent
     const subNiches = Object.entries(NICHES).filter(([_, n]) => n._parent === parentId);
     if (subNiches.length === 0) return null;
+
+    // Active-conflict pivot: if caller detected an ongoing military conflict, bypass the
+    // AI-theme mapping entirely — AI often picks "technology" (drones, companies) when the
+    // real subject is war news, which incorrectly lands on news.tech / explainer.tech.
+    if (opts.preferMilitary) {
+        const militaryId = `${parentId}.military`;
+        if (NICHES[militaryId]) {
+            console.log(`      [Sub-niche pivot]: active conflict detected → ${militaryId} (bypassed AI theme "${aiTheme}")`);
+            return militaryId;
+        }
+    }
 
     // AI theme → sub-niche, organized by parent category.
     // Using hierarchical map prevents a 'military' AI theme from picking news.military
@@ -1480,6 +1798,12 @@ function _detectSubNiche(parentId, text, aiTheme) {
             'military': 'explainer.military',
             'defense': 'explainer.military',
             'war': 'explainer.military',       // historical war = explainer
+            'geopolitics': 'explainer.military',
+            'geopolitical': 'explainer.military',
+            'politics': 'explainer.politics',
+            'policy': 'explainer.politics',
+            'government': 'explainer.politics',
+            'diplomacy': 'explainer.politics',
             'technology': 'explainer.tech',
             'tech': 'explainer.tech',
             'engineering': 'explainer.tech',
@@ -1521,7 +1845,7 @@ function _detectSubNiche(parentId, text, aiTheme) {
     // A strong keyword signal (e.g., 8 military terms) should override a weak AI theme tag.
     const subScores = {};
     let bestSub = null;
-    let bestScore = 1; // Minimum threshold — need at least 2 keyword hits to specialize
+    let bestScore = 0; // Minimum threshold — need at least 1 keyword hit to specialize
     for (const [subId, sub] of subNiches) {
         if (!sub.keywords) continue;
         let score = 0;
@@ -1535,6 +1859,34 @@ function _detectSubNiche(parentId, text, aiTheme) {
         if (score > bestScore) {
             bestScore = score;
             bestSub = subId;
+        }
+    }
+
+    // Tiebreaker: when multiple sub-niches tie, prefer the one that matches AI theme.
+    // If AI theme doesn't match any tied niche, pick based on content domain priority.
+    if (bestSub && bestScore > 0) {
+        const tied = Object.entries(subScores).filter(([_, s]) => s === bestScore);
+        if (tied.length > 1) {
+            // Check if directSub (AI theme match) is among the tied — if so, it's a valid tiebreaker
+            if (directSub && subScores[directSub] === bestScore) {
+                // AI theme is one of the tied — but check if another sub-niche is more domain-specific
+                // military/politics content talking about "technology" is still military, not tech
+                // War/conflict/defense terms are stronger identity signals than "technology"
+                const DOMAIN_PRIORITY = {
+                    [`${parentId}.military`]: ['war', 'conflict', 'defense', 'weapon', 'army', 'drone', 'missile', 'combat', 'troops'],
+                    [`${parentId}.politics`]: ['election', 'government', 'president', 'parliament', 'sanction', 'diplomacy', 'geopolit'],
+                };
+                for (const [domainNiche, domainTerms] of Object.entries(DOMAIN_PRIORITY)) {
+                    if (subScores[domainNiche] === bestScore && domainNiche !== directSub) {
+                        const domainHits = domainTerms.filter(t => text.includes(t)).length;
+                        if (domainHits >= 2) {
+                            console.log(`      [Sub-niche tiebreak]: ${domainNiche} wins tie vs ${directSub} — ${domainHits} strong domain terms found`);
+                            bestSub = domainNiche;
+                            break;
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1755,7 +2107,11 @@ function getFallbackKeywords(nicheId) {
 
 // Providers that are never appropriate for educational/documentary content.
 // Telegram and VK carry breaking-news war footage — irrelevant and jarring in explainers.
-const EXPLAINER_EXCLUDED_PROVIDERS = ['telegram', 'vkVideo'];
+// Category-level provider exclusions for ALL explainer niches.
+// Kept empty so explainer.military can use Telegram (war footage) while
+// other explainers still opt-out via their own `excludeVideoProviders: ['telegram']`.
+// vkVideo removed globally — provider is broken.
+const EXPLAINER_EXCLUDED_PROVIDERS = [];
 
 // All overlay MG types available in the system (from mg-registry.js).
 // Explainer category gets the full set — rich visual treatment.
@@ -1797,10 +2153,15 @@ function getNiche(nicheId) {
         const isNewsCategory      = resolved.id === 'news'      || resolved._parentId === 'news';
 
         if (isExplainerCategory) {
-            // Explainer: all overlay MGs available + no Telegram/VK
+            // Explainer: rich MG treatment by default, but allow sub-niches to
+            // narrow the overlay list explicitly (for example politics).
             const excluded = new Set(resolved.excludeVideoProviders || []);
             EXPLAINER_EXCLUDED_PROVIDERS.forEach(p => excluded.add(p));
-            resolved = { ...resolved, allowedMGs: ALL_OVERLAY_MGS, excludeVideoProviders: [...excluded] };
+            const nextResolved = { ...resolved, excludeVideoProviders: [...excluded] };
+            if (!niche.allowedMGs) {
+                nextResolved.allowedMGs = ALL_OVERLAY_MGS;
+            }
+            resolved = nextResolved;
         } else if (isNewsCategory) {
             // News: footage-first, only minimal overlay MGs.
             // Sub-niches can define their own allowedMGs (e.g. news.military adds mapChart).
@@ -1885,6 +2246,7 @@ const NICHE_PRESETS = {
     food:           { nicheId: 'explainer.food',      suggestedFormat: null,           suggestedPacing: 'moderate', label: 'Food / Health',            emoji: '🍎' },
     diy:            { nicheId: 'explainer.diy',       suggestedFormat: null,           suggestedPacing: 'moderate', label: 'DIY / Lifehacks',          emoji: '🔧' },
     militaryDoc:    { nicheId: 'explainer.military',  suggestedFormat: 'documentary',  suggestedPacing: 'moderate', label: 'Military Documentary',     emoji: '🪖' },
+    politicsDoc:    { nicheId: 'explainer.politics',  suggestedFormat: 'documentary',  suggestedPacing: 'moderate', label: 'Politics Explainer',       emoji: '🏛' },
     techExplainer:  { nicheId: 'explainer.tech',      suggestedFormat: 'documentary',  suggestedPacing: 'moderate', label: 'Tech Explainer',           emoji: '🔬' },
     // ── Breaking News category ──
     news:           { nicheId: 'news',                suggestedFormat: null,           suggestedPacing: 'fast',     label: 'News (Auto)',              emoji: '📰' },
@@ -1934,27 +2296,28 @@ function resolvePreset(presetKey) {
 // ── Default template settings for all niches ──
 // Per-niche template type allowlist and density (max count).
 // Niches can override these by defining allowedTemplates/templateDensity explicitly.
-const DEFAULT_ALLOWED_TEMPLATES = ['chapterCard', 'locationCard', 'quoteCard', 'keyTakeaway', 'comparisonCard', 'timelineCard', 'factCard', 'imageShowcase', 'statCard', 'personIntro'];
+const DEFAULT_ALLOWED_TEMPLATES = ['chapterCard', 'locationCard', 'quoteCard', 'keyTakeaway', 'comparisonCard', 'timelineCard', 'factCard', 'imageShowcase', 'statCard', 'personIntro', 'splitScreen', 'infographic'];
 const NICHE_TEMPLATE_CONFIG = {
     // EXPLAINER parent + all sub-niches: rich visual treatment
     explainer:               { allowed: DEFAULT_ALLOWED_TEMPLATES,                                                                                                                       density: 'high' },
-    'explainer.nature':      { allowed: ['chapterCard', 'locationCard', 'quoteCard', 'keyTakeaway', 'factCard', 'imageShowcase', 'statCard', 'personIntro'],                            density: 'medium' },
+    'explainer.nature':      { allowed: ['chapterCard', 'locationCard', 'quoteCard', 'keyTakeaway', 'factCard', 'imageShowcase', 'statCard', 'personIntro', 'splitScreen'],                  density: 'medium' },
     'explainer.crime':       { allowed: DEFAULT_ALLOWED_TEMPLATES,                                                                                                                       density: 'high' },
     'explainer.business':    { allowed: DEFAULT_ALLOWED_TEMPLATES,                                                                                                                       density: 'high' },
-    'explainer.luxury':      { allowed: ['chapterCard', 'locationCard', 'quoteCard', 'keyTakeaway', 'imageShowcase', 'statCard', 'personIntro'],                                        density: 'medium' },
-    'explainer.sport':       { allowed: ['chapterCard', 'quoteCard', 'keyTakeaway', 'comparisonCard', 'factCard', 'imageShowcase', 'statCard', 'personIntro'],                          density: 'medium' },
+    'explainer.luxury':      { allowed: ['chapterCard', 'locationCard', 'quoteCard', 'keyTakeaway', 'imageShowcase', 'statCard', 'personIntro', 'splitScreen'],                           density: 'medium' },
+    'explainer.sport':       { allowed: ['chapterCard', 'quoteCard', 'keyTakeaway', 'comparisonCard', 'factCard', 'imageShowcase', 'statCard', 'personIntro', 'splitScreen'],            density: 'medium' },
     'explainer.history':     { allowed: DEFAULT_ALLOWED_TEMPLATES,                                                                                                                       density: 'high' },
-    'explainer.motivation':  { allowed: ['chapterCard', 'quoteCard', 'keyTakeaway', 'imageShowcase', 'statCard', 'personIntro'],                                                        density: 'medium' },
+    'explainer.motivation':  { allowed: ['chapterCard', 'quoteCard', 'keyTakeaway', 'imageShowcase', 'statCard', 'personIntro', 'splitScreen'],                                           density: 'medium' },
     'explainer.food':        { allowed: DEFAULT_ALLOWED_TEMPLATES,                                                                                                                       density: 'high' },
     'explainer.diy':         { allowed: DEFAULT_ALLOWED_TEMPLATES,                                                                                                                       density: 'high' },
-    'explainer.military':    { allowed: ['chapterCard', 'locationCard', 'quoteCard', 'keyTakeaway', 'timelineCard', 'factCard', 'imageShowcase', 'statCard', 'personIntro'],            density: 'high' },
+    'explainer.military':    { allowed: ['chapterCard', 'locationCard', 'quoteCard', 'keyTakeaway', 'timelineCard', 'factCard', 'imageShowcase', 'statCard', 'personIntro', 'splitScreen', 'infographic'], density: 'high' },
+    'explainer.politics':    { allowed: ['chapterCard', 'locationCard', 'quoteCard', 'keyTakeaway', 'timelineCard', 'factCard', 'imageShowcase', 'statCard', 'personIntro', 'splitScreen', 'infographic'], density: 'high' },
     'explainer.tech':        { allowed: DEFAULT_ALLOWED_TEMPLATES,                                                                                                                       density: 'high' },
     // NEWS niches: footage-driven, minimal templates
     news:                    { allowed: ['chapterCard', 'locationCard', 'personIntro'],                                                                                                  density: 'low' },
     'news.politics':         { allowed: ['chapterCard', 'locationCard', 'personIntro'],                                                                                                  density: 'low' },
     'news.celebrity':        { allowed: ['personIntro'],                                                                                                                                 density: 'low' },
-    'news.economy':          { allowed: ['chapterCard', 'statCard', 'personIntro'],                                                                                                      density: 'low' },
-    'news.military':         { allowed: ['chapterCard', 'locationCard', 'personIntro'],                                                                                                  density: 'low' },
+    'news.economy':          { allowed: ['chapterCard', 'statCard', 'personIntro', 'infographic'],                                                                                        density: 'low' },
+    'news.military':         { allowed: ['chapterCard', 'locationCard', 'personIntro', 'splitScreen', 'infographic'],                                                                    density: 'low' },
     'news.tech':             { allowed: ['chapterCard', 'personIntro'],                                                                                                                  density: 'low' },
     'news.sport':            { allowed: ['chapterCard', 'personIntro'],                                                                                                                  density: 'low' },
     general:                 { allowed: DEFAULT_ALLOWED_TEMPLATES,                                                                                                                       density: 'low' },
@@ -1967,6 +2330,178 @@ for (const niche of Object.values(NICHES)) {
     if (!niche.templateDensity) {
         niche.templateDensity = cfg ? cfg.density : 'low';
     }
+}
+
+// ============================================================
+// SMART SCENE SPLIT CONFIG
+// Per-niche duration bands + feature weights for the smart splitter.
+// Read by src/scene-optimizer.js and src/scene-boundary-scorer.js.
+// ============================================================
+
+// Tuned 2026-04-20: bodyBand lower bound raised from 3.0 → 4.5s after real-data
+// validation showed 3-4s body scenes are choppy. Soft-band penalty now kicks in
+// below 4.5s, encouraging body spans to breathe.
+//
+// Refined 2026-04-20 (Phase 2.5): unitThresholds exposed as config so niches can
+// tune speech-unit shape. weights rebalanced after zoneAlignment was re-centered
+// around 0 (was acting as a cut subsidy floor, not a signal). New topic feature
+// adds a lexical Jaccard-based topic-shift contributor.
+const DEFAULT_SCENE_SPLIT = {
+    hookBand:   [1.8, 4.5],
+    bodyBand:   [4.5, 12.0],
+    ctaBand:    [5.0, 15.0],
+    pauseSensitivity: 1.0,
+    // styleBlend controls how much the style-profile avgSceneDuration influences
+    // the optimizer's target per zone. 1.0 = style dominates, 0.0 = band midpoint
+    // dominates. After blending, the target is CLAMPED into the zone band.
+    // Explainer niches set body low (0.15–0.25) so a reference video with
+    // aggressive 3s pacing doesn't drag 498s longform scripts into news-rhythm.
+    styleBlend: { hook: 0.7, body: 0.5, cta: 0.5 },
+    // bandResistance multiplies the under-band penalty in body zone only.
+    // 1.0 = default, >1 = push harder against sub-band body spans.
+    bandResistance: 1.0,
+    // topicGating: when true, topicShift contribution is attenuated in the
+    // body zone unless an anchor signal (pause / entity / contrast / numeric /
+    // entityType) is also present. Prevents topicShift from solo-driving cuts.
+    topicGating: false,
+    unitThresholds: {
+        minUnitDur:   0.8,   // shortest a speech unit can be before we force absorb
+        maxUnitDur:   6.0,   // hard ceiling — unit closes regardless of pause/segment state
+        pauseHardSec: 0.8,   // gap large enough to always break
+        pauseSoftSec: 0.4,   // gap large enough to break IF unit is ≥ minUnitDur
+        entityWindow: 3,     // words on each side checked for entity straddling
+    },
+    weights: {
+        pause:         1.0,
+        entity:        0.9,
+        entityType:    0.7,
+        numeric:       0.5,
+        contrast:      0.8,
+        pronoun:       0.4,
+        // segmentHint DEMOTED 0.3 → 0.15 after Apr 20 real-build showed it was
+        // contributing 0.15 avg — louder than pauseScore (0.08). Whisper segment
+        // boundaries are an editing artifact, not a narrative cue.
+        segmentHint:   0.15,
+        zoneAlignment: 1.0,  // weight applies to a CENTERED value in [-0.3, +0.2]
+        stylePacing:   0.6,
+        // topic weight pulled in from 0.7 default; explainer niches override
+        // this further downward to keep topicShift from monopolizing cuts.
+        topic:         0.5,
+    }
+};
+
+// Per-niche deltas. Keys are niche IDs; values are partial objects that
+// override only the fields they mention. Anything not listed here inherits
+// DEFAULT_SCENE_SPLIT.
+const SCENE_SPLIT_OVERRIDES = {
+    // NEWS — tighter hook + body, pauses matter more, shorter unit ceiling so
+    // rapid-fire cuts aren't starved for candidate units. bodyBand lower raised
+    // 2.5 → 3.0 (2.5s body scenes looked like fragments in validation).
+    'news':              { hookBand: [1.5, 3.5], bodyBand: [3.0, 8.0],  pauseSensitivity: 1.3, unitThresholds: { maxUnitDur: 4.5 } },
+    'news.politics':     { hookBand: [1.5, 3.5], bodyBand: [3.0, 8.0],  pauseSensitivity: 1.3, unitThresholds: { maxUnitDur: 4.5 } },
+    'news.celebrity':    { hookBand: [1.5, 3.5], bodyBand: [3.0, 8.0],  pauseSensitivity: 1.3, unitThresholds: { maxUnitDur: 4.5 } },
+    'news.military':     { hookBand: [1.5, 3.5], bodyBand: [3.0, 8.0],  pauseSensitivity: 1.3, unitThresholds: { maxUnitDur: 4.5 } },
+    'news.economy':      { hookBand: [1.5, 3.5], bodyBand: [3.0, 8.0],  pauseSensitivity: 1.3, unitThresholds: { maxUnitDur: 4.5 } },
+    'news.tech':         { hookBand: [1.5, 3.5], bodyBand: [3.0, 8.0],  pauseSensitivity: 1.3, unitThresholds: { maxUnitDur: 4.5 } },
+    'news.sport':        { hookBand: [1.5, 3.5], bodyBand: [3.0, 8.0],  pauseSensitivity: 1.3, unitThresholds: { maxUnitDur: 4.5 } },
+
+    // GEOPOLITICAL / MILITARY EXPLAINERS — wider body, entities matter more.
+    // bodyBand lower raised 4.0 → 5.5 so political/military scenes hold on one
+    // idea long enough to show the subject (actor/policy/location).
+    //
+    // Apr 20 real-build tuning: 498s script still produced 113 scenes with avg
+    // body 3.8s. Root causes:
+    //   - topicShift was 55% of total contribution (0.69/1.26) and drove 64/116
+    //     chosen cuts solo — one paragraph-level topic change = one cut.
+    //   - style profile's 3.0s/scene avg was being used as direct target,
+    //     dragging 498s longform into news rhythm.
+    //   - speech units averaged 2.6s, giving DP cheap sub-band spans to choose.
+    // Response: topic↓0.7→0.35, topicGating on, styleBlend.body↓0.15 (mostly
+    // niche), bandResistance=1.6, coarser unitThresholds.
+    // Apr 20 third-pass tuning: previous bandResistance=1.6 still left 13/59
+    // body scenes under-band on the reference 498s run. Bumped to 2.0
+    // (smallest tightening that targets the under-band tail without
+    // over-tightening the 7–9s body norm). Added segmentHintMinPause=0.35
+    // so Whisper segment boundaries only trigger unit breaks when there's
+    // at least 350ms of real silence — explainer narration has a lot of
+    // mid-sentence Whisper segments that were driving 75 unit breaks.
+    'explainer.politics': {
+        bodyBand: [5.5, 14.0],
+        pauseSensitivity: 0.8,
+        weights: { entity: 1.1, topic: 0.35, segmentHint: 0.10 },
+        styleBlend: { hook: 0.6, body: 0.15, cta: 0.5 },
+        bandResistance: 2.0,
+        topicGating: true,
+        unitThresholds: { minUnitDur: 1.4, maxUnitDur: 8.0, pauseSoftSec: 0.6, segmentHintMinPause: 0.35 },
+    },
+    'explainer.military': {
+        bodyBand: [5.5, 14.0],
+        pauseSensitivity: 0.8,
+        weights: { entity: 1.1, topic: 0.35, segmentHint: 0.10 },
+        styleBlend: { hook: 0.6, body: 0.15, cta: 0.5 },
+        bandResistance: 2.0,
+        topicGating: true,
+        unitThresholds: { minUnitDur: 1.4, maxUnitDur: 8.0, pauseSoftSec: 0.6, segmentHintMinPause: 0.35 },
+    },
+
+    // DOCUMENTARY EXPLAINERS — let strong visuals breathe (raised 5.0 → 6.0).
+    // Wider unit ceiling so long narration sentences can form single units.
+    // Same rhythm problem as politics/military — reuse the same anti-fragment
+    // knobs but keep pauseSensitivity at 0.7 (these narrators pause naturally).
+    'explainer.history':  {
+        bodyBand: [6.0, 14.0], pauseSensitivity: 0.7,
+        weights: { topic: 0.4, segmentHint: 0.10 },
+        styleBlend: { hook: 0.6, body: 0.2, cta: 0.5 },
+        bandResistance: 1.7,
+        topicGating: true,
+        unitThresholds: { minUnitDur: 1.3, maxUnitDur: 7.5, pauseSoftSec: 0.55, segmentHintMinPause: 0.30 },
+    },
+    'explainer.crime':    {
+        bodyBand: [6.0, 14.0], pauseSensitivity: 0.7,
+        weights: { topic: 0.4, segmentHint: 0.10 },
+        styleBlend: { hook: 0.6, body: 0.2, cta: 0.5 },
+        bandResistance: 1.7,
+        topicGating: true,
+        unitThresholds: { minUnitDur: 1.3, maxUnitDur: 7.5, pauseSoftSec: 0.55, segmentHintMinPause: 0.30 },
+    },
+    'explainer.nature':   {
+        bodyBand: [6.0, 14.0], pauseSensitivity: 0.7,
+        weights: { topic: 0.4, segmentHint: 0.10 },
+        styleBlend: { hook: 0.6, body: 0.2, cta: 0.5 },
+        bandResistance: 1.7,
+        topicGating: true,
+        unitThresholds: { minUnitDur: 1.3, maxUnitDur: 7.5, pauseSoftSec: 0.55, segmentHintMinPause: 0.30 },
+    },
+};
+
+function _deepMergeSplit(base, override) {
+    if (!override) return base;
+    const out = {
+        hookBand: (override.hookBand || base.hookBand).slice(),
+        bodyBand: (override.bodyBand || base.bodyBand).slice(),
+        ctaBand:  (override.ctaBand  || base.ctaBand ).slice(),
+        pauseSensitivity: (typeof override.pauseSensitivity === 'number')
+            ? override.pauseSensitivity : base.pauseSensitivity,
+        bandResistance: (typeof override.bandResistance === 'number')
+            ? override.bandResistance : base.bandResistance,
+        topicGating: (typeof override.topicGating === 'boolean')
+            ? override.topicGating : base.topicGating,
+        styleBlend: Object.assign({}, base.styleBlend || {}, override.styleBlend || {}),
+        unitThresholds: Object.assign({}, base.unitThresholds, override.unitThresholds || {}),
+        weights: Object.assign({}, base.weights, override.weights || {}),
+    };
+    return out;
+}
+
+/**
+ * Get the effective scene-split config for a niche id.
+ * Missing niche → DEFAULT_SCENE_SPLIT.
+ * Missing fields → inherit from DEFAULT_SCENE_SPLIT.
+ */
+function getNicheSplitConfig(nicheId) {
+    const id = String(nicheId || '').trim();
+    const override = SCENE_SPLIT_OVERRIDES[id] || null;
+    return _deepMergeSplit(DEFAULT_SCENE_SPLIT, override);
 }
 
 // ============================================================
@@ -1985,5 +2520,8 @@ module.exports = {
     getKeywordRules,
     getSearchPolicy,
     rewriteQuery,
-    getFallbackKeywords
+    getFallbackKeywords,
+    DEFAULT_SCENE_SPLIT,
+    SCENE_SPLIT_OVERRIDES,
+    getNicheSplitConfig
 };

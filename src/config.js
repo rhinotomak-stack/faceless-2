@@ -10,7 +10,7 @@ const PROJECT_OVERRIDE_KEYS = new Set([
     'AI_PROVIDER', 'AI_INSTRUCTIONS',
     'BUILD_QUALITY_TIER', 'BUILD_FORMAT', 'BUILD_THEME', 'BUILD_NICHE',
     'BUILD_STYLE_PROFILE',
-    'CINEMATIC_SCALE', 'SMART_AI',
+    'SMART_AI',
     'OLLAMA_MODEL', 'OLLAMA_VISION_MODEL',
 ]);
 if (process.env.DOTENV_PATH && process.env.DOTENV_PATH !== appRootEnv) {
@@ -79,8 +79,10 @@ const config = {
     },
 
     // Qwen / Alibaba DashScope API settings (cheap)
+    // QWEN_API_KEY supports comma-separated keys — each key has independent model quota tracking
     qwen: {
-        apiKey: process.env.QWEN_API_KEY || '',
+        apiKey: parseEnvList(process.env.QWEN_API_KEY || '')[0] || '',
+        apiKeys: parseEnvList(process.env.QWEN_API_KEY || ''),
         baseUrl: process.env.QWEN_BASE_URL || 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
         model: process.env.QWEN_MODEL || 'qwen-omni-turbo',
         visionModel: process.env.QWEN_VISION_MODEL || 'qwen-omni-turbo'
@@ -92,11 +94,16 @@ const config = {
         apiKey: geminiApiKeys[0] || '',
         apiKeys: geminiApiKeys,
         baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
-        model: process.env.GEMINI_MODEL || 'gemini-3.1-pro-preview',
-        visionModel: process.env.GEMINI_VISION_MODEL || 'gemini-3-flash-preview',
+        model: process.env.GEMINI_MODEL || 'gemini-2.5-pro',
+        visionModel: process.env.GEMINI_VISION_MODEL || 'gemini-2.5-flash',
         useVertex: process.env.GEMINI_USE_VERTEX === 'true',
         vertexProject: process.env.VERTEX_PROJECT_ID || '',
+        // VERTEX_LOCATION can be a single region (e.g. "us-east5") or a
+        // comma-separated fallback list (e.g. "global,us-east5,us-east4").
+        // vertex-auth.js parses this at runtime and rotates on 429/503.
         vertexLocation: process.env.VERTEX_LOCATION || 'us-central1',
+        vertexLocations: (process.env.VERTEX_LOCATION || 'us-central1')
+            .split(',').map(s => s.trim().toLowerCase()).filter(Boolean),
     },
 
     // Groq API settings (ultra-fast inference)
@@ -149,12 +156,6 @@ const config = {
         apiKey: process.env.BING_API_KEY || ''
     },
 
-    // Perplexity Sonar API (for media research — improves footage quality)
-    perplexity: {
-        apiKey: process.env.PERPLEXITY_API_KEY || '',
-        model: 'sonar-pro'
-    },
-
     // YouTube (via yt-dlp)
     youtube: {
         apiKey: process.env.YOUTUBE_API_KEY || '',
@@ -167,6 +168,12 @@ const config = {
     // Rate limited to ~10 req/min unauthenticated, provider self-throttles
     reddit: {},
 
+    // Freesound API (for real transition + MG sound effects)
+    // Get key: https://freesound.org/apiv2/apply/
+    freesound: {
+        apiKey: process.env.FREESOUND_API_KEY || ''
+    },
+
     // Map providers (for static map images in mapChart MGs)
     // Geoapify: free 3,000 req/day — https://myprojects.geoapify.com/
     geoapify: {
@@ -175,6 +182,14 @@ const config = {
     // MapTiler: free 100K req/month — https://cloud.maptiler.com/
     maptiler: {
         apiKey: process.env.MAPTILER_API_KEY || ''
+    },
+
+    // Freepik/Flaticon: same API key — https://www.freepik.com/api
+    flaticon: {
+        apiKey: process.env.FREEPIK_API_KEY || ''
+    },
+    freepik: {
+        apiKey: process.env.FREEPIK_API_KEY || ''
     },
 
     // Clip Analyzer — Omni multimodal video understanding (Qwen Omni / Gemini)

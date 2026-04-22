@@ -33,6 +33,9 @@ for (const arg of process.argv) {
 
 // Resolve to absolute path
 PROJECT_DIR = path.resolve(PROJECT_DIR);
+// Publish to the process env so any module running in the main process
+// (e.g. style-studio-agent) can locate the active project without being passed it.
+process.env.PROJECT_DIR = PROJECT_DIR;
 
 // ========================================
 // Single-Instance Lock (per project directory)
@@ -272,6 +275,7 @@ initProjectLogger(PROJECT_DIR);
 
 function applyProjectDir(projectDir) {
     PROJECT_DIR = path.resolve(projectDir);
+    process.env.PROJECT_DIR = PROJECT_DIR;
     INPUT_PATH = path.join(PROJECT_DIR, 'input');
     OUTPUT_PATH = path.join(PROJECT_DIR, 'output');
     TEMP_PATH = path.join(PROJECT_DIR, 'temp');
@@ -286,6 +290,17 @@ function applyProjectDir(projectDir) {
     }
     initProjectLogger(PROJECT_DIR);
     console.log(`📁 Active project set to: ${PROJECT_DIR}`);
+
+    // Wipe accumulated Style Studio chat history on project switch so long
+    // Detach in-memory Style Studio sessions so the old project's Gemini context
+    // doesn't leak into the new one. The on-disk session stays intact — when the
+    // user switches back, Style Studio restores from disk (like ChatGPT projects).
+    try {
+        const studio = require('./src/style-studio-agent');
+        studio.clearChatHistory(path.join(PROJECT_DIR, 'styles'));
+    } catch (e) {
+        console.warn(`[project-switch] Failed to detach studio session: ${e.message}`);
+    }
 }
 
 let startupWindow = null;
@@ -676,7 +691,7 @@ app.whenReady().then(async () => {
     createWindow();
 
     // Auto-probe V2 on startup to log GPU capabilities
-    if (_gpuExportAddon && process.env.EXPORT_V2 !== '0') {
+    if (typeof _gpuExportAddon !== 'undefined' && _gpuExportAddon && process.env.EXPORT_V2 !== '0') {
         try {
             const probe = _gpuExportAddon.probeAngleD3D11();
             if (probe.ok) {
@@ -870,9 +885,6 @@ ipcMain.handle('run-build', async (event, options) => {
             if (options.buildStyleProfile && options.buildStyleProfile !== 'none') {
                 buildEnv.BUILD_STYLE_PROFILE = options.buildStyleProfile;
             }
-            if (options.cinematicScale) {
-                buildEnv.CINEMATIC_SCALE = options.cinematicScale;
-            }
             // Smart AI toggle
             const isSmartAI = options.smartAI !== false && options.smartAI !== 'false';
             buildEnv.SMART_AI = isSmartAI ? 'true' : 'false';
@@ -881,6 +893,16 @@ ipcMain.handle('run-build', async (event, options) => {
             const clipAnalyzerOn = options.clipAnalyzer !== false && options.clipAnalyzer !== 'false';
             buildEnv.CLIP_ANALYZER_ENABLED = clipAnalyzerOn ? 'true' : 'false';
             console.log(`   🎬 Clip Analyzer: ${clipAnalyzerOn ? 'ON' : 'OFF'}`);
+            // Build Resume toggle — when OFF (default), wipe checkpoint + scene cache for a fresh run
+            const resumeOn = options.buildResume === true || options.buildResume === 'true';
+            buildEnv.BUILD_RESUME = resumeOn ? 'true' : 'false';
+            console.log(`   ♻️  Resume Build: ${resumeOn ? 'ON (skip completed steps, keep scene cache)' : 'OFF (fresh build)'}`);
+            // AI thinking mode (Gemini, Qwen, DeepSeek)
+            const thinkMode = options.aiThinking || options.geminiThinking || 'off';
+            buildEnv.AI_THINKING = thinkMode;
+            if (thinkMode !== 'off') {
+                console.log(`   🧠 AI Thinking: ${thinkMode}`);
+            }
             // Also pass DOTENV_PATH so build pipeline loads the project-local .env
             buildEnv.DOTENV_PATH = path.join(PROJECT_DIR, '.env');
             // Pass --smart-ai flag as CLI arg for reliability (env vars can be lost on Windows)
@@ -1854,6 +1876,25 @@ ipcMain.handle('get-sfx-path', async (event, filename) => {
     return null;
 });
 
+// Download real SFX from Freesound API (replaces synthetic placeholders)
+ipcMain.handle('download-real-sfx', async () => {
+    try {
+        const { downloadAllSfx } = require('./src/sfx-provider');
+        const simpleLog = {
+            step: (msg) => console.log(msg),
+            ok: (msg) => console.log(`   ✅ ${msg}`),
+            warn: (msg) => console.log(`   ⚠️ ${msg}`),
+            dim: (msg) => console.log(msg),
+            br: () => console.log(''),
+        };
+        const result = await downloadAllSfx({ log: simpleLog });
+        return { success: true, ...result };
+    } catch (err) {
+        console.error('[SFX Download] Error:', err.message);
+        return { success: false, error: err.message };
+    }
+});
+
 // Scan assets/overlays/ folder for available overlay files
 ipcMain.handle('scan-overlays', async () => {
     const overlaysDir = path.join(__dirname, 'assets', 'overlays');
@@ -1972,6 +2013,15 @@ ipcMain.handle('qwen-pool-status', async () => {
     try {
         if (fs.existsSync(_qwenExhaustedPath)) {
             const data = JSON.parse(fs.readFileSync(_qwenExhaustedPath, 'utf8'));
+            // Support both old format (flat) and new format (keys: { hash: { ... } })
+            if (data.keys) {
+                let totalExhausted = 0, totalModels = 0;
+                for (const [hash, map] of Object.entries(data.keys)) {
+                    totalExhausted += Object.values(map).filter(v => v === true).length;
+                    totalModels += Object.keys(map).length;
+                }
+                return { exhausted: totalExhausted, total: totalModels, multiKey: true };
+            }
             const exhausted = Object.values(data).filter(v => v === true).length;
             return { exhausted, total: Object.keys(data).length };
         }
@@ -2027,6 +2077,340 @@ ipcMain.handle('learn-style', async (event, input) => {
         return { success: false, error: e.message || String(e) };
     }
 });
+
+ipcMain.handle('learn-style-multi', async (event, urls, profileName) => {
+    try {
+        if (!urls || !Array.isArray(urls) || urls.length === 0) {
+            return { success: false, error: 'No URLs provided' };
+        }
+        const styleLearner = require('./src/style-learner');
+        const saveDir = _styleProfilesDir();
+
+        const sendProgress = (percent, message) => {
+            if (mainWindow && !mainWindow.isDestroyed()) {
+                mainWindow.webContents.send('learn-style-progress', { percent, message });
+            }
+        };
+
+        const profile = await styleLearner.analyzeMultiple(urls, {
+            name: profileName || undefined,
+            saveDir,
+            onProgress: sendProgress,
+        });
+
+        return { success: true, profile, path: profile.savedPath };
+    } catch (e) {
+        console.error('[learn-style-multi] Failed:', e);
+        return { success: false, error: e.message || String(e) };
+    }
+});
+
+ipcMain.handle('compare-style', async (event, profilePath, videoPlan) => {
+    try {
+        const styleLearner = require('./src/style-learner');
+        const profile = styleLearner.loadStyleProfile(profilePath);
+        if (!profile) return { success: false, error: 'Could not load style profile' };
+        const report = styleLearner.compareWithBuild(profile, videoPlan);
+        const formatted = styleLearner.formatComparison(report);
+        return { success: true, report: formatted, data: report };
+    } catch (e) {
+        console.error('[compare-style] Failed:', e);
+        return { success: false, error: e.message || String(e) };
+    }
+});
+
+// ========================================
+// Style Studio Agent — Conversational style analyst
+// ========================================
+function _sendStudioProgress(window, percent, message) {
+    if (window && !window.isDestroyed()) {
+        window.webContents.send('style-studio-progress', { percent, message });
+    }
+}
+
+ipcMain.handle('style-studio-start', async (event, input, options) => {
+    try {
+        if (!input || typeof input !== 'string') {
+            return { error: 'No input provided' };
+        }
+        const studio = require('./src/style-studio-agent');
+        const saveDir = _styleProfilesDir();
+        const win = BrowserWindow.fromWebContents(event.sender);
+
+        const result = await studio.startSession(input, {
+            saveDir,
+            thinkingMode: options?.thinkingMode || 'off',
+            codeAccess: options?.codeAccess !== false,
+            onProgress: (pct, msg) => _sendStudioProgress(win, pct, msg),
+        });
+        return result;
+    } catch (e) {
+        console.error('[style-studio-start] Failed:', e);
+        return { error: e.message || String(e) };
+    }
+});
+
+ipcMain.handle('style-studio-add-video', async (event, sessionId, input) => {
+    try {
+        const studio = require('./src/style-studio-agent');
+        const win = BrowserWindow.fromWebContents(event.sender);
+        const result = await studio.addVideo(sessionId, input, (pct, msg) =>
+            _sendStudioProgress(win, pct, msg));
+        return result;
+    } catch (e) {
+        console.error('[style-studio-add-video] Failed:', e);
+        return { error: e.message || String(e) };
+    }
+});
+
+ipcMain.handle('style-studio-chat', async (event, sessionId, message) => {
+    try {
+        const studio = require('./src/style-studio-agent');
+        const result = await studio.chat(sessionId, message);
+        return result;
+    } catch (e) {
+        console.error('[style-studio-chat] Failed:', e);
+        return { error: e.message || String(e) };
+    }
+});
+
+ipcMain.handle('style-studio-analyze-script', async (event, sessionId) => {
+    try {
+        const studio = require('./src/style-studio-agent');
+        const result = await studio.analyzeScript(sessionId);
+        return result;
+    } catch (e) {
+        console.error('[style-studio-analyze-script] Failed:', e);
+        return { error: e.message || String(e) };
+    }
+});
+
+ipcMain.handle('style-studio-extract-profile', async (event, sessionId) => {
+    try {
+        const studio = require('./src/style-studio-agent');
+        const profile = await studio.extractProfile(sessionId);
+        return { profile };
+    } catch (e) {
+        console.error('[style-studio-extract-profile] Failed:', e);
+        return { error: e.message || String(e) };
+    }
+});
+
+ipcMain.handle('style-studio-save-profile', async (event, sessionId, name) => {
+    try {
+        const studio = require('./src/style-studio-agent');
+        const profile = studio.saveProfile(sessionId, name);
+        return { savedPath: profile.savedPath, profile };
+    } catch (e) {
+        console.error('[style-studio-save-profile] Failed:', e);
+        return { error: e.message || String(e) };
+    }
+});
+
+ipcMain.handle('style-studio-end-session', async (event, sessionId) => {
+    try {
+        const studio = require('./src/style-studio-agent');
+        return await studio.endSession(sessionId);
+    } catch (e) {
+        console.error('[style-studio-end-session] Failed:', e);
+        return { error: e.message || String(e) };
+    }
+});
+
+ipcMain.handle('style-studio-session-info', async (event, sessionId) => {
+    try {
+        const studio = require('./src/style-studio-agent');
+        return studio.getSessionInfo(sessionId);
+    } catch (e) {
+        return { error: e.message || String(e) };
+    }
+});
+
+ipcMain.handle('style-studio-set-code-access', async (event, sessionId, enabled) => {
+    try {
+        const studio = require('./src/style-studio-agent');
+        return studio.setCodeAccess(sessionId, enabled);
+    } catch (e) {
+        return { error: e.message || String(e) };
+    }
+});
+
+// Receive live project settings from the renderer so the agent knows the
+// user's video title / niche / AI instructions even before the .fvp is saved.
+ipcMain.handle('style-studio-set-project-context', async (event, ctx) => {
+    try {
+        const studio = require('./src/style-studio-agent');
+        studio.setLiveProjectContext(ctx || {});
+        return { ok: true };
+    } catch (e) {
+        return { error: e.message || String(e) };
+    }
+});
+
+// --- Session Persistence ---
+
+ipcMain.handle('style-studio-check-saved', async () => {
+    try {
+        const studio = require('./src/style-studio-agent');
+        const saveDir = _styleProfilesDir();
+        const saved = studio.loadSavedSession(saveDir);
+        return saved; // null if no saved session
+    } catch (e) {
+        return null;
+    }
+});
+
+ipcMain.handle('style-studio-restore', async (event) => {
+    try {
+        const studio = require('./src/style-studio-agent');
+        const saveDir = _styleProfilesDir();
+        const win = BrowserWindow.fromWebContents(event.sender);
+        const result = await studio.restoreSession(saveDir, (pct, msg) =>
+            _sendStudioProgress(win, pct, msg));
+        return result;
+    } catch (e) {
+        console.error('[style-studio-restore] Failed:', e);
+        return { error: e.message || String(e) };
+    }
+});
+
+ipcMain.handle('style-studio-discard-saved', async () => {
+    try {
+        const studio = require('./src/style-studio-agent');
+        studio.deleteSavedSession(_styleProfilesDir());
+        return { ok: true };
+    } catch (e) {
+        return { error: e.message || String(e) };
+    }
+});
+
+// --- Style Studio Memory ---
+
+ipcMain.handle('style-studio-load-memory', async () => {
+    try {
+        const studio = require('./src/style-studio-agent');
+        return { memories: studio.loadMemory(_styleProfilesDir()) };
+    } catch (e) {
+        return { memories: [] };
+    }
+});
+
+ipcMain.handle('style-studio-save-memory', async (event, text, category) => {
+    try {
+        const studio = require('./src/style-studio-agent');
+        const memories = studio.saveMemoryEntry(_styleProfilesDir(), text, category || 'user-note');
+        return { memories };
+    } catch (e) {
+        return { error: e.message || String(e) };
+    }
+});
+
+ipcMain.handle('style-studio-delete-memory', async (event, index) => {
+    try {
+        const studio = require('./src/style-studio-agent');
+        const memories = studio.deleteMemoryEntry(_styleProfilesDir(), index);
+        return { memories };
+    } catch (e) {
+        return { error: e.message || String(e) };
+    }
+});
+
+ipcMain.handle('style-studio-clear-memory', async () => {
+    try {
+        const studio = require('./src/style-studio-agent');
+        studio.clearMemory(_styleProfilesDir());
+        return { memories: [] };
+    } catch (e) {
+        return { error: e.message || String(e) };
+    }
+});
+
+// --- In-Studio Audio Transcription (Whisper) ---
+// Writes to <project>/temp/transcription.json so the Style Studio agent's
+// _buildTimestampedTranscriptContext() can pick it up on "plan scenes".
+
+ipcMain.handle('style-studio-pick-audio', async (event) => {
+    try {
+        const win = BrowserWindow.fromWebContents(event.sender) || mainWindow;
+        const result = await dialog.showOpenDialog(win, {
+            title: 'Choose audio file',
+            properties: ['openFile'],
+            filters: [
+                { name: 'Audio', extensions: ['mp3', 'wav', 'm4a', 'flac', 'ogg', 'opus', 'aac', 'webm', 'mp4'] },
+                { name: 'All files', extensions: ['*'] }
+            ]
+        });
+        if (result.canceled || !result.filePaths.length) return null;
+        const audioPath = result.filePaths[0];
+        let size = null;
+        try { size = fs.statSync(audioPath).size; } catch (_) {}
+        return { path: audioPath, name: path.basename(audioPath), size };
+    } catch (e) {
+        console.error('[style-studio-pick-audio] Failed:', e);
+        return { error: e.message || String(e) };
+    }
+});
+
+ipcMain.handle('style-studio-transcribe-audio', async (event, audioPath, options) => {
+    try {
+        if (!audioPath || typeof audioPath !== 'string') {
+            return { error: 'No audio path provided' };
+        }
+        if (!fs.existsSync(audioPath)) {
+            return { error: `Audio file not found: ${audioPath}` };
+        }
+        const win = BrowserWindow.fromWebContents(event.sender);
+        const send = (pct, msg) => {
+            if (win && !win.isDestroyed()) {
+                win.webContents.send('style-studio-transcribe-progress', { percent: pct, message: msg });
+            }
+        };
+
+        send(5, 'Loading Whisper…');
+        const { transcribeAudio } = require('./src/transcribe');
+        const result = await transcribeAudio(audioPath, {
+            languageHint: options?.languageHint || null
+        });
+        send(100, 'Transcription complete');
+
+        // transcribeAudio wrote the JSON to <project>/temp/transcription.json
+        const config = require('./src/config');
+        const outPath = path.join(config.paths.temp, 'transcription.json');
+        return {
+            ok: true,
+            path: outPath,
+            duration: result.duration || 0,
+            language: result.language || 'unknown',
+            segments: (result.segments || []).length,
+            text: (result.text || '').slice(0, 2000)
+        };
+    } catch (e) {
+        console.error('[style-studio-transcribe-audio] Failed:', e);
+        return { error: e.message || String(e) };
+    }
+});
+
+ipcMain.handle('style-studio-get-transcript-info', async () => {
+    try {
+        const config = require('./src/config');
+        const p = path.join(config.paths.temp, 'transcription.json');
+        if (!fs.existsSync(p)) return { exists: false };
+        const j = JSON.parse(fs.readFileSync(p, 'utf8'));
+        const st = fs.statSync(p);
+        return {
+            exists: true,
+            path: p,
+            duration: j.duration || 0,
+            language: j.language || 'unknown',
+            segments: (j.segments || []).length,
+            mtime: st.mtimeMs
+        };
+    } catch (e) {
+        return { exists: false, error: e.message };
+    }
+});
+
+// pick-video-file handler is registered later (legacy from style-learner)
 
 ipcMain.handle('scan-style-profiles', async () => {
     try {
@@ -2538,6 +2922,38 @@ ipcMain.handle('open-qa-chat', async () => {
     });
     qaStudioWindow.loadFile(htmlFile, { query: 'chat=1' });
     qaStudioWindow.on('closed', () => { qaStudioWindow = null; });
+});
+
+// ========================================
+// Style Studio — Separate Window
+// ========================================
+let styleStudioWindow = null;
+
+ipcMain.handle('open-style-studio', async () => {
+    const htmlFile = path.join(__dirname, 'ui', 'style-studio.html');
+
+    if (styleStudioWindow && !styleStudioWindow.isDestroyed()) {
+        styleStudioWindow.focus();
+        return;
+    }
+    styleStudioWindow = new BrowserWindow({
+        width: 1400,
+        height: 900,
+        minWidth: 1000,
+        minHeight: 640,
+        backgroundColor: '#0a0a0a',
+        title: 'Learner',
+        webPreferences: {
+            nodeIntegration: false,
+            contextIsolation: false,
+            sandbox: false,
+            preload: path.join(__dirname, 'preload.js'),
+        },
+        icon: getWindowIconPath() || undefined,
+        parent: mainWindow || undefined,
+    });
+    styleStudioWindow.loadFile(htmlFile);
+    styleStudioWindow.on('closed', () => { styleStudioWindow = null; });
 });
 
 // ========================================

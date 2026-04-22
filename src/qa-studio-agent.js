@@ -19,6 +19,7 @@ const { execFile } = require('child_process');
 const config = require('./config');
 const vertex = require('./vertex-auth');
 const { getNiche } = require('./niches');
+const { buildQAContextBlock, buildFeatureCatalog } = require('./qa-features-context');
 
 // ============ LOG ============
 
@@ -542,7 +543,7 @@ function _buildNicheContext(nicheId, niche) {
         parts.push('  - Expect clean stock B-roll, archival photos, product/process footage, scientific diagrams — high production quality is the standard.');
         parts.push('  - Context threshold: flag "poor" if footage is generic/unrelated to the SPECIFIC topic (e.g. random street for a specific invention).');
         parts.push('  - A person talking vlog-style directly to camera = presenter face = reject, even if discussing the topic.');
-        parts.push('  - NEVER suggest telegram or vkVideo as replacement sources for any explainer niche.');
+        parts.push('  - Replacement sources are niche-specific. Most explainer niches avoid telegram/vkVideo, but only block them when the current niche rules say so.');
     }
 
     // ── 5. Sub-niche specific rules ──
@@ -603,6 +604,13 @@ function _buildSubNicheRules(nicheId) {
                 '  - Historical military footage: tanks, aircraft, ships, battlefields, war memorials, military museums, archival war photos = all correct.',
                 '  - This is a DOCUMENTARY not breaking news. Live drone strikes, raw combat explosions, frontline chaos = context mismatch (wrong niche).',
                 '  - Historical reenactments and archive footage are fine even if dramatized.',
+            ].join('\n');
+
+        case 'explainer.politics':
+            return [
+                '  - Long-form political analysis: parliament/capitol exteriors, summit handshakes, policy document close-ups, trade-route maps, chokepoint aerials, historical leader footage = all correct.',
+                '  - This is a DOCUMENTARY / POLICY EXPLAINER, not breaking politics news. Constant podium clips, live hit coverage, ticker-heavy broadcast footage, and generic "breaking news" visuals are usually a weak fit unless used briefly as context.',
+                '  - Maps, timelines, treaty visuals, sanctions graphics, and archival government footage are expected and often stronger than generic protest/news montages.',
             ].join('\n');
 
         case 'explainer.tech':
@@ -707,17 +715,28 @@ function _buildSubNicheRules(nicheId) {
 
 /**
  * Niche-aware replacement source guidance.
- * Explainer niches: never suggest Telegram/VK.
- * News niches: Telegram/VK available where appropriate.
+ * Provider access is resolved from the niche config so explainer sub-niches can
+ * opt into Telegram when appropriate.
  */
 function _buildReplacementSourceGuidance(nicheId) {
+    const niche = getNiche(nicheId || 'general');
     const isNews      = nicheId?.startsWith('news');
     const isExplainer = nicheId?.startsWith('explainer') || nicheId === 'explainer';
+    const excluded = new Set(niche.excludeVideoProviders || []);
+    const canUseTelegram = !excluded.has('telegram');
+    const canUseVkVideo = !excluded.has('vkVideo');
+    const providers = ['pexels', 'pixabay', 'youtube'];
+    if (canUseTelegram) providers.push('telegram');
+    providers.push('reddit');
+    if (canUseVkVideo) providers.push('vkVideo');
+    providers.push('bing', 'googleScrape', 'unsplash');
 
     if (isExplainer) {
         return [
-            '  Available: pexels | pixabay | youtube | reddit | bing | googleScrape | unsplash',
-            '  (NO telegram or vkVideo — educational content only)',
+            `  Available: ${providers.join(' | ')}`,
+            canUseTelegram || canUseVkVideo
+                ? '  - Telegram/vkVideo are allowed for this specific explainer niche, but only when the footage is documentary-relevant rather than generic breaking-news clutter.'
+                : '  (telegram and vkVideo are excluded for this niche)',
             '  - Archival / historical footage → youtube',
             '  - Generic clean B-roll (landscapes, objects, processes) → pexels or pixabay',
             '  - Specific people / events / products → youtube first, then googleScrape',
@@ -726,9 +745,8 @@ function _buildReplacementSourceGuidance(nicheId) {
     }
 
     if (isNews) {
-        const canUseTelegram = nicheId === 'news.military' || nicheId === 'news.politics';
         return [
-            '  Available: pexels | pixabay | youtube | telegram | reddit | vkVideo | bing | googleScrape | unsplash',
+            `  Available: ${providers.join(' | ')}`,
             '  - Real news events / on-location footage → youtube',
             canUseTelegram ? '  - Military operations / government events / conflict zones → youtube, then telegram' : null,
             '  - Celebrity / athlete footage → youtube or bing/googleScrape',
@@ -838,6 +856,18 @@ function _truncateSceneMap(sceneMap, currentSceneIndex) {
     return result.join('\n');
 }
 
+// ============ FEATURES CONTEXT (auto-captured) ============
+
+function _buildFeaturesBlock(sceneInfo) {
+    try {
+        const block = buildQAContextBlock(sceneInfo);
+        if (!block) return '';
+        return `\nSYSTEM FEATURES (auto-detected — DO NOT ignore these when reviewing):\n${block}\n`;
+    } catch (e) {
+        return '';
+    }
+}
+
 // ============ PROMPT ============
 
 function _buildPrompt(sceneInfo, ctx) {
@@ -892,6 +922,7 @@ ${ctx.styleBlock}
 The video above is being built to match this reference style. When you analyze this scene, note whether the pacing, footage choice, MG density, transitions, or effects deviate significantly from the reference. Add deviation notes under NOTES, but do NOT lower the score solely for stylistic mismatch — only flag actual quality issues (watermarks, wrong context, broken animations, etc.).
 ` : ''}
 ${nicheContextBlock}
+${_buildFeaturesBlock(sceneInfo)}
 
 HOW THIS APP WORKS — READ BEFORE REVIEWING:
 - This is a FACELESS YouTube ${ctx.format || 'documentary'} video. There is NEVER a host/presenter talking to camera. If you see someone talking directly to camera = presenter face = reject immediately.

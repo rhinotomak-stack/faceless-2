@@ -89,13 +89,18 @@ class BaseProvider {
     /**
      * Download a file from URL to outputPath
      */
-    async download(url, outputPath) {
+    async download(url, outputPath, opts = {}) {
+        const abortSignal = opts.abortSignal || null;
+        if (abortSignal?.aborted) {
+            throw new Error('aborted before request');
+        }
         const response = await axios({
             url,
             method: 'GET',
             responseType: 'stream',
             adapter: _HTTP_ADAPTER, // force Node.js http adapter (avoids XHR adapter in Electron renderer)
             timeout: 30000,
+            signal: abortSignal || undefined,
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 'Accept': 'image/*,video/*,*/*;q=0.8',
@@ -113,8 +118,25 @@ class BaseProvider {
         const writer = fs.createWriteStream(outputPath);
         response.data.pipe(writer);
 
+        // If the caller aborts mid-stream, tear the stream down and delete the partial file.
+        const onAbort = () => {
+            try { response.data.destroy(new Error('aborted mid-stream')); } catch (_) {}
+            try { writer.destroy(new Error('aborted mid-stream')); } catch (_) {}
+            try { if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath); } catch (_) {}
+        };
+        if (abortSignal) abortSignal.addEventListener('abort', onAbort, { once: true });
+
         return new Promise((resolve, reject) => {
+            const cleanup = () => {
+                if (abortSignal) abortSignal.removeEventListener('abort', onAbort);
+            };
             writer.on('finish', () => {
+                cleanup();
+                if (abortSignal?.aborted) {
+                    try { if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath); } catch (_) {}
+                    reject(new Error('aborted'));
+                    return;
+                }
                 // Validate file size — reject tiny/empty files
                 const stat = fs.statSync(outputPath);
                 if (stat.size < 5000) {
@@ -126,7 +148,7 @@ class BaseProvider {
                     resolve(finalPath);
                 }
             });
-            writer.on('error', reject);
+            writer.on('error', (err) => { cleanup(); reject(err); });
         });
     }
 

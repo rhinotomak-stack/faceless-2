@@ -142,6 +142,858 @@ function _autoWebQuery(keyword, sourceHint) {
     return words;
 }
 
+function _clamp(value, min, max) {
+    return Math.max(min, Math.min(max, value));
+}
+
+function _getScenePhase(scene, scriptContext = {}) {
+    const hookEnd = parseFloat(scriptContext.hookEndTime);
+    const ctaStart = parseFloat(scriptContext.ctaStartTime);
+    if (!Number.isNaN(hookEnd) && (scene.startTime || 0) < hookEnd) return 'hook';
+    if (scriptContext.ctaDetected && !Number.isNaN(ctaStart) && (scene.startTime || 0) >= ctaStart) return 'cta';
+    return 'body';
+}
+// Known template + fullscreenMG type names, matched flexibly
+// (both camelCase and "two word" spellings).
+const _TEMPLATE_TYPE_ALIASES = {
+    statCard:        [/\bstat[\s-]*cards?\b/],
+    factCard:        [/\bfact[\s-]*cards?\b/],
+    personIntro:     [/\bperson[\s-]*intro(?:duction)?s?\b/, /\bperson card\b/],
+    locationCard:    [/\blocation[\s-]*cards?\b/, /\bplace cards?\b/],
+    chapterCard:     [/\bchapter[\s-]*cards?\b/, /\bsection cards?\b/],
+    quoteCard:       [/\bquote[\s-]*cards?\b/],
+    keyTakeaway:     [/\bkey[\s-]*takeaways?\b/, /\btakeaway cards?\b/],
+    comparisonCard:  [/\bcomparison[\s-]*cards?\b/, /\bvs(?:\.|\s)*cards?\b/],
+    timelineCard:    [/\btimeline[\s-]*cards?\b/],
+    imageShowcase:   [/\bimage[\s-]*showcase\b/, /\bphoto[\s-]*collage\b/, /\bpicture[\s-]*grid\b/],
+    splitScreen:     [/\bsplit[\s-]*screens?\b/, /\bside[\s-]*by[\s-]*sides?\b/],
+    infographic:     [/\binfographics?\b/],
+};
+const _FULLSCREEN_TYPE_ALIASES = {
+    mapChart:        [/\bmap[\s-]*charts?\b/, /\broute[\s-]*maps?\b/, /\btrade[\s-]*route[\s-]*maps?\b/, /\bshipping[\s-]*route[\s-]*maps?\b/, /\blocator[\s-]*maps?\b/],
+    barChart:        [/\bbar[\s-]*charts?\b/],
+    donutChart:      [/\bdonut[\s-]*charts?\b/, /\bpie[\s-]*charts?\b/],
+    timeline:        [/\btimeline\b/],
+    bulletList:      [/\bbullet[\s-]*lists?\b/],
+    rankingList:     [/\branking[\s-]*lists?\b/, /\btop[\s-]*\d+[\s-]*lists?\b/],
+    comparisonCard:  [/\bcomparison[\s-]*cards?\b/],
+    kineticText:     [/\bkinetic[\s-]*texts?\b/],
+    articleHighlight:[/\barticle[\s-]*highlights?\b/, /\bheadline[\s-]*cards?\b/],
+};
+
+function _parseVisualInstructionPrefs(rawInstructions = '') {
+    const raw = String(rawInstructions || '').trim();
+    const lower = raw.toLowerCase();
+    const prefs = {
+        raw,
+        hasUserDirectives: raw.length > 0,
+        avoidStock: /\b(?:no|avoid|without|don't use|dont use)\s+(?:any\s+)?stock\b/.test(lower),
+        preferRealFootage: /\b(?:real|raw|authentic)\s+(?:footage|video|clips?)\b/.test(lower) || /\bprefer real footage\b/.test(lower),
+        preferMaps: /\b(?:use|prefer|more)\s+maps?\b/.test(lower) || /\bmap animation\b/.test(lower) || /\b(?:map[\s-]*charts?|route[\s-]*maps?|trade[\s-]*route[\s-]*maps?|shipping[\s-]*route[\s-]*maps?|locator[\s-]*maps?)\b/.test(lower),
+        preferTemplates: /\b(?:use|prefer|more)\s+(?:templates?|infographics?|cards?)\b/.test(lower) || /\buse more templates?\b/.test(lower),
+        preferGraphics: /\b(?:use|prefer|more)\s+(?:graphics|motion graphics|mgs?|overlays)\b/.test(lower),
+        minimizeGraphics: /\b(?:no|avoid|less|fewer|minimal)\s+(?:graphics|motion graphics|mgs?|overlays)\b/.test(lower),
+        avoidFullscreenMG: /\b(?:no|avoid|less|fewer|minimal|minimize)\s+(?:fullscreen|full-?screen|full screen)(?:\s+(?:graphics|mgs?))?\b/.test(lower),
+        preferImages: /\b(?:use|prefer|more)\s+(?:images|photos|stills)\b/.test(lower),
+        preferVideos: /\b(?:use|prefer|more)\s+(?:video|videos|footage|clips)\b/.test(lower),
+        preferFloating: /\b(?:use|prefer|more)\s+floating\b/.test(lower),
+        preferCinematic: /\b(?:use|prefer|more)\s+cinematic\b/.test(lower),
+        preferFullscreen: /\b(?:use|prefer|mostly)\s+fullscreen\b/.test(lower),
+        requestedTemplateTypes: new Set(),
+        requestedFullscreenTypes: new Set(),
+        bannedSources: new Set(),
+        preferredSources: [],
+    };
+
+    // Detect explicit type names the user wrote in instructions — AI still chooses
+    // WHERE to apply them; we just surface the ask in the prompt.
+    for (const [type, patterns] of Object.entries(_TEMPLATE_TYPE_ALIASES)) {
+        if (patterns.some(re => re.test(lower))) prefs.requestedTemplateTypes.add(type);
+    }
+    for (const [type, patterns] of Object.entries(_FULLSCREEN_TYPE_ALIASES)) {
+        if (patterns.some(re => re.test(lower))) prefs.requestedFullscreenTypes.add(type);
+    }
+
+    const sourcePatterns = [
+        { source: 'stock', bans: [/\b(?:no|avoid|don't use|dont use)\s+stock\b/], prefers: [/\b(?:prefer|use|more)\s+stock\b/] },
+        { source: 'youtube', bans: [/\b(?:no|avoid|don't use|dont use)\s+youtube\b/], prefers: [/\b(?:prefer|use|more)\s+youtube\b/] },
+        { source: 'telegram', bans: [/\b(?:no|avoid|don't use|dont use)\s+telegram\b/], prefers: [/\b(?:prefer|use|more)\s+telegram\b/] },
+        { source: 'reddit', bans: [/\b(?:no|avoid|don't use|dont use)\s+reddit\b/], prefers: [/\b(?:prefer|use|more)\s+reddit\b/] },
+        { source: 'web-image', bans: [/\b(?:no|avoid|don't use|dont use)\s+(?:web images?|web-image|google images?)\b/], prefers: [/\b(?:prefer|use|more)\s+(?:web images?|web-image|google images?)\b/] },
+    ];
+
+    for (const cfg of sourcePatterns) {
+        if (cfg.bans.some(re => re.test(lower))) prefs.bannedSources.add(cfg.source);
+        if (cfg.prefers.some(re => re.test(lower))) prefs.preferredSources.push(cfg.source);
+    }
+
+    prefs.preferredSources = [...new Set(prefs.preferredSources)];
+    prefs.preferredVideoRatio =
+        prefs.preferVideos ? 0.78 :
+        prefs.preferImages ? 0.35 :
+        null;
+    prefs.preferredFraming =
+        prefs.preferFullscreen ? 'fullscreen' :
+        prefs.preferFloating ? 'floating' :
+        prefs.preferCinematic ? 'cinematic' :
+        null;
+
+    return prefs;
+}
+
+function _deriveStylePlannerPrefs(styleProfile) {
+    if (!styleProfile || typeof styleProfile !== 'object') {
+        return {
+            hasStyleInfluence: false,
+            targetVideoRatio: null,
+            preferRealSources: false,
+            mgDensity: null,
+            preferredMGTypes: [],
+            hookUsesMG: false,
+            framingBias: null,
+        };
+    }
+
+    const footage = styleProfile.footage || {};
+    const motionGraphics = styleProfile.motionGraphics || {};
+    const summaryText = [
+        styleProfile.summary || '',
+        ...(Array.isArray(styleProfile.systemNotes) ? styleProfile.systemNotes.map(n => `${n.observation || ''} ${n.gap || ''}`) : []),
+    ].join(' ').toLowerCase();
+
+    let framingBias = null;
+    if (/\bfloating\b|\bframed\b|\bexhibit\b|\bphoto on\b/.test(summaryText)) {
+        framingBias = 'floating';
+    } else if (/\bcinematic\b|\bpulled back\b|\bletterbox\b/.test(summaryText)) {
+        framingBias = 'cinematic';
+    }
+
+    const stockVsReal = String(footage.stockVsReal || '').toLowerCase();
+    const targetVideoRatio = typeof footage.videoToImageRatio === 'number'
+        ? _clamp(footage.videoToImageRatio, 0.2, 0.9)
+        : null;
+
+    return {
+        hasStyleInfluence: true,
+        targetVideoRatio,
+        preferRealSources: stockVsReal.includes('real') || stockVsReal.includes('mixed'),
+        mgDensity: (motionGraphics.density || '').toLowerCase() || null,
+        preferredMGTypes: Array.isArray(motionGraphics.preferredTypes) ? motionGraphics.preferredTypes : [],
+        hookUsesMG: !!styleProfile.hook?.usesMG,
+        framingBias,
+    };
+}
+
+function _buildPlannerDirectives(scenes, scriptContext, directorsBrief) {
+    return {
+        user: _parseVisualInstructionPrefs(directorsBrief?.freeInstructions || ''),
+        style: _deriveStylePlannerPrefs(scriptContext?.styleProfile || directorsBrief?.styleProfile || null),
+        sceneCount: scenes.length,
+    };
+}
+
+function _countRegexMatches(text, patterns) {
+    const lower = String(text || '').toLowerCase();
+    return patterns.reduce((count, pattern) => count + (pattern.test(lower) ? 1 : 0), 0);
+}
+
+function _deriveSceneSignals(scene, scenes, scriptContext) {
+    const text = String(scene.text || '');
+    const lower = text.toLowerCase();
+    const entities = scriptContext?.entities || [];
+    const entityTypes = scriptContext?.entityTypes || {};
+    const matchedEntities = entities.filter(e => lower.includes(e.toLowerCase()));
+    const placeTypes = new Set(['place', 'location', 'country', 'city', 'region']);
+    const people = matchedEntities.filter(e => entityTypes[e.toLowerCase()] === 'person');
+    const places = matchedEntities.filter(e => placeTypes.has(entityTypes[e.toLowerCase()]));
+    const numericTokens = text.match(/\b(?:\$?\d+(?:\.\d+)?%?|\d{4})\b/g) || [];
+    const geoTerms = [
+        /\bstrait\b/, /\bgulf\b/, /\bsea\b/, /\bocean\b/, /\broute\b/, /\bcorridor\b/,
+        /\bshipping\b/, /\btrade\b/, /\bpipeline\b/, /\bport\b/, /\bterminal\b/,
+        /\bharbor\b/, /\bcanal\b/, /\bborder\b/, /\bchokepoint\b/,
+    ];
+    const mapCandidate = places.length >= 2 || _countRegexMatches(lower, geoTerms) >= 2;
+    const hasQuote = /["“”]/.test(text) || /\bquote\b|\bsaid\b/.test(lower);
+    const likelyAction = /\b(attack|strike|launch|sail|drive|march|fire|moving|tour|training|operation|meeting|speeches?|protests?|election|vote|summit|review|walkthrough)\b/.test(lower);
+    const likelyDataImage = numericTokens.length > 0 || /\b(percent|rate|chart|graph|data|ranking|budget|stat)\b/.test(lower);
+    const isAbstractMood = !likelyAction && !likelyDataImage && people.length === 0 && places.length === 0 &&
+        /\b(sunset|storm|rain|night|crowd|city|smoke|cloud|ocean|aerial|abstract|mood)\b/.test(lower);
+    const firstPersonIntro = people.find(person => {
+        return !scenes.some(other => {
+            if ((other.index || 0) >= (scene.index || 0)) return false;
+            return String(other.text || '').toLowerCase().includes(person.toLowerCase());
+        });
+    }) || null;
+
+    return {
+        phase: _getScenePhase(scene, scriptContext),
+        matchedEntities,
+        people,
+        places,
+        primaryPerson: people[0] || null,
+        firstPersonIntro,
+        numericTokens,
+        hasNumeric: numericTokens.length > 0,
+        hasQuote,
+        hasMapCandidate: mapCandidate,
+        likelyAction,
+        likelyDataImage,
+        isAbstractMood,
+    };
+}
+
+function _sceneTagString(scene, scenes, scriptContext) {
+    const signals = _deriveSceneSignals(scene, scenes, scriptContext);
+    const tags = [signals.phase.toUpperCase()];
+    if (signals.hasNumeric) tags.push('STAT');
+    if (signals.hasMapCandidate) tags.push('GEO');
+    if (signals.firstPersonIntro) tags.push('PERSON-INTRO');
+    if (signals.hasQuote) tags.push('QUOTE');
+    return tags.join(', ');
+}
+
+function _renderPlannerDirectiveBlock(plannerDirectives, scriptContext) {
+    const lines = [];
+    const { user, style } = plannerDirectives;
+
+    if (user.hasUserDirectives) {
+        lines.push('VISUAL COMPLIANCE RULES (deterministic, must respect these):');
+        if (user.avoidStock) lines.push('- Avoid stock unless the scene is pure abstract mood with no real entity/event.');
+        if (user.preferRealFootage) lines.push('- Favor real footage sources over generic stock whenever the scene allows it.');
+        if (user.preferMaps) lines.push('- For geographic / route / chokepoint scenes, prefer maps or route visuals over generic footage.');
+        if (user.preferredSources.length > 0) lines.push(`- Preferred sources when they fit: ${user.preferredSources.join(', ')}.`);
+        if (user.bannedSources.size > 0) lines.push(`- Avoid these sources when alternatives exist: ${[...user.bannedSources].join(', ')}.`);
+        if (user.preferredFraming) lines.push(`- Preferred framing bias: ${user.preferredFraming}.`);
+        if (user.preferredVideoRatio != null) lines.push(`- Preferred media mix: ~${Math.round(user.preferredVideoRatio * 100)}% video / ${100 - Math.round(user.preferredVideoRatio * 100)}% image.`);
+        if (user.preferGraphics || user.preferTemplates) lines.push('- Be more proactive about graphics/templates when the narration has numbers, quotes, or introductions.');
+        if (user.minimizeGraphics) lines.push('- Keep motion graphics sparse unless the narration clearly needs one.');
+        if (user.avoidFullscreenMG) lines.push('- User asked for FEWER fullscreen MGs. Prefer overlay mgHint or templateHint over fullscreenMG when the scene content allows it.');
+        if (user.requestedTemplateTypes && user.requestedTemplateTypes.size > 0) {
+            lines.push(`- User explicitly asked for these TEMPLATES where they fit naturally (YOU decide which scenes): ${[...user.requestedTemplateTypes].join(', ')}.`);
+        }
+        if (user.requestedFullscreenTypes && user.requestedFullscreenTypes.size > 0) {
+            lines.push(`- User explicitly asked for these FULLSCREEN MG types where they fit naturally (YOU decide which scenes): ${[...user.requestedFullscreenTypes].join(', ')}.`);
+        }
+    }
+
+    if (style.hasStyleInfluence) {
+        lines.push('STYLE-DRIVEN VISUAL PRIORS (soft constraints, deterministic):');
+        if (style.targetVideoRatio != null) lines.push(`- Style media mix target: ~${Math.round(style.targetVideoRatio * 100)}% video / ${100 - Math.round(style.targetVideoRatio * 100)}% image.`);
+        if (style.preferRealSources) lines.push('- Style leans toward real/documentary footage over generic stock.');
+        if (style.mgDensity) lines.push(`- Style MG density inspiration: ${style.mgDensity}.`);
+        if (style.preferredMGTypes.length > 0) lines.push(`- Style frequently uses MG types like: ${style.preferredMGTypes.slice(0, 5).join(', ')}.`);
+        if (style.hookUsesMG) lines.push('- Style reference uses graphics in the hook when the narration supports them.');
+        if (style.framingBias) lines.push(`- Style framing bias: ${style.framingBias} when it fits the shot.`);
+    }
+
+    if (scriptContext.mainPoints?.length > 0) {
+        lines.push(`UPSTREAM STORY POINTS: ${scriptContext.mainPoints.slice(0, 6).join(' | ')}`);
+    }
+    if (scriptContext.sections?.length > 0) {
+        const sectionNames = scriptContext.sections
+            .map(s => typeof s === 'string' ? s : s?.title)
+            .filter(Boolean);
+        if (sectionNames.length > 0) lines.push(`UPSTREAM SECTIONS: ${sectionNames.slice(0, 8).join(' | ')}`);
+    }
+
+    return lines.length > 0 ? `${lines.join('\n')}\n` : '';
+}
+
+function _compactSceneText(text, maxLen = 160) {
+    const clean = String(text || '').replace(/\s+/g, ' ').trim();
+    if (clean.length <= maxLen) return clean;
+    return `${clean.substring(0, Math.max(0, maxLen - 3)).trim()}...`;
+}
+
+function buildGlobalOutlinePrompt(scenes, scriptContext, directorsBrief, plannerDirectives) {
+    const nicheId = scriptContext.nicheId || 'general';
+    const { getNiche } = require('./niches');
+    const niche = getNiche(nicheId);
+    const { user, style } = plannerDirectives;
+
+    const sceneList = scenes.map(scene => {
+        const duration = ((scene.endTime || 0) - (scene.startTime || 0)).toFixed(1);
+        const tags = _sceneTagString(scene, scenes, scriptContext);
+        return `SCENE ${scene.index} (${scene.startTime.toFixed(1)}s-${scene.endTime.toFixed(1)}s, ${duration}s) [${tags}]: "${_compactSceneText(scene.text, 180)}"`;
+    }).join('\n');
+
+    const directiveLines = [];
+    if (user.hasUserDirectives) {
+        directiveLines.push(`- User instructions: ${user.raw}`);
+        if (user.preferMaps) directiveLines.push('- User wants maps / route visuals when they fit.');
+        if (user.preferTemplates) directiveLines.push('- User wants more template/card usage when editorially justified.');
+        if (user.preferGraphics) directiveLines.push('- User is open to more graphics when the narration benefits.');
+        if (user.avoidFullscreenMG) directiveLines.push('- User prefers fewer fullscreen graphics.');
+        if (user.avoidStock) directiveLines.push('- User wants less stock footage.');
+    }
+    if (style.hasStyleInfluence) {
+        if (style.targetVideoRatio != null) directiveLines.push(`- Style media mix target: ~${Math.round(style.targetVideoRatio * 100)}% video.`);
+        if (style.preferRealSources) directiveLines.push('- Style prefers real/documentary footage over generic stock.');
+        if (style.mgDensity) directiveLines.push(`- Style graphics density inspiration: ${style.mgDensity}.`);
+        if (style.framingBias) directiveLines.push(`- Style framing bias: ${style.framingBias}.`);
+    }
+
+    return `You are creating a VIDEO-WIDE VISUAL OUTLINE before detailed scene planning.
+
+Think across ALL scenes at once. Your job is to create a concise AI blueprint for the full video so later chunk planners can stay globally consistent.
+
+Do NOT write final stockQuery/webQuery fields. Do NOT output the full detailed planner format. This is an OUTLINE pass only.
+
+VIDEO CONTEXT:
+- Niche: ${niche.name} (${niche.description})
+- Theme: ${scriptContext.theme || 'general'}
+- Tone: ${scriptContext.tone || 'informative'}
+- Mood: ${scriptContext.mood || 'neutral'}
+- Pacing: ${scriptContext.pacing || 'moderate'}
+- Format: ${scriptContext.format || 'general'}
+- Summary: ${scriptContext.summary || 'none'}
+- Event Anchor: ${scriptContext.eventAnchor || 'none'}
+- Main Points: ${scriptContext.mainPoints?.length ? scriptContext.mainPoints.slice(0, 8).join(' | ') : 'none'}
+- Sections: ${scriptContext.sections?.length ? scriptContext.sections.map(s => typeof s === 'string' ? s : s?.title).filter(Boolean).slice(0, 8).join(' | ') : 'none'}
+- Entities: ${scriptContext.entities?.length ? scriptContext.entities.slice(0, 12).join(', ') : 'none'}
+${scriptContext.webContext ? `- Research: ${String(scriptContext.webContext).substring(0, 1200)}` : ''}
+${directiveLines.length ? `\nDIRECTIVES:\n${directiveLines.map(line => `  ${line}`).join('\n')}` : ''}
+
+SCENES (${scenes.length} total):
+${sceneList}
+
+WHAT YOU MUST DO:
+1. Think about the WHOLE visual journey, not just single scenes.
+2. Decide where the video should lean into footage, overlays, templates, or fullscreen MG.
+3. Prevent repetition across neighboring scenes.
+4. Preserve stronger moments for hook / reveal / conclusion scenes.
+5. Flag the best editorial opportunities for templates instead of letting everything collapse into fullscreen graphics.
+
+OUTPUT FORMAT:
+GLOBAL ARC: <one concise line about the full-video visual journey>
+GLOBAL SOURCES: <one concise line about source rhythm across the full video>
+GLOBAL GRAPHICS: <one concise line about where templates / overlays / fullscreen graphics should appear>
+GLOBAL DIVERSITY: <one concise line about anti-repetition / variation strategy>
+Then output ONE line for EVERY scene:
+SCENE N: lane=<short editorial role> | source=<best source family> | graphics=<footage|overlay|template|fullscreenMG> | note=<short anti-repeat or emphasis cue>
+
+RULES:
+- Cover EVERY scene exactly once.
+- Keep scene notes short and practical.
+- Let graphics choices be editorial, not mechanical.
+- Use "template" when a card/panel layout would communicate better than raw footage.
+- Use "fullscreenMG" only when replacing footage is clearly the better communication choice.
+- Keep the outline concise and easy for a later planner pass to follow.`;
+}
+
+function _parseGlobalVisualOutline(rawText, scenes) {
+    const validSceneIds = new Set(scenes.map(scene => scene.index));
+    const lines = String(rawText || '').split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+    const globalLines = [];
+    const sceneHints = {};
+
+    for (const line of lines) {
+        const sceneMatch = line.match(/^SCENE\s+(\d+)\s*:\s*(.+)$/i);
+        if (sceneMatch) {
+            const idx = parseInt(sceneMatch[1], 10);
+            if (!validSceneIds.has(idx)) continue;
+            const body = sceneMatch[2].trim();
+            const field = (name) => {
+                const match = body.match(new RegExp(`\\b${name}\\s*=\\s*([^|]+)`, 'i'));
+                return match ? match[1].trim() : '';
+            };
+            sceneHints[idx] = {
+                index: idx,
+                raw: body,
+                lane: field('lane'),
+                source: field('source'),
+                graphics: field('graphics'),
+                note: field('note'),
+            };
+            continue;
+        }
+        if (/^GLOBAL\s+[A-Z ]+:/i.test(line)) {
+            globalLines.push(line);
+        }
+    }
+
+    const expected = scenes.length;
+    const actual = Object.keys(sceneHints).length;
+    const missing = scenes.map(scene => scene.index).filter(idx => !sceneHints[idx]);
+    const graphicsCounts = { footage: 0, overlay: 0, template: 0, fullscreenMG: 0, unknown: 0 };
+    for (const hint of Object.values(sceneHints)) {
+        const g = String(hint.graphics || '').toLowerCase();
+        if (g.includes('template')) graphicsCounts.template++;
+        else if (g.includes('fullscreen')) graphicsCounts.fullscreenMG++;
+        else if (g.includes('overlay')) graphicsCounts.overlay++;
+        else if (g.includes('footage')) graphicsCounts.footage++;
+        else graphicsCounts.unknown++;
+    }
+
+    return {
+        rawText: String(rawText || ''),
+        globalLines,
+        sceneHints,
+        coverage: expected > 0 ? actual / expected : 0,
+        missing,
+        graphicsCounts,
+    };
+}
+
+function _renderGlobalOutlineBlock(globalOutline, currentScenes) {
+    if (!globalOutline) return '';
+
+    const currentIds = currentScenes.map(scene => scene.index);
+    const first = currentIds[0];
+    const last = currentIds[currentIds.length - 1];
+    const currentHints = currentIds
+        .map(idx => globalOutline.sceneHints[idx])
+        .filter(Boolean);
+    const seamIds = [first - 2, first - 1, last + 1, last + 2];
+    const seamHints = seamIds
+        .map(idx => globalOutline.sceneHints[idx])
+        .filter(Boolean);
+
+    const lines = ['FULL-VIDEO AI OUTLINE (generated from ALL scenes before detailed planning):'];
+    for (const line of globalOutline.globalLines.slice(0, 4)) {
+        lines.push(`- ${line}`);
+    }
+    if (currentHints.length > 0) {
+        lines.push('CURRENT SCENE BLUEPRINT HINTS:');
+        for (const hint of currentHints) {
+            lines.push(`- Scene ${hint.index}: ${hint.raw}`);
+        }
+    }
+    if (seamHints.length > 0) {
+        lines.push('NEIGHBORING SEAM HINTS (for continuity before/after this batch):');
+        for (const hint of seamHints) {
+            lines.push(`- Scene ${hint.index}: ${hint.raw}`);
+        }
+    }
+    lines.push('Treat this outline as a SOFT whole-video blueprint. Keep the final per-scene plan intelligent and scene-specific.');
+    return `\n${lines.join('\n')}\n`;
+}
+
+async function _generateGlobalVisualOutline(scenes, scriptContext, directorsBrief, plannerDirectives) {
+    console.log(`   🧭 [Step 4 Outline] generating whole-video outline for ${scenes.length} scenes...`);
+    const prompt = buildGlobalOutlinePrompt(scenes, scriptContext, directorsBrief, plannerDirectives);
+    const maxTokens = Math.max(1200, scenes.length * 60);
+    const rawText = await callAI(prompt, { maxTokens });
+    if (!rawText) throw new Error('Empty outline response');
+
+    const outline = _parseGlobalVisualOutline(rawText, scenes);
+    const coveragePct = Math.round(outline.coverage * 100);
+    const gfx = outline.graphicsCounts;
+    console.log(`   🧭 [Step 4 Outline] globals=${outline.globalLines.length} sceneHints=${Object.keys(outline.sceneHints).length}/${scenes.length} (${coveragePct}%) graphics={footage:${gfx.footage}, overlay:${gfx.overlay}, template:${gfx.template}, fs:${gfx.fullscreenMG}, unknown:${gfx.unknown}}`);
+    if (outline.globalLines.length > 0) {
+        console.log(`   🧭 [Step 4 Outline] ${outline.globalLines.slice(0, 2).join(' | ')}`);
+    }
+    if (outline.missing.length > 0) {
+        console.log(`   ⚠️ [Step 4 Outline] missing scene hints for: ${outline.missing.slice(0, 8).join(', ')}${outline.missing.length > 8 ? '...' : ''}`);
+    }
+    return outline;
+}
+
+function _extractFirstStatToken(text) {
+    const match = String(text || '').match(/\b(?:\$?\d+(?:\.\d+)?%?|\d{4})\b/);
+    return match ? match[0] : null;
+}
+
+function _buildMapKeyword(scene, signals, scriptContext) {
+    const anchors = [];
+    for (const place of signals.places.slice(0, 2)) anchors.push(place);
+    if (anchors.length === 0 && scriptContext.eventAnchor) anchors.push(scriptContext.eventAnchor);
+    if (anchors.length === 0 && scriptContext.videoTitle) anchors.push(scriptContext.videoTitle.split(/\s+/).slice(0, 4).join(' '));
+    const suffix = /\b(route|corridor|pipeline|shipping|trade|strait|canal)\b/i.test(scene.text || '') ? 'route map' : 'map';
+    return [...anchors.slice(0, 2), suffix].join(' ').trim() || 'location map';
+}
+
+function _pickPreferredVideoSource(nicheId, plannerDirectives, fallback = 'youtube') {
+    const { getNiche } = require('./niches');
+    const niche = getNiche(nicheId || 'general');
+    const videoPriority = niche.footagePriority?.video || [fallback];
+    const preferred = plannerDirectives.user.preferredSources.filter(src => videoPriority.includes(src) && src !== 'stock');
+    const ordered = [...preferred, ...videoPriority.filter(src => !preferred.includes(src) && src !== 'pexels' && src !== 'pixabay')];
+    const allowed = ordered.filter(src => !plannerDirectives.user.bannedSources.has(src));
+    return allowed[0] || ordered[0] || fallback;
+}
+
+function _applyPlannerMediaMix(scenes, scriptContext, plannerDirectives, stats) {
+    const footageScenes = scenes.filter(s => !s.fullscreenMG);
+    if (footageScenes.length < 6) return;
+
+    const nicheId = scriptContext.nicheId || 'general';
+    const { user, style } = plannerDirectives;
+    let targetVideoRatio = user.preferredVideoRatio;
+    if (targetVideoRatio == null && style.targetVideoRatio != null && !nicheId.startsWith('news')) {
+        targetVideoRatio = style.targetVideoRatio;
+    }
+    if (targetVideoRatio == null) return;
+
+    const currentVideoCount = footageScenes.filter(s => s.mediaType === 'video').length;
+    const currentRatio = currentVideoCount / footageScenes.length;
+    if (Math.abs(currentRatio - targetVideoRatio) < 0.08) return;
+
+    if (currentRatio < targetVideoRatio) {
+        const needed = Math.ceil(targetVideoRatio * footageScenes.length) - currentVideoCount;
+        const topSource = _pickPreferredVideoSource(nicheId, plannerDirectives);
+        const candidates = footageScenes
+            .filter(s => s.mediaType === 'image' && !s._personLock)
+            .map(scene => ({ scene, signals: _deriveSceneSignals(scene, scenes, scriptContext) }))
+            .filter(({ signals }) => !signals.likelyDataImage && !signals.hasMapCandidate && !signals.primaryPerson)
+            .sort((a, b) => (a.scene.index || 0) - (b.scene.index || 0));
+
+        let flipped = 0;
+        for (const { scene } of candidates) {
+            if (flipped >= needed) break;
+            scene.mediaType = 'video';
+            scene.sourceHint = topSource;
+            scene.stockQuery = scene.stockQuery || _autoStockQuery(scene.keyword || extractFallbackKeyword(scene.text));
+            flipped++;
+        }
+        if (flipped > 0) stats.styleMixAdjusted += flipped;
+    } else {
+        const needed = currentVideoCount - Math.floor(targetVideoRatio * footageScenes.length);
+        const candidates = footageScenes
+            .filter(s => s.mediaType === 'video')
+            .map(scene => ({ scene, signals: _deriveSceneSignals(scene, scenes, scriptContext) }))
+            .filter(({ signals }) => signals.likelyDataImage || signals.hasMapCandidate || (!signals.likelyAction && signals.phase === 'body'))
+            .sort((a, b) => (a.scene.index || 0) - (b.scene.index || 0));
+
+        let flipped = 0;
+        for (const { scene, signals } of candidates) {
+            if (flipped >= needed) break;
+            scene.mediaType = 'image';
+            scene.sourceHint = 'web-image';
+            if (signals.hasMapCandidate) {
+                const mapKeyword = _buildMapKeyword(scene, signals, scriptContext);
+                scene.keyword = mapKeyword;
+                scene.webQuery = `${mapKeyword} reference image`;
+            }
+            flipped++;
+        }
+        if (flipped > 0) stats.styleMixAdjusted += flipped;
+    }
+}
+
+function _applyGraphicDensity(scenes, scriptContext, plannerDirectives, stats) {
+    const { user, style } = plannerDirectives;
+    if (user.minimizeGraphics) {
+        let cleared = 0;
+        for (const scene of scenes) {
+            const signals = _deriveSceneSignals(scene, scenes, scriptContext);
+            if (scene.mgHint && !signals.hasNumeric && !signals.firstPersonIntro) {
+                scene.mgHint = null;
+                cleared++;
+            }
+        }
+        if (cleared > 0) stats.graphicsTrimmed += cleared;
+        return;
+    }
+
+    let targetRatio = null;
+    if (style.mgDensity === 'high') targetRatio = 0.22;
+    if (style.mgDensity === 'medium') targetRatio = 0.15;
+    if (style.mgDensity === 'low') targetRatio = 0.08;
+    if (user.preferGraphics || user.preferTemplates) targetRatio = Math.max(targetRatio || 0, 0.18);
+    if (!targetRatio) return;
+
+    const currentGraphicScenes = scenes.filter(s => s.mgHint || s.templateHint || s.fullscreenMG).length;
+    const needed = Math.max(0, Math.ceil(targetRatio * scenes.length) - currentGraphicScenes);
+    if (needed === 0) return;
+
+    const candidates = scenes
+        .filter(s => !s.mgHint && !s.templateHint && !s.fullscreenMG)
+        .map(scene => ({ scene, signals: _deriveSceneSignals(scene, scenes, scriptContext) }))
+        .filter(({ signals }) => signals.phase === 'body' && (signals.hasNumeric || signals.firstPersonIntro || signals.hasQuote))
+        .sort((a, b) => {
+            const scoreA = (a.signals.hasNumeric ? 3 : 0) + (a.signals.firstPersonIntro ? 2 : 0) + (a.signals.hasQuote ? 1 : 0);
+            const scoreB = (b.signals.hasNumeric ? 3 : 0) + (b.signals.firstPersonIntro ? 2 : 0) + (b.signals.hasQuote ? 1 : 0);
+            return scoreB - scoreA || ((a.scene.index || 0) - (b.scene.index || 0));
+        });
+
+    let injected = 0;
+    for (const { scene, signals } of candidates) {
+        if (injected >= needed) break;
+        if (signals.hasNumeric) {
+            const stat = _extractFirstStatToken(scene.text);
+            if (stat) {
+                scene.mgHint = `statCounter: ${stat}`;
+                injected++;
+            }
+        } else if (signals.firstPersonIntro) {
+            scene.mgHint = `lowerThird: ${signals.firstPersonIntro}`;
+            injected++;
+        } else if (signals.hasQuote) {
+            const snippet = String(scene.text || '').replace(/^["“”']+|["“”']+$/g, '').split(/[.?!]/)[0].trim();
+            if (snippet) {
+                scene.mgHint = `callout: ${snippet.substring(0, 80)}`;
+                injected++;
+            }
+        }
+    }
+
+    if (injected > 0) stats.graphicsInjected += injected;
+}
+
+function _applyPlannerCompliance(scenes, scriptContext, directorsBrief, plannerDirectives) {
+    const nicheId = scriptContext.nicheId || 'general';
+    const stats = {
+        sourceOverrides: 0,
+        mapOverrides: 0,
+        framingOverrides: 0,
+        styleMixAdjusted: 0,
+        graphicsInjected: 0,
+        graphicsTrimmed: 0,
+    };
+
+    const topVideoSource = _pickPreferredVideoSource(nicheId, plannerDirectives);
+
+    for (const scene of scenes) {
+        const signals = _deriveSceneSignals(scene, scenes, scriptContext);
+        scene.sceneType = signals.phase;
+        scene.narrativeArc = scene.narrativeArc || signals.phase;
+
+        if (!scene.fullscreenMG) {
+            const banned = plannerDirectives.user.bannedSources.has(scene.sourceHint);
+            const shouldAvoidStock =
+                (plannerDirectives.user.avoidStock || plannerDirectives.user.preferRealFootage || plannerDirectives.style.preferRealSources) &&
+                scene.sourceHint === 'stock' &&
+                !signals.isAbstractMood;
+
+            if (banned || shouldAvoidStock) {
+                if (scene.mediaType === 'image' || signals.primaryPerson || signals.likelyDataImage || signals.hasMapCandidate) {
+                    if (plannerDirectives.user.bannedSources.has('web-image')) {
+                        scene.sourceHint = topVideoSource;
+                        scene.mediaType = 'video';
+                    } else {
+                        scene.sourceHint = 'web-image';
+                        scene.mediaType = 'image';
+                    }
+                } else {
+                    scene.sourceHint = topVideoSource;
+                    scene.mediaType = 'video';
+                }
+                stats.sourceOverrides++;
+            }
+
+            if (plannerDirectives.user.preferredSources.length > 0 &&
+                scene.mediaType === 'video' &&
+                !signals.primaryPerson &&
+                !signals.likelyDataImage &&
+                !signals.hasMapCandidate &&
+                !plannerDirectives.user.bannedSources.has(scene.sourceHint)) {
+                const preferredSource = _pickPreferredVideoSource(nicheId, plannerDirectives, scene.sourceHint);
+                if (preferredSource && preferredSource !== scene.sourceHint) {
+                    scene.sourceHint = preferredSource;
+                    stats.sourceOverrides++;
+                }
+            }
+
+            if (plannerDirectives.user.preferMaps && signals.hasMapCandidate && !signals.primaryPerson && signals.phase !== 'cta') {
+                const mapKeyword = _buildMapKeyword(scene, signals, scriptContext);
+                scene.keyword = mapKeyword;
+                const useWebImage = !plannerDirectives.user.bannedSources.has('web-image');
+                scene.mediaType = useWebImage ? 'image' : 'video';
+                scene.sourceHint = useWebImage ? 'web-image' : topVideoSource;
+                scene.webQuery = `${mapKeyword} reference map`;
+                scene.stockQuery = _autoStockQuery(mapKeyword);
+                if (!scene.visualIntent || scene.visualIntent === scene.keyword) {
+                    scene.visualIntent = `Map / route visualization for ${mapKeyword}`;
+                }
+                stats.mapOverrides++;
+            }
+
+            if (plannerDirectives.user.preferredFraming === 'fullscreen') {
+                if (scene.framing !== 'fullscreen') {
+                    scene.framing = 'fullscreen';
+                    scene.backgroundId = 'none';
+                    scene.background = 'none';
+                    stats.framingOverrides++;
+                }
+            } else if (plannerDirectives.user.preferredFraming === 'cinematic' &&
+                scene.framing === 'fullscreen' &&
+                (scene.mediaType === 'image' || scene.sourceHint === 'web-image' || signals.likelyDataImage)) {
+                scene.framing = 'cinematic';
+                scene.backgroundId = scene.backgroundId || 'blur';
+                stats.framingOverrides++;
+            } else if (plannerDirectives.user.preferredFraming === 'floating' &&
+                scene.framing === 'fullscreen' &&
+                (scene.mediaType === 'image' || scene.sourceHint === 'web-image')) {
+                scene.framing = 'floating';
+                scene.backgroundId = scene.backgroundId || 'soft-beige';
+                scene.floatingAnim = scene.floatingAnim || 'fadeScale';
+                scene.floatingShadow = scene.floatingShadow || 0.5;
+                stats.framingOverrides++;
+            } else if (!plannerDirectives.user.preferredFraming &&
+                plannerDirectives.style.framingBias === 'floating' &&
+                scene.framing === 'fullscreen' &&
+                scene.mediaType === 'image' &&
+                scene.sourceHint === 'web-image') {
+                scene.framing = 'floating';
+                scene.backgroundId = scene.backgroundId || 'soft-beige';
+                scene.floatingAnim = scene.floatingAnim || 'fadeScale';
+                scene.floatingShadow = scene.floatingShadow || 0.5;
+                stats.framingOverrides++;
+            }
+        }
+    }
+
+    _applyPlannerMediaMix(scenes, scriptContext, plannerDirectives, stats);
+    _applyGraphicDensity(scenes, scriptContext, plannerDirectives, stats);
+
+    for (const scene of scenes) {
+        if (scene.framing) scene._framingLocked = true;
+    }
+
+    const changeParts = [];
+    if (stats.sourceOverrides > 0) changeParts.push(`sources=${stats.sourceOverrides}`);
+    if (stats.mapOverrides > 0) changeParts.push(`maps=${stats.mapOverrides}`);
+    if (stats.framingOverrides > 0) changeParts.push(`framing=${stats.framingOverrides}`);
+    if (stats.styleMixAdjusted > 0) changeParts.push(`styleMix=${stats.styleMixAdjusted}`);
+    if (stats.graphicsInjected > 0) changeParts.push(`graphics+${stats.graphicsInjected}`);
+    if (stats.graphicsTrimmed > 0) changeParts.push(`graphics-${stats.graphicsTrimmed}`);
+    if (changeParts.length > 0) {
+        console.log(`   🧭 Planner compliance: ${changeParts.join(' | ')}`);
+    }
+}
+
+function _finalizeVisualPlan(enrichedScenes, scriptContext, directorsBrief, plannerDirectives) {
+    // Listicle keyword variety enforcement
+    if (scriptContext.format === 'listicle' && scriptContext.listicleItems) {
+        const { enforceKeywordVariety } = require('./listicle-format');
+        enforceKeywordVariety(enrichedScenes, scriptContext.listicleItems);
+
+        const firstItem = scriptContext.listicleItems.find(it => it.startSceneIndex != null);
+        if (firstItem) {
+            const overviewIdx = Math.max(0, firstItem.startSceneIndex - 1);
+            const overviewScene = enrichedScenes.find(s => s.index === overviewIdx);
+            if (overviewScene && !overviewScene.fullscreenMG) {
+                overviewScene.fullscreenMG = 'listicleGrid';
+                overviewScene.isListicleOverview = true;
+                overviewScene.keyword = null;
+                overviewScene.stockQuery = null;
+                overviewScene.webQuery = null;
+                overviewScene.mediaType = null;
+                overviewScene.sourceHint = null;
+                console.log(`      [Listicle] Scene ${overviewIdx}: forced to listicleGrid overview (no footage needed)`);
+            }
+        }
+    }
+
+    _applyPlannerCompliance(enrichedScenes, scriptContext, directorsBrief, plannerDirectives);
+
+    _enforceVideoRatio(enrichedScenes, scriptContext.nicheId);
+
+    if (scriptContext.nicheId && scriptContext.nicheId.startsWith('news')) {
+        for (const scene of enrichedScenes) {
+            if (scene.sourceHint === 'stock' && scene.mediaType !== 'video') {
+                scene.sourceHint = 'web-image';
+            }
+        }
+    }
+
+    const entities = scriptContext.entities || [];
+    const entityTypes2 = scriptContext.entityTypes || {};
+    if (entities.length > 0) {
+        for (const scene of enrichedScenes) {
+            if (!scene.keyword || scene.sourceHint === 'web-image') continue;
+            const kwLower = scene.keyword.toLowerCase();
+            const matchedEntities = entities.filter(e => {
+                const eLower = e.toLowerCase();
+                return kwLower.includes(eLower) || eLower.includes(kwLower);
+            });
+            const personEntity = matchedEntities.find(e => entityTypes2[e.toLowerCase()] === 'person');
+            const hasPortraitHint = /portrait|photo|headshot|face/i.test(kwLower);
+            if (personEntity || hasPortraitHint) {
+                if (scene.mediaType !== 'image' || scene.sourceHint !== 'web-image') {
+                    console.log(`   🧑 Person override: "${scene.keyword}" → [image, web-image]`);
+                    scene.mediaType = 'image';
+                    scene.sourceHint = 'web-image';
+                }
+            }
+        }
+    }
+
+    _validateKeywords(enrichedScenes, scriptContext);
+
+    // ── CTA zone fullscreenMG guard ──
+    // Conclusion/CTA scenes should never be a fullscreenMG — they need real closing
+    // footage. If the planner (or a promoter upstream) left one there, strip it and
+    // restore sensible footage defaults.
+    let ctaGuardStripped = 0;
+    for (const scene of enrichedScenes) {
+        if (!scene.fullscreenMG) continue;
+        const phase = _getScenePhase(scene, scriptContext);
+        if (phase !== 'cta') continue;
+        scene._correctedFromFullscreen = scene.fullscreenMG;
+        scene.fullscreenMG = null;
+        if (!scene.keyword || scene.keyword === 'none') {
+            scene.keyword = scene.visualIntent || extractFallbackKeyword(scene.text || '');
+        }
+        if (!scene.mediaType) scene.mediaType = 'video';
+        if (!scene.sourceHint) {
+            const nicheIdLocal = scriptContext.nicheId || 'general';
+            scene.sourceHint = _pickPreferredVideoSource(nicheIdLocal, plannerDirectives, 'stock');
+        }
+        if (!scene.stockQuery) scene.stockQuery = _autoStockQuery(scene.keyword);
+        if (!scene.webQuery)  scene.webQuery  = _autoWebQuery(scene.keyword, scene.sourceHint);
+        ctaGuardStripped++;
+    }
+    if (ctaGuardStripped > 0) {
+        console.log(`   🛡️  CTA guard: stripped fullscreenMG from ${ctaGuardStripped} conclusion scene(s) — restored footage`);
+    }
+
+    // ── Keyword compliance guard ──
+    // Catches keywords the model generated despite the prompt's abstract/news-actor rules.
+    // Logs every violation so we can see whether the prompt is landing, and repairs the
+    // scene instead of letting a doomed query hit the provider chain.
+    const kwViolations = _enforceKeywordCompliance(enrichedScenes, scriptContext);
+    if (kwViolations.length > 0) {
+        console.log(`   ⚠️  Keyword compliance: caught ${kwViolations.length} violation(s) the AI slipped past the prompt:`);
+        for (const v of kwViolations) {
+            console.log(`      Scene ${v.index}: ${v.reason} — "${v.before}" → "${v.after}"${v.sourceChange ? ` (source: ${v.sourceChange})` : ''}`);
+        }
+    }
+
+    // ── Global Source Diversity ──
+    // Run ONCE across the full scene list (was per-batch, which missed
+    // cross-chunk skew: e.g. 3 batches each 50% youtube = 50% youtube globally
+    // but ran with 2-scene streaks in every chunk seam).
+    _enforceSourceDiversity(enrichedScenes, scriptContext.nicheId);
+
+    // ── Planner compliance summary ──
+    // Distinguish "AI chose this" from "we corrected it" so it's visible whether
+    // the model is actually planning, or the guardrails are doing the work.
+    const summary = _buildPlannerSummary(enrichedScenes, ctaGuardStripped);
+    console.log(summary);
+
+    return enrichedScenes;
+}
+
+function _buildPlannerSummary(scenes, ctaGuardStripped = 0) {
+    const total = scenes.length;
+    let aiTpl = 0, aiFS = 0, aiMg = 0;
+    let finalTpl = 0, finalFS = 0, finalMg = 0;
+    let sourceChanges = 0, mediaChanges = 0, framingChanges = 0;
+    const sourceCounts = {};
+    for (const s of scenes) {
+        const ai = s._aiChose || {};
+        if (ai.templateHint) aiTpl++;
+        if (ai.fullscreenMG) aiFS++;
+        if (ai.mgHint) aiMg++;
+        if (s.templateHint) finalTpl++;
+        if (s.fullscreenMG) finalFS++;
+        if (s.mgHint) finalMg++;
+        if (ai.sourceHint && s.sourceHint && ai.sourceHint !== s.sourceHint) sourceChanges++;
+        if (ai.mediaType && s.mediaType && ai.mediaType !== s.mediaType) mediaChanges++;
+        if (ai.framing && s.framing && ai.framing !== s.framing) framingChanges++;
+        const src = s.sourceHint || (s.fullscreenMG ? 'fs-mg' : 'none');
+        sourceCounts[src] = (sourceCounts[src] || 0) + 1;
+    }
+    const dist = Object.entries(sourceCounts)
+        .sort((a, b) => b[1] - a[1])
+        .map(([k, v]) => `${k}:${v}`)
+        .join(', ');
+    const corr = sourceChanges + mediaChanges + framingChanges + ctaGuardStripped;
+    return `   📊 [Planner Summary] ${total} scenes — AI-chose: tpl=${aiTpl} fs-mg=${aiFS} ov-mg=${aiMg} | final: tpl=${finalTpl} fs-mg=${finalFS} ov-mg=${finalMg} | corrections=${corr} (src=${sourceChanges} media=${mediaChanges} framing=${framingChanges} cta-guard=${ctaGuardStripped}) | sources: {${dist}}`;
+}
+
 // ============================================================
 // PROMPT BUILDER
 // ============================================================
@@ -157,6 +1009,7 @@ function buildBatchPrompt(scenes, scriptContext, directorsBrief, options = {}) {
     const { getNiche, getSearchPolicy, getKeywordRules } = require('./niches');
     const niche = getNiche(nicheId);
     const searchPolicy = getSearchPolicy(nicheId);
+    const plannerDirectives = options.plannerDirectives || _buildPlannerDirectives(scenes, scriptContext, directorsBrief);
 
     if (scriptContext && scriptContext.styleBlock) {
         console.log(`   🎨 [VisualPlanner] Style profile injected into batch prompt: "${scriptContext.styleProfile?.name || 'unnamed'}" (${scriptContext.styleBlock.length} chars)`);
@@ -172,8 +1025,7 @@ function buildBatchPrompt(scenes, scriptContext, directorsBrief, options = {}) {
     let sceneList = '';
     for (const scene of scenes) {
         const duration = (scene.endTime - scene.startTime).toFixed(1);
-        const period = scene.startTime < (hookEndTime || 15) ? '[HOOK]' :
-                       (ctaDetected && scene.startTime >= ctaStartTime) ? '[CTA]' : '';
+        const period = `[${_sceneTagString(scene, scenes, scriptContext)}]`;
 
         sceneList += `SCENE ${scene.index} (${scene.startTime.toFixed(1)}s-${scene.endTime.toFixed(1)}s, ${duration}s) ${period}:\n`;
         sceneList += `   "${scene.text}"\n\n`;
@@ -215,6 +1067,7 @@ function buildBatchPrompt(scenes, scriptContext, directorsBrief, options = {}) {
 
     // Build cross-chunk awareness block
     const previousKeywords = options.previousKeywords || [];
+    const globalOutline = options.globalOutline || null;
     let chunkBlock = '';
     if (previousKeywords.length > 0) {
         chunkBlock = `\nALREADY USED KEYWORDS (from previous scenes — DO NOT repeat these):
@@ -222,6 +1075,7 @@ ${previousKeywords.map(k => `- "${k}"`).join('\n')}
 
 You MUST pick DIFFERENT keywords for the scenes below. Vary your visuals!\n`;
     }
+    const outlineBlock = _renderGlobalOutlineBlock(globalOutline, scenes);
 
     let prompt = `You are a visual director planning B-ROLL FOOTAGE for a FACELESS VIDEO.
 
@@ -249,7 +1103,9 @@ ${directorsBrief.freeInstructions}
 ${(scriptContext && scriptContext.styleBlock) ? `\n${scriptContext.styleBlock}
 
 ↑ Use this as INSPIRATION for footage variety and shot composition. Niche rules and theme settings below still take priority for MG types and effects.\n` : ''}
+${_renderPlannerDirectiveBlock(plannerDirectives, scriptContext)}
 ${chunkBlock}
+${outlineBlock}
 DIRECTOR'S ANALYSIS:
 - Theme: ${theme || 'general'}
 - Tone: ${tone || 'informative'}
@@ -261,6 +1117,9 @@ ${entities.length > 0 ? `- Key Entities: ${entities.join(', ')}` : ''}
 ${hookEndTime ? `- Hook Period: 0-${hookEndTime}s (needs strong visuals to grab attention)` : ''}
 ${ctaDetected ? `- CTA Period: ${ctaStartTime}s-end (wind down, show branding/channel elements)` : ''}
 ${audienceHint ? `- Target Audience: ${audienceHint}` : ''}
+- Event Anchor: ${scriptContext.eventAnchor || 'none'}
+- Main Points: ${scriptContext.mainPoints?.length ? scriptContext.mainPoints.slice(0, 6).join(' | ') : 'none'}
+- Section Labels: ${scriptContext.sections?.length ? scriptContext.sections.map(s => typeof s === 'string' ? s : s?.title).filter(Boolean).slice(0, 8).join(' | ') : 'none'}
 - Content Niche: ${niche.name} (${niche.description})
 ${format === 'listicle' && scriptContext.listicleItems ? require('./listicle-format').getListiclePromptRules(scriptContext.listicleItems) : ''}
 
@@ -595,14 +1454,32 @@ ${(() => {
    - When a scene states a NUMBER or PERCENTAGE, consider whether an mgHint (statCounter) or fullscreenMG is BETTER than footage.
 
    CRITICAL — NEVER use abstract, metaphorical, or conceptual keywords:
-   - BAD: "warfare principles Sun Tzu analogy", "lighthouse emission analogy", "elegance of collapse", "paper defense strategy", "physics trap principle", "no-win battery dilemma"
-   - These return ZERO useful footage on any search engine. They are concepts, not visual things.
-   - ALWAYS rewrite to the CONCRETE PHYSICAL THING the narration is describing:
-   - "warfare principles Sun Tzu" → "military command center screens" (what you'd actually SHOW)
-   - "lighthouse emission analogy" → "radar antenna rotating signal" (the real object being compared)
-   - "paper defense strategy" → "Iran air defense missile launchers" (what the narration is about)
-   - "no-win battery dilemma" → "missile battery operator radar screen" (the actual scene)
-   - Ask yourself: "Can I take a PHOTO of this keyword?" If no, rewrite it.
+   - BANNED WORDS in keyword (these have NO stock match — they describe ideas, not shots):
+     montage, mechanism, inflation, dilemma, analogy, principle, strategy, concept,
+     collapse, breaking apart, falling apart, grid collapse, system breaking, network grid,
+     symbolism, metaphor, paradigm, dichotomy, framework, equilibrium, dynamic,
+     side-by-side comparison, juxtaposition, interplay
+   - If you want to write any of these words → STOP. Pick one of these instead:
+     (a) a CONCRETE physical shot (what a camera would literally capture in that moment), OR
+     (b) fullscreenMG "kineticText" / "focusWord" / "statCounter" — abstract ideas belong on typography, not footage.
+   - BAD: "container ship and oil tanker montage" → GOOD: "oil tanker at sea" + set mgHint="kineticText: Oil + Shipping"
+   - BAD: "digital network grid breaking apart" → GOOD: fullscreenMG="focusWord: Collapse" (no footage keyword)
+   - BAD: "grocery store checkout inflation" → GOOD: "grocery store shelves" + mgHint="statCounter: +8.2% Food Prices"
+   - BAD: "complex gear system mechanism close-up" → GOOD: "industrial gears turning" (one concrete object)
+   - BAD: "large container ship and small freighter side-by-side" → GOOD: "container ship aerial" (pick ONE subject, not a comparison)
+   - Other examples: "warfare principles Sun Tzu" → "military command center screens"; "no-win battery dilemma" → "missile battery operator radar screen"
+   - TEST: "Can a camera photograph this exact keyword in one shot, today?" If no → rewrite or flip to MG.
+
+   ⚠️ MAX 3 CONCRETE NOUNS (hard cap for stock-routed scenes):
+   - If sourceHint is "stock", keyword must have AT MOST 3 concrete nouns.
+   - "HMM Algeciras class ship drone" = 4 nouns + brand (HMM Algeciras) = BANNED. Use "container ship aerial" (2 nouns) instead.
+   - "Bab el-Mandeb strait container ship drone" = 4 nouns. Use "container ship strait" (2 nouns).
+   - Brand/class names (HMM Algeciras, USS Gerald Ford, F-35) are OK on youtube/telegram/web-image, NEVER on stock.
+
+   ⚠️ NEWS-ACTOR HARD RULE (no exceptions):
+   - If the scene text mentions a state/military actor (Iran, Russia, Houthi, Hamas, IDF, NATO, Ukraine, Israel, China, North Korea, Hezbollah, Taliban, ISIS) combined with a military/political verb (navy, forces, strike, patrol, attack, invasion, missile, drone, blockade, sanctions) → sourceHint MUST be "telegram" OR fullscreenMG="mapChart". NEVER "stock". NEVER "pexels".
+   - These events do not exist on stock footage libraries. Routing them to stock guarantees failure.
+   - If telegram also feels wrong for the scene, use a map fullscreenMG instead of forcing footage.
 
    ⚠️ TOPIC ANCHORING (CRITICAL FOR NEWS/POLITICS/MILITARY NICHES):
    - Every keyword MUST be grounded in the SPECIFIC topic of this video.
@@ -666,16 +1543,45 @@ ${(() => {
    - Format: "<mgType>: <content data>" or "none"
    - When set, this scene becomes a FULLSCREEN motion graphic — NO footage is downloaded.
    - This is BETTER than footage when the scene's narration is data-heavy or abstract.${isNonEnglish ? `\n   - ⚠️ LANGUAGE: ALL content data (labels, titles, items, comparisons) MUST be in ${buildLangName}. Example: "comparisonCard: Öffentliches Bild vs Private Realität" NOT English.` : ''}
+
+   ⚠️ CRITICAL DATA RULE — DATA MGs REQUIRE REAL DATA FROM THE NARRATION:
+   The types barChart, donutChart, rankingList, timeline, bulletList, comparisonCard
+   are DATA MGs — they render charts/lists from labels + numbers. DO NOT invent data.
+   If the scene's narration does NOT contain real numbers/comparisons/dates/items,
+   DO NOT USE a data MG — pick footage, a template, or a non-data MG instead.
+   Data MGs with missing/invented data will be REJECTED and the scene will have no visual.
+
+   - FORMAT for data MGs (title + pipe-separated Label:Number pairs):
+     • barChart   → "barChart: <Title> | Label1:Num1 | Label2:Num2 | Label3:Num3"  (≥2 numeric pairs, numbers only)
+     • donutChart → "donutChart: <Title> | Label1:Num1 | Label2:Num2"  (≥2 numeric pairs, percentages add to ~100)
+     • rankingList→ "rankingList: <Title> | #1 Item:Num | #2 Item:Num | #3 Item:Num"  (≥2 numeric pairs)
+     • timeline   → "timeline: <Title> | 1915:Event | 1925:Event | 1999:Event"  (≥2 date:event pairs)
+     • bulletList → "bulletList: <Title> | Point 1 | Point 2 | Point 3"  (≥2 items, no colons needed)
+     • comparisonCard → "comparisonCard: Item A vs Item B"  (must contain " vs ")
+
    - USE fullscreenMG WHEN:
-     • Scene lists MULTIPLE data points, dates, or items → "bulletList: Point 1 | Point 2 | Point 3"
-     • Scene has a TIMELINE of events/dates → "timeline: 1915: Birth of a Nation | 1925: Rise of jazz | 1999: Legacy"
-     • Scene makes an explicit COMPARISON (X vs Y) → "comparisonCard: Public Image vs Private Reality"
-     • Scene has chart-worthy data → "barChart: Category1:Value1 | Category2:Value2 | Category3:Value3"
+     • Scene explicitly states 2+ numbers/stats → barChart (e.g. narration says "exports dropped from 100 to 40") → "barChart: Bab-el-Mandeb Transit | Before:100 | Now:40"
+     • Scene compares market shares/percentages that add up → donutChart
+     • Scene lists ranked items with numeric values → rankingList
+     • Scene lists MULTIPLE dates with events (≥2 years mentioned) → timeline
+     • Scene lists ≥2 short points/items (no numbers needed) → bulletList
+     • Scene makes an explicit COMPARISON — the word "vs", "versus", "compared to" → comparisonCard
      • Scene discusses an article/document/book → "articleHighlight: Title of Article"
      • Scene mentions GEOGRAPHIC LOCATIONS, borders, routes, or geopolitical regions → "mapChart: Location1: label, Location2: label"
      • Scene describes a SPECIFIC LOCATION being introduced → "mapChart: Atlanta, Georgia — 1915"
      • IMPORTANT: For narration about straits, trade routes, military positions, borders, or multiple countries — mapChart is STRONGLY preferred over footage. Use it when 2+ locations are mentioned.
-     • Scene has a RANKING or ordered list → "rankingList: #1 Item | #2 Item | #3 Item"
+     • When using mapChart, also pick a mapVariant based on scene intent:
+       – locator → single place being introduced/spotlit ("the Strait of Hormuz is...")
+       – route → travel/trade/flight path between ≥2 points ("ships travel from Shanghai to Rotterdam...")
+       – regionHighlight → one country/region being discussed as a whole ("throughout the Middle East...")
+       – comparison → two or more places contrasted side-by-side ("oil from Saudi Arabia vs Iran...")
+
+   - DO NOT USE data MG WHEN:
+     • The narration only names a topic without numbers (e.g. "Bab-el-Mandeb Transit Volume" alone is NOT enough — there are no numbers)
+     • You would have to invent numbers or labels the narration doesn't state
+     • The scene has only one data point (charts need ≥2 to make sense)
+     → In those cases, use mgHint (overlay), templateHint, or footage instead.
+
    - Fullscreen MG types: articleHighlight, timeline, bulletList, barChart, donutChart, comparisonCard, rankingList, mapChart
    - When fullscreenMG is set, keyword/stockQuery/webQuery are IGNORED (set to "none")
    - Do NOT overuse — max ~15% of scenes. Most scenes should be footage.
@@ -694,8 +1600,10 @@ ${(() => {
      • In the final 20% of video, a key insight/conclusion → "keyTakeaway: Main point"
      • An explicit COMPARISON (X vs Y) in narration → "comparisonCard: Thing A vs Thing B"
      • Dates/events forming a chronological sequence → "timelineCard: Date1: Event | Date2: Event"
-     • Narration references two related concepts/people/places worth visualizing → "imageShowcase: Title | image1 desc; image2 desc"
+     • Narration references two or three related concepts/people/places worth visualizing → "imageShowcase: Title | image1 desc; image2 desc; image3 desc" (2-3 images, collage variant scatters them like photos on a desk)
      • A NAMED PERSON is introduced for the FIRST TIME → "personIntro: Person Name | Role/Title, Year" — Shows portrait + name + context image. MUCH better than just downloading a portrait photo. Use for: "Wallace Neff", "Buckminster Fuller", "David South", etc. Only on FIRST mention — not for every scene about them.
+     • Narration EXPLICITLY COMPARES two things visually (before/after, two countries, two sides) → "splitScreen: Title | Left Label; Right Label" — Vertical split with two images side by side. Use when two contrasting visuals would be impactful.
+     • Narration lists 3-5+ items each with a stat/price/detail (weapon costs, country budgets, building specs) → "infographic: Title | Item1 Title | Value | image; Item2 Title | Value | image" — Multi-item visual layout with images, titles, and values. More complex than statCard.
    - personIntro FORMAT: "personIntro: Person Name | Role/Title, Year"
      Examples:
      • "Wallace Neff, an architect..." → "personIntro: Wallace Neff | Architect, 1941"
@@ -716,8 +1624,8 @@ ${(() => {
 
 OUTPUT FORMAT (one line per scene):
 
-SCENE 0: keyword: <search term or none> | stockQuery: <query or none> | webQuery: <query or none> | mediaType: <video|image> | sourceHint: <stock|youtube|web-image|telegram|reddit> | framing: <fullscreen|cinematic|floating> | backgroundId: <none|blur|gradient-id> | floatingAnim: <slideRight|slideLeft|slideUp|fadeScale|none> | floatingShadow: <0.3|0.5|0.7|none> | visualIntent: <shot description> | effects: <presetName or none> | mgHint: <overlay type: desc or none> | fullscreenMG: <fullscreen type: data or none> | templateHint: <template type: content or none>
-SCENE 1: keyword: <search term or none> | stockQuery: <query or none> | webQuery: <query or none> | mediaType: <video|image> | sourceHint: <stock|youtube|web-image|telegram|reddit> | framing: <fullscreen|cinematic|floating> | backgroundId: <none|blur|gradient-id> | floatingAnim: <slideRight|slideLeft|slideUp|fadeScale|none> | floatingShadow: <0.3|0.5|0.7|none> | visualIntent: <shot description> | effects: <presetName or none> | mgHint: <overlay type: desc or none> | fullscreenMG: <fullscreen type: data or none> | templateHint: <template type: content or none>
+SCENE 0: keyword: <search term or none> | stockQuery: <query or none> | webQuery: <query or none> | mediaType: <video|image> | sourceHint: <stock|youtube|web-image|telegram|reddit> | framing: <fullscreen|cinematic|floating> | backgroundId: <none|blur|gradient-id> | floatingAnim: <slideRight|slideLeft|slideUp|fadeScale|none> | floatingShadow: <0.3|0.5|0.7|none> | visualIntent: <shot description> | effects: <presetName or none> | mgHint: <overlay type: desc or none> | fullscreenMG: <fullscreen type: data or none> | mapVariant: <locator|route|regionHighlight|comparison|none> | templateHint: <template type: content or none>
+SCENE 1: keyword: <search term or none> | stockQuery: <query or none> | webQuery: <query or none> | mediaType: <video|image> | sourceHint: <stock|youtube|web-image|telegram|reddit> | framing: <fullscreen|cinematic|floating> | backgroundId: <none|blur|gradient-id> | floatingAnim: <slideRight|slideLeft|slideUp|fadeScale|none> | floatingShadow: <0.3|0.5|0.7|none> | visualIntent: <shot description> | effects: <presetName or none> | mgHint: <overlay type: desc or none> | fullscreenMG: <fullscreen type: data or none> | mapVariant: <locator|route|regionHighlight|comparison|none> | templateHint: <template type: content or none>
 ...
 
 CRITICAL: YOU MUST OUTPUT EXACTLY ${scenes.length} LINES (one per scene).
@@ -747,11 +1655,24 @@ Do NOT write English display text. Do NOT switch to English mid-output. EVERY sc
 // RESPONSE PARSING
 // ============================================================
 
+// AI sometimes returns placeholder values like "none" / "n/a" / "-" instead of
+// omitting the field. For search strings that would leak into the downloader
+// (keyword, stockQuery, webQuery) these must be treated as null so the
+// fallback repair path in parseBatchResponse can regenerate a real keyword.
+const _PLACEHOLDER_VALUES = new Set(['', 'none', 'n/a', 'na', 'null', 'nil', 'undefined', '-', '--', 'tbd']);
+function _sanitizeSearchValue(raw) {
+    if (raw == null) return null;
+    const stripped = String(raw).replace(/^["']+|["']+$/g, '').trim();
+    if (!stripped) return null;
+    if (_PLACEHOLDER_VALUES.has(stripped.toLowerCase())) return null;
+    return stripped;
+}
+
 /**
  * Parse the batch visual plan response.
  * Extracts keyword, mediaType, sourceHint, visualIntent for each scene.
  */
-function parseBatchResponse(rawText, scenes, nicheId, themeId, scriptContext) {
+function parseBatchResponse(rawText, scenes, nicheId, themeId, scriptContext, plannerDirectives = null) {
     const entities = scriptContext?.entities || [];
     const enrichedScenes = [];
     const lines = rawText.trim().split('\n').filter(line => {
@@ -759,18 +1680,37 @@ function parseBatchResponse(rawText, scenes, nicheId, themeId, scriptContext) {
         return lower.startsWith('scene ') && lower.includes(':');
     });
 
+    // Build a Map<sceneIndex, line> keyed by the global scene.index the prompt used.
+    // Detect duplicates and collect unparseable lines so we can hard-fail the batch.
+    const lineByIndex = new Map();
+    const duplicates = [];
+    for (const line of lines) {
+        const match = line.match(/scene\s+(\d+)/i);
+        if (!match) continue;
+        const idx = parseInt(match[1], 10);
+        if (lineByIndex.has(idx)) {
+            duplicates.push(idx);
+        } else {
+            lineByIndex.set(idx, line);
+        }
+    }
+    if (duplicates.length > 0) {
+        throw new Error(`Duplicate scene number(s) in batch response: ${duplicates.join(', ')}`);
+    }
+
+    const missing = [];
+    for (const s of scenes) {
+        if (!lineByIndex.has(s.index)) missing.push(s.index);
+    }
+    if (missing.length > 0) {
+        throw new Error(`Missing scene number(s) in batch response: ${missing.join(', ')}`);
+    }
+
     for (let i = 0; i < scenes.length; i++) {
         const scene = { ...scenes[i] };
 
-        // Find the matching line (may not be in perfect order)
-        let matchedLine = lines.find(line => {
-            const match = line.match(/scene\s+(\d+)/i);
-            return match && parseInt(match[1]) === i;
-        });
-
-        if (!matchedLine && lines[i]) {
-            matchedLine = lines[i]; // Fallback to positional match
-        }
+        // Match strictly by global scene.index (not loop index — scenes come in chunks).
+        const matchedLine = lineByIndex.get(scene.index);
 
         if (matchedLine) {
             // Remove "SCENE N: " prefix first
@@ -783,13 +1723,13 @@ function parseBatchResponse(rawText, scenes, nicheId, themeId, scriptContext) {
                 const lower = part.toLowerCase();
 
                 if (lower.startsWith('keyword:')) {
-                    scene.keyword = part.substring(part.indexOf(':') + 1).trim();
+                    scene.keyword = _sanitizeSearchValue(part.substring(part.indexOf(':') + 1));
                 }
                 if (lower.startsWith('stockquery:') || lower.startsWith('stock query:')) {
-                    scene.stockQuery = part.substring(part.indexOf(':') + 1).trim();
+                    scene.stockQuery = _sanitizeSearchValue(part.substring(part.indexOf(':') + 1));
                 }
                 if (lower.startsWith('webquery:') || lower.startsWith('web query:')) {
-                    scene.webQuery = part.substring(part.indexOf(':') + 1).trim();
+                    scene.webQuery = _sanitizeSearchValue(part.substring(part.indexOf(':') + 1));
                 }
                 if (lower.startsWith('mediatype:') || lower.startsWith('media type:')) {
                     const val = part.substring(part.indexOf(':') + 1).trim().toLowerCase();
@@ -890,6 +1830,20 @@ function parseBatchResponse(rawText, scenes, nicheId, themeId, scriptContext) {
                         scene.mediaType = null;
                         scene.sourceHint = null;
                     }
+                }
+                if (lower.startsWith('mapvariant:') || lower.startsWith('map variant:')) {
+                    const raw = part.substring(part.indexOf(':') + 1).trim().replace(/^["']+|["']+$/g, '').toLowerCase();
+                    const variantMap = {
+                        locator: 'locator',
+                        route: 'route',
+                        regionhighlight: 'regionHighlight',
+                        region_highlight: 'regionHighlight',
+                        'region-highlight': 'regionHighlight',
+                        region: 'regionHighlight',
+                        comparison: 'comparison',
+                        compare: 'comparison',
+                    };
+                    scene.mapVariant = (raw === 'none' || raw === '') ? null : (variantMap[raw] || null);
                 }
                 if (lower.startsWith('templatehint:') || lower.startsWith('template hint:')) {
                     const val = part.substring(part.indexOf(':') + 1).trim().replace(/^["']+|["']+$/g, '');
@@ -1024,13 +1978,22 @@ function parseBatchResponse(rawText, scenes, nicheId, themeId, scriptContext) {
         if (!scene.effects) scene.effects = [];
         if (scene.mgHint === undefined) scene.mgHint = null;
 
+        // Snapshot AI's raw choices BEFORE any downstream correction so we can
+        // report "AI chose vs we corrected" in the Planner Summary.
+        scene._aiChose = {
+            templateHint: !!scene.templateHint,
+            fullscreenMG: !!scene.fullscreenMG,
+            mgHint: !!scene.mgHint,
+            sourceHint: scene.sourceHint || null,
+            mediaType: scene.mediaType || null,
+            framing: scene.framing || null,
+        };
+
         enrichedScenes.push(scene);
     }
 
-    // ── Source Diversity Enforcement ──
-    // AI tends to over-pick one source (e.g. 90% youtube for news).
-    // Redistribute when any single video source exceeds its fair share.
-    _enforceSourceDiversity(enrichedScenes, nicheId);
+    // Source Diversity enforcement moved to _finalizeVisualPlan so it runs
+    // ONCE globally across the full scene list (not per-batch).
 
     return enrichedScenes;
 }
@@ -1119,6 +2082,113 @@ function _enforceVideoRatio(scenes, nicheId) {
  * - Only reassigns scenes where the source is interchangeable (not person photos, not maps)
  * - Prefers round-robin across top 3 niche sources
  */
+// Words that describe ideas/editing/comparisons — they have no stock footage match.
+// If the model emits any of these in a keyword, the scene was mis-planned: either the
+// narration is metaphorical (→ should be MG/template, not footage) or the model copied
+// narrator rhythm instead of picking a concrete shot.
+const _BANNED_KEYWORD_TOKENS = [
+    'montage', 'mechanism', 'inflation', 'dilemma', 'analogy', 'principle',
+    'strategy', 'concept', 'symbolism', 'metaphor', 'paradigm', 'dichotomy',
+    'framework', 'equilibrium', 'juxtaposition', 'interplay',
+    'side-by-side', 'side by side',
+    'breaking apart', 'falling apart', 'grid collapse', 'system breaking',
+    'network grid', 'collapsing system'
+];
+
+// State+military-actor detector — these scenes must not hit stock.
+const _NEWS_ACTORS_RE = /\b(iran|iranian|russia|russian|houthi|houthis|hamas|idf|nato|ukraine|ukrainian|israel|israeli|china|chinese|north korea|hezbollah|taliban|isis|isil|putin|netanyahu|zelensky|khamenei)\b/i;
+const _MILITARY_VERBS_RE = /\b(navy|forces|strike|patrol|attack|invasion|missile|drone strike|blockade|sanctions|bombing|airstrike|troop|combat|military|warship|coastline|frontline)\b/i;
+
+function _isAbstractKeyword(kw) {
+    if (!kw) return null;
+    const lower = kw.toLowerCase();
+    for (const token of _BANNED_KEYWORD_TOKENS) {
+        if (lower.includes(token)) return token;
+    }
+    return null;
+}
+
+function _countConcreteNouns(kw) {
+    if (!kw) return 0;
+    // Rough heuristic: words that aren't stop/filler words and aren't articles/conjunctions.
+    const STOP = new Set(['the', 'a', 'an', 'and', 'or', 'of', 'in', 'on', 'at', 'to', 'for', 'with', 'by', 'from', 'over', 'under', 'through']);
+    return kw.toLowerCase().split(/\s+/).filter(w => w && !STOP.has(w)).length;
+}
+
+/**
+ * Post-AI keyword compliance. Three rules:
+ *   1. Abstract tokens (montage, inflation, ...) → strip keyword, flip to fullscreenMG
+ *      or rewrite from visualIntent if concrete fallback exists.
+ *   2. News-actor + military verb → force sourceHint to telegram (never stock/pexels).
+ *   3. sourceHint=stock AND noun-count > 3 → truncate via _autoStockQuery.
+ *
+ * Returns an array of { index, reason, before, after, sourceChange } for logging.
+ */
+function _enforceKeywordCompliance(scenes, scriptContext) {
+    const violations = [];
+    const { getNiche: _getNiche } = require('./niches');
+    const niche = _getNiche(scriptContext.nicheId || 'general');
+    const videoPriority = niche.footagePriority?.video || ['youtube', 'telegram', 'reddit'];
+
+    for (const scene of scenes) {
+        if (!scene.keyword || scene.keyword === 'none') continue;
+        if (scene.fullscreenMG) continue; // already flipped to MG
+
+        const before = scene.keyword;
+        const text = String(scene.text || '');
+
+        // Rule 1: abstract token
+        const banned = _isAbstractKeyword(scene.keyword);
+        if (banned) {
+            // Try to rewrite from visualIntent (first 3 concrete nouns), else flip to
+            // fullscreenMG focusWord using the most content-bearing word in the narration.
+            const intentWords = String(scene.visualIntent || '')
+                .toLowerCase().split(/\s+/)
+                .filter(w => w && w.length > 3 && !_isAbstractKeyword(w))
+                .slice(0, 3);
+            if (intentWords.length >= 2) {
+                scene.keyword = intentWords.join(' ');
+                scene.stockQuery = _autoStockQuery(scene.keyword);
+                scene.webQuery = _autoWebQuery(scene.keyword, scene.sourceHint);
+                violations.push({ index: scene.index, reason: `banned token "${banned}"`, before, after: scene.keyword });
+            } else {
+                // No concrete fallback — flip to focusWord MG so scene still renders
+                scene.fullscreenMG = `focusWord: ${text.split(/\s+/).slice(0, 4).join(' ')}`;
+                scene.keyword = null;
+                scene.sourceHint = null;
+                violations.push({ index: scene.index, reason: `banned token "${banned}" (no concrete fallback)`, before, after: '→ fullscreenMG focusWord' });
+                continue;
+            }
+        }
+
+        // Rule 2: news-actor + military verb → force telegram
+        if (scene.sourceHint === 'stock' || scene.sourceHint === 'pexels' || scene.sourceHint === 'pixabay') {
+            if (_NEWS_ACTORS_RE.test(text) && _MILITARY_VERBS_RE.test(text)) {
+                const oldSrc = scene.sourceHint;
+                scene.sourceHint = videoPriority.includes('telegram') ? 'telegram' : videoPriority[0];
+                violations.push({
+                    index: scene.index,
+                    reason: 'news-actor routed to stock',
+                    before: scene.keyword,
+                    after: scene.keyword,
+                    sourceChange: `${oldSrc} → ${scene.sourceHint}`
+                });
+            }
+        }
+
+        // Rule 3: stock keyword noun cap (max 3)
+        if (scene.sourceHint === 'stock' && _countConcreteNouns(scene.keyword) > 3) {
+            const truncated = _autoStockQuery(scene.keyword);
+            if (truncated && truncated !== scene.keyword) {
+                violations.push({ index: scene.index, reason: `stock noun-cap (>3)`, before: scene.keyword, after: truncated });
+                scene.keyword = truncated;
+                scene.stockQuery = truncated;
+            }
+        }
+    }
+    return violations;
+}
+
 function _enforceSourceDiversity(scenes, nicheId) {
     const { getNiche: _getNiche } = require('./niches');
     const niche = _getNiche(nicheId || 'general');
@@ -1353,20 +2423,34 @@ async function planVisuals(scenes, scriptContext, directorsBrief) {
     console.log(`📡 Provider: ${config.aiProvider.toUpperCase()}`);
     console.log(`🎬 Planning visuals for ${scenes.length} scenes`);
     console.log(`🧠 Using director's context: theme=${scriptContext.theme}, mood=${scriptContext.mood}, pacing=${scriptContext.pacing}, niche=${scriptContext.nicheId || 'general'}`);
+    try {
+        const { getAIThinking } = require('./ai-provider');
+        const t = getAIThinking();
+        const provider = (config.aiProvider || 'ollama').toLowerCase();
+        const geminiModel = provider === 'gemini' ? (config.gemini?.model || process.env.GEMINI_MODEL || 'gemini') : '';
+        console.log(`   🧠 [Step 4 Planner] provider=${provider}${geminiModel ? ` model=${geminiModel}` : ''} thinking=${t.mode} budget=${t.budget}`);
+    } catch (_) { /* diagnostic-only, never fail the build */ }
     console.log('');
+    const plannerDirectives = _buildPlannerDirectives(scenes, scriptContext, directorsBrief);
 
     // Auto-chunk based on provider and scene count
     // Ollama: 8 scenes per batch (local model limits)
     // Cloud APIs: 15 scenes per batch (prevents token truncation on tail scenes)
     const isOllama = (config.aiProvider || 'ollama') === 'ollama';
     const CHUNK_SIZE = isOllama ? 8 : 15;
+    let globalOutline = null;
 
     if (scenes.length > CHUNK_SIZE) {
-        return await _planVisualsChunked(scenes, scriptContext, directorsBrief, CHUNK_SIZE);
+        try {
+            globalOutline = await _generateGlobalVisualOutline(scenes, scriptContext, directorsBrief, plannerDirectives);
+        } catch (outlineError) {
+            console.log(`   ⚠️ [Step 4 Outline] failed: ${outlineError.message} — continuing with chunk-local planning`);
+        }
+        return await _planVisualsChunked(scenes, scriptContext, directorsBrief, CHUNK_SIZE, plannerDirectives, globalOutline);
     }
 
     try {
-        const prompt = buildBatchPrompt(scenes, scriptContext, directorsBrief);
+            const prompt = buildBatchPrompt(scenes, scriptContext, directorsBrief, { plannerDirectives, globalOutline });
 
         // Batch call for ALL scenes — ~150 tokens per scene (keyword + stockQuery + webQuery + intent)
         const maxTokens = Math.max(1000, scenes.length * 200);
@@ -1376,82 +2460,32 @@ async function planVisuals(scenes, scriptContext, directorsBrief) {
 
         console.log(`   [AI Response Preview]:\n${rawText.substring(0, 400)}${rawText.length > 400 ? '...' : ''}\n`);
 
-        const enrichedScenes = parseBatchResponse(rawText, scenes, scriptContext.nicheId, scriptContext.themeId, scriptContext);
-
-        // Listicle keyword variety enforcement
-        if (scriptContext.format === 'listicle' && scriptContext.listicleItems) {
-            const { enforceKeywordVariety } = require('./listicle-format');
-            enforceKeywordVariety(enrichedScenes, scriptContext.listicleItems);
-
-            // Force overview scene to be a listicleGrid fullscreen MG (in case AI missed it)
-            const firstItem = scriptContext.listicleItems.find(it => it.startSceneIndex != null);
-            if (firstItem) {
-                const overviewIdx = Math.max(0, firstItem.startSceneIndex - 1);
-                const overviewScene = enrichedScenes.find(s => s.index === overviewIdx);
-                if (overviewScene && !overviewScene.fullscreenMG) {
-                    overviewScene.fullscreenMG = 'listicleGrid';
-                    overviewScene.isListicleOverview = true;
-                    overviewScene.keyword = null;
-                    overviewScene.stockQuery = null;
-                    overviewScene.webQuery = null;
-                    overviewScene.mediaType = null;
-                    overviewScene.sourceHint = null;
-                    console.log(`      [Listicle] Scene ${overviewIdx}: forced to listicleGrid overview (no footage needed)`);
-                }
-            }
-        }
-
-        // Enforce video ratio for news niches (80-85% video target)
-        _enforceVideoRatio(enrichedScenes, scriptContext.nicheId);
-
-        // Post-enforcement: for news niches, only fix stock images (video source = AI's choice)
-        if (scriptContext.nicheId && scriptContext.nicheId.startsWith('news')) {
-            for (const scene of enrichedScenes) {
-                if (scene.sourceHint === 'stock' && scene.mediaType !== 'video') {
-                    scene.sourceHint = 'web-image';
-                }
-            }
-        }
-
-        // Post-enforcement: force person scenes back to image if ratio enforcement flipped them.
-        // This runs AFTER ratio enforcement to guarantee person photos stay as images.
-        const entities = scriptContext.entities || [];
-        const entityTypes2 = scriptContext.entityTypes || {};
-        if (entities.length > 0) {
-            for (const scene of enrichedScenes) {
-                if (!scene.keyword || scene.sourceHint === 'web-image') continue;
-                const kwLower = scene.keyword.toLowerCase();
-                const matchedEntities = entities.filter(e => {
-                    const eLower = e.toLowerCase();
-                    return kwLower.includes(eLower) || eLower.includes(kwLower);
-                });
-                const personEntity = matchedEntities.find(e => entityTypes2[e.toLowerCase()] === 'person');
-                const hasPortraitHint = /portrait|photo|headshot|face/i.test(kwLower);
-                if (personEntity || hasPortraitHint) {
-                    if (scene.mediaType !== 'image' || scene.sourceHint !== 'web-image') {
-                        console.log(`   🧑 Person override: "${scene.keyword}" → [image, web-image]`);
-                        scene.mediaType = 'image';
-                        scene.sourceHint = 'web-image';
-                    }
-                }
-            }
-        }
-
-        // Validate keywords — fix abstract/unsearchable ones
-        _validateKeywords(enrichedScenes, scriptContext);
+        const enrichedScenes = _finalizeVisualPlan(
+            parseBatchResponse(rawText, scenes, scriptContext.nicheId, scriptContext.themeId, scriptContext, plannerDirectives),
+            scriptContext,
+            directorsBrief,
+            plannerDirectives
+        );
 
         // Log results
-        const footageCount = enrichedScenes.filter(s => !s.fullscreenMG).length;
         const fsMGCount = enrichedScenes.filter(s => s.fullscreenMG).length;
-        console.log(`   ✅ Visual plan created for ${enrichedScenes.length} scenes (${footageCount} footage + ${fsMGCount} fullscreen MG):\n`);
+        const tplCount = enrichedScenes.filter(s => s.templateHint && !s.fullscreenMG).length;
+        const overlayMGCount = enrichedScenes.filter(s => s.mgHint && !s.fullscreenMG && !s.templateHint).length;
+        const footageCount = enrichedScenes.length - fsMGCount;
+        const plainFootage = enrichedScenes.length - fsMGCount - tplCount - overlayMGCount;
+        console.log(`   ✅ Visual plan created for ${enrichedScenes.length} scenes (${footageCount} footage + ${fsMGCount} fullscreen MG):`);
+        console.log(`      📊 Breakdown: fs=${fsMGCount}  template=${tplCount}  overlay=${overlayMGCount}  plain-footage=${plainFootage}\n`);
         for (const scene of enrichedScenes.slice(0, 5)) { // Show first 5
             if (scene.fullscreenMG) {
                 console.log(`      Scene ${scene.index}: 🎨 [FULLSCREEN MG] ${scene.fullscreenMG}`);
+            } else if (scene.templateHint) {
+                const kw = scene.keyword ? ` [bg: "${scene.keyword}"]` : '';
+                console.log(`      Scene ${scene.index}: 📇 [TEMPLATE HINT] ${scene.templateHint}${kw}`);
             } else {
                 const sq = scene.stockQuery ? ` stock:"${scene.stockQuery}"` : '';
                 const wq = scene.webQuery ? ` web:"${scene.webQuery}"` : '';
                 const fx = scene.effectPreset && scene.effectPreset !== 'none' ? ` fx:${scene.effectPreset}` : (scene.effects && scene.effects.length ? ` fx:[${scene.effects.join(',')}]` : '');
-                const mg = scene.mgHint ? ` mg:"${scene.mgHint}"` : '';
+                const mg = scene.mgHint ? ` 🪧 mg:"${scene.mgHint}"` : '';
                 console.log(`      Scene ${scene.index}: "${scene.keyword}" [${scene.mediaType}, ${scene.sourceHint}]${sq}${wq}${fx}${mg}`);
             }
         }
@@ -1467,7 +2501,7 @@ async function planVisuals(scenes, scriptContext, directorsBrief) {
         console.log('   ↩️ Falling back to per-scene planning...\n');
 
         // Fallback: Plan each scene individually
-        return await planVisualsPerScene(scenes, scriptContext, directorsBrief);
+        return await planVisualsPerScene(scenes, scriptContext, directorsBrief, globalOutline);
     }
 }
 
@@ -1475,7 +2509,8 @@ async function planVisuals(scenes, scriptContext, directorsBrief) {
  * Chunked batch planning — splits scenes into smaller groups
  * to prevent timeout on large scripts. Works for all providers.
  */
-async function _planVisualsChunked(scenes, scriptContext, directorsBrief, chunkSize) {
+async function _planVisualsChunked(scenes, scriptContext, directorsBrief, chunkSize, plannerDirectives = null, globalOutline = null) {
+    plannerDirectives = plannerDirectives || _buildPlannerDirectives(scenes, scriptContext, directorsBrief);
     const chunks = [];
     for (let i = 0; i < scenes.length; i += chunkSize) {
         chunks.push(scenes.slice(i, i + chunkSize));
@@ -1496,17 +2531,25 @@ async function _planVisualsChunked(scenes, scriptContext, directorsBrief, chunkS
     for (let c = 0; c < chunks.length; c++) {
         const chunk = chunks[c];
         console.log(`   📦 Batch ${c + 1}/${chunks.length} (scenes ${chunk[0].index}-${chunk[chunk.length - 1].index})...`);
+        if (globalOutline) {
+            const hinted = chunk.filter(scene => globalOutline.sceneHints[scene.index]).length;
+            const seamIds = [chunk[0].index - 2, chunk[0].index - 1, chunk[chunk.length - 1].index + 1, chunk[chunk.length - 1].index + 2];
+            const seamCount = seamIds.filter(idx => !!globalOutline.sceneHints[idx]).length;
+            console.log(`      🧭 Outline aware: ${hinted}/${chunk.length} scene hints + ${seamCount} seam cues`);
+        }
 
         try {
             const prompt = buildBatchPrompt(chunk, scriptContext, directorsBrief, {
                 previousKeywords: usedKeywords,
+                plannerDirectives,
+                globalOutline,
             });
             const maxTokens = Math.max(1000, chunk.length * 150);
             const rawText = await callAI(prompt, { maxTokens });
 
             if (!rawText) throw new Error('Empty AI response');
 
-            const enriched = parseBatchResponse(rawText, chunk, scriptContext.nicheId, scriptContext.themeId, scriptContext);
+            const enriched = parseBatchResponse(rawText, chunk, scriptContext.nicheId, scriptContext.themeId, scriptContext, plannerDirectives);
             allEnriched.push(...enriched);
 
             // Collect keywords for next chunk's awareness
@@ -1514,11 +2557,20 @@ async function _planVisualsChunked(scenes, scriptContext, directorsBrief, chunkS
                 if (scene.keyword) usedKeywords.push(scene.keyword);
             }
 
+            const batchFs = enriched.filter(s => s.fullscreenMG).length;
+            const batchTpl = enriched.filter(s => s.templateHint && !s.fullscreenMG).length;
+            const batchOverlay = enriched.filter(s => s.mgHint && !s.fullscreenMG && !s.templateHint).length;
+            const batchPlain = enriched.length - batchFs - batchTpl - batchOverlay;
+            console.log(`      📊 Batch ${c + 1} breakdown: fs=${batchFs}  template=${batchTpl}  overlay=${batchOverlay}  plain-footage=${batchPlain}`);
             for (const scene of enriched) {
                 if (scene.fullscreenMG) {
                     console.log(`      Scene ${scene.index}: 🎨 [FULLSCREEN MG] ${scene.fullscreenMG}`);
+                } else if (scene.templateHint) {
+                    const kw = scene.keyword ? ` [bg: "${scene.keyword}"]` : '';
+                    console.log(`      Scene ${scene.index}: 📇 [TEMPLATE HINT] ${scene.templateHint}${kw}`);
                 } else {
-                    console.log(`      Scene ${scene.index}: "${scene.keyword}" [${scene.mediaType}, ${scene.sourceHint}]`);
+                    const mg = scene.mgHint ? ` 🪧 mg:"${scene.mgHint}"` : '';
+                    console.log(`      Scene ${scene.index}: "${scene.keyword}" [${scene.mediaType}, ${scene.sourceHint}]${mg}`);
                 }
             }
         } catch (error) {
@@ -1527,15 +2579,19 @@ async function _planVisualsChunked(scenes, scriptContext, directorsBrief, chunkS
             const nicheId = scriptContext.nicheId || '';
             for (const scene of chunk) {
                 try {
-                    const prompt = buildSingleScenePrompt(scene, scriptContext, directorsBrief);
+                    const prompt = buildSingleScenePrompt(scene, chunk, scriptContext, directorsBrief, plannerDirectives, globalOutline);
                     const rawText = await callAI(prompt, { maxTokens: 100 });
-                    const parsed = parseSingleSceneResponse(rawText, scene);
-                    // News niche safety net: only override stock images (not video — AI decides)
-                    if (nicheId.startsWith('news') && parsed.sourceHint === 'stock' && parsed.mediaType !== 'video') {
-                        parsed.sourceHint = 'web-image';
-                    }
+                    const parsed = parseSingleSceneResponse(rawText, scene, scriptContext, directorsBrief, plannerDirectives);
                     allEnriched.push(parsed);
-                    console.log(`      Scene ${scene.index}: "${parsed.keyword}" [${parsed.mediaType}, ${parsed.sourceHint}]`);
+                    if (parsed.fullscreenMG) {
+                        console.log(`      Scene ${scene.index}: 🎨 [FULLSCREEN MG] ${parsed.fullscreenMG}`);
+                    } else if (parsed.templateHint) {
+                        const kw = parsed.keyword ? ` [bg: "${parsed.keyword}"]` : '';
+                        console.log(`      Scene ${scene.index}: 📇 [TEMPLATE HINT] ${parsed.templateHint}${kw}`);
+                    } else {
+                        const mg = parsed.mgHint ? ` 🪧 mg:"${parsed.mgHint}"` : '';
+                        console.log(`      Scene ${scene.index}: "${parsed.keyword}" [${parsed.mediaType}, ${parsed.sourceHint}]${mg}`);
+                    }
                 } catch (err) {
                     const fallbackHint = nicheId.startsWith('news') ? 'telegram' : 'stock';
                     allEnriched.push({
@@ -1553,8 +2609,14 @@ async function _planVisualsChunked(scenes, scriptContext, directorsBrief, chunkS
         }
     }
 
-    console.log(`\n   ✅ Visual plan created for ${allEnriched.length} scenes\n`);
-    return allEnriched;
+    const finalized = _finalizeVisualPlan(allEnriched, scriptContext, directorsBrief, plannerDirectives);
+    const totalFs = finalized.filter(s => s.fullscreenMG).length;
+    const totalTpl = finalized.filter(s => s.templateHint && !s.fullscreenMG).length;
+    const totalOverlay = finalized.filter(s => s.mgHint && !s.fullscreenMG && !s.templateHint).length;
+    const totalPlain = finalized.length - totalFs - totalTpl - totalOverlay;
+    console.log(`\n   ✅ Visual plan created for ${finalized.length} scenes`);
+    console.log(`      📊 TOTAL breakdown: fs=${totalFs}  template=${totalTpl}  overlay=${totalOverlay}  plain-footage=${totalPlain}\n`);
+    return finalized;
 }
 
 // ============================================================
@@ -1565,20 +2627,17 @@ async function _planVisualsChunked(scenes, scriptContext, directorsBrief, chunkS
  * Fallback to old per-scene approach if batch fails.
  * Still uses scriptContext for smarter decisions than old ai-keywords.js.
  */
-async function planVisualsPerScene(scenes, scriptContext, directorsBrief) {
+async function planVisualsPerScene(scenes, scriptContext, directorsBrief, globalOutline = null) {
+    const plannerDirectives = _buildPlannerDirectives(scenes, scriptContext, directorsBrief);
     const enrichedScenes = [];
 
     for (const scene of scenes) {
-        const prompt = buildSingleScenePrompt(scene, scriptContext, directorsBrief);
+        const prompt = buildSingleScenePrompt(scene, scenes, scriptContext, directorsBrief, plannerDirectives, globalOutline);
 
         const nicheId = scriptContext.nicheId || '';
         try {
             const rawText = await callAI(prompt, { maxTokens: 100 });
-            const parsed = parseSingleSceneResponse(rawText, scene);
-            // News niche safety net: only override stock images (not video — AI decides)
-            if (nicheId.startsWith('news') && parsed.sourceHint === 'stock' && parsed.mediaType !== 'video') {
-                parsed.sourceHint = 'web-image';
-            }
+            const parsed = parseSingleSceneResponse(rawText, scene, scriptContext, directorsBrief, plannerDirectives);
             enrichedScenes.push(parsed);
             console.log(`   Scene ${scene.index}: "${parsed.keyword}" [${parsed.mediaType}, ${parsed.sourceHint}]`);
         } catch (error) {
@@ -1598,65 +2657,55 @@ async function planVisualsPerScene(scenes, scriptContext, directorsBrief) {
     }
 
     console.log('');
-    return enrichedScenes;
+    return _finalizeVisualPlan(enrichedScenes, scriptContext, directorsBrief, plannerDirectives);
 }
 
 /**
  * Build prompt for a single scene (fallback mode).
  */
-function buildSingleScenePrompt(scene, scriptContext, directorsBrief) {
+function buildSingleScenePrompt(scene, allScenes, scriptContext, directorsBrief, plannerDirectives = null, globalOutline = null) {
     const { theme, mood, entities } = scriptContext;
     const { tier } = directorsBrief;
     const nicheId = scriptContext.nicheId || 'general';
     const { getNiche } = require('./niches');
     const niche = getNiche(nicheId);
     const videoPriority = niche.footagePriority?.video || ['youtube', 'telegram', 'vkVideo', 'reddit', 'pexels', 'pixabay'];
+    plannerDirectives = plannerDirectives || _buildPlannerDirectives(allScenes || [scene], scriptContext, directorsBrief);
+    const sceneTags = _sceneTagString(scene, allScenes || [scene], scriptContext);
+    const outlineBlock = _renderGlobalOutlineBlock(globalOutline, [scene]);
 
     return `You are planning B-ROLL for a ${theme || 'general'} video with ${mood || 'neutral'} mood.
 
+SCENE ${scene.index} [${sceneTags}]
 SCENE TEXT: "${scene.text}"
 ${entities.length > 0 ? `KEY ENTITIES: ${entities.join(', ')}` : ''}
+TOPIC SUMMARY: ${scriptContext.summary || 'none'}
+EVENT ANCHOR: ${scriptContext.eventAnchor || 'none'}
+${_renderPlannerDirectiveBlock(plannerDirectives, scriptContext)}
+${outlineBlock}
 
 AVAILABLE SOURCES (priority order for this ${niche.name} niche): ${videoPriority.join(' → ')}
 Pick sourceHint from these. Top sources are BEST for this niche.
 
 OUTPUT FORMAT (one line):
-keyword: <searchable keyword> | mediaType: <${tier.allowVideo ? 'video|image' : 'image'}> | sourceHint: <stock|youtube|web-image|telegram|reddit>`;
+SCENE ${scene.index}: keyword: <searchable keyword or none> | stockQuery: <query or none> | webQuery: <query or none> | mediaType: <${tier.allowVideo ? 'video|image' : 'image'}> | sourceHint: <stock|youtube|web-image|telegram|reddit> | framing: <fullscreen|cinematic|floating> | backgroundId: <none|blur|gradient-id> | floatingAnim: <slideRight|slideLeft|slideUp|fadeScale|none> | floatingShadow: <0.3|0.5|0.7|none> | visualIntent: <shot description> | effects: <presetName or none> | mgHint: <overlay type: desc or none> | fullscreenMG: <fullscreen type: data or none> | templateHint: <template type: content or none>`;
 }
 
 /**
  * Parse single scene response.
  */
-function parseSingleSceneResponse(rawText, scene) {
-    const enriched = { ...scene };
-    const parts = rawText.split('|').map(p => p.trim());
-
-    for (const part of parts) {
-        const lower = part.toLowerCase();
-        if (lower.startsWith('keyword:')) {
-            enriched.keyword = part.substring(part.indexOf(':') + 1).trim();
-        }
-        if (lower.startsWith('mediatype:')) {
-            enriched.mediaType = part.substring(part.indexOf(':') + 1).trim().toLowerCase() === 'video' ? 'video' : 'image';
-        }
-        if (lower.startsWith('sourcehint:')) {
-            const val = part.substring(part.indexOf(':') + 1).trim().toLowerCase();
-            if (['stock', 'youtube', 'web-image', 'news', 'telegram', 'reddit'].includes(val)) enriched.sourceHint = val;
-        }
-    }
-
-    enriched.keyword = enriched.keyword || extractFallbackKeyword(scene.text);
-    enriched.mediaType = enriched.mediaType || 'video';
-    enriched.sourceHint = enriched.sourceHint || 'stock';
-    enriched.framing = enriched.framing || 'fullscreen';
-    if (!enriched.background) {
-        enriched.background = enriched.framing === 'cinematic' ? 'blur' : 'none';
-    }
-    enriched.visualIntent = enriched.visualIntent || enriched.keyword;
-    if (!enriched.effects) enriched.effects = [];
-    if (enriched.mgHint === undefined) enriched.mgHint = null;
-
-    return enriched;
+function parseSingleSceneResponse(rawText, scene, scriptContext, directorsBrief, plannerDirectives = null) {
+    const normalized = /scene\s+\d+/i.test(rawText)
+        ? rawText
+        : `SCENE ${scene.index}: ${rawText.trim()}`;
+    return parseBatchResponse(
+        normalized,
+        [scene],
+        scriptContext.nicheId,
+        scriptContext.themeId,
+        scriptContext,
+        plannerDirectives
+    )[0];
 }
 
 // ============================================================

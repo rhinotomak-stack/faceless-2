@@ -1,0 +1,588 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Learner</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+    --bg:        #0a0a0a;
+    --bg2:       #111111;
+    --bg3:       #181818;
+    --bg4:       #202020;
+    --border:    #2a2a2a;
+    --text:      #e8e8e8;
+    --text2:     #9a9a9a;
+    --text3:     #555;
+    --accent:    #f59e0b;
+    --accent2:   #fbbf24;
+    --pass:      #22c55e;
+    --warn:      #f59e0b;
+    --reject:    #ef4444;
+}
+
+html, body {
+    height: 100%; background: var(--bg); color: var(--text);
+    font-family: 'Segoe UI', system-ui, sans-serif; font-size: 13px; overflow: hidden;
+}
+
+/* ── TOP BAR ── */
+#topbar {
+    display: flex; align-items: center; gap: 12px;
+    padding: 0 16px; height: 52px;
+    background: var(--bg2); border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+}
+#topbar .logo {
+    font-size: 15px; font-weight: 700; color: var(--accent); letter-spacing: 0.5px;
+    display: inline-flex; align-items: center; gap: 6px;
+}
+#topbar .subtitle { color: var(--text2); font-size: 11px; }
+#topbar .spacer { flex: 1; }
+#topbar button {
+    height: 32px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--bg3); color: var(--text); cursor: pointer;
+    font-size: 12px; padding: 0 14px; font-family: inherit;
+}
+#topbar button:hover { background: var(--bg4); }
+#topbar button.primary {
+    background: var(--accent); border-color: var(--accent); color: #000; font-weight: 600;
+}
+#topbar button.primary:hover { background: var(--accent2); }
+#topbar button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* ── LAYOUT ── */
+#layout { display: flex; height: calc(100vh - 52px); overflow: hidden; }
+
+/* ── LEFT: VIDEO SIDEBAR ── */
+#video-sidebar {
+    width: 260px; flex-shrink: 0;
+    background: var(--bg2); border-right: 1px solid var(--border);
+    display: flex; flex-direction: column;
+}
+.panel-header {
+    padding: 12px 14px; font-size: 10px; font-weight: 700;
+    letter-spacing: 1px; color: var(--text3); text-transform: uppercase;
+    border-bottom: 1px solid var(--border); flex-shrink: 0;
+    display: flex; justify-content: space-between; align-items: center;
+}
+.panel-header .count { color: var(--accent); font-weight: 600; }
+
+#video-list { flex: 1; overflow-y: auto; padding: 8px; }
+#video-list::-webkit-scrollbar { width: 4px; }
+#video-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+.video-card {
+    background: var(--bg3); border: 1px solid var(--border);
+    border-radius: 6px; padding: 10px 12px; margin-bottom: 6px;
+    transition: border-color 0.15s;
+}
+.video-card:hover { border-color: var(--accent); }
+.video-card.failed { border-color: var(--reject, #e74c3c); }
+.video-card.ok { border-left: 3px solid var(--pass, #27ae60); }
+.video-status {
+    display: inline-block; width: 14px; height: 14px; line-height: 14px;
+    text-align: center; border-radius: 50%; font-size: 9px; font-weight: 700;
+    margin-right: 4px; vertical-align: middle; flex-shrink: 0;
+}
+.video-status.ok { background: var(--pass, #27ae60); color: #fff; }
+.video-status.failed { background: var(--reject, #e74c3c); color: #fff; cursor: help; }
+.video-status.pending { background: var(--text3, #666); color: #fff; }
+.video-card .title {
+    font-size: 12px; color: var(--text); font-weight: 600;
+    line-height: 1.3; margin-bottom: 4px;
+    display: flex; align-items: center; gap: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.video-card .meta {
+    font-size: 10px; color: var(--text2);
+    display: flex; gap: 8px; align-items: center;
+}
+.video-card .meta .duration { color: var(--accent); }
+.video-error {
+    margin-top: 6px; padding: 6px 8px;
+    background: rgba(231, 76, 60, 0.1);
+    border: 1px solid rgba(231, 76, 60, 0.35);
+    border-radius: 4px;
+    display: flex; align-items: center; gap: 6px;
+}
+.video-error-msg {
+    flex: 1; font-size: 10px; color: #f1948a;
+    line-height: 1.3;
+    overflow: hidden; text-overflow: ellipsis;
+    display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+    white-space: normal; word-break: break-word;
+}
+.video-retry-btn {
+    flex-shrink: 0; background: var(--reject, #e74c3c); color: #fff;
+    border: none; border-radius: 3px; padding: 3px 8px;
+    font-size: 10px; font-weight: 600; cursor: pointer;
+    font-family: inherit;
+}
+.video-retry-btn:hover { background: #c0392b; }
+.video-retry-btn:active { transform: translateY(1px); }
+.video-card .source {
+    font-size: 9px; color: var(--text3); margin-top: 4px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+#video-empty {
+    padding: 24px 14px; text-align: center; color: var(--text3); font-size: 11px;
+    line-height: 1.6;
+}
+#video-empty .icon { font-size: 32px; opacity: 0.4; margin-bottom: 8px; display: block; }
+
+#audio-area {
+    border-top: 1px solid var(--border); padding: 10px;
+    background: var(--bg2); flex-shrink: 0;
+}
+#audio-area .audio-card {
+    background: var(--bg3); border: 1px solid var(--border);
+    border-radius: 5px; padding: 8px 10px; margin-bottom: 6px;
+    font-size: 10px; color: var(--text2); line-height: 1.4;
+    display: flex; flex-direction: column; gap: 3px;
+}
+#audio-area .audio-card .audio-name {
+    color: var(--text); font-weight: 600; font-size: 11px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#audio-area .audio-card.empty .audio-name { color: var(--text3); font-weight: 500; }
+#audio-area .audio-card .audio-meta {
+    color: var(--text2); font-size: 10px;
+    display: flex; gap: 8px; align-items: center;
+}
+#audio-area .audio-card .audio-meta .ok { color: var(--pass); }
+#audio-area .audio-card .audio-meta .warn { color: var(--warn); }
+#audio-area .audio-card .audio-meta .err { color: var(--reject); }
+#audio-area .btn-row { display: flex; gap: 6px; }
+#audio-area button {
+    flex: 1; height: 28px; border-radius: 5px;
+    background: var(--bg3); border: 1px solid var(--border);
+    color: var(--text); font-size: 11px; cursor: pointer; font-family: inherit;
+}
+#audio-area button.primary {
+    background: var(--accent); border-color: var(--accent); color: #000; font-weight: 600;
+}
+#audio-area button:hover { filter: brightness(1.15); }
+#audio-area button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+#add-video-area {
+    border-top: 1px solid var(--border); padding: 10px;
+    background: var(--bg2); flex-shrink: 0;
+}
+#add-video-area input {
+    width: 100%; background: var(--bg3); border: 1px solid var(--border);
+    color: var(--text); border-radius: 5px; padding: 8px 10px;
+    font-size: 11px; font-family: inherit; outline: none;
+    margin-bottom: 6px;
+}
+#add-video-area input:focus { border-color: var(--accent); }
+#add-video-area .btn-row { display: flex; gap: 6px; }
+#add-video-area button {
+    flex: 1; height: 28px; border-radius: 5px;
+    background: var(--bg3); border: 1px solid var(--border);
+    color: var(--text); font-size: 11px; cursor: pointer; font-family: inherit;
+}
+#add-video-area button.primary {
+    background: var(--accent); border-color: var(--accent); color: #000; font-weight: 600;
+}
+#add-video-area button:hover { filter: brightness(1.15); }
+#add-video-area button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* ── CENTER: CHAT ── */
+#chat-area {
+    flex: 1; display: flex; flex-direction: column;
+    background: var(--bg); min-width: 0;
+}
+
+#chat-context-bar {
+    flex-shrink: 0; padding: 10px 16px;
+    background: #1a140a; border-bottom: 1px solid #4a3a1a;
+    font-size: 11px; color: var(--text2); line-height: 1.5;
+}
+#chat-context-bar .session-id { color: var(--text3); font-size: 10px; }
+#chat-context-bar .video-count { color: var(--accent); font-weight: 600; }
+
+#chat-messages {
+    flex: 1; overflow-y: auto; padding: 16px;
+    display: flex; flex-direction: column; gap: 12px;
+}
+#chat-messages::-webkit-scrollbar { width: 6px; }
+#chat-messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+.chat-empty {
+    margin: auto; text-align: center; color: var(--text3);
+    max-width: 460px; padding: 40px 20px;
+}
+.chat-empty .big-icon { font-size: 56px; opacity: 0.3; display: block; margin-bottom: 16px; }
+.chat-empty h2 { font-size: 18px; color: var(--text); margin-bottom: 8px; font-weight: 600; }
+.chat-empty p { font-size: 12px; line-height: 1.6; margin-bottom: 6px; }
+.chat-empty .hint { color: var(--accent); font-size: 11px; margin-top: 16px; }
+
+.msg { display: flex; gap: 10px; align-items: flex-start; max-width: 88%; }
+.msg.user { align-self: flex-end; flex-direction: row-reverse; }
+.msg.model { align-self: flex-start; }
+
+.msg-avatar {
+    width: 28px; height: 28px; border-radius: 50%; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 13px; font-weight: 700;
+}
+.msg.user .msg-avatar { background: #1a140a; color: var(--accent); border: 1px solid var(--accent); }
+.msg.model .msg-avatar { background: var(--bg3); color: var(--text2); border: 1px solid var(--border); }
+
+.msg-bubble {
+    padding: 10px 14px; border-radius: 12px;
+    font-size: 13px; line-height: 1.55; word-break: break-word;
+    white-space: pre-wrap;
+}
+.msg.user .msg-bubble {
+    background: #1a140a; color: var(--accent2);
+    border: 1px solid #4a3a1a;
+    border-bottom-right-radius: 4px;
+}
+.msg.model .msg-bubble {
+    background: var(--bg2); color: var(--text);
+    border: 1px solid var(--border);
+    border-bottom-left-radius: 4px;
+}
+.msg-bubble code {
+    background: rgba(245,158,11,0.12); color: var(--accent);
+    padding: 1px 5px; border-radius: 3px;
+    font-family: 'Consolas', 'Monaco', monospace; font-size: 11px;
+}
+.msg-bubble pre {
+    background: var(--bg); border: 1px solid var(--border);
+    padding: 10px 12px; border-radius: 6px; margin: 6px 0;
+    overflow-x: auto; font-size: 11px; line-height: 1.4;
+    font-family: 'Consolas', 'Monaco', monospace; color: var(--text2);
+}
+.msg-bubble strong { color: var(--accent); }
+
+.code-context-badge {
+    display: inline-block; margin-top: 6px;
+    font-size: 9px; color: var(--text3); background: var(--bg);
+    border: 1px solid var(--border); border-radius: 4px;
+    padding: 2px 8px; letter-spacing: 0.3px;
+    font-family: 'Consolas', 'Monaco', monospace;
+}
+
+.typing {
+    display: flex; gap: 6px; padding: 10px 14px;
+    background: var(--bg2); border: 1px solid var(--border);
+    border-radius: 12px; border-bottom-left-radius: 4px;
+    align-self: flex-start;
+}
+.typing-dot {
+    width: 7px; height: 7px; border-radius: 50%; background: var(--accent);
+    opacity: 0.5; animation: dot 1.2s ease-in-out infinite;
+}
+.typing-dot:nth-child(2) { animation-delay: 0.2s; }
+.typing-dot:nth-child(3) { animation-delay: 0.4s; }
+@keyframes dot { 0%,60%,100%{ transform:translateY(0); opacity:0.5 } 30%{ transform:translateY(-6px); opacity:1 } }
+
+#chat-input-area {
+    flex-shrink: 0; padding: 12px 16px; border-top: 1px solid var(--border);
+    background: var(--bg2);
+    display: flex; gap: 10px; align-items: flex-end;
+}
+#chat-input {
+    flex: 1; background: var(--bg3); border: 1px solid var(--border);
+    color: var(--text); border-radius: 8px; padding: 10px 14px;
+    font-size: 13px; font-family: inherit; resize: none;
+    min-height: 40px; max-height: 140px; line-height: 1.5; outline: none;
+}
+#chat-input:focus { border-color: var(--accent); }
+#chat-input:disabled { opacity: 0.5; cursor: not-allowed; }
+
+#chat-send {
+    width: 42px; height: 42px; border-radius: 8px;
+    background: var(--accent); border: none; color: #000;
+    font-size: 18px; cursor: pointer; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700;
+}
+#chat-send:hover { background: var(--accent2); }
+#chat-send:disabled { opacity: 0.4; cursor: not-allowed; }
+
+#chat-quick-actions {
+    display: flex; gap: 6px; padding: 6px 16px 0; flex-wrap: wrap;
+}
+.quick-btn {
+    background: var(--bg3); border: 1px solid var(--border);
+    color: var(--text2); font-size: 10px; padding: 4px 10px;
+    border-radius: 4px; cursor: pointer; font-family: inherit;
+}
+.quick-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+/* ── RIGHT: PROFILE PREVIEW ── */
+#profile-sidebar {
+    width: 320px; flex-shrink: 0;
+    background: var(--bg2); border-left: 1px solid var(--border);
+    display: flex; flex-direction: column;
+}
+#profile-content {
+    flex: 1; overflow-y: auto; padding: 12px 14px;
+}
+#profile-content::-webkit-scrollbar { width: 4px; }
+#profile-content::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+#profile-empty {
+    text-align: center; color: var(--text3); padding: 30px 12px;
+    font-size: 11px; line-height: 1.6;
+}
+#profile-empty .icon { font-size: 36px; opacity: 0.3; display: block; margin-bottom: 10px; }
+
+.profile-section {
+    margin-bottom: 14px; padding-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+}
+.profile-section:last-child { border-bottom: none; }
+.profile-section .section-label {
+    font-size: 9px; font-weight: 700; letter-spacing: 1px;
+    color: var(--accent); text-transform: uppercase; margin-bottom: 6px;
+}
+.profile-row {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 3px 0; font-size: 11px;
+}
+.profile-row .key { color: var(--text2); }
+.profile-row .val { color: var(--text); font-weight: 600; text-align: right; max-width: 60%; word-break: break-word; }
+
+.color-swatch {
+    display: inline-block; width: 12px; height: 12px;
+    border-radius: 2px; border: 1px solid var(--border);
+    vertical-align: middle; margin-right: 4px;
+}
+
+#profile-actions {
+    flex-shrink: 0; padding: 10px 14px;
+    border-top: 1px solid var(--border); background: var(--bg2);
+    display: flex; flex-direction: column; gap: 6px;
+}
+#profile-actions input {
+    width: 100%; background: var(--bg3); border: 1px solid var(--border);
+    color: var(--text); border-radius: 5px; padding: 7px 10px;
+    font-size: 11px; font-family: inherit; outline: none;
+}
+#profile-actions input:focus { border-color: var(--accent); }
+#profile-actions button {
+    height: 32px; border-radius: 5px; font-family: inherit; font-size: 11px;
+    cursor: pointer; border: 1px solid var(--border);
+}
+#profile-actions .btn-extract {
+    background: var(--bg3); color: var(--accent); border-color: var(--accent);
+    font-weight: 600;
+}
+#profile-actions .btn-extract:hover { background: var(--accent); color: #000; }
+#profile-actions .btn-save {
+    background: var(--pass); color: #000; border-color: var(--pass);
+    font-weight: 600;
+}
+#profile-actions .btn-save:hover { filter: brightness(1.15); }
+#profile-actions button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* ── PROGRESS OVERLAY ── */
+#progress-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.85);
+    display: none; align-items: center; justify-content: center;
+    flex-direction: column; gap: 16px; z-index: 100;
+}
+#progress-overlay.active { display: flex; }
+#progress-overlay .ring {
+    width: 56px; height: 56px;
+    border: 4px solid var(--bg3); border-top-color: var(--accent);
+    border-radius: 50%; animation: spin 0.9s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+#progress-overlay .msg { color: var(--text); font-size: 14px; max-width: 480px; text-align: center; }
+#progress-overlay .pct { color: var(--accent); font-size: 11px; }
+
+/* ── TOAST ── */
+#toast {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: var(--bg3); border: 1px solid var(--border);
+    color: var(--text); padding: 10px 18px; border-radius: 6px;
+    font-size: 12px; opacity: 0; transition: opacity 0.2s;
+    z-index: 200; pointer-events: none; max-width: 80%;
+}
+#toast.show { opacity: 1; }
+#toast.error { border-color: var(--reject); color: var(--reject); }
+#toast.success { border-color: var(--pass); color: var(--pass); }
+
+/* ── RESTORE BANNER ── */
+#restore-banner {
+    display: none; padding: 12px 16px; background: #1a1a0a;
+    border-bottom: 1px solid #4a4a1a; font-size: 12px; color: var(--text);
+    align-items: center; gap: 10px; flex-shrink: 0;
+}
+#restore-banner.active { display: flex; }
+#restore-banner .info { flex: 1; }
+#restore-banner .info .title { font-weight: 600; color: var(--accent); }
+#restore-banner .info .detail { font-size: 10px; color: var(--text2); margin-top: 2px; }
+#restore-banner button {
+    height: 28px; border-radius: 5px; border: 1px solid var(--border);
+    background: var(--bg3); color: var(--text); cursor: pointer;
+    font-size: 11px; padding: 0 14px; font-family: inherit;
+}
+#restore-banner button.primary {
+    background: var(--accent); border-color: var(--accent); color: #000; font-weight: 600;
+}
+#restore-banner button:hover { filter: brightness(1.15); }
+
+/* ── MEMORY BADGE ── */
+.memory-badge {
+    display: inline-block; margin-top: 4px;
+    font-size: 9px; color: var(--pass); background: rgba(34,197,94,0.08);
+    border: 1px solid rgba(34,197,94,0.2); border-radius: 4px;
+    padding: 2px 8px; letter-spacing: 0.3px;
+}
+</style>
+</head>
+<body>
+
+<!-- Restore banner (shown when saved session exists) -->
+<div id="restore-banner">
+    <div class="info">
+        <div class="title" id="restore-title">Previous session found</div>
+        <div class="detail" id="restore-detail"></div>
+    </div>
+    <button class="primary" id="btn-restore">Restore Session</button>
+    <button id="btn-discard-saved">Discard</button>
+</div>
+
+<!-- Top bar -->
+<div id="topbar">
+    <span class="logo">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2 L15 8.5 L22 9.3 L17 14.1 L18.2 21 L12 17.8 L5.8 21 L7 14.1 L2 9.3 L9 8.5 Z"/>
+        </svg>
+        Learner
+    </span>
+    <span class="subtitle" id="subtitle">Conversational style analyst — chat with Gemini about reference videos</span>
+    <div class="spacer"></div>
+    <label style="font-size:11px;color:var(--text2);display:flex;align-items:center;gap:6px;">
+        Analysis Mode
+        <select id="thinking-mode" style="height:30px;border-radius:5px;border:1px solid var(--border);background:var(--bg3);color:var(--text);font-size:11px;padding:0 8px;cursor:pointer;font-family:inherit;">
+            <option value="off">Standard (1 fps)</option>
+            <option value="high" selected>Deep Analysis (5 fps + thinking)</option>
+            <option value="medium">Balanced (5 fps + medium thinking)</option>
+        </select>
+    </label>
+    <label style="font-size:11px;color:var(--text2);display:flex;align-items:center;gap:5px;cursor:pointer;" title="When ON, the agent can search and read source files to answer questions about your codebase">
+        <input type="checkbox" id="code-access" checked style="cursor:pointer;accent-color:var(--accent);">
+        Code Access
+    </label>
+    <button id="btn-new-session">+ New Session</button>
+    <button id="btn-end-session" disabled>End Session</button>
+</div>
+
+<!-- Main layout -->
+<div id="layout">
+
+    <!-- LEFT: video sidebar -->
+    <div id="video-sidebar">
+        <div class="panel-header">
+            Reference Videos <span class="count" id="video-count-badge">0</span>
+        </div>
+        <div id="video-list">
+            <div id="video-empty">
+                <span class="icon">▶</span>
+                Add a YouTube URL or local video file below to start a session.
+            </div>
+        </div>
+        <div id="audio-area" style="display:none;">
+            <div class="panel-header" style="padding:0 0 6px; border-bottom: none;">
+                Project Audio <span class="count" id="audio-status-badge">—</span>
+            </div>
+            <div class="audio-card empty" id="audio-card">
+                <div class="audio-name" id="audio-name">No audio loaded</div>
+                <div class="audio-meta" id="audio-meta">
+                    <span id="audio-meta-text">Pick an MP3/WAV, then transcribe</span>
+                </div>
+            </div>
+            <div class="btn-row">
+                <button id="btn-browse-audio">Browse Audio</button>
+                <button id="btn-transcribe-audio" class="primary" disabled>Transcribe</button>
+            </div>
+        </div>
+
+        <div id="add-video-area">
+            <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;">
+                <label style="font-size:10px;color:var(--text3);white-space:nowrap;">Input:</label>
+                <select id="input-mode" style="flex:1;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:3px 6px;font-size:10px;cursor:pointer;font-family:inherit;">
+                    <option value="single">Single URL</option>
+                    <option value="multi">Multiple URLs</option>
+                </select>
+            </div>
+            <input type="text" id="video-url-input" placeholder="YouTube URL or local file path">
+            <textarea id="video-urls-multi" placeholder="One YouTube URL per line (2-6 videos)" rows="4" style="display:none;width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:5px;padding:8px 10px;font-size:11px;font-family:inherit;resize:vertical;outline:none;box-sizing:border-box;line-height:1.5;"></textarea>
+            <div class="btn-row">
+                <button id="btn-browse-video">Browse</button>
+                <button id="btn-add-video" class="primary">Start Session</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- CENTER: chat -->
+    <div id="chat-area">
+        <div id="chat-context-bar">
+            No active session — drop a reference video to begin.
+        </div>
+        <div id="chat-messages">
+            <div class="chat-empty" id="chat-empty">
+                <span class="big-icon">✦</span>
+                <h2>Welcome to Learner</h2>
+                <p>Drop a reference YouTube video on the left to start a conversation with Gemini.</p>
+                <p>The agent will watch the video, analyze its editing style, and answer any follow-up questions you have.</p>
+                <p class="hint">Try asking: "what about the music?" · "how fast are the cuts?" · "extract profile"</p>
+            </div>
+        </div>
+        <div id="chat-quick-actions" style="display:none">
+            <button class="quick-btn" data-msg="Tell me about the pacing — average cuts per minute and rhythm.">Pacing</button>
+            <button class="quick-btn" data-msg="Describe the music style and overall audio mix in detail.">Audio</button>
+            <button class="quick-btn" data-msg="What motion graphics types appear most often? Be specific with timestamps.">MGs</button>
+            <button class="quick-btn" data-msg="What are the dominant colors? Give me hex codes for the palette.">Colors</button>
+            <button class="quick-btn" data-msg="What features does the reference use that our system probably can't replicate?">Gaps</button>
+            <button class="quick-btn" data-msg="extract profile">Extract Profile</button>
+        </div>
+        <div id="chat-input-area">
+            <textarea id="chat-input" placeholder="Start a session first to chat..." disabled rows="1"></textarea>
+            <button id="chat-send" disabled>➤</button>
+        </div>
+    </div>
+
+    <!-- RIGHT: profile preview -->
+    <div id="profile-sidebar">
+        <div class="panel-header">Style Profile <span class="count" id="profile-status">—</span></div>
+        <div id="profile-content">
+            <div id="profile-empty">
+                <span class="icon">◌</span>
+                No profile extracted yet.<br><br>
+                Chat with the agent, then click <strong>Extract Profile</strong> below or say "extract profile" in chat.
+            </div>
+        </div>
+        <div id="profile-actions">
+            <input type="text" id="profile-name-input" placeholder="Profile name" value="">
+            <button id="btn-extract-profile" class="btn-extract" disabled>Extract Profile from Conversation</button>
+            <button id="btn-save-profile" class="btn-save" disabled>Save Profile to Project</button>
+        </div>
+    </div>
+
+</div>
+
+<!-- Progress overlay -->
+<div id="progress-overlay">
+    <div class="ring"></div>
+    <div class="msg" id="progress-msg">Working...</div>
+    <div class="pct" id="progress-pct"></div>
+</div>
+
+<!-- Toast -->
+<div id="toast"></div>
+
+<script src="js/style-studio-app.js"></script>
+</body>
+</html>

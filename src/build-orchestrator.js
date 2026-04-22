@@ -15,6 +15,51 @@ const { callAI } = require('./ai-provider');
 const { getNiche } = require('./niches');
 const { getTheme } = require('./themes');
 const { FULLSCREEN_MG_TYPES } = require('./ai-motion-graphics');
+const { extractFallbackKeyword } = require('./ai-visual-planner');
+
+// Data-required fullscreen MG types. If the AI doesn't give real data from the
+// narration, the MG renders broken (empty bars, sentence-fragment labels, no
+// comparison text). These get REJECTED and the scene falls back to footage.
+const DATA_REQUIRED_FS_MGS = {
+    barChart:       { kind: 'pairs', minPairs: 2 },
+    donutChart:     { kind: 'pairs', minPairs: 2 },
+    rankingList:    { kind: 'pairs', minPairs: 2 },
+    timeline:       { kind: 'pairs', minPairs: 2 },
+    bulletList:     { kind: 'items', minItems: 2 },
+    comparisonCard: { kind: 'vs' },
+};
+
+// Returns { valid, reason? }. mgContent is the string after "<mgType>: ".
+function _validateDataMGContent(mgType, mgContent) {
+    const spec = DATA_REQUIRED_FS_MGS[mgType];
+    if (!spec) return { valid: true };
+    const c = (mgContent || '').trim();
+    if (!c) return { valid: false, reason: 'empty content' };
+
+    if (spec.kind === 'vs') {
+        if (!/\s+vs\.?\s+|\s+versus\s+/i.test(c)) {
+            return { valid: false, reason: `needs "A vs B" pattern, got "${c.slice(0, 40)}"` };
+        }
+        return { valid: true };
+    }
+
+    // Split on | or ; — first segment may be a title, rest are data
+    const segments = c.split(/\s*\|\s*|\s*;\s*/).map(s => s.trim()).filter(Boolean);
+    const firstIsPair = segments.length > 0 && /^[^:]+:\s*[\d.,%$+\-]+/.test(segments[0]);
+    const dataSegs = (segments.length > 1 && !firstIsPair) ? segments.slice(1) : segments;
+
+    if (spec.kind === 'pairs') {
+        const pairs = dataSegs.filter(s => /^[^:]+:\s*[\d.,%$+\-]+/.test(s));
+        if (pairs.length < spec.minPairs) {
+            return { valid: false, reason: `needs ≥${spec.minPairs} "Label:Number" pairs, found ${pairs.length} in "${c.slice(0, 60)}"` };
+        }
+    } else if (spec.kind === 'items') {
+        if (dataSegs.length < spec.minItems) {
+            return { valid: false, reason: `needs ≥${spec.minItems} items separated by "|", got "${c.slice(0, 60)}"` };
+        }
+    }
+    return { valid: true };
+}
 
 // Niche pacing → scene duration limits
 const PACING_LIMITS = {
@@ -288,6 +333,25 @@ async function preBuildReview(scenes, scriptContext) {
         }
     }
 
+    // 3b. FullscreenMG DATA validation — data-required MGs without real pairs/items
+    // render broken (empty bars, sentence-fragment labels). Reject and restore footage.
+    for (const s of scenes) {
+        if (!s.fullscreenMG) continue;
+        const colonIdx = s.fullscreenMG.indexOf(':');
+        if (colonIdx <= 0) continue;
+        const mgType = s.fullscreenMG.substring(0, colonIdx).trim();
+        if (!DATA_REQUIRED_FS_MGS[mgType]) continue;
+        const mgContent = s.fullscreenMG.substring(colonIdx + 1).trim();
+        const res = _validateDataMGContent(mgType, mgContent);
+        if (!res.valid) {
+            s.fullscreenMG = null;
+            s.keyword = s.keyword || extractFallbackKeyword(s.text || '');
+            s.mediaType = s.mediaType || 'video';
+            s.sourceHint = s.sourceHint || (niche.footagePriority?.video?.[0] || 'stock');
+            changes.push(`Scene ${s.index}: fullscreenMG "${mgType}" REJECTED (${res.reason}) → fallback to footage "${s.keyword}"`);
+        }
+    }
+
     // 4. Fullscreen MG distribution check
     const fsMGScenes = scenes.filter(s => s.fullscreenMG);
     const footageScenes = scenes.filter(s => !s.fullscreenMG);
@@ -478,20 +542,48 @@ Output ONLY fix lines or "PLAN OK". No explanations, no summaries.`;
                     case 'KEYWORD': {
                         if (!value || scene.fullscreenMG) { skipped++; break; }
                         const old = scene.keyword;
-                        // Guard: reject if new keyword is MORE generic than old
-                        // (shorter AND lost the main topic entity words)
+                        // Guard: reject if the new keyword simplifies AWAY protected anchors
+                        // (entity names, event anchors, weapon model qualifiers, org-name glue words).
                         if (old) {
                             const oldWords = old.toLowerCase().split(/\s+/);
                             const newWords = value.toLowerCase().split(/\s+/);
-                            // Check if key entity words from old keyword are preserved
+                            const newSet = new Set(newWords);
+
+                            // Entity tokens (people, orgs, places) from director's extraction
                             const entityWords = (scriptContext.entities || [])
                                 .flatMap(e => e.toLowerCase().split(/\s+/))
-                                .filter(w => w.length > 3);
-                            const oldHasEntity = entityWords.some(e => oldWords.includes(e));
-                            const newHasEntity = entityWords.some(e => newWords.includes(e));
-                            if (oldHasEntity && !newHasEntity && newWords.length <= oldWords.length) {
-                                // New keyword lost entity specificity — reject
-                                changes.push(`S${sceneIdx}: keyword REJECTED "${old}" → "${value}" (lost entity specificity)`);
+                                .filter(w => w.length > 2);
+                            // Event anchor tokens (main incident/topic) — e.g. "Terra A1", "Shahed"
+                            const anchorWords = (scriptContext.eventAnchor || '')
+                                .toLowerCase().split(/\s+/)
+                                .filter(w => w.length > 2);
+                            // Weapon/vehicle model qualifiers — dropping these breaks specificity
+                            // ("Shahed drone" → "Shahed" loses the weapon class signal).
+                            const MODEL_QUALIFIERS = new Set([
+                                'drone', 'drones', 'tank', 'tanks', 'fighter', 'fighters',
+                                'jet', 'jets', 'missile', 'missiles', 'rocket', 'rockets',
+                                'helicopter', 'helicopters', 'aircraft', 'submarine', 'submarines',
+                                'ship', 'ships', 'carrier', 'carriers', 'bomber', 'bombers',
+                                'warship', 'warships', 'destroyer', 'destroyers', 'cruiser',
+                                'rifle', 'pistol', 'interceptor', 'interceptors', 'launcher',
+                            ]);
+                            // Preposition "glue" words that hold org/event names together
+                            // ("Council on Foreign Relations", "Ministry of Defense").
+                            const GLUE_WORDS = new Set([
+                                'on', 'of', 'for', 'and', 'de', 'du', 'van', 'von', 'al', 'el', 'la',
+                            ]);
+
+                            const protectedTokens = new Set([
+                                ...entityWords.filter(w => oldWords.includes(w)),
+                                ...anchorWords.filter(w => oldWords.includes(w)),
+                                ...oldWords.filter(w => MODEL_QUALIFIERS.has(w)),
+                                ...oldWords.filter(w => GLUE_WORDS.has(w)),
+                            ]);
+
+                            const lostTokens = [...protectedTokens].filter(t => !newSet.has(t));
+
+                            if (lostTokens.length > 0 && newWords.length <= oldWords.length) {
+                                changes.push(`S${sceneIdx}: keyword REJECTED "${old}" → "${value}" (lost protected: ${lostTokens.join(', ')})`);
                                 skipped++;
                                 break;
                             }
@@ -996,6 +1088,62 @@ SCORE: <1-10>
         if (firstItem) protectedSceneIndices.add(Math.max(0, firstItem.startSceneIndex - 1));
     }
 
+    // Smart extractor: pick a meaningful MG label from scene text.
+    // Priority: (1) named entity mentioned in scene, (2) first clean short sentence,
+    // otherwise return null to skip the gap entirely rather than inject a fragment.
+    const extractCleanMGText = (sceneText, entities, mgType) => {
+        if (!sceneText) return null;
+        const cleanText = sceneText.trim();
+
+        // Sentence split (keep terminal punct off final label)
+        const sentences = cleanText
+            .split(/(?<=[.!?])\s+/)
+            .map(s => s.replace(/^[\s\-—"']+|[\s\-—"']+$/g, '').trim())
+            .filter(Boolean);
+
+        // Strip trailing commas/semicolons/colons from a fragment
+        const tidy = (s) => s.replace(/[.,;:]+$/, '').trim();
+
+        // Entity anchor: first entity name that actually appears in this scene
+        const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const entityList = Array.isArray(entities) ? entities : [];
+        const foundEntity = entityList.find(e => {
+            if (!e || typeof e !== 'string' || e.length < 2) return false;
+            const re = new RegExp(`\\b${escapeRe(e)}\\b`, 'i');
+            return re.test(cleanText);
+        });
+
+        // Pick the first sentence that's 2..10 words and starts with a capital letter
+        let cleanSentence = null;
+        for (const sent of sentences) {
+            const tidied = tidy(sent);
+            const wc = tidied.split(/\s+/).length;
+            if (wc < 2 || wc > 10) continue;
+            if (!/^[A-Z0-9"']/.test(tidied)) continue;
+            cleanSentence = tidied;
+            break;
+        }
+
+        if (mgType === 'focusWord') {
+            // Prefer a known entity; else longest capitalized word >3 chars
+            if (foundEntity && foundEntity.split(/\s+/).length === 1) return { text: foundEntity };
+            const words = cleanText.split(/\s+/).filter(w => w.length > 3 && /^[A-Z]/.test(w));
+            const longest = words.sort((a, b) => b.length - a.length)[0];
+            return longest ? { text: tidy(longest) } : null;
+        }
+
+        // lowerThird / headline: need usable name text
+        if (foundEntity) {
+            return { name: foundEntity, title: cleanSentence || '', text: foundEntity };
+        }
+        if (cleanSentence) {
+            return { name: cleanSentence, title: '', text: cleanSentence };
+        }
+        // No entity + no clean sentence = skip rather than inject garbage
+        return null;
+    };
+
+    let skippedGaps = 0;
     for (const gap of significantGaps) {
         const gapMid = (gap.from + gap.to) / 2;
         // Find the scene at gap midpoint
@@ -1009,22 +1157,13 @@ SCORE: <1-10>
         const sceneIdx = targetScene.index !== undefined ? targetScene.index : scenes.indexOf(targetScene);
         if (protectedSceneIndices.has(sceneIdx)) continue;
 
-        // Extract a meaningful text snippet for the MG
-        const text = (targetScene.text || '').trim();
-        const words = text.split(/\s+/);
-        let mgText = '';
-        if (preferredGapMG === 'lowerThird') {
-            // Use first few words as name, rest as title
-            mgText = words.slice(0, 6).join(' ');
-        } else if (preferredGapMG === 'focusWord') {
-            // Pick the most important-looking word (longest capitalized word)
-            const candidates = words.filter(w => w.length > 3);
-            mgText = candidates.sort((a, b) => b.length - a.length)[0] || words[0] || '';
-        } else {
-            mgText = words.slice(0, 8).join(' ');
+        // Entity-first extraction; skip gap entirely if no clean label found
+        const extracted = extractCleanMGText(targetScene.text, ctx.entities, preferredGapMG);
+        if (!extracted || !extracted.text || extracted.text.length < 2) {
+            skippedGaps++;
+            continue;
         }
-
-        if (!mgText || mgText.length < 2) continue;
+        const mgText = extracted.text;
 
         const newMG = {
             id: `orchestrator-gap-${injected.length}`,
@@ -1041,8 +1180,8 @@ SCORE: <1-10>
 
         // Add type-specific fields
         if (preferredGapMG === 'lowerThird') {
-            newMG.name = mgText;
-            newMG.title = '';
+            newMG.name = extracted.name || mgText;
+            newMG.title = extracted.title || '';
         }
 
         injected.push(newMG);
@@ -1058,6 +1197,9 @@ SCORE: <1-10>
         // Recalculate density after injection
         const totalMGs = (videoPlan.mgScenes || []).length + videoPlan.motionGraphics.length;
         analysis.mgDensity = totalDuration > 0 ? (totalMGs / (totalDuration / 60)).toFixed(1) : 0;
+    }
+    if (skippedGaps > 0) {
+        console.log(`   🔧 Gap-filling: Skipped ${skippedGaps} gap(s) — no clean entity/sentence to use (prefer empty over garbage fragment)`);
     }
 
     // ── Build Report ──

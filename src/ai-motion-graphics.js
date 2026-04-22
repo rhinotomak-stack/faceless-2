@@ -127,6 +127,33 @@ function extractKeyPhrase(text, maxWords = 8) {
     return cleaned.split(/\s+/).slice(0, maxWords).join(' ');
 }
 
+// Strip stage directions / screenplay annotations that leak into MG text.
+// The AI (and VP) sometimes copies narration markers like "[TEXT GLITCHES AND FLICKERS]"
+// or "(dramatic pause)" into the display text — those are camera/effect directions,
+// not content to render.
+function sanitizeMGText(text) {
+    if (!text) return '';
+    let s = String(text);
+    // Strip [ ... ] stage directions (bracket notation — never content).
+    s = s.replace(/\[[^\]]*\]/g, ' ');
+    // Strip (CUE) / (FX) / (BEAT) / (PAUSE) / (SFX) / (VFX) / (MUSIC) — ALL-CAPS short parentheticals
+    // are nearly always stage directions, never content. Don't strip mixed-case ones
+    // like "(2023)" or "(the Gulf)".
+    s = s.replace(/\(\s*[A-Z][A-Z0-9 _\-\/]{1,30}\s*\)/g, ' ');
+    // Common ALL-CAPS stage keywords even without parens at start/end
+    s = s.replace(/\b(?:TEXT\s+(?:GLITCHES?|FLICKERS?|CRAWLS?|SCROLLS?|FADES?))\b/gi, ' ');
+    s = s.replace(/\b(?:CUT\s+TO|FADE\s+(?:IN|OUT)|DISSOLVE\s+TO|B-?ROLL|VOICEOVER|V\.O\.|O\.S\.|SFX|VFX)\s*:?/gi, ' ');
+    // Collapse whitespace
+    s = s.replace(/\s+/g, ' ').trim();
+    // Strip leading/trailing stray punctuation left behind by the stage-direction strip.
+    // Do NOT strip trailing "." — that's a legitimate sentence end.
+    s = s.replace(/^[:;,.\-–—\s]+/, '').trim();
+    s = s.replace(/[:;,\-–—\s]+$/, '').trim();
+    // Strip wrapping quotes/asterisks if they bracket the whole string
+    s = s.replace(/^["'*`“”‘’]+|["'*`“”‘’]+$/g, '').trim();
+    return s;
+}
+
 // Classification: full-screen MGs go on V3, overlay MGs stay on MG track
 const FULLSCREEN_MG_TYPES = new Set([
     'barChart', 'donutChart', 'rankingList', 'timeline', 'comparisonCard', 'bulletList', 'mapChart', 'kineticText'
@@ -543,11 +570,16 @@ function generateCandidates(scene, sceneIndex, totalScenes, allowedMGs, alreadyP
         // Reject hints for small numbers like "3-time winner", "5 awards"
         let hintValid = true;
         if (hint.type === 'statCounter') {
-            const hasStatNum = CONTENT_PATTERNS.statistic(text);
-            if (!hasStatNum || hasStatNum.score < 3) {
+            // VP saw the full script — accept a qualifying stat in EITHER the scene text
+            // or the hint content itself (e.g. "+$1,000,000 Cost Per Transit", "+1% Cargo Value").
+            const sceneStat = CONTENT_PATTERNS.statistic(text);
+            const hintStat = hint.content ? CONTENT_PATTERNS.statistic(hint.content) : null;
+            const sceneQualifies = sceneStat && sceneStat.score >= 3;
+            const hintQualifies  = hintStat  && hintStat.score  >= 3;
+            if (!sceneQualifies && !hintQualifies) {
                 hintValid = false;
                 if (!typeReasons['_rejected']) typeReasons['_rejected'] = [];
-                typeReasons['_rejected'].push(`mgHint:statCounter rejected (no qualifying 100+ number in text)`);
+                typeReasons['_rejected'].push(`mgHint:statCounter rejected (no qualifying 100+ number in scene text or hint content)`);
             }
             // Also reject date ranges like "1953 → 1999" — years are not stats
             if (hintValid && hint.content) {
@@ -582,7 +614,15 @@ function generateCandidates(scene, sceneIndex, totalScenes, allowedMGs, alreadyP
     const statisticHit = patternHits.find(h => h.pattern === 'statistic');
     const hasQualifyingStat = statisticHit && statisticHit.score >= 3;
 
+    // VP hint that passed all its own validators gets cap/pattern-gate exemptions.
+    // The planner saw the full script; a per-video "max 3 headlines" rule shouldn't
+    // silently drop a scene the planner explicitly earmarked for one.
+    const vpPrivileged = hint.type && allowedMGs.includes(hint.type)
+        && !(typeReasons['_rejected'] || []).some(r => r.startsWith(`mgHint:${hint.type}`));
+
     for (const [type, rawScore] of Object.entries(typeScores)) {
+        const isVPHinted = vpPrivileged && type === hint.type;
+
         // Block fullscreen MG types — only Visual Planner can assign fullscreen MGs
         // MG engine only creates overlay MGs on footage scenes
         if (FULLSCREEN_MG_TYPES.has(type)) {
@@ -591,8 +631,9 @@ function generateCandidates(scene, sceneIndex, totalScenes, allowedMGs, alreadyP
         }
 
         // statCounter MUST have a qualifying statistic pattern — no exceptions
-        // This prevents dates, rankings, geographic mentions from triggering statCounter
-        if (type === 'statCounter' && !hasQualifyingStat) {
+        // This prevents dates, rankings, geographic mentions from triggering statCounter.
+        // Exception: VP-hinted statCounter already passed its own validator (scene text OR hint content).
+        if (type === 'statCounter' && !hasQualifyingStat && !isVPHinted) {
             skipped.push({ type, reason: 'no qualifying statistic (100+ number)' });
             continue;
         }
@@ -603,12 +644,18 @@ function generateCandidates(scene, sceneIndex, totalScenes, allowedMGs, alreadyP
             continue;
         }
 
-        // Check per-video cap
-        if (TYPE_CAPS[type] !== undefined) {
+        // Check per-video cap — VP-hinted types are exempt (planner's call, full-script context)
+        if (TYPE_CAPS[type] !== undefined && !isVPHinted) {
             const placed = alreadyPlaced.filter(t => t === type).length;
             if (placed >= TYPE_CAPS[type]) {
                 skipped.push({ type, reason: `cap reached (${placed}/${TYPE_CAPS[type]})` });
                 continue;
+            }
+        } else if (TYPE_CAPS[type] !== undefined && isVPHinted) {
+            const placed = alreadyPlaced.filter(t => t === type).length;
+            if (placed >= TYPE_CAPS[type]) {
+                if (!typeReasons[type]) typeReasons[type] = [];
+                typeReasons[type].push(`vp-hint cap-bypass (${placed}/${TYPE_CAPS[type]})`);
             }
         }
 
@@ -792,9 +839,6 @@ function computeSmartDuration(type, text, subtext) {
     if (type === 'statCounter' || type === 'progressBar') {
         duration = Math.max(duration, 1.5 + ANIM_OVERHEAD + HOLD_PADDING);
     }
-    if (type === 'focusWord') {
-        duration = Math.min(duration, 5.5);
-    }
     if (type === 'barChart' || type === 'donutChart' || type === 'rankingList' || type === 'mapChart') {
         const itemCount = (subtext || '').split(',').filter(s => s.includes(':')).length;
         const staggerTime = itemCount * 0.3;
@@ -809,19 +853,17 @@ function computeSmartDuration(type, text, subtext) {
         const charCount = (text || '').length;
         const revealTime = charCount * 0.06; // ~60ms per character
         duration = Math.max(duration, revealTime + ANIM_OVERHEAD + HOLD_PADDING);
-        duration = Math.min(duration, 8.0);
     }
     if (type === 'kineticText') {
         const kWordCount = (text || '').split(/\s+/).filter(Boolean).length;
         const wordStagger = kWordCount * 0.15;
         duration = Math.max(duration, wordStagger + ANIM_OVERHEAD + HOLD_PADDING);
-        duration = Math.min(duration, 8.0);
     }
 
-    // Clamp between minimum and max
+    // Floor only — no hard ceiling. Caller clamps against the scene duration (for
+    // fullscreen MGs) or trusts the AI's `durationSec` pick (for overlays).
     const min = MIN[type] || 5.0;
-    const max = 10.0;
-    return Math.max(min, Math.min(duration, max));
+    return Math.max(min, duration);
 }
 
 function fixArticleSubtext(subtext, sceneText, displayText) {
@@ -1006,27 +1048,239 @@ function buildRuleMG(scene, sceneIndex, type) {
         startTime = scene.startTime + Math.min(sceneDur * 0.25, 1.5);
     }
 
-    const duration = computeSmartDuration(type, displayText, subtext);
     const category = FULLSCREEN_MG_TYPES.has(type) ? 'fullscreen' : 'overlay';
-
-    // Cap overlay MG duration to scene length + small bleed
     const sceneDur = scene.endTime - scene.startTime;
-    const cappedDuration = category === 'overlay'
-        ? Math.min(duration, sceneDur + 1.0)
-        : duration;
+    // Fullscreen MGs mirror the scene exactly. Overlay MGs use the reading-time
+    // heuristic but are clamped to the scene span + 1s bleed so they stay in sync.
+    const cappedDuration = category === 'fullscreen'
+        ? sceneDur
+        : Math.min(computeSmartDuration(type, displayText, subtext), sceneDur + 1.0);
 
     return {
         id: `mg-${sceneIndex}`,
         type,
         category,
-        text: displayText,
-        subtext: subtext === 'none' ? '' : subtext,
+        text: sanitizeMGText(displayText),
+        subtext: subtext === 'none' ? '' : sanitizeMGText(subtext),
         startTime,
         duration: cappedDuration,
         position,
         sceneIndex,
         style: 'clean', // overridden later
     };
+}
+
+// ============ VP DIRECT-BUILD (skip per-scene AI when VP gave concrete content) ============
+// Parses scene.mgHint content directly into a finished overlay MG without calling AI.
+// Returns null when hint is missing, fullscreen-only, not allowed by niche, or unparseable.
+function buildMGFromHint(scene, sceneIndex, allowedMGs) {
+    const hint = parseMgHint(scene.mgHint);
+    if (!hint.type || hint.isNone || !hint.content) return null;
+    if (!allowedMGs.includes(hint.type)) return null;
+    if (FULLSCREEN_MG_TYPES.has(hint.type)) return null; // fullscreens handled by VP fullscreen loop
+
+    const type = hint.type;
+    const raw = sanitizeMGText(hint.content);
+    if (!raw) return null;
+
+    let displayText = '';
+    let subtext = '';
+    let triggerWord = '';
+
+    switch (type) {
+        case 'statCounter': {
+            displayText = raw.split(/\s+/).slice(0, 6).join(' ');
+            const numMatch = raw.match(/\d[\d,.]*/);
+            triggerWord = numMatch ? numMatch[0].replace(/,/g, '') : raw.split(/\s+/)[0];
+            break;
+        }
+        case 'progressBar': {
+            const pctMatch = raw.match(/(\d+)\s*(%|percent)/i);
+            if (pctMatch) {
+                displayText = raw;
+                subtext = pctMatch[1];
+                triggerWord = pctMatch[1];
+            } else {
+                displayText = raw;
+                triggerWord = raw.split(/\s+/)[0];
+            }
+            break;
+        }
+        case 'lowerThird': {
+            // VP format: "Name, Title" or "Name | Title" or "Name - Title" or plain "Name"
+            const parts = raw.split(/\s*[|,]\s*/).map(p => p.trim()).filter(Boolean);
+            if (parts.length >= 2) {
+                displayText = parts[0];
+                subtext = parts.slice(1).join(', ');
+            } else {
+                const dashParts = raw.split(/\s+[-–—]\s+/).map(p => p.trim()).filter(Boolean);
+                if (dashParts.length >= 2) {
+                    displayText = dashParts[0];
+                    subtext = dashParts.slice(1).join(' — ');
+                } else {
+                    displayText = raw;
+                    subtext = '';
+                }
+            }
+            triggerWord = displayText.split(/\s+/)[0];
+            break;
+        }
+        case 'explainer': {
+            // VP format: "Query | Label" or plain query
+            const parts = raw.split(/\s*\|\s*/).map(p => p.trim()).filter(Boolean);
+            displayText = parts[0] || raw;
+            subtext = parts.length > 1 ? parts.slice(1).join(' ') : displayText;
+            triggerWord = displayText.split(/\s+/)[0];
+            break;
+        }
+        case 'focusWord': {
+            const firstWord = raw.split(/\s+/)[0] || raw;
+            displayText = firstWord;
+            triggerWord = firstWord;
+            break;
+        }
+        case 'headline':
+        case 'callout':
+        case 'kineticText':
+        case 'typewriter':
+        default: {
+            displayText = raw;
+            triggerWord = raw.split(/\s+/)[0];
+            break;
+        }
+    }
+
+    if (!displayText) return null;
+
+    // Find startTime via word alignment — same sync logic as buildRuleMG
+    let startTime = null;
+    if (scene.words && scene.words.length > 0 && triggerWord) {
+        const normalized = triggerWord.toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (normalized) {
+            const wordMatch = scene.words.find(w => w.word.toLowerCase().replace(/[^a-z0-9]/g, '').includes(normalized));
+            if (wordMatch) startTime = Math.max(scene.startTime, wordMatch.start - 0.4);
+        }
+    }
+    if (startTime === null) {
+        const aligned = findWordAlignedStart(displayText, scene);
+        if (aligned !== null) startTime = Math.max(scene.startTime, aligned - 0.4);
+    }
+    if (startTime === null) {
+        const sceneDur = (scene.endTime || 0) - (scene.startTime || 0);
+        startTime = scene.startTime + Math.min(sceneDur * 0.25, 1.5);
+    }
+
+    const sceneDur = scene.endTime - scene.startTime;
+    const heuristic = computeSmartDuration(type, displayText, subtext);
+    const duration = Math.max(2.0, Math.min(heuristic, sceneDur + 1.0));
+
+    return {
+        id: `mg-${sceneIndex}`,
+        type,
+        category: 'overlay',
+        text: sanitizeMGText(displayText),
+        subtext: sanitizeMGText(subtext),
+        startTime,
+        duration,
+        position: POSITION_MAP[type] || 'center',
+        sceneIndex,
+        style: 'clean', // overridden by caller
+        hintSource: true,
+    };
+}
+
+// ============ VP REVIEW PASS (batched, single AI call for all mgHint=none scenes) ============
+// For scenes VP marked as needing no overlay MG, ask the AI to confirm "none" or
+// propose a missed overlay. Writes back to scene.mgHint (sets _vpReviewed flag).
+async function reviewNoneScenes(scenes, skipIndices, scriptContext, allowedMGs, listicleStartScenes) {
+    const targets = [];
+    for (let i = 0; i < scenes.length; i++) {
+        if (skipIndices.has(i)) continue;
+        if (listicleStartScenes && listicleStartScenes.has(i)) continue;
+        const parsed = parseMgHint(scenes[i].mgHint);
+        const missing = parsed.isNone || (!parsed.type && !parsed.content);
+        if (!missing) continue;
+        const dur = (scenes[i].endTime || 0) - (scenes[i].startTime || 0);
+        if (dur < 2.5) continue;
+        if ((scenes[i].text || '').trim().length < 30) continue;
+        targets.push(i);
+    }
+    if (targets.length === 0) return { reviewed: 0, proposed: 0, confirmed: 0 };
+
+    const overlayAllowed = allowedMGs.filter(t => !FULLSCREEN_MG_TYPES.has(t));
+    if (overlayAllowed.length === 0) return { reviewed: 0, proposed: 0, confirmed: 0 };
+
+    const niche = getNiche(scriptContext?.nicheId || 'general');
+    const lang = scriptContext?.language || 'en';
+
+    let prompt = `You are reviewing ${targets.length} scenes the Visual Planner initially marked as needing no overlay motion graphic. Decide per scene: either CONFIRM "none" (narrative/transitional text with no hookable fact) OR PROPOSE an overlay MG VP missed.
+
+TOPIC: ${scriptContext?.summary || '(not set)'}
+NICHE: ${niche.name}
+ALLOWED OVERLAY TYPES: ${overlayAllowed.join(', ')}
+
+Type contracts (content format after the colon):
+- statCounter: BIG number/percentage/multiplier (100+, %, $, x/fold). content = the stat, e.g. "340%", "$2.5M"
+- lowerThird: first mention of a named person/place/org. content = "Name, Title" or "Name"
+- headline: thesis sentence worth pinning. content = short headline (≤8 words)
+- callout: key insight/takeaway. content = short phrase
+- focusWord: single dramatic word. content = the word
+- progressBar: percentage completion. content = "X%"
+- typewriter: short quote/fact for dramatic reveal. content = the quote
+- kineticText: short powerful statement. content = ≤6 words
+- explainer: a tool/product/tech/concept discussed. content = "ImageQuery | Label"
+
+Rules:
+- Reply with EXACTLY ${targets.length} lines, one per scene, in the listed order.
+- Format per line: "<sceneIndex>: none" OR "<sceneIndex>: <type>: <content>"
+- Only propose a type from ALLOWED OVERLAY TYPES. Never propose a fullscreen type.
+- If the scene text does not contain a concrete fact/name/number/quote/concept, reply "none".
+- Text/content must be anchored in the scene narration (no invented facts).
+
+Scenes to review:
+`;
+    for (const idx of targets) {
+        const s = scenes[idx];
+        const text = (s.text || '').replace(/\s+/g, ' ').slice(0, 260);
+        prompt += `Scene ${idx} (${((s.endTime - s.startTime) || 0).toFixed(1)}s): "${text}"\n`;
+    }
+    prompt += getLanguageBlock(lang);
+
+    let raw;
+    try {
+        raw = await callAI(prompt);
+    } catch (e) {
+        console.log(`  [VP Review] AI call failed: ${e.message} — skipping review pass`);
+        return { reviewed: 0, proposed: 0, confirmed: 0 };
+    }
+
+    const targetSet = new Set(targets);
+    const lines = (raw || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    let proposed = 0, confirmed = 0;
+
+    for (const line of lines) {
+        const m = line.match(/^(?:scene\s*)?#?(\d+)\s*[:\-)]\s*(.+)$/i);
+        if (!m) continue;
+        const idx = parseInt(m[1], 10);
+        if (!targetSet.has(idx)) continue;
+        const payload = m[2].trim();
+
+        if (/^none\b/i.test(payload)) {
+            scenes[idx]._vpReviewed = 'confirmed-none';
+            confirmed++;
+            continue;
+        }
+        const proposal = parseMgHint(payload);
+        if (proposal.type && proposal.content && overlayAllowed.includes(proposal.type)) {
+            scenes[idx].mgHint = `${proposal.type}: ${proposal.content}`;
+            scenes[idx]._vpReviewed = 'proposed';
+            proposed++;
+        }
+    }
+
+    const unparsed = targets.length - proposed - confirmed;
+    console.log(`  [VP Review] ${targets.length} none-scenes reviewed → ${proposed} proposed, ${confirmed} confirmed none${unparsed > 0 ? `, ${unparsed} unparsed` : ''}`);
+    return { reviewed: targets.length, proposed, confirmed };
 }
 
 function buildPrompt(scene, sceneIndex, totalScenes, scriptContext, sceneVisual, candidateTypes, mgHintObj, ctx) {
@@ -1169,7 +1423,8 @@ type: <${allowedTypesList}>
 text: <display text, max 8 words, extracted from narration>
 subtext: <secondary line OR "label1:value1,label2:value2" for charts, or "none">
 position: <center|bottom-left|bottom-right|center-left|top-right>
-triggerWord: <the exact word from narration that triggers appearance, or "none">`;
+triggerWord: <the exact word from narration that triggers appearance, or "none">
+durationSec: <how long the MG should stay on screen, in seconds. Scene is ${sceneDuration}s — an OVERLAY MG can last anywhere from ~3s to the full scene depending on how long the narration supports it. A FULLSCREEN MG (mapChart, explainer, etc.) will cover the whole scene regardless, so any value is fine for those. Pick based on reading time + narration pacing, NOT a fixed cap.>`;
     if (candidateTypes.includes('mapChart')) {
         prompt += `\nmapVariant: <locator|route|regionHighlight|comparison> (ONLY if type is mapChart)`;
     }
@@ -1183,7 +1438,44 @@ triggerWord: <the exact word from narration that triggers appearance, or "none">
     return prompt;
 }
 
-function parseResponse(text, scene, sceneIndex) {
+// Levenshtein distance — tolerant of Whisper phonetic errors (Bab↔Bob, Mandeb↔Mandeb)
+function _levenshtein(a, b) {
+    if (a === b) return 0;
+    if (!a.length) return b.length;
+    if (!b.length) return a.length;
+    const m = a.length, n = b.length;
+    let prev = new Array(n + 1);
+    let curr = new Array(n + 1);
+    for (let j = 0; j <= n; j++) prev[j] = j;
+    for (let i = 1; i <= m; i++) {
+        curr[0] = i;
+        for (let j = 1; j <= n; j++) {
+            const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+            curr[j] = Math.min(curr[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost);
+        }
+        [prev, curr] = [curr, prev];
+    }
+    return prev[n];
+}
+
+// True if `needle` appears in `haystack` either as a substring or as a fuzzy word match
+// (Levenshtein ≤ 2 for words ≥4 chars, ≤1 for shorter). Handles Whisper mis-transcriptions.
+function _fuzzyWordInText(needle, haystack) {
+    const n = needle.toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (!n) return true;
+    const hayLower = haystack.toLowerCase();
+    if (hayLower.includes(needle.toLowerCase())) return true;
+    if (hayLower.replace(/[^a-z0-9\s]/g, ' ').includes(n)) return true;
+    const tolerance = n.length >= 4 ? 2 : 1;
+    const words = hayLower.split(/[^a-z0-9]+/).filter(Boolean);
+    for (const w of words) {
+        if (Math.abs(w.length - n.length) > tolerance) continue;
+        if (_levenshtein(w, n) <= tolerance) return true;
+    }
+    return false;
+}
+
+function parseResponse(text, scene, sceneIndex, scriptContext) {
     const lines = text.trim().split('\n');
     let type = 'none';
     let displayText = '';
@@ -1191,6 +1483,7 @@ function parseResponse(text, scene, sceneIndex) {
     let aiPosition = '';
     let triggerWord = '';
     let mapVariant = '';
+    let aiDurationSec = null;
 
     const typeMap = {
         'headline': 'headline',
@@ -1267,6 +1560,7 @@ function parseResponse(text, scene, sceneIndex) {
         const textMatch = lower.match(/^text\s*[:=\-]\s*/);
         if (textMatch) {
             displayText = line.substring(line.search(/[:=\-]\s*/) + 1).trim().replace(/^["'*]+|["'*]+$/g, '');
+            displayText = sanitizeMGText(displayText);
         }
 
         // Flexible subtext matching
@@ -1274,6 +1568,7 @@ function parseResponse(text, scene, sceneIndex) {
         if (subMatch) {
             subtext = line.substring(line.search(/[:=\-]\s*/) + 1).trim().replace(/^["'*]+|["'*]+$/g, '');
             if (subtext.toLowerCase() === 'none' || subtext === '-') subtext = '';
+            else subtext = sanitizeMGText(subtext);
         }
 
         // Position (AI-chosen)
@@ -1296,6 +1591,14 @@ function parseResponse(text, scene, sceneIndex) {
             const variantMap = { locator: 'locator', route: 'route', regionhighlight: 'regionHighlight', region_highlight: 'regionHighlight', comparison: 'comparison' };
             mapVariant = variantMap[v] || '';
         }
+
+        // AI-picked duration (seconds). Matches "durationSec:", "duration:", "duration sec:".
+        const durMatch = lower.match(/^duration\s*-?\s*sec\s*[:=\-]\s*(.+)/) || lower.match(/^duration\s*[:=\-]\s*(.+)/);
+        if (durMatch) {
+            const raw = durMatch[1].trim().replace(/['"*]/g, '').replace(/s(ec(ond)?s?)?\s*$/i, '').trim();
+            const n = parseFloat(raw);
+            if (Number.isFinite(n) && n > 0) aiDurationSec = n;
+        }
     }
 
     // Fallback: scan full text for type keywords if parser missed them
@@ -1314,15 +1617,36 @@ function parseResponse(text, scene, sceneIndex) {
     if (type === 'none') return null;
 
 
-    // Validate lowerThird: displayed name must actually appear in the scene narration text.
-    // Prevents spoiling names from broader context before they're spoken.
+    // Validate lowerThird: displayed name must be grounded — either in AI-extracted entities
+    // (from the script) OR fuzzy-matched in scene text (tolerant of Whisper mis-transcription,
+    // e.g. "Bab el-Mandeb" vs Whisper's "Bob -El -Mandeb").
     if (type === 'lowerThird' && displayText) {
-        const sceneTextLower = scene.text.toLowerCase();
-        // Check if the main name words appear in scene text
         const nameWords = displayText.split(/\s+/).filter(w => w.length > 2 && /^[A-Z]/.test(w));
-        const nameInText = nameWords.length === 0 || nameWords.some(w => sceneTextLower.includes(w.toLowerCase()));
+        let nameInText = nameWords.length === 0;
+
         if (!nameInText) {
-            console.log(`[MG] lowerThird rejected: "${displayText}" not found in scene text "${scene.text.substring(0, 60)}..."`);
+            // 1. Check against AI-extracted entities (source of truth from the script)
+            const entities = scriptContext?.entities || [];
+            if (entities.length > 0) {
+                const displayLower = displayText.toLowerCase().replace(/\[[^\]]*\]/g, '').trim();
+                for (const ent of entities) {
+                    const entClean = String(ent).toLowerCase().replace(/\[[^\]]*\]/g, '').trim();
+                    if (!entClean) continue;
+                    if (entClean.includes(displayLower) || displayLower.includes(entClean)) {
+                        nameInText = true;
+                        break;
+                    }
+                }
+            }
+
+            // 2. Fuzzy match against scene text (handles Whisper phonetic errors)
+            if (!nameInText) {
+                nameInText = nameWords.some(w => _fuzzyWordInText(w, scene.text));
+            }
+        }
+
+        if (!nameInText) {
+            console.log(`[MG] lowerThird rejected: "${displayText}" not found in scene text "${scene.text.substring(0, 60)}..." (entities checked, fuzzy checked)`);
             return null;
         }
     }
@@ -1330,16 +1654,22 @@ function parseResponse(text, scene, sceneIndex) {
     const finalText = displayText || scene.text.substring(0, 40);
     const sceneDuration = scene.endTime - scene.startTime;
     const isOverlay = !FULLSCREEN_MG_TYPES.has(type);
-    // Smart duration based on content
-    let mgDuration = computeSmartDuration(type, finalText, subtext);
 
-    // For overlay MGs, cap duration to scene length + small extension
-    // This keeps them synced with the narration instead of drifting across scenes
-    if (isOverlay) {
-        const maxOverlayDuration = sceneDuration + 1.0; // allow 1s bleed into next scene
-        if (mgDuration > maxOverlayDuration) {
-            mgDuration = Math.max(2.0, maxOverlayDuration);
-        }
+    // Duration rules (no hard caps):
+    //   • Fullscreen MG (mapChart, explainer, etc.) → mirrors scene duration exactly.
+    //     V3 covers the scene entirely, so the MG must live the whole span.
+    //   • Overlay MG → AI's `durationSec` wins. Falls back to reading-time heuristic
+    //     (`computeSmartDuration`) if the AI forgot the field. Clamped only to the
+    //     scene span + 1s bleed so overlays stay in narration sync.
+    let mgDuration;
+    if (!isOverlay) {
+        mgDuration = sceneDuration;
+    } else {
+        const heuristic = computeSmartDuration(type, finalText, subtext);
+        const picked = (aiDurationSec && aiDurationSec > 0) ? aiDurationSec : heuristic;
+        const maxOverlayDuration = sceneDuration + 1.0;
+        mgDuration = Math.min(picked, maxOverlayDuration);
+        if (mgDuration < 2.0) mgDuration = Math.min(2.0, maxOverlayDuration);
     }
 
     // === TIMING: Use AI's triggerWord first, fall back to text-based word matching ===
@@ -1382,8 +1712,8 @@ function parseResponse(text, scene, sceneIndex) {
         id: `mg-${sceneIndex}`,
         type: type,
         category: FULLSCREEN_MG_TYPES.has(type) ? 'fullscreen' : 'overlay',
-        text: finalText,
-        subtext: subtext,
+        text: sanitizeMGText(finalText),
+        subtext: sanitizeMGText(subtext),
         startTime: startTime,
         duration: finalDuration,
         position: finalPosition,
@@ -1476,8 +1806,12 @@ Only pick the most impactful scenes. Reply with ONLY the lines, nothing else.`;
                 const scene = scenes[idx];
                 const type = typeMap[typeRaw];
                 const finalText = text || scene.text.substring(0, 40);
-                // Smart duration — NOT capped to scene length
-                const mgDuration = computeSmartDuration(type, finalText, data);
+                const sceneDur = scene.endTime - scene.startTime;
+                const isFullscreen = FULLSCREEN_MG_TYPES.has(type);
+                // Fullscreen = full scene span. Overlay = heuristic, clamped to scene+1s.
+                const mgDuration = isFullscreen
+                    ? sceneDur
+                    : Math.min(computeSmartDuration(type, finalText, data), sceneDur + 1.0);
 
                 // Timing: AI triggerWord first, then heuristic fallback
                 let wordStart = null;
@@ -1587,15 +1921,48 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
             continue;
         }
 
+        // For data-required MGs, parse "<Title> | Label1:Val1 | Label2:Val2"
+        // into mg.text (title) and mg.subtext (pairs). If no real pairs found,
+        // defensively reject (orchestrator should have caught this, but belt-and-suspenders).
+        const DATA_MGS = new Set(['barChart', 'donutChart', 'rankingList', 'timeline', 'bulletList']);
+        let mgText = mgContent;
+        let mgSubtext = scene.text;
+        if (DATA_MGS.has(mgType)) {
+            const segs = mgContent.split(/\s*\|\s*|\s*;\s*/).map(v => v.trim()).filter(Boolean);
+            const firstIsPair = segs.length > 0 && /^[^:]+:\s*[\d.,%$+\-]+/.test(segs[0]);
+            const pairSegs = (segs.length > 1 && !firstIsPair) ? segs.slice(1) : segs;
+            const pairs = pairSegs.filter(v => /^[^:]+:\s*[\d.,%$+\-]+/.test(v));
+            const isBullet = mgType === 'bulletList';
+            const enough = isBullet ? pairSegs.length >= 2 : pairs.length >= 2;
+            if (!enough) {
+                console.log(`  Scene ${i}: [fullscreenMG] "${mgType}" rejected — no real data pairs in "${mgContent.slice(0, 60)}". Skipping (scene will have no MG here).`);
+                continue;
+            }
+            mgText = (!firstIsPair && segs.length > 1) ? segs[0] : '';
+            mgSubtext = pairSegs.join(', ');
+        } else if (mgType === 'comparisonCard') {
+            if (!/\s+vs\.?\s+|\s+versus\s+/i.test(mgContent)) {
+                console.log(`  Scene ${i}: [fullscreenMG] "comparisonCard" rejected — missing "A vs B" pattern in "${mgContent.slice(0, 60)}". Skipping.`);
+                continue;
+            }
+        } else if (mgType === 'mapChart') {
+            // Route VP's location:value pairs into subtext so map-provider's
+            // entity parser finds them directly. Without this the parser sees
+            // narration in subtext, finds no "Place: value" pairs, and falls back
+            // to dumping the full script-wide entity list into the geocoder.
+            mgText = '';
+            mgSubtext = mgContent;
+        }
+
         const duration = scene.endTime - scene.startTime;
         const mg = {
             id: `mg-${i}`,
             type: mgType,
             category: 'fullscreen',
-            text: mgContent,
-            subtext: scene.text, // full scene narration as context for renderer
-            startTime: scene.startTime + 0.1,
-            duration: Math.max(duration - 0.2, 2),
+            text: mgText,
+            subtext: mgSubtext,
+            startTime: scene.startTime,
+            duration: duration,
             position: POSITION_MAP[mgType] || 'center',
             sceneIndex: i,
             selectionMode: 'visual-planner',
@@ -1612,7 +1979,19 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
             mg.subType = catOverride?.style || reg.defaultType;
             if (catOverride?.anim) mg.animation = catOverride.anim;
         }
-        if (mgType === 'mapChart') { mg.mapStyle = mapStyle; if (mg.mapVariant) mg.subType = mg.mapVariant; }
+        if (mgType === 'mapChart') {
+            mg.mapStyle = mapStyle;
+            // Honor VP's mapVariant selection (locator/route/regionHighlight/comparison).
+            // Validate against registry — reject anything not in mapChart.types.
+            const mapReg = MG_REGISTRY.mapChart;
+            const vpVariant = scene.mapVariant;
+            if (vpVariant && mapReg?.types?.[vpVariant]) {
+                mg.mapVariant = vpVariant;
+                mg.subType = vpVariant;
+            } else if (mg.mapVariant && mapReg?.types?.[mg.mapVariant]) {
+                mg.subType = mg.mapVariant;
+            }
+        }
 
         results.push(mg);
         fullscreenMGSceneIndices.add(i);
@@ -1632,6 +2011,17 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
         }
     }
 
+    // VP REVIEW PASS: ask AI to confirm "none" or propose missed overlays for
+    // scenes VP didn't tag. Runs once, batched, before the per-scene loop.
+    try {
+        await reviewNoneScenes(scenes, fullscreenMGSceneIndices, scriptContext, allowedMGs, listicleStartScenes);
+    } catch (e) {
+        console.log(`  [VP Review] pass failed: ${e.message} — continuing with original hints`);
+    }
+
+    let directBuiltCount = 0;
+    let reviewSkippedCount = 0;
+
     for (let i = 0; i < scenes.length; i++) {
         // Skip scenes that already have a planned fullscreen MG
         if (fullscreenMGSceneIndices.has(i)) continue;
@@ -1645,6 +2035,58 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
         const scene = scenes[i];
         const sceneVisual = visualAnalysis ? visualAnalysis.find(v => v.sceneIndex === i) : null;
         const arcTag = ctx.getArc(i);
+
+        // VP review confirmed no MG needed — skip entirely
+        if (scene._vpReviewed === 'confirmed-none') {
+            console.log(`  Scene ${i} [${arcTag}]: [VP-review] confirmed none — skipped`);
+            lastType = '';
+            reviewSkippedCount++;
+            continue;
+        }
+
+        // VP DIRECT-BUILD: if VP gave concrete overlay content, skip hybrid + AI
+        const preHint = parseMgHint(scene.mgHint);
+        if (preHint.type && preHint.content
+            && allowedMGs.includes(preHint.type)
+            && !FULLSCREEN_MG_TYPES.has(preHint.type)) {
+            const vpMG = buildMGFromHint(scene, i, allowedMGs);
+            if (vpMG) {
+                if (ctx.isDuplicateText(vpMG.text)) {
+                    console.log(`  Scene ${i} [${arcTag}]: [VP-direct] Rejected (duplicate text): "${vpMG.text.slice(0, 40)}"`);
+                } else {
+                    vpMG.style = mgStyle;
+                    vpMG.selectionMode = scene._vpReviewed === 'proposed' ? 'vp-review' : 'vp-direct';
+                    const themeIdVP = scriptContext?.themeId || 'standard';
+                    const themeOvrVP = MG_THEME_OVERRIDES[themeIdVP] || {};
+                    const catOvrVP = themeOvrVP[vpMG.type];
+                    const regVP = MG_REGISTRY[vpMG.type];
+                    if (regVP) {
+                        vpMG.subType = catOvrVP?.style || regVP.defaultType;
+                        if (catOvrVP?.anim) vpMG.animation = catOvrVP.anim;
+                    }
+                    if (vpMG.type === 'explainer') {
+                        vpMG.explainerQuery = vpMG.text || '';
+                        vpMG.explainerLabel = vpMG.subtext || vpMG.text || '';
+                        vpMG.explainerImageFile = null;
+                        vpMG.duration = Math.max(vpMG.duration, scene.endTime - vpMG.startTime - 0.2);
+                    }
+                    if (sceneVisual && sceneVisual.suggestedMGPosition === 'avoid-center' && vpMG.position === 'center') {
+                        vpMG.position = 'bottom-left';
+                    }
+                    const wordAlignedVP = findWordAlignedStart(vpMG.text, scene) !== null;
+                    const subTagVP = vpMG.subType ? `:${vpMG.subType}` : '';
+                    const modeTagVP = scene._vpReviewed === 'proposed' ? 'VP-REVIEW' : 'VP-DIRECT';
+                    console.log(`  Scene ${i} [${arcTag}]: [${modeTagVP}] ${vpMG.type}${subTagVP}: "${vpMG.text}" @${vpMG.startTime.toFixed(2)}s pos:${vpMG.position} ${wordAlignedVP ? '(word-synced)' : '(centered)'}`);
+                    placedTypes.push(vpMG.type);
+                    lastType = vpMG.type;
+                    ctx.record(vpMG);
+                    results.push(vpMG);
+                    directBuiltCount++;
+                }
+                continue; // skip hybrid/AI path — VP content was good enough
+            }
+        }
+
         console.log(`  Scene ${i} [${arcTag}]: "${scene.text.substring(0, 50)}..."`);
 
         // ---- HYBRID STEP 1: Rule-based candidate generation (with mgHint from Visual Planner + context tracker) ----
@@ -1693,7 +2135,7 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
                 const prompt = buildPrompt(scene, i, scenes.length, scriptContext, sceneVisual, candidateTypes, candidateResult.hint, ctx);
                 const rawText = await callAI(prompt);
                 console.log(`    [AI raw]: ${rawText.substring(0, 80).replace(/\n/g, ' | ')}`);
-                mg = parseResponse(rawText, scene, i);
+                mg = parseResponse(rawText, scene, i, scriptContext);
 
                 // Enforce candidate list: reject if AI picked outside candidates
                 if (mg && !candidateTypes.includes(mg.type)) {
@@ -1905,15 +2347,28 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
     }
 
     // Log selection summary
-    const modeCounts = { ai: 0, rule: 0, 'rule-fallback': 0, 'listicle-counter': 0, 'visual-planner': 0 };
+    const modeCounts = { ai: 0, rule: 0, 'rule-fallback': 0, 'listicle-counter': 0, 'visual-planner': 0, 'vp-direct': 0, 'vp-review': 0 };
     const typeCounts = {};
     for (const mg of results) {
-        modeCounts[mg.selectionMode || 'ai']++;
+        const mode = mg.selectionMode || 'ai';
+        if (!(mode in modeCounts)) modeCounts[mode] = 0;
+        modeCounts[mode]++;
         typeCounts[mg.type] = (typeCounts[mg.type] || 0) + 1;
     }
     console.log(`\n  Motion graphics placed: ${results.length}/${scenes.length} scenes (style: ${mgStyle})`);
     if (results.length > 0) {
-        console.log(`  📊 Selection: AI=${modeCounts.ai} | Rule=${modeCounts.rule} | Fallback=${modeCounts['rule-fallback']}${modeCounts['visual-planner'] ? ` | Planned=${modeCounts['visual-planner']}` : ''}`);
+        const parts = [
+            `AI=${modeCounts.ai}`,
+            `Rule=${modeCounts.rule}`,
+            `Fallback=${modeCounts['rule-fallback']}`,
+        ];
+        if (modeCounts['visual-planner']) parts.push(`Planned=${modeCounts['visual-planner']}`);
+        if (modeCounts['vp-direct']) parts.push(`VP-Direct=${modeCounts['vp-direct']}`);
+        if (modeCounts['vp-review']) parts.push(`VP-Review=${modeCounts['vp-review']}`);
+        console.log(`  📊 Selection: ${parts.join(' | ')}`);
+        if (directBuiltCount || reviewSkippedCount) {
+            console.log(`  📊 VP pipeline: ${directBuiltCount} direct-built, ${reviewSkippedCount} review-confirmed-none`);
+        }
         const typeBreakdown = Object.entries(typeCounts).sort((a, b) => b[1] - a[1]).map(([t, c]) => `${t}(${c})`).join(', ');
         console.log(`  📊 Types: ${typeBreakdown}`);
     }

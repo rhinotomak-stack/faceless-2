@@ -21,6 +21,51 @@ const config = require('./config');
 // ── Geocoding cache (avoids repeat API calls within same build) ──
 const _geocodeCache = new Map();
 
+// ── MapTiler tile cache (avoids re-downloading identical tiles across maps) ──
+// Keyed by `${style}/${z}/${x}/${y}`. Stores raw PNG Buffer. Cleared between builds.
+const _tileCache = new Map();
+
+// ── Non-place entity filter ──
+// These entities should NEVER reach the geocoder — they're not locations and
+// cause garbage matches (e.g. "Houthi forces" → Albania, "Maersk" → Denmark,
+// "Hapag-Lloyd" → Alberta). When a non-place slips through, OSM fetches wrong
+// country boundaries and the final map is polluted with unrelated regions.
+const NON_PLACE_SUFFIX_RE = /\b(Inc|Inc\.|Ltd|Ltd\.|LLC|PLC|Corp|Corp\.|Corporation|Co\.|Company|Companies|AG|SA|GmbH|BV|NV|Holding|Holdings|Group|Groups?|Shipping|Lines?|Airlines?|Motors?|Industries|Solutions|Technologies|Services|Partners|Ventures|Capital)\b/i;
+const NON_PLACE_WORD_RE  = /\b(forces|militia|militant|militants|rebels|rebel|insurgents?|fighters|battalion|brigade|regiment|corps|coalition|alliance|cartel|faction|syndicate|terrorists?|party|parties|government|governments|administration|administrations|agency|agencies|ministry|ministries|committee|committees|council|councils|union|unions|organization|organizations|association|associations|federation|confederation|conglomerate)\b/i;
+const GENERIC_GLOBAL_RE  = /^(world|global|globe|earth|international|worldwide|everywhere|nowhere|abroad)$/i;
+
+function isLikelyPlace(name, entityTypes) {
+    if (!name || typeof name !== 'string') return false;
+    const trimmed = name.trim();
+    if (trimmed.length < 2) return false;
+
+    // 1. Trust the AI Director's tagging when present
+    const tag = entityTypes && entityTypes[trimmed.toLowerCase()];
+    if (tag === 'place') return true;
+    if (tag === 'person' || tag === 'org' || tag === 'event') return false;
+
+    // 2. Untagged: apply heuristics
+    if (GENERIC_GLOBAL_RE.test(trimmed)) return false;     // "World", "Earth", etc.
+    if (NON_PLACE_SUFFIX_RE.test(trimmed)) return false;   // Company suffixes
+    if (NON_PLACE_WORD_RE.test(trimmed)) return false;     // Groups / orgs / institutions
+
+    return true;
+}
+
+function filterPlaces(names, entityTypes, context = 'entities') {
+    if (!Array.isArray(names) || names.length === 0) return names || [];
+    const kept = [];
+    const dropped = [];
+    for (const n of names) {
+        if (isLikelyPlace(n, entityTypes)) kept.push(n);
+        else dropped.push(n);
+    }
+    if (dropped.length > 0) {
+        console.log(`      🚫 Filtered ${dropped.length} non-place ${context}: ${dropped.join(', ')}`);
+    }
+    return kept;
+}
+
 // ── MapTiler style mapping (primary) ──
 const MAPTILER_STYLE_MAP = {
     dark:      'dataviz-dark',
@@ -73,6 +118,35 @@ const GEO_COORDS = {
     'Europe': [15, 50, 3.5], 'Asia': [90, 35, 2], 'Africa': [20, 5, 2.5],
     'Middle East': [45, 28, 4], 'South America': [-60, -15, 2.5],
     'North America': [-100, 45, 2.5], 'World': [0, 20, 1],
+    'Earth': [0, 20, 1], 'Globe': [0, 20, 1],
+    // Sub-continents / regions — tighter than continents, often the right establishing shot
+    'Southeast Asia': [110, 10, 3.5], 'East Asia': [120, 35, 3.5],
+    'South Asia': [80, 22, 3.5], 'Central Asia': [70, 45, 3.5],
+    'Western Europe': [5, 48, 4.5], 'Eastern Europe': [28, 50, 4],
+    'Northern Europe': [18, 62, 3.5], 'Southern Europe': [15, 42, 4.5],
+    'Scandinavia': [18, 64, 3.5], 'Balkans': [22, 43, 5], 'Caucasus': [45, 42, 5.5],
+    'North Africa': [10, 28, 3.5], 'West Africa': [-5, 10, 4],
+    'East Africa': [38, 0, 4], 'Southern Africa': [25, -22, 3.5],
+    'Sub-Saharan Africa': [20, -5, 2.8],
+    'Central America': [-85, 14, 4.5], 'Caribbean': [-75, 17, 4.5],
+    'Latin America': [-70, -10, 2.8], 'Oceania': [145, -25, 2.8],
+    'Arabian Peninsula': [46, 23, 4], 'Horn of Africa': [44, 8, 5],
+    'Indian Subcontinent': [78, 22, 3.8],
+    // Seas / gulfs / straits — often the BEST establishing frame for coastal stories
+    'Red Sea': [38, 20, 4.5], 'Gulf of Aden': [48, 12.5, 5.5],
+    'Persian Gulf': [52, 27, 5], 'Arabian Sea': [64, 15, 4],
+    'Gulf of Oman': [58, 24, 6], 'Strait of Hormuz': [56, 26.5, 7.5],
+    'Bab-el-Mandeb': [43.3, 12.6, 7.5], 'Bab el-Mandeb': [43.3, 12.6, 7.5],
+    'Mediterranean': [18, 37, 3.8], 'Mediterranean Sea': [18, 37, 3.8],
+    'Black Sea': [35, 43.5, 5], 'Caspian Sea': [51, 41.5, 4.8],
+    'Baltic Sea': [19, 58, 4.5], 'North Sea': [3, 56, 4.8],
+    'South China Sea': [115, 15, 3.8], 'East China Sea': [125, 30, 4.5],
+    'Sea of Japan': [135, 40, 4.5], 'Bay of Bengal': [88, 15, 4],
+    'Gulf of Mexico': [-90, 25, 4.5], 'Gulf of Guinea': [3, 3, 4.5],
+    // Oceans (rarely the right choice but completeness)
+    'Pacific Ocean': [-160, 0, 2], 'Atlantic Ocean': [-30, 15, 2.2],
+    'Indian Ocean': [75, -10, 2.2], 'Arctic Ocean': [0, 85, 2],
+    'Southern Ocean': [0, -65, 2],
 };
 
 /**
@@ -361,9 +435,16 @@ function computeTileGrid(view, width = OUT_W, height = OUT_H) {
  * Uses @2x retina tiles (512px native) for crisp 1920×1080 output.
  */
 function downloadTile(style, z, x, y, apiKey) {
+    const cacheKey = `${style}/${z}/${x}/${y}`;
+    if (_tileCache.has(cacheKey)) {
+        return Promise.resolve(_tileCache.get(cacheKey));
+    }
     // @2x suffix gives 512px retina tiles on the free tier
     const url = `https://api.maptiler.com/maps/${style}/${z}/${x}/${y}@2x.png?key=${apiKey}`;
-    return httpsDownload(url, 10000);
+    return httpsDownload(url, 10000).then(buf => {
+        _tileCache.set(cacheKey, buf);
+        return buf;
+    });
 }
 
 /**
@@ -377,7 +458,8 @@ async function stitchMapTilerTiles(view, mapStyle, apiKey, outW, outH) {
     const canvasH = outH || OUT_H;
 
     const { tiles, z } = computeTileGrid(view, canvasW, canvasH);
-    console.log(`      MapTiler: stitching ${tiles.length} tiles at z=${z} ${canvasW}×${canvasH} (${style})`);
+    const cachedCount = tiles.filter(t => _tileCache.has(`${style}/${t.z}/${t.x}/${t.y}`)).length;
+    console.log(`      MapTiler: stitching ${tiles.length} tiles at z=${z} ${canvasW}×${canvasH} (${style})${cachedCount > 0 ? ` [${cachedCount} cached]` : ''}`);
 
     // Download all tiles in parallel (batched to avoid hammering)
     const BATCH_SIZE = 6;
@@ -444,38 +526,88 @@ function buildGeoapifyUrl(view, mapStyle, apiKey) {
  * Also falls back to scriptContext.entities and GEO_COORDS dictionary scan.
  */
 function extractEntities(mg, scriptContext) {
-    let entities = [];
+    const entityTypes = scriptContext?.entityTypes || {};
 
-    // 1. Parse subtext "Location: value" pairs — these are the most specific
+    // Meta-directive prefixes VP emits instead of actual place names
+    // ("Region: Middle East", "Zoom on Persian Gulf", "Pan to Red Sea", etc.).
+    // These describe a camera op — the REAL place is the value side.
+    const META_KEY_RE = /^(region|zoom|pan|view|map|focus|overview|closeup|close-up|highlight|scene|labels?)$/i;
+    const META_PREFIX_RE = /^(zoom\s+(?:on|in(?:to)?|to)|pan\s+(?:to|across)|view\s+of|focus\s+on|overview\s+of|highlight(?:ing)?|map\s+of|region:?)\s+/i;
+
+    const stripMetaPrefix = (s) => {
+        if (!s) return '';
+        let out = String(s).trim();
+        // Strip up to 2 chained prefixes (e.g. "Map of Region: Asia")
+        for (let i = 0; i < 2; i++) {
+            const stripped = out.replace(META_PREFIX_RE, '').trim();
+            if (stripped === out) break;
+            out = stripped;
+        }
+        return out;
+    };
+
+    // Filter at each step so a bad step 1 (e.g. VP description with stray colons)
+    // doesn't block fallback to steps 2 and 3.
+
+    // 1. Parse subtext "Location: value" pairs — short fragments only.
+    //    Long fragments (>6 words) are almost always descriptive prose, not
+    //    real "Location: value" pairs, so skip them. If the key is a
+    //    meta-directive ("Region", "Zoom", "Pan"...), use the VALUE as the place.
+    let entities = [];
     const subtext = mg.subtext || '';
     if (subtext) {
-        // Pattern: "Berlin: 3.6M" or "Saudi Arabia: 12M bpd" or "Canada: #4"
         const pairs = subtext.split(',').map(s => s.trim()).filter(Boolean);
         for (const pair of pairs) {
             const colonIdx = pair.indexOf(':');
             if (colonIdx > 0) {
-                const location = pair.substring(0, colonIdx).trim();
-                if (location.length >= 2) entities.push(location);
+                const key = pair.substring(0, colonIdx).trim();
+                const val = pair.substring(colonIdx + 1).trim();
+                if (META_KEY_RE.test(key)) {
+                    // "Region: Middle East" → place is the value
+                    if (val && val.length >= 2 && val.split(/\s+/).length <= 6) {
+                        entities.push(val);
+                    }
+                } else if (key.length >= 2 && key.split(/\s+/).length <= 6) {
+                    entities.push(key);
+                }
             }
         }
     }
+    let filtered = filterPlaces(entities, entityTypes, 'entities');
+    if (filtered.length > 0) return filtered;
 
-    // 2. If no subtext locations, check mg.text for place names
-    if (entities.length === 0 && mg.text) {
-        const textToScan = mg.text;
+    // 2a. If mg.text is a short meta-directive like "Zoom on Persian Gulf",
+    //     stripping the prefix leaves the literal place name — use it directly.
+    //     (Avoids needing every place in the GEO_COORDS key list.)
+    const textStripped = stripMetaPrefix(mg.text || '');
+    if (textStripped && textStripped !== (mg.text || '').trim()) {
+        const wordCount = textStripped.split(/\s+/).length;
+        if (wordCount >= 1 && wordCount <= 4) {
+            filtered = filterPlaces([textStripped], entityTypes, 'entities');
+            if (filtered.length > 0) return filtered;
+        }
+    }
+
+    // 2b. Scan mg.text AND mg.subtext for known GEO_COORDS place names.
+    const scanText = `${stripMetaPrefix(mg.text || '')} ${stripMetaPrefix(mg.subtext || '')}`.toLowerCase();
+    if (scanText.trim()) {
+        entities = [];
         for (const name of Object.keys(GEO_COORDS)) {
-            if (name.length > 2 && textToScan.toLowerCase().includes(name.toLowerCase())) {
+            if (name.length > 2 && scanText.includes(name.toLowerCase())) {
                 if (!entities.includes(name)) entities.push(name);
             }
         }
+        filtered = filterPlaces(entities, entityTypes, 'entities');
+        if (filtered.length > 0) return filtered;
     }
 
-    // 3. Fall back to scriptContext.entities
-    if (entities.length === 0 && scriptContext?.entities) {
-        entities = [...scriptContext.entities];
+    // 3. Fall back to scriptContext.entities (the authoritative list).
+    if (Array.isArray(scriptContext?.entities) && scriptContext.entities.length > 0) {
+        filtered = filterPlaces([...scriptContext.entities], entityTypes, 'entities');
+        if (filtered.length > 0) return filtered;
     }
 
-    return entities;
+    return [];
 }
 
 /**
@@ -493,7 +625,42 @@ async function downloadMapForMG(mg, scriptContext, tempDir) {
         return false;
     }
 
-    const entities = extractEntities(mg, scriptContext);
+    const entityTypes = scriptContext?.entityTypes || {};
+
+    // Prefer the AI Map Planner's selected waypoints + swarms — that's exactly what
+    // the renderer will animate, so those are the only coords we actually need.
+    // Using them directly (instead of re-deriving from mg.text/subtext/scriptContext)
+    // avoids geocoding 20 unused script-wide entities per map and keeps OSM boundary
+    // fetches tight — no more Albania/Australia appearing on Red Sea maps.
+    let entities;
+    const plannerNames = [];
+    const seen = new Set();
+    if (Array.isArray(mg._mapWaypoints) && mg._mapWaypoints.length > 0) {
+        for (const wp of mg._mapWaypoints) {
+            if (wp.name && !seen.has(wp.name)) {
+                plannerNames.push(wp.name);
+                seen.add(wp.name);
+            }
+        }
+    }
+    if (Array.isArray(mg._mapSwarms)) {
+        for (const sw of mg._mapSwarms) {
+            for (const loc of (sw.locations || [])) {
+                if (loc.name && !seen.has(loc.name)) {
+                    plannerNames.push(loc.name);
+                    seen.add(loc.name);
+                }
+            }
+        }
+    }
+
+    if (plannerNames.length > 0) {
+        entities = filterPlaces(plannerNames, entityTypes, 'planner waypoints');
+        console.log(`      🎯 Using ${entities.length} planner-selected entit${entities.length === 1 ? 'y' : 'ies'} (waypoints + swarms)`);
+    } else {
+        // Planner didn't run or yielded nothing → derive from mg content as before.
+        entities = extractEntities(mg, scriptContext);
+    }
 
     // Use geocoding for precise coordinates (async — MapTiler free tier)
     const view = await computeMapView(entities, maptilerKey);
@@ -538,14 +705,19 @@ async function downloadMapForMG(mg, scriptContext, tempDir) {
 
     if (useBigMap && maptilerKey) {
         try {
-            // Compute bounding box of all waypoint locations
+            // Compute bounding box of all waypoint + swarm locations
             const wpCoords = [];
-            for (const wp of mg._mapWaypoints) {
-                const wpLower = wp.name.toLowerCase();
-                const pin = view.pins.find(p => p.name.toLowerCase() === wpLower)
-                    || view.pins.find(p => p.name.toLowerCase().includes(wpLower) || wpLower.includes(p.name.toLowerCase()));
-                if (pin) {
-                    wpCoords.push({ name: wp.name, lon: pin.lon, lat: pin.lat });
+            const _addCoord = (name) => {
+                if (wpCoords.some(c => c.name.toLowerCase() === name.toLowerCase())) return;
+                const lower = name.toLowerCase();
+                const pin = view.pins.find(p => p.name.toLowerCase() === lower)
+                    || view.pins.find(p => p.name.toLowerCase().includes(lower) || lower.includes(p.name.toLowerCase()));
+                if (pin) wpCoords.push({ name, lon: pin.lon, lat: pin.lat });
+            };
+            for (const wp of mg._mapWaypoints) _addCoord(wp.name);
+            if (mg._mapSwarms) {
+                for (const sw of mg._mapSwarms) {
+                    for (const loc of sw.locations) _addCoord(loc.name);
                 }
             }
 
@@ -555,16 +727,72 @@ async function downloadMapForMG(mg, scriptContext, tempDir) {
                 const centerLon = (Math.min(...wpLons) + Math.max(...wpLons)) / 2;
                 const centerLat = (Math.min(...wpLats) + Math.max(...wpLats)) / 2;
 
-                // Tile zoom: low enough that country fits at minimum per-wp camScale
-                const minWpZoom = Math.min(...mg._mapWaypoints.map(w => w.zoom ?? 1.0));
-                let bigZoom = Math.floor(Math.log2(1920 / (minWpZoom * 512 * 80 / 360)));
-                bigZoom = Math.max(3, Math.min(bigZoom, 5));
+                // ── Tile zoom + canvas size ──
+                // Pick tile zoom from the TIGHTEST close-up (most demanding for
+                // sharpness), then size the canvas so the WIDEST camera shot
+                // still fits. Step tile zoom down if canvas would exceed cap.
+                // Derivation: on-screen pixels-per-degree at camZoom = 1920*camZoom/80.
+                // Tile pixels-per-degree at tile zoom z = 512*2^z/360.
+                // Crisp when z ≥ log2(1920 * camZoom * 360 / (80 * 512)) = log2(16.875 * camZoom).
+                const HARD_MAX_W = 9216;
+                const HARD_MAX_H = 5184;
+                const MIN_W = 1920;
+                const MIN_H = 1080;
+                const TARGET_AR = 16 / 9;
 
-                const BIG_W = 1920 * 3; // 5760
-                const BIG_H = 1080 * 3; // 3240
+                const camZooms = mg._mapWaypoints.map(w => w.zoom ?? 1.0);
+                const minWpZoom = Math.min(...camZooms);
+                const maxWpZoom = Math.max(...camZooms);
+
+                const tileZoomForCam = (cz) => Math.ceil(Math.log2(1920 * cz * 360 / (80 * 512)));
+                let bigZoom = Math.max(3, Math.min(tileZoomForCam(maxWpZoom), 7));
+
+                const cosLat = Math.max(0.1, Math.cos(centerLat * Math.PI / 180));
+                const wideShotLonSpan = 80 / minWpZoom;
+                const bboxLonSpan = Math.max(...wpLons) - Math.min(...wpLons);
+                const bboxLatSpan = Math.max(...wpLats) - Math.min(...wpLats);
+
+                let BIG_W, BIG_H;
+                while (true) {
+                    const pxPerDegLon = 512 * Math.pow(2, bigZoom) / 360;
+                    const pxPerDegLat = pxPerDegLon / cosLat;
+
+                    const neededLonSpan = Math.max(wideShotLonSpan, bboxLonSpan * 1.3);
+                    const neededLatSpan = Math.max(wideShotLonSpan * 9 / 16, bboxLatSpan * 1.3);
+
+                    let w = Math.ceil(neededLonSpan * pxPerDegLon);
+                    let h = Math.ceil(neededLatSpan * pxPerDegLat);
+
+                    // Force 16:9 by growing the narrower dimension
+                    if (w / h > TARGET_AR) h = Math.ceil(w / TARGET_AR);
+                    else w = Math.ceil(h * TARGET_AR);
+
+                    w = Math.max(MIN_W, w);
+                    h = Math.max(MIN_H, h);
+
+                    if (w <= HARD_MAX_W && h <= HARD_MAX_H) {
+                        BIG_W = w;
+                        BIG_H = h;
+                        break;
+                    }
+                    if (bigZoom <= 3) {
+                        BIG_W = Math.min(w, HARD_MAX_W);
+                        BIG_H = Math.min(h, HARD_MAX_H);
+                        break;
+                    }
+                    bigZoom--;
+                }
+
+                // Round up to whole tiles (512 px) so stitching has no partial edges,
+                // then re-clamp to cap.
+                const roundUp = (n, step) => Math.ceil(n / step) * step;
+                BIG_W = Math.min(HARD_MAX_W, roundUp(BIG_W, 512));
+                BIG_H = Math.min(HARD_MAX_H, roundUp(BIG_H, 512));
+
                 const bigView = { lon: centerLon, lat: centerLat, zoom: bigZoom, pins: view.pins };
 
-                console.log(`      Big map mode: ${BIG_W}x${BIG_H}, zoom ${bigZoom}, center [${centerLon.toFixed(1)},${centerLat.toFixed(1)}]`);
+                const tilesEstimate = Math.ceil(BIG_W / 512) * Math.ceil(BIG_H / 512);
+                console.log(`      Big map: ${BIG_W}×${BIG_H} tileZ=${bigZoom} (~${tilesEstimate} tiles) camZoom[${minWpZoom.toFixed(1)}→${maxWpZoom.toFixed(1)}] center [${centerLon.toFixed(1)},${centerLat.toFixed(1)}]`);
                 const buffer = await stitchMapTilerTiles(bigView, mapStyle, maptilerKey, BIG_W, BIG_H);
 
                 if (buffer.length > 5000) {
@@ -760,5 +988,5 @@ module.exports = {
     downloadMapForMG, downloadMapsForMGs, computeMapView, GEO_COORDS,
     stitchMapTilerTiles, MAPTILER_STYLE_MAP, GEOAPIFY_STYLE_MAP,
     geocodePlace, geocodePlaces, fetchOSMBoundary, fetchOSMBoundaries,
-    extractEntities,
+    extractEntities, isLikelyPlace, filterPlaces,
 };

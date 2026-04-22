@@ -545,13 +545,16 @@ class Compositor {
                     const localFrame = frame - scene._startFrame;
                     const mgTex = this._getMGTexture(scene, localFrame, this._scriptContext);
                     if (mgTex) {
-                        if (i > 0) {
+                        const v3Alpha = this._getV3FadeAlpha(scene, frame);
+                        // Blend when stacked on a base layer OR when mid-crossfade
+                        const needsBlend = i > 0 || v3Alpha < 1.0;
+                        if (needsBlend) {
                             gl.enable(gl.BLEND);
                             gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
                         }
                         const bp = this._mgBlitParams(mgTex);
-                        this._blitTexture(mgTex.texture, 1.0, bp.sx, bp.sy, bp.ox, bp.oy);
-                        if (i > 0) gl.disable(gl.BLEND);
+                        this._blitTexture(mgTex.texture, v3Alpha, bp.sx, bp.sy, bp.ox, bp.oy);
+                        if (needsBlend) gl.disable(gl.BLEND);
                     }
                     continue;
                 }
@@ -574,12 +577,13 @@ class Compositor {
                     // V2 overlay system DISABLED — skip compositor directive scenes
                     continue;
                 } else {
-                    // Upper tracks (non-overlay): alpha blend, slide animation
+                    // Upper tracks (non-overlay): alpha blend, slide animation, V3 crossfade
                     gl.enable(gl.BLEND);
                     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
                     const upperScene = Object.assign({}, scene, { background: 'none' });
                     this._applySlideAnimation(upperScene, frame);
-                    this._renderSceneTexture(tex, 1.0, upperScene);
+                    const v3Alpha = this._getV3FadeAlpha(scene, frame);
+                    this._renderSceneTexture(tex, v3Alpha, upperScene);
                     gl.disable(gl.BLEND);
                 }
             }
@@ -1490,6 +1494,31 @@ class Compositor {
             case 'driftBottomLeftToTopRight':  scale = 1 + 0.15 * s; tx = (-2 + p * 4) * s; ty = (2 - p * 4) * s; break;
         }
         return { scale, translateX: tx, translateY: ty };
+    }
+
+    // V3 crossfade: fade in/out the upper-track asset (fullscreen MG or template)
+    // over ~0.3s at each edge so boundaries don't hard-cut to the V1 layer below.
+    _getV3FadeAlpha(scene, frame) {
+        const startFrame = scene._startFrame;
+        const endFrame = scene._endFrame;
+        if (startFrame === undefined || endFrame === undefined) return 1.0;
+
+        const fadeFrames = Math.max(1, Math.round(0.3 * (this.fps || 30)));
+        const span = endFrame - startFrame;
+        if (span <= 0) return 1.0;
+        const window = Math.min(fadeFrames, Math.floor(span / 2));
+        if (window <= 0) return 1.0;
+
+        const sinceStart = frame - startFrame;
+        const untilEnd = endFrame - frame;
+        let alpha = 1.0;
+        if (sinceStart < window) {
+            alpha = Math.max(0, Math.min(1, sinceStart / window));
+        }
+        if (untilEnd < window) {
+            alpha = Math.min(alpha, Math.max(0, Math.min(1, untilEnd / window)));
+        }
+        return alpha;
     }
 
     /**

@@ -256,6 +256,84 @@ function _showListicleControls(mgType, mg) {
     if (bgSel && mg) bgSel.value = mg.mgBackground || 'auto';
 }
 
+const DEFAULT_MG_OVERLAY_SHADOW = 0.55;
+
+function _clampMgOverlayShadow(value) {
+    const parsed = Number.parseFloat(value);
+    if (!Number.isFinite(parsed)) return DEFAULT_MG_OVERLAY_SHADOW;
+    return Math.max(0, Math.min(1, parsed));
+}
+
+function _syncMgShadowUI(value) {
+    const shadow = _clampMgOverlayShadow(value);
+    const slider = document.getElementById('mg-global-shadow');
+    const label = document.getElementById('mg-global-shadow-val');
+    if (slider) slider.value = shadow.toFixed(2);
+    if (label) label.textContent = `${Math.round(shadow * 100)}%`;
+}
+
+function _setGlobalMgOverlayShadow(value) {
+    const shadow = _clampMgOverlayShadow(value);
+    state.mgOverlayShadow = shadow;
+    _syncMgShadowUI(shadow);
+
+    for (const mg of (state.motionGraphics || [])) {
+        mg.overlayShadowStrength = shadow;
+        if (mg.mgData) mg.mgData.overlayShadowStrength = shadow;
+    }
+
+    if (state.videoPlan) {
+        if (!state.videoPlan.scriptContext) state.videoPlan.scriptContext = {};
+        state.videoPlan.scriptContext.mgOverlayShadow = shadow;
+    }
+    if (state.compositor?._scriptContext) {
+        state.compositor._scriptContext.mgOverlayShadow = shadow;
+    }
+}
+
+function _hydrateMgOverlayShadow(plan) {
+    const scriptShadow = plan?.scriptContext?.mgOverlayShadow;
+    const firstMgShadow = (plan?.motionGraphics || []).find(mg => mg?.overlayShadowStrength != null)?.overlayShadowStrength;
+    _setGlobalMgOverlayShadow(scriptShadow != null ? scriptShadow : firstMgShadow);
+}
+
+function _getActiveMgCategoryOverride(mgType) {
+    const activeTheme = (typeof _resolveActiveTheme === 'function' && _resolveActiveTheme())
+        || state.videoPlan?.scriptContext?.themeId
+        || null;
+    if (!activeTheme || !window._themeTokens?.getTokens) return null;
+    try {
+        return window._themeTokens.getTokens(activeTheme)?.chrome?.mgOverrides?.[mgType] || null;
+    } catch (_err) {
+        return null;
+    }
+}
+
+function _setMgField(active, key, value) {
+    active.mg[key] = value;
+    if (active.mg.mgData) active.mg.mgData[key] = value;
+}
+
+function _deleteMgField(active, key) {
+    delete active.mg[key];
+    if (active.mg.mgData) delete active.mg.mgData[key];
+}
+
+function _applyManualMgStyle(active, style) {
+    _setMgField(active, 'style', style);
+    _setMgField(active, 'styleManual', true);
+
+    const themeOverride = _getActiveMgCategoryOverride(active.mg.type);
+    if (themeOverride?.style && !active.mg.variantManual && active.mg.subType === themeOverride.style) {
+        _deleteMgField(active, 'subType');
+        _populateMgVariantDropdown(active.mg.type, null);
+    }
+    if (themeOverride?.anim && !active.mg.animationManual && active.mg.animation === themeOverride.anim) {
+        _deleteMgField(active, 'animation');
+        _populateMgAnimationDropdown(active.mg.type, null);
+    }
+}
+
 // THEME_FONTS, THEME_COLORS — defined in mg-theme-bridge.js
 
 // getStyledThemeColors, _resolveActiveTheme — defined in mg-theme-bridge.js
@@ -386,6 +464,7 @@ const state = {
     mgEnabled: true,
     subtitlesEnabled: false,
     mgStyle: 'clean',
+    mgOverlayShadow: DEFAULT_MG_OVERLAY_SHADOW,
     aiInstructions: '',
     videoTitle: '',
     timeline: {
@@ -393,6 +472,7 @@ const state = {
         scrollX: 0,
         minZoom: 0.5,
         maxZoom: 200,
+        rulerSecondsOnly: false, // when true, show raw seconds (matches log timestamps) instead of M:SS
         isDraggingPlayhead: false,
         tracks: [
             { id: 'video-track-5', label: 'V5', type: 'video' },
@@ -491,6 +571,7 @@ const elements = {
     ollamaModelRow: document.getElementById('ollama-model-row'),
     ollamaModel: document.getElementById('ollama-model'),
     ollamaVisionModel: document.getElementById('ollama-vision-model'),
+    aiThinking: document.getElementById('ai-thinking'),
     aiInstructions: document.getElementById('ai-instructions'),
     videoTitle: document.getElementById('video-title'),
     buildQuality: document.getElementById('build-quality'),
@@ -508,6 +589,13 @@ const elements = {
     learnStyleProgress: document.getElementById('learn-style-progress'),
     learnStyleBar: document.getElementById('learn-style-bar'),
     learnStyleMsg: document.getElementById('learn-style-msg'),
+    learnStyleMode: document.getElementById('learn-style-mode'),
+    learnStyleUrls: document.getElementById('learn-style-urls'),
+    learnStyleName: document.getElementById('learn-style-name'),
+    btnCompareStyle: document.getElementById('btn-compare-style'),
+    styleComparisonReport: document.getElementById('style-comparison-report'),
+    styleComparisonText: document.getElementById('style-comparison-text'),
+    styleComparisonClose: document.getElementById('style-comparison-close'),
     mapTestLocations: document.getElementById('map-test-locations'),
     mapTestStyle: document.getElementById('map-test-style'),
     mapTestTitle: document.getElementById('map-test-title'),
@@ -535,10 +623,12 @@ const elements = {
     mapPanYVal: document.getElementById('map-pan-y-val'),
     mapVariant: document.getElementById('map-variant'),
     mapCinematic: document.getElementById('map-cinematic'),
-    cinematicScale: document.getElementById('cinematic-scale'),
-    cinematicScaleVal: document.getElementById('cinematic-scale-val'),
+    mapUsePlanner: document.getElementById('map-use-planner'),
+    mapTestNarration: document.getElementById('map-test-narration'),
     // Clip analyzer toggle
     clipAnalyzerToggle: document.getElementById('clip-analyzer-toggle'),
+    // Resume build toggle (skip completed steps + reuse cached scene media)
+    buildResumeToggle: document.getElementById('build-resume-toggle'),
     // Footage source toggles
     srcPexels: document.getElementById('src-pexels'),
     srcPixabay: document.getElementById('src-pixabay'),
@@ -744,6 +834,7 @@ function initCaptureMode() {
             state.fps = plan.fps || 30;
             state.mgEnabled = plan.mgEnabled !== false; // enable MGs by default
             state.mgStyle = plan.mgStyle || 'clean';
+            _hydrateMgOverlayShadow(plan);
 
             // Assign trackIds if missing
             state.scenes.forEach((s, i) => {
@@ -903,6 +994,7 @@ async function init() {
     setupVideoControls();
     setupClipPropertyListeners();
     setupMgPropertyListeners();
+    _initMapPropertiesListeners();
     setupListiclePropertyListeners();
     setupTemplatePropertyListeners();
     // Populate template background dropdown with custom images from assets/backgrounds/
@@ -923,6 +1015,17 @@ async function init() {
     setupPreviewZoom();
     setupNotifCenter();
     loadSettings();
+    // Push initial project context to Style Studio agent so it knows the video
+    // title / niche / instructions immediately, without waiting for an edit.
+    try {
+        window.electronAPI?.styleStudioSetProjectContext?.({
+            videoTitle: state.videoTitle,
+            aiInstructions: state.aiInstructions,
+            buildNiche: elements.buildNiche ? elements.buildNiche.value : 'auto',
+            buildLanguage: elements.buildLanguage ? elements.buildLanguage.value : 'auto',
+            buildStyleProfile: elements.buildStyleProfile ? elements.buildStyleProfile.value : 'none',
+        });
+    } catch (_) {}
     // Show Ollama model row if Ollama is the active provider
     if (elements.ollamaModelRow) {
         elements.ollamaModelRow.style.display = elements.aiProvider.value === 'ollama' ? 'block' : 'none';
@@ -1004,6 +1107,9 @@ function setupEventListeners() {
     if (elements.clipAnalyzerToggle) {
         elements.clipAnalyzerToggle.addEventListener('change', () => saveSettings());
     }
+    if (elements.buildResumeToggle) {
+        elements.buildResumeToggle.addEventListener('change', () => saveSettings());
+    }
 
     // Qwen Pool reset button + status (uses IPC, not direct Node.js)
     const qwenPoolBtn = document.getElementById('reset-qwen-pool-btn');
@@ -1071,11 +1177,12 @@ function setupEventListeners() {
             document.getElementById('mg-global-anim-speed-val').textContent = `${val.toFixed(1)}x`;
         });
     }
-    // Cinematic scale slider
-    if (elements.cinematicScale) {
-        elements.cinematicScale.addEventListener('input', (e) => {
-            const val = parseFloat(e.target.value);
-            if (elements.cinematicScaleVal) elements.cinematicScaleVal.textContent = val.toFixed(2);
+    _syncMgShadowUI(state.mgOverlayShadow);
+    const globalShadowEl = document.getElementById('mg-global-shadow');
+    if (globalShadowEl) {
+        globalShadowEl.addEventListener('input', (e) => {
+            _setGlobalMgOverlayShadow(e.target.value);
+            refreshCompositorMGs();
         });
     }
     // Footage source toggle listeners
@@ -1119,8 +1226,36 @@ function setupEventListeners() {
         elements.sfxVolume.addEventListener('input', () => {
             state.sfxVolume = parseFloat(elements.sfxVolume.value);
             if (elements.sfxVolumeLabel) elements.sfxVolumeLabel.textContent = `${Math.round(state.sfxVolume * 100)}%`;
-            state.sfxClips.forEach(sfx => { sfx.volume = state.sfxVolume; });
+            applySfxVolumeLevels();
+            renderTimeline();
             saveSettings();
+        });
+    }
+    // Download Real SFX button
+    const btnDownloadSfx = document.getElementById('btn-download-sfx');
+    const sfxDownloadStatus = document.getElementById('sfx-download-status');
+    if (btnDownloadSfx) {
+        btnDownloadSfx.addEventListener('click', async () => {
+            if (!window.electronAPI?.downloadRealSfx) return;
+            btnDownloadSfx.disabled = true;
+            btnDownloadSfx.textContent = '⏳ Downloading...';
+            if (sfxDownloadStatus) sfxDownloadStatus.textContent = 'Searching Freesound for high-quality SFX...';
+            try {
+                const result = await window.electronAPI.downloadRealSfx();
+                if (result.noKey) {
+                    if (sfxDownloadStatus) sfxDownloadStatus.textContent = '⚠ Set FREESOUND_API_KEY in .env first';
+                } else if (result.success) {
+                    if (sfxDownloadStatus) sfxDownloadStatus.textContent = `✅ ${result.downloaded} downloaded, ${result.skipped} cached, ${result.failed} fallback`;
+                    // Re-preload SFX URLs with new files
+                    preloadSfxUrls();
+                } else {
+                    if (sfxDownloadStatus) sfxDownloadStatus.textContent = `❌ ${result.error || 'Download failed'}`;
+                }
+            } catch (e) {
+                if (sfxDownloadStatus) sfxDownloadStatus.textContent = `❌ ${e.message}`;
+            }
+            btnDownloadSfx.disabled = false;
+            btnDownloadSfx.textContent = '🎵 Download Real SFX';
         });
     }
     // Motion Graphics controls
@@ -1155,8 +1290,8 @@ function setupEventListeners() {
 }
 
 function setupVideoControls() {
-    // Create SFX audio pool (4 elements for overlapping transition + MG SFX)
-    for (let i = 0; i < 4; i++) {
+    // Create a slightly larger SFX pool so dense sections don't drop nearby hits.
+    for (let i = 0; i < 8; i++) {
         const audio = document.createElement('audio');
         audio.preload = 'auto';
         audio.className = 'hidden';
@@ -1757,6 +1892,7 @@ function updateClipProperties() {
     const panel = elements.clipProperties;
     const overlayPanel = document.getElementById('overlay-properties');
     const mgPanel = document.getElementById('mg-properties');
+    const mapPanel = document.getElementById('map-properties');
     const listiclePanel = document.getElementById('listicle-properties');
     const templatePanel = document.getElementById('template-properties');
     const emptyState = document.getElementById('properties-empty');
@@ -1766,6 +1902,7 @@ function updateClipProperties() {
     if (panel) panel.classList.add('hidden');
     if (overlayPanel) overlayPanel.classList.add('hidden');
     if (mgPanel) mgPanel.classList.add('hidden');
+    if (mapPanel) mapPanel.classList.add('hidden');
     if (listiclePanel) listiclePanel.classList.add('hidden');
     if (templatePanel) templatePanel.classList.add('hidden');
 
@@ -1805,6 +1942,14 @@ function updateClipProperties() {
         state.selectedMgIndex = -1; // Not from MG track
         state._selectedMgScene = scene; // Temp reference for panel
 
+        // Map scenes get their own dedicated panel
+        if (scene.type === 'mapChart') {
+            if (titleEl) titleEl.textContent = 'Map';
+            updateMapProperties(scene);
+            expandPropertiesSection();
+            return;
+        }
+
         // Listicle Templates get their own dedicated panel (separate from MGs)
         if (TEMPLATE_TYPES.has(scene.type)) {
             const reg = TEMPLATE_REGISTRY[scene.type];
@@ -1814,7 +1959,7 @@ function updateClipProperties() {
             return;
         }
 
-        const mgTypeLabels = { barChart: 'Bar Chart', donutChart: 'Donut Chart', rankingList: 'Ranking List', timeline: 'Timeline', comparisonCard: 'Comparison', bulletList: 'Bullet List', mapChart: 'Map', articleHighlight: 'Article' };
+        const mgTypeLabels = { barChart: 'Bar Chart', donutChart: 'Donut Chart', rankingList: 'Ranking List', timeline: 'Timeline', comparisonCard: 'Comparison', bulletList: 'Bullet List', articleHighlight: 'Article' };
         if (titleEl) titleEl.textContent = mgTypeLabels[scene.type] || 'Motion Graphic';
 
         updateMgPropertiesForScene(scene);
@@ -2335,6 +2480,207 @@ function updateMgPropertiesForScene(scene) {
 
     // Show listicle template controls if applicable
     _showListicleControls(sceneType, mg);
+}
+
+/**
+ * Populate the Map properties panel (#map-properties)
+ */
+function updateMapProperties(scene) {
+    const panel = document.getElementById('map-properties');
+    if (!panel) return;
+    panel.classList.remove('hidden');
+
+    const mg = scene.mgData || scene;
+
+    // Map style
+    const styleEl = document.getElementById('map-prop-style');
+    if (styleEl) styleEl.value = mg.mapStyle || scene.mapStyle || 'satellite';
+
+    // Variant
+    const variantEl = document.getElementById('map-prop-variant');
+    if (variantEl) variantEl.value = mg.mapVariant || scene.mapVariant || 'auto';
+
+    // Title
+    const titleEl = document.getElementById('map-prop-title');
+    if (titleEl) titleEl.value = mg.text || scene.text || '';
+
+    // Subtext (locations)
+    const subtextEl = document.getElementById('map-prop-subtext');
+    if (subtextEl) subtextEl.value = mg.subtext || scene.subtext || '';
+
+    // Waypoints — format from _mapWaypoints array to string
+    const wpEl = document.getElementById('map-prop-waypoints');
+    if (wpEl) {
+        const wps = mg._mapWaypoints || scene._mapWaypoints || [];
+        const wpStr = wps.map(wp => {
+            let s = `${wp.name} ${wp.startTime}-${wp.endTime}`;
+            if (wp.zoom != null) s += ` z${wp.zoom}`;
+            if (wp.tilt != null) s += ` t${wp.tilt}`;
+            if (wp.bearing != null) s += ` b${wp.bearing}`;
+            if (wp.orbit != null) s += ` o${wp.orbit}`;
+            if (wp.icon) s += ` i${wp.icon}`;
+            return s;
+        }).join(', ');
+        wpEl.value = wpStr;
+    }
+
+    // Zoom speed
+    const zsEl = document.getElementById('map-prop-zoom-speed');
+    const zsVal = document.getElementById('map-prop-zoom-speed-val');
+    const zoomSpeed = mg._mapZoomSpeed || 1;
+    if (zsEl) zsEl.value = zoomSpeed;
+    if (zsVal) zsVal.textContent = `${zoomSpeed.toFixed(1)}x`;
+
+    // Polygon speed
+    const psEl = document.getElementById('map-prop-poly-speed');
+    const psVal = document.getElementById('map-prop-poly-speed-val');
+    const polySpeed = mg._mapPolySpeed || 1;
+    if (psEl) psEl.value = polySpeed;
+    if (psVal) psVal.textContent = `${polySpeed.toFixed(1)}x`;
+
+    // Easing
+    const easEl = document.getElementById('map-prop-easing');
+    if (easEl) easEl.value = mg._mapEasing || 'cubic';
+
+    // Poly color
+    const pcEl = document.getElementById('map-prop-poly-color');
+    if (pcEl) pcEl.value = mg._mapPolyColor || 'auto';
+
+    // Tilt keyframes
+    const tiltSEl = document.getElementById('map-prop-tilt-start');
+    const tiltEEl = document.getElementById('map-prop-tilt-end');
+    const tiltVal = document.getElementById('map-prop-tilt-val');
+    const tiltS = mg._mapTiltKfStart ?? 0;
+    const tiltE = mg._mapTiltKfEnd ?? 0.5;
+    if (tiltSEl) tiltSEl.value = tiltS;
+    if (tiltEEl) tiltEEl.value = tiltE;
+    if (tiltVal) tiltVal.textContent = `${Math.round(tiltS * 100)}→${Math.round(tiltE * 100)}%`;
+
+    // Zoom keyframes
+    const zoomSEl = document.getElementById('map-prop-zoom-start');
+    const zoomEEl = document.getElementById('map-prop-zoom-end');
+    const zoomVal = document.getElementById('map-prop-zoom-val');
+    const zoomS = mg._mapZoomKfStart ?? 0.8;
+    const zoomE = mg._mapZoomKfEnd ?? 1.0;
+    if (zoomSEl) zoomSEl.value = zoomS;
+    if (zoomEEl) zoomEEl.value = zoomE;
+    if (zoomVal) zoomVal.textContent = `${zoomS.toFixed(1)}→${zoomE.toFixed(1)}`;
+
+    // Cinematic
+    const cinEl = document.getElementById('map-prop-cinematic');
+    if (cinEl) cinEl.checked = !!mg._mapCinematic;
+}
+
+function _initMapPropertiesListeners() {
+    const _getMapScene = () => {
+        if (state.selectedClipIndex < 0) return null;
+        const scene = state.scenes[state.selectedClipIndex];
+        return (scene && scene.type === 'mapChart') ? scene : null;
+    };
+    const _setMgProp = (key, val) => {
+        const scene = _getMapScene();
+        if (!scene) return;
+        if (scene.mgData) scene.mgData[key] = val;
+        scene[key] = val;
+        triggerAutoSave(); refreshCompositorMGs();
+    };
+
+    document.getElementById('map-prop-style')?.addEventListener('change', e => {
+        _setMgProp('mapStyle', e.target.value);
+    });
+    document.getElementById('map-prop-variant')?.addEventListener('change', e => {
+        _setMgProp('mapVariant', e.target.value);
+    });
+    document.getElementById('map-prop-title')?.addEventListener('input', e => {
+        const scene = _getMapScene(); if (!scene) return;
+        scene.text = e.target.value;
+        if (scene.mgData) scene.mgData.text = e.target.value;
+        triggerAutoSave(); refreshCompositorMGs();
+    });
+    document.getElementById('map-prop-subtext')?.addEventListener('input', e => {
+        const scene = _getMapScene(); if (!scene) return;
+        scene.subtext = e.target.value;
+        if (scene.mgData) scene.mgData.subtext = e.target.value;
+        triggerAutoSave(); refreshCompositorMGs();
+    });
+    document.getElementById('map-prop-zoom-speed')?.addEventListener('input', e => {
+        const val = parseFloat(e.target.value);
+        _setMgProp('_mapZoomSpeed', val);
+        const valEl = document.getElementById('map-prop-zoom-speed-val');
+        if (valEl) valEl.textContent = `${val.toFixed(1)}x`;
+    });
+    document.getElementById('map-prop-poly-speed')?.addEventListener('input', e => {
+        const val = parseFloat(e.target.value);
+        _setMgProp('_mapPolySpeed', val);
+        const valEl = document.getElementById('map-prop-poly-speed-val');
+        if (valEl) valEl.textContent = `${val.toFixed(1)}x`;
+    });
+    document.getElementById('map-prop-easing')?.addEventListener('change', e => {
+        _setMgProp('_mapEasing', e.target.value);
+    });
+    document.getElementById('map-prop-poly-color')?.addEventListener('change', e => {
+        _setMgProp('_mapPolyColor', e.target.value);
+    });
+    // Tilt keyframes
+    const tiltHandler = () => {
+        const s = parseFloat(document.getElementById('map-prop-tilt-start')?.value || 0);
+        const e = parseFloat(document.getElementById('map-prop-tilt-end')?.value || 0.5);
+        _setMgProp('_mapTiltKfStart', s);
+        _setMgProp('_mapTiltKfEnd', e);
+        const valEl = document.getElementById('map-prop-tilt-val');
+        if (valEl) valEl.textContent = `${Math.round(s * 100)}→${Math.round(e * 100)}%`;
+    };
+    document.getElementById('map-prop-tilt-start')?.addEventListener('input', tiltHandler);
+    document.getElementById('map-prop-tilt-end')?.addEventListener('input', tiltHandler);
+    // Zoom keyframes
+    const zoomHandler = () => {
+        const s = parseFloat(document.getElementById('map-prop-zoom-start')?.value || 0.8);
+        const e = parseFloat(document.getElementById('map-prop-zoom-end')?.value || 1.0);
+        _setMgProp('_mapZoomKfStart', s);
+        _setMgProp('_mapZoomKfEnd', e);
+        const valEl = document.getElementById('map-prop-zoom-val');
+        if (valEl) valEl.textContent = `${s.toFixed(1)}→${e.toFixed(1)}`;
+    };
+    document.getElementById('map-prop-zoom-start')?.addEventListener('input', zoomHandler);
+    document.getElementById('map-prop-zoom-end')?.addEventListener('input', zoomHandler);
+    // Cinematic
+    document.getElementById('map-prop-cinematic')?.addEventListener('change', e => {
+        _setMgProp('_mapCinematic', e.target.checked);
+    });
+    // Waypoints text field — parse on blur
+    document.getElementById('map-prop-waypoints')?.addEventListener('change', e => {
+        const scene = _getMapScene(); if (!scene) return;
+        const text = e.target.value;
+        // Parse waypoint format: "Name start-end z<zoom> t<tilt> b<bearing> o<orbit>"
+        const wpRegex = /^(.+?)\s+(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*(.*)$/;
+        const entries = text.split(',').map(s => s.trim()).filter(Boolean);
+        const waypoints = [];
+        for (const entry of entries) {
+            const m = entry.match(wpRegex);
+            if (!m) continue;
+            const extras = m[4] || '';
+            const zM = extras.match(/z(\d+(?:\.\d+)?)/);
+            const tM = extras.match(/t(\d+(?:\.\d+)?)/);
+            const bM = extras.match(/b(-?\d+(?:\.\d+)?)/);
+            const oM = extras.match(/o(-?\d+(?:\.\d+)?)/);
+            const iM = extras.match(/i([a-zA-Z][a-zA-Z0-9 _-]*)/);
+            let icon = null;
+            if (iM) { const raw = iM[1].trim(); if (raw.length >= 2 && !['sz','c'].includes(raw)) icon = raw; }
+            waypoints.push({
+                name: m[1].trim(),
+                startTime: parseFloat(m[2]),
+                endTime: parseFloat(m[3]),
+                zoom: zM ? parseFloat(zM[1]) : null,
+                tilt: tM ? parseFloat(tM[1]) : null,
+                bearing: bM ? parseFloat(bM[1]) : null,
+                orbit: oM ? parseFloat(oM[1]) : null,
+                icon: icon,
+            });
+        }
+        if (waypoints.length > 0) {
+            _setMgProp('_mapWaypoints', waypoints);
+        }
+    });
 }
 
 /**
@@ -2950,7 +3296,10 @@ function setupMgPropertyListeners() {
             // Reset subType/animation when type changes
             delete active.mg.subType;
             delete active.mg.animation;
+            delete active.mg.variantManual;
+            delete active.mg.animationManual;
             if (active.mg.mgData) { delete active.mg.mgData.subType; delete active.mg.mgData.animation; }
+            if (active.mg.mgData) { delete active.mg.mgData.variantManual; delete active.mg.mgData.animationManual; }
             // Refresh variant/animation dropdowns for new type
             _populateMgVariantDropdown(e.target.value, null);
             _populateMgAnimationDropdown(e.target.value, null);
@@ -2966,8 +3315,8 @@ function setupMgPropertyListeners() {
         subTypeEl.addEventListener('change', (e) => {
             const active = getActiveMG();
             if (!active) return;
-            active.mg.subType = e.target.value;
-            if (active.mg.mgData) active.mg.mgData.subType = e.target.value;
+            _setMgField(active, 'subType', e.target.value);
+            _setMgField(active, 'variantManual', true);
             if (active.isScene) loadActiveScenes(); else updateMGOverlay();
             refreshCompositorMGs();
         });
@@ -2979,8 +3328,8 @@ function setupMgPropertyListeners() {
         animEl.addEventListener('change', (e) => {
             const active = getActiveMG();
             if (!active) return;
-            active.mg.animation = e.target.value;
-            if (active.mg.mgData) active.mg.mgData.animation = e.target.value;
+            _setMgField(active, 'animation', e.target.value);
+            _setMgField(active, 'animationManual', true);
             refreshCompositorMGs();
         });
     }
@@ -2988,8 +3337,7 @@ function setupMgPropertyListeners() {
         styleEl.addEventListener('change', (e) => {
             const active = getActiveMG();
             if (!active) return;
-            active.mg.style = e.target.value;
-            if (active.mg.mgData) active.mg.mgData.style = e.target.value;
+            _applyManualMgStyle(active, e.target.value);
             if (active.isScene) loadActiveScenes(); else updateMGOverlay();
             refreshCompositorMGs();
         });
@@ -3087,8 +3435,8 @@ function setupMgPropertyListeners() {
         listicleTemplateSel.addEventListener('change', (e) => {
             const active = getActiveMG();
             if (!active) return;
-            active.mg.subType = e.target.value;
-            if (active.mg.mgData) active.mg.mgData.subType = e.target.value;
+            _setMgField(active, 'subType', e.target.value);
+            _setMgField(active, 'variantManual', true);
             // Also update the main variant dropdown if visible
             const subTypeEl = document.getElementById('mg-subtype');
             if (subTypeEl) subTypeEl.value = e.target.value;
@@ -3102,8 +3450,8 @@ function setupMgPropertyListeners() {
         listicleAnimSel.addEventListener('change', (e) => {
             const active = getActiveMG();
             if (!active) return;
-            active.mg.animation = e.target.value;
-            if (active.mg.mgData) active.mg.mgData.animation = e.target.value;
+            _setMgField(active, 'animation', e.target.value);
+            _setMgField(active, 'animationManual', true);
             refreshCompositorMGs();
         });
     }
@@ -3800,7 +4148,6 @@ async function saveProject(silent = false) {
             videoTitle: state.videoTitle,
             buildNiche: elements.buildNiche ? elements.buildNiche.value : 'auto',
             buildLanguage: elements.buildLanguage ? elements.buildLanguage.value : 'auto',
-            cinematicScale: elements.cinematicScale ? elements.cinematicScale.value : '0.65',
             clipAnalyzer: elements.clipAnalyzerToggle?.checked !== false,
             mutedTracks: state.mutedTracks
         };
@@ -3883,9 +4230,13 @@ function actuallyStartPlayback() {
             }
         });
     } else {
-        // In a gap - show placeholder
+        // In a gap - hide video container, but only show placeholder when the whole project is empty
         elements.videoContainer?.classList.add('hidden');
-        elements.previewPlaceholder.classList.remove('hidden');
+        if (state.scenes.length === 0) {
+            elements.previewPlaceholder.classList.remove('hidden');
+        } else {
+            elements.previewPlaceholder.classList.add('hidden');
+        }
     }
 
     // Always start audio - it plays through gaps
@@ -4248,13 +4599,134 @@ function stopAllSfx() {
  * Update the Motion Graphics overlay in the preview.
  * Shows/hides MG elements based on current playback time.
  */
+let _mgMeasureCanvas = null;
+
+function getMGMeasureContext() {
+    if (!_mgMeasureCanvas) {
+        _mgMeasureCanvas = document.createElement('canvas');
+    }
+    return _mgMeasureCanvas.getContext('2d');
+}
+
+function getKineticTextPreviewLayout(text, fontFamily, options) {
+    const words = String(text || '')
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean)
+        .map(word => word.toUpperCase());
+    if (words.length === 0) return null;
+
+    const { hasSubtext = false, variant = 'centered', weight = 700 } = options || {};
+    const ctx = getMGMeasureContext();
+    const maxWidth = 1920 * 0.9;
+    const maxHeight = hasSubtext ? 1080 * 0.58 : 1080 * 0.68;
+    const maxRows = words.length <= 3 ? 2 : words.length <= 8 ? 3 : 4;
+    const maxFontSize = variant === 'punch'
+        ? 192
+        : words.length <= 3
+            ? 176
+            : words.length <= 6
+                ? 156
+                : 136;
+    const minFontSize = 60;
+    const previewPxPerCqw = 14.4;
+
+    let best = null;
+    for (let fontSize = maxFontSize; fontSize >= minFontSize; fontSize -= 4) {
+        ctx.font = `${weight} ${fontSize}px ${fontFamily}`;
+        const gap = Math.round(Math.max(20, Math.min(40, fontSize * 0.18)));
+        const rowHeight = Math.round(fontSize * 1.08);
+        const attrFontSize = Math.round(Math.max(28, Math.min(56, fontSize * 0.34)));
+        const attrMargin = hasSubtext ? Math.round(Math.max(18, fontSize * 0.5)) : 0;
+
+        const rows = [];
+        let currentRow = [];
+        let currentWidth = 0;
+        for (let i = 0; i < words.length; i++) {
+            const width = ctx.measureText(words[i]).width;
+            const nextWidth = currentRow.length > 0 ? currentWidth + gap + width : width;
+            if (nextWidth > maxWidth && currentRow.length > 0) {
+                rows.push({ words: currentRow, width: currentWidth });
+                currentRow = [];
+                currentWidth = 0;
+            }
+
+            currentRow.push({ word: words[i], width, index: i });
+            currentWidth = currentRow.length > 1 ? currentWidth + gap + width : width;
+        }
+
+        if (currentRow.length > 0) {
+            rows.push({ words: currentRow, width: currentWidth });
+        }
+
+        const textHeight = rows.length * rowHeight;
+        const totalHeight = textHeight + (hasSubtext ? attrMargin + attrFontSize * 1.2 : 0);
+        const widestRow = rows.reduce((max, row) => Math.max(max, row.width), 0);
+
+        best = {
+            words,
+            rows,
+            fontSizePx: fontSize,
+            fontSizeCqw: fontSize / previewPxPerCqw,
+            gapPx: gap,
+            gapCqw: gap / previewPxPerCqw,
+            attrFontSizePx: attrFontSize,
+            attrFontSizeCqw: attrFontSize / previewPxPerCqw,
+            attrMarginPx: attrMargin,
+            attrMarginCqw: attrMargin / previewPxPerCqw,
+            lineHeight: 1.02,
+            maxWidthPct: 92,
+        };
+
+        if (rows.length <= maxRows && widestRow <= maxWidth && totalHeight <= maxHeight) {
+            return best;
+        }
+    }
+
+    return best;
+}
+
+function buildKineticTextPreviewHtml(mg, scene, styleVars, fontFamily, opacity, elapsed, enterDur, posClass, extraClasses) {
+    const weightByStyle = { clean: 800, bold: 900, minimal: 500, neon: 900, cinematic: 700, elegant: 600 };
+    const layout = getKineticTextPreviewLayout(mg.text || scene.text, fontFamily, {
+        hasSubtext: !!(mg.subtext && mg.subtext !== 'none'),
+        variant: mg.subType || 'centered',
+        weight: weightByStyle[mg.style || scene.style || 'clean'] || 700,
+    });
+
+    if (!layout) {
+        return `<div class="mg-preview-element mg-pos-center ${extraClasses || ''}" style="${styleVars};opacity:${opacity}"></div>`;
+    }
+
+    const kineticStyleVars = `${styleVars};--mg-kinetic-font-size:${layout.fontSizeCqw.toFixed(3)}cqw;--mg-kinetic-gap:${layout.gapCqw.toFixed(3)}cqw;--mg-kinetic-attr-size:${layout.attrFontSizeCqw.toFixed(3)}cqw;--mg-kinetic-attr-margin:${layout.attrMarginCqw.toFixed(3)}cqw;--mg-kinetic-line-height:${layout.lineHeight};--mg-kinetic-max-width:${layout.maxWidthPct}%`;
+    const wordsHTML = layout.words.map((word, i) => {
+        const wOp = Math.min(1, Math.max(0, (elapsed - enterDur * 0.1 - i * 0.12) / 0.15));
+        const wScale = 1 + (1 - wOp) * 0.5;
+        return `<span class="mg-kinetic-word" style="opacity:${wOp};transform:scale(${wScale})">${escapeHTML(word)}</span>`;
+    }).join('');
+    const allWordsEnd = enterDur * 0.1 + layout.words.length * 0.12 + 0.3;
+    const attrOp = elapsed > allWordsEnd ? Math.min(1, (elapsed - allWordsEnd) / 0.3) : 0;
+    const subHtml = mg.subtext && mg.subtext !== 'none'
+        ? `<div class="mg-kinetic-attr" style="opacity:${attrOp}">\u2014 ${escapeHTML(mg.subtext)}</div>` : '';
+
+    return `<div class="mg-preview-element mg-kinetic ${posClass} ${extraClasses || ''}" style="${kineticStyleVars};opacity:${opacity}">
+        <div class="mg-kinetic-scrim" style="opacity:${Math.min(0.3, elapsed * 2)}"></div>
+        <div class="mg-kinetic-words">${wordsHTML}</div>
+        ${subHtml}
+    </div>`;
+}
+
 // Full-screen MG preview for V3 scenes (opaque background + centered content)
 function renderFullscreenMGPreview(scene) {
     const mg = scene.mgData || scene;
     const mgStyleName = mg.style || scene.style || state.mgStyle || 'clean';
     const styledColors = getStyledThemeColors(mgStyleName);
     const baseS = MG_STYLES[mgStyleName] || MG_STYLES.clean;
-    const s = styledColors ? { ...baseS, ...styledColors } : baseS;
+    // Manual style pick → MG_STYLES palette wins; auto-placed → theme wins.
+    const manualStyle = mg.styleManual || scene.styleManual;
+    const s = styledColors
+        ? (manualStyle ? { ...styledColors, ...baseS } : { ...baseS, ...styledColors })
+        : baseS;
     const tf = getActiveThemeFonts();
     // Replace double quotes with single quotes in font names to avoid breaking style="" attribute
     const fontH = tf.heading.replace(/"/g, "'");
@@ -4394,6 +4866,20 @@ function renderFullscreenMGPreview(scene) {
                 <div class="mg-chart-title">${escapeHTML(mg.text || scene.text)}</div>
                 ${bulletsHTML}
             </div>`;
+            break;
+        }
+        case 'kineticText': {
+            innerHtml = buildKineticTextPreviewHtml(
+                mg,
+                scene,
+                styleVars,
+                fontH,
+                opacity,
+                elapsed,
+                enterDur,
+                'mg-pos-center',
+                'mg-fullscreen'
+            );
             break;
         }
         case 'mapChart': {
@@ -4617,7 +5103,11 @@ function updateMGOverlay() {
         const mgStyleName = mg.style || state.mgStyle || 'clean';
         const styledColors = getStyledThemeColors(mgStyleName);
         const baseS = MG_STYLES[mgStyleName] || MG_STYLES.clean;
-        const s = styledColors ? { ...baseS, ...styledColors } : baseS;
+        // Manual style pick → MG_STYLES palette wins so the change is visible.
+        // Auto-placed MGs → theme colors win (matches AI intent + theme identity).
+        const s = styledColors
+            ? (mg.styleManual ? { ...styledColors, ...baseS } : { ...baseS, ...styledColors })
+            : baseS;
         const styleVars = `--mg-primary:${s.primary};--mg-accent:${s.accent};--mg-bg:${s.bg};--mg-text:${s.text};--mg-text-sub:${s.textSub};--mg-font-heading:${fontH};--mg-font-body:${fontB}`;
 
         const elapsed = ct - mg.startTime;
@@ -4818,21 +5308,17 @@ function updateMGOverlay() {
             }
 
             case 'kineticText': {
-                const words = (mg.text || '').split(/\s+/).filter(Boolean);
-                const wordsHTML = words.map((word, i) => {
-                    const wOp = Math.min(1, Math.max(0, (elapsed - enterDur * 0.1 - i * 0.12) / 0.15));
-                    const wScale = 1 + (1 - wOp) * 0.5;
-                    return `<span class="mg-kinetic-word" style="opacity:${wOp};transform:scale(${wScale})">${escapeHTML(word)}</span>`;
-                }).join('');
-                const allWordsEnd = enterDur * 0.1 + words.length * 0.12 + 0.3;
-                const attrOp = elapsed > allWordsEnd ? Math.min(1, (elapsed - allWordsEnd) / 0.3) : 0;
-                const subHtml = mg.subtext && mg.subtext !== 'none'
-                    ? `<div class="mg-kinetic-attr" style="opacity:${attrOp}">\u2014 ${escapeHTML(mg.subtext)}</div>` : '';
-                return `<div class="mg-preview-element mg-kinetic ${posClass}" style="${styleVars};opacity:${opacity}">
-                    <div class="mg-kinetic-scrim" style="opacity:${Math.min(0.3, elapsed * 2)}"></div>
-                    <div class="mg-kinetic-words">${wordsHTML}</div>
-                    ${subHtml}
-                </div>`;
+                return buildKineticTextPreviewHtml(
+                    mg,
+                    mg,
+                    styleVars,
+                    fontH,
+                    opacity,
+                    elapsed,
+                    enterDur,
+                    posClass,
+                    ''
+                );
             }
 
             default:
@@ -4946,6 +5432,19 @@ function setupPanelResize(handle, side) {
 function setupTimelineResize() {
     const handle = elements.resizeTimeline;
     if (!handle) return;
+
+    const TL_MIN = 180;
+    const TL_MAX = 600;
+    const TL_STORAGE_KEY = 'yta.timelineHeight';
+
+    // Restore persisted height on startup so layout doesn't reset every session
+    try {
+        const saved = parseInt(localStorage.getItem(TL_STORAGE_KEY), 10);
+        if (Number.isFinite(saved) && saved >= TL_MIN && saved <= TL_MAX) {
+            elements.timelineContainer.style.height = `${saved}px`;
+        }
+    } catch (_err) { /* localStorage may be unavailable */ }
+
     let isDragging = false, startY = 0, startHeight = 0;
     handle.addEventListener('mousedown', (e) => {
         isDragging = true; startY = e.clientY; startHeight = elements.timelineContainer.offsetHeight;
@@ -4953,9 +5452,20 @@ function setupTimelineResize() {
     });
     document.addEventListener('mousemove', (e) => {
         if (!isDragging) return;
-        elements.timelineContainer.style.height = `${Math.max(100, Math.min(400, startHeight + startY - e.clientY))}px`;
+        const h = Math.max(TL_MIN, Math.min(TL_MAX, startHeight + startY - e.clientY));
+        elements.timelineContainer.style.height = `${h}px`;
     });
-    document.addEventListener('mouseup', () => { if (isDragging) { isDragging = false; document.body.style.cursor = ''; document.body.style.userSelect = ''; } });
+    document.addEventListener('mouseup', () => {
+        if (!isDragging) return;
+        isDragging = false;
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+        // Persist final height
+        try {
+            const finalH = elements.timelineContainer.offsetHeight;
+            if (Number.isFinite(finalH)) localStorage.setItem(TL_STORAGE_KEY, String(finalH));
+        } catch (_err) { /* ignore */ }
+    });
 }
 
 // ========================================
@@ -5101,9 +5611,10 @@ async function generateVideo() {
             buildTheme: elements.buildTheme.value,
             buildLanguage: elements.buildLanguage ? elements.buildLanguage.value : 'auto',
             buildStyleProfile: elements.buildStyleProfile ? elements.buildStyleProfile.value : 'none',
-            cinematicScale: elements.cinematicScale ? elements.cinematicScale.value : '0.65',
             smartAI: elements.smartAiToggle ? elements.smartAiToggle.checked : true,
-            clipAnalyzer: elements.clipAnalyzerToggle ? elements.clipAnalyzerToggle.checked : true
+            clipAnalyzer: elements.clipAnalyzerToggle ? elements.clipAnalyzerToggle.checked : true,
+            buildResume: elements.buildResumeToggle ? elements.buildResumeToggle.checked : false,
+            aiThinking: elements.aiThinking ? elements.aiThinking.value : 'off'
         });
         if (result.success) {
             updateProgress(90, '📋 Loading video plan...'); await loadVideoPlan({ freshBuild: true });
@@ -5255,6 +5766,7 @@ async function loadVideoPlan({ freshBuild = false } = {}) {
             // Explainer always stays as overlay MG (never fullscreen V3 scene)
             state.motionGraphics = allMGs.filter(mg => !FULLSCREEN_MG_TYPES.has(mg.type));
             state.mgStyle = plan.mgStyle || 'clean';
+            _hydrateMgOverlayShadow(plan);
 
             // Resolve explainer image URLs for overlay MGs
             _resolveExplainerUrls(state.motionGraphics);
@@ -5338,6 +5850,10 @@ async function loadVideoPlan({ freshBuild = false } = {}) {
                 if (core._osmBoundaries) {
                     sceneObj._osmBoundaries = core._osmBoundaries;
                     if (sceneObj.mgData) sceneObj.mgData._osmBoundaries = core._osmBoundaries;
+                }
+                if (core._mapIcons) {
+                    sceneObj._mapIcons = core._mapIcons;
+                    if (sceneObj.mgData) sceneObj.mgData._mapIcons = core._mapIcons;
                 }
                 // Pre-resolve map image URL for preview
                 if (core.mapImageFile && window.electronAPI?.getProjectInfo && window.electronAPI?.getFileUrl) {
@@ -5568,6 +6084,7 @@ window._loadTestPlan = async function(plan) {
     const allMGs = plan.motionGraphics || [];
     state.motionGraphics = allMGs.filter(mg => !FULLSCREEN_MG_TYPES.has(mg.type));
     state.mgStyle = plan.mgStyle || 'clean';
+    _hydrateMgOverlayShadow(plan);
 
     // Resolve explainer image URLs for overlay MGs
     _resolveExplainerUrls(state.motionGraphics);
@@ -5629,49 +6146,69 @@ window._loadTestPlan = async function(plan) {
 // ========================================
 const SFX_MAP = {
     // === Smooth / Cinematic ===
-    fade: { file: 'sfx-fade.mp3', duration: 0.5 },
-    dissolve: { file: 'sfx-dissolve.mp3', duration: 0.5 },
-    crossfade: { file: 'sfx-fade.mp3', duration: 0.5 },
-    blur: { file: 'sfx-blur.mp3', duration: 0.5 },
-    crossBlur: { file: 'sfx-blur.mp3', duration: 0.5 },
-    luma: { file: 'sfx-wipe.mp3', duration: 0.3 },
-    ripple: { file: 'sfx-ripple.mp3', duration: 0.7 },
-    reveal: { file: 'sfx-ink.mp3', duration: 0.6 },
-    morph: { file: 'sfx-blur.mp3', duration: 0.5 },
-    dreamFade: { file: 'sfx-fade.mp3', duration: 0.5 },
-    filmBurn: { file: 'sfx-filmburn.mp3', duration: 0.6 },
+    fade:           { file: 'sfx-fade.mp3', duration: 0.5 },
+    fade_to_black:  { file: 'sfx-fade.mp3', duration: 0.4 },
+    dissolve:       { file: 'sfx-dissolve.mp3', duration: 0.5 },
+    crossfade:      { file: 'sfx-fade.mp3', duration: 0.5 },
+    blur:           { file: 'sfx-blur.mp3', duration: 0.5 },
+    crossBlur:      { file: 'sfx-blur.mp3', duration: 0.5 },
+    luma:           { file: 'sfx-fade.mp3', duration: 0.5 },
+    lumaFade:       { file: 'sfx-fade.mp3', duration: 0.5 },
+    lumaDark:       { file: 'sfx-fade.mp3', duration: 0.5 },
+    ripple:         { file: 'sfx-ripple.mp3', duration: 0.7 },
+    reveal:         { file: 'sfx-ink.mp3', duration: 0.6 },
+    morph:          { file: 'sfx-blur.mp3', duration: 0.5 },
+    dreamFade:      { file: 'sfx-fade.mp3', duration: 0.5 },
+    colorFade:      { file: 'sfx-fade.mp3', duration: 0.5 },
+    filmBurn:       { file: 'sfx-filmburn.mp3', duration: 0.6 },
+    filmGrain:      { file: 'sfx-filmburn.mp3', duration: 0.6 },
+    ink:            { file: 'sfx-ink.mp3', duration: 0.6 },
     // === Energetic / Dynamic ===
-    slide: { file: 'sfx-slide.mp3', duration: 0.4 },
-    wipe: { file: 'sfx-wipe.mp3', duration: 0.3 },
-    zoom: { file: 'sfx-zoom.mp3', duration: 0.5 },
-    push: { file: 'sfx-slide.mp3', duration: 0.4 },
-    swipe: { file: 'sfx-wipe.mp3', duration: 0.3 },
-    whip: { file: 'sfx-whip.mp3', duration: 0.3 },
-    bounce: { file: 'sfx-bounce.mp3', duration: 0.4 },
-    splitWipe: { file: 'sfx-wipe.mp3', duration: 0.3 },
-    shutterSlice: { file: 'sfx-shutter.mp3', duration: 0.3 },
-    zoomBlur: { file: 'sfx-zoom.mp3', duration: 0.5 },
-    // === Dramatic / Film ===
-    flash: { file: 'sfx-flash.mp3', duration: 0.3 },
-    cameraFlash: { file: 'sfx-camera-flash.mp3', duration: 0.3 },
-    flare: { file: 'sfx-flare.mp3', duration: 0.6 },
-    lightLeak: { file: 'sfx-flare.mp3', duration: 0.6 },
-    vignetteBlink: { file: 'sfx-camera-flash.mp3', duration: 0.3 },
-    shadowWipe: { file: 'sfx-wipe.mp3', duration: 0.3 },
-    filmGrain: { file: 'sfx-filmburn.mp3', duration: 0.6 },
-    ink: { file: 'sfx-ink.mp3', duration: 0.6 },
-    directionalBlur: { file: 'sfx-blur.mp3', duration: 0.5 },
-    colorFade: { file: 'sfx-fade.mp3', duration: 0.5 },
-    spin: { file: 'sfx-spin.mp3', duration: 0.6 },
-    prismShift: { file: 'sfx-prism.mp3', duration: 0.5 },
+    slide:          { file: 'sfx-slide.mp3', duration: 0.4 },
+    wipe:           { file: 'sfx-wipe.mp3', duration: 0.3 },
+    push:           { file: 'sfx-slide.mp3', duration: 0.4 },
+    swipe:          { file: 'sfx-wipe.mp3', duration: 0.3 },
+    splitWipe:      { file: 'sfx-wipe.mp3', duration: 0.3 },
+    shutterSlice:   { file: 'sfx-shutter.mp3', duration: 0.3 },
+    bounce:         { file: 'sfx-bounce.mp3', duration: 0.4 },
+    // === Zoom ===
+    zoom:           { file: 'sfx-zoom.mp3', duration: 0.5 },
+    zoomBlur:       { file: 'sfx-zoom.mp3', duration: 0.5 },
+    zoomOut:        { file: 'sfx-zoom.mp3', duration: 0.5 },
+    zoomRotate:     { file: 'sfx-spin.mp3', duration: 0.6 },
+    // === Camera Motion ===
+    panLeft:        { file: 'sfx-pan.mp3', duration: 0.4 },
+    panRight:       { file: 'sfx-pan.mp3', duration: 0.4 },
+    panUp:          { file: 'sfx-pan.mp3', duration: 0.4 },
+    panDown:        { file: 'sfx-pan.mp3', duration: 0.4 },
+    whip:           { file: 'sfx-whip.mp3', duration: 0.3 },
+    whipPan:        { file: 'sfx-whip.mp3', duration: 0.3 },
+    directionalBlur:{ file: 'sfx-whip.mp3', duration: 0.3 },
+    spin:           { file: 'sfx-spin.mp3', duration: 0.6 },
+    // === Light Leaks ===
+    flash:          { file: 'sfx-flash.mp3', duration: 0.3 },
+    cameraFlash:    { file: 'sfx-camera-flash.mp3', duration: 0.3 },
+    flare:          { file: 'sfx-flare.mp3', duration: 0.6 },
+    lightLeak:      { file: 'sfx-flare.mp3', duration: 0.6 },
+    warmLeak:       { file: 'sfx-warm-leak.mp3', duration: 0.6 },
+    coolLeak:       { file: 'sfx-cool-leak.mp3', duration: 0.6 },
+    vignetteBlink:  { file: 'sfx-camera-flash.mp3', duration: 0.3 },
+    shadowWipe:     { file: 'sfx-wipe.mp3', duration: 0.3 },
+    prismShift:     { file: 'sfx-prism.mp3', duration: 0.5 },
     // === Glitch / Tech ===
-    glitch: { file: 'sfx-glitch.mp3', duration: 0.4 },
-    pixelate: { file: 'sfx-glitch.mp3', duration: 0.4 },
-    mosaic: { file: 'sfx-glitch.mp3', duration: 0.4 },
-    dataMosh: { file: 'sfx-glitch.mp3', duration: 0.4 },
-    scanline: { file: 'sfx-static.mp3', duration: 0.5 },
-    rgbSplit: { file: 'sfx-glitch.mp3', duration: 0.4 },
-    static: { file: 'sfx-static.mp3', duration: 0.5 },
+    glitch:         { file: 'sfx-glitch.mp3', duration: 0.4 },
+    pixelate:       { file: 'sfx-glitch.mp3', duration: 0.4 },
+    mosaic:         { file: 'sfx-glitch.mp3', duration: 0.4 },
+    dataMosh:       { file: 'sfx-glitch.mp3', duration: 0.4 },
+    scanline:       { file: 'sfx-static.mp3', duration: 0.5 },
+    rgbSplit:       { file: 'sfx-glitch.mp3', duration: 0.4 },
+    static:         { file: 'sfx-static.mp3', duration: 0.5 },
+    // === Shapes ===
+    diagonalStripes:{ file: 'sfx-wipe.mp3', duration: 0.3 },
+    rectangles:     { file: 'sfx-shutter.mp3', duration: 0.3 },
+    diamonds:       { file: 'sfx-diamond.mp3', duration: 0.4 },
+    blinds:         { file: 'sfx-blinds.mp3', duration: 0.4 },
+    circles:        { file: 'sfx-fade.mp3', duration: 0.5 },
 };
 
 // MG type -> SFX mapping
@@ -5691,8 +6228,31 @@ const MG_SFX_MAP = {
     kineticText:    { file: 'sfx-mg-type.mp3', duration: 0.2 },
     typewriter:     { file: 'sfx-mg-type.mp3', duration: 0.3 },
     subscribeCTA:   { file: 'sfx-mg-chime.mp3', duration: 0.5 },
-    mapChart:       { file: 'sfx-mg-ding.mp3', duration: 0.4 },
+    mapChart:        { file: 'sfx-mg-ding.mp3', duration: 0.4 },
+    explainer:       { file: 'sfx-mg-swoosh.mp3', duration: 0.35 },
+    listicleCounter: { file: 'sfx-mg-tick.mp3', duration: 0.15 },
+    progressTracker: { file: 'sfx-mg-tick.mp3', duration: 0.15 },
+    // Template types (fullscreen MG scenes)
+    splitScreen:     { file: 'sfx-mg-swoosh.mp3', duration: 0.35 },
+    infographic:     { file: 'sfx-mg-ding.mp3', duration: 0.4 },
+    factCard:        { file: 'sfx-mg-pop.mp3', duration: 0.25 },
+    statCard:        { file: 'sfx-mg-ding.mp3', duration: 0.4 },
+    personIntro:     { file: 'sfx-mg-swoosh.mp3', duration: 0.35 },
+    imageShowcase:   { file: 'sfx-mg-pop.mp3', duration: 0.25 },
+    listicleGrid:    { file: 'sfx-mg-pop.mp3', duration: 0.25 },
+    chapterCard:     { file: 'sfx-mg-swoosh.mp3', duration: 0.35 },
+    locationCard:    { file: 'sfx-mg-swoosh.mp3', duration: 0.35 },
+    quoteCard:       { file: 'sfx-mg-rise.mp3', duration: 0.5 },
+    keyTakeaway:     { file: 'sfx-mg-ding.mp3', duration: 0.4 },
+    timelineCard:    { file: 'sfx-mg-rise.mp3', duration: 0.5 },
 };
+
+function applySfxVolumeLevels() {
+    for (const sfx of (state.sfxClips || [])) {
+        const mult = typeof sfx.volumeMultiplier === 'number' ? sfx.volumeMultiplier : 1;
+        sfx.volume = +(state.sfxVolume * mult).toFixed(4);
+    }
+}
 
 function generateSfxClips() {
     if (!state.sfxEnabled) {
@@ -5749,6 +6309,7 @@ function generateSfxClips() {
                 sceneIndex: curr.idx,
                 startTime: startTime,
                 duration: sfxInfo.duration,
+                volumeMultiplier: 1,
                 volume: state.sfxVolume,
                 file: sfxInfo.file
             });
@@ -5767,7 +6328,8 @@ function generateSfxClips() {
                 sceneIndex: -1,
                 startTime: mg.startTime || 0,
                 duration: mgSfx.duration,
-                volume: state.sfxVolume * 0.7, // MG SFX slightly quieter
+                volumeMultiplier: 0.7,
+                volume: state.sfxVolume * 0.7,
                 file: mgSfx.file
             });
         });
@@ -5784,12 +6346,14 @@ function generateSfxClips() {
             sceneIndex: idx,
             startTime: scene.startTime || 0,
             duration: mgSfx.duration,
+            volumeMultiplier: 0.7,
             volume: state.sfxVolume * 0.7,
             file: mgSfx.file
         });
     });
 
     state.sfxClips = clips;
+    applySfxVolumeLevels();
 }
 
 function renderScenes() {
@@ -5838,6 +6402,10 @@ function renderTimeline() {
                 <button id="snap-toggle" class="snap-toggle ${state.snapEnabled ? 'active' : ''}" title="Toggle Snap to Clips">
                     <span class="snap-icon">🧲</span>
                     <span class="snap-label">Snap</span>
+                </button>
+                <button id="time-format-toggle" class="snap-toggle ${state.timeline.rulerSecondsOnly ? 'active' : ''}" title="Toggle ruler time format (M:SS ↔ seconds-only, for matching log timestamps)">
+                    <span class="snap-icon">⏱</span>
+                    <span class="snap-label">${state.timeline.rulerSecondsOnly ? 'Sec' : 'M:SS'}</span>
                 </button>
             </div>
             <div class="timeline-info">
@@ -5898,6 +6466,21 @@ function renderTimeline() {
             state.snapEnabled = !state.snapEnabled;
             snapToggle.classList.toggle('active', state.snapEnabled);
             showToast(`Snap ${state.snapEnabled ? 'enabled' : 'disabled'}`, 'info');
+        });
+    }
+
+    // Setup time format toggle (M:SS ↔ seconds-only, for matching log timestamps)
+    const timeFmtToggle = document.getElementById('time-format-toggle');
+    if (timeFmtToggle) {
+        timeFmtToggle.addEventListener('click', () => {
+            state.timeline.rulerSecondsOnly = !state.timeline.rulerSecondsOnly;
+            timeFmtToggle.classList.toggle('active', state.timeline.rulerSecondsOnly);
+            const lbl = timeFmtToggle.querySelector('.snap-label');
+            if (lbl) lbl.textContent = state.timeline.rulerSecondsOnly ? 'Sec' : 'M:SS';
+            renderRuler(state.totalDuration);
+            const timeEl = document.getElementById('timeline-time');
+            if (timeEl) timeEl.textContent = `${formatTime(state.currentTime, true)} / ${formatTime(state.totalDuration, true)}`;
+            showToast(`Timeline: ${state.timeline.rulerSecondsOnly ? 'seconds-only' : 'M:SS'}`, 'info');
         });
     }
 
@@ -7300,14 +7883,20 @@ async function loadActiveScenes(activeScenes) {
     if (elements.bgGradient) elements.bgGradient.classList.remove('active');
 
     if (activeScenes.length === 0) {
-        // No active scenes - hide video container, show placeholder
+        // No active scenes at this frame - hide video container
         if (elements.videoContainer) {
             elements.videoContainer.classList.add('hidden');
         }
         if (elements.videoControls) {
             elements.videoControls.classList.add('hidden');
         }
-        elements.previewPlaceholder.classList.remove('hidden');
+        // Only show the "Import audio" placeholder when the whole project is empty.
+        // Otherwise we're just in a gap — keep placeholder hidden so the compositor frame remains.
+        if (state.scenes.length === 0) {
+            elements.previewPlaceholder.classList.remove('hidden');
+        } else {
+            elements.previewPlaceholder.classList.add('hidden');
+        }
         return;
     }
 
@@ -7871,6 +8460,7 @@ function refreshCompositorMGs() {
             _endFrame: endFrame,
             _totalFrames: endFrame - startFrame,
             _animationSpeed: mg.animationSpeed || 1.0,
+            overlayShadowStrength: mg.overlayShadowStrength != null ? mg.overlayShadowStrength : state.mgOverlayShadow,
         };
     });
 
@@ -7901,6 +8491,24 @@ function refreshCompositorMGs() {
                 _listicleItems: mgScene._listicleItems,
                 _itemThumbnails: mgScene._itemThumbnails,
                 _itemThumbnailUrls: mgScene._itemThumbnailUrls,
+                // Map properties
+                _mapPolyColor: mgScene._mapPolyColor,
+                _mapWaypoints: mgScene._mapWaypoints,
+                _mapBigMap: mgScene._mapBigMap,
+                _bigMapSize: mgScene._bigMapSize,
+                _wpCoords: mgScene._wpCoords,
+                _osmBoundaries: mgScene._osmBoundaries,
+                _mapZoomSpeed: mgScene._mapZoomSpeed,
+                _mapPolySpeed: mgScene._mapPolySpeed,
+                _mapEasing: mgScene._mapEasing,
+                _mapTiltKfStart: mgScene._mapTiltKfStart,
+                _mapTiltKfEnd: mgScene._mapTiltKfEnd,
+                _mapZoomKfStart: mgScene._mapZoomKfStart,
+                _mapZoomKfEnd: mgScene._mapZoomKfEnd,
+                _mapCinematic: mgScene._mapCinematic,
+                mapStyle: mgScene.mapStyle,
+                mapVariant: mgScene.mapVariant,
+                _mapIcons: mgScene._mapIcons,
             });
         }
     }
@@ -7975,7 +8583,12 @@ async function loadPlanIntoCompositor() {
             // Fullscreen MG scenes
             mgScenes: state.scenes.filter(s => s.isMGScene).map(s => ({ ...s })),
             // Overlay motion graphics
-            motionGraphics: (state.motionGraphics || []).filter(mg => !mg.disabled),
+            motionGraphics: (state.motionGraphics || [])
+                .filter(mg => !mg.disabled)
+                .map(mg => ({
+                    ...mg,
+                    overlayShadowStrength: mg.overlayShadowStrength != null ? mg.overlayShadowStrength : state.mgOverlayShadow,
+                })),
             // Transitions (built from adjacent scenes above)
             transitions,
         };
@@ -8095,7 +8708,13 @@ async function renderVideo() {
                 position: mg.position,
                 sceneIndex: mg.sceneIndex,
                 style: mg.style || state.mgStyle || 'clean',
+                subType: mg.subType || undefined,
+                animation: mg.animation || undefined,
                 animationSpeed: mg.animationSpeed || undefined,
+                overlayShadowStrength: mg.overlayShadowStrength != null ? mg.overlayShadowStrength : state.mgOverlayShadow,
+                styleManual: mg.styleManual === true ? true : undefined,
+                variantManual: mg.variantManual === true ? true : undefined,
+                animationManual: mg.animationManual === true ? true : undefined,
             };
             // Preserve explainer-specific fields
             if (mg.type === 'explainer') {
@@ -8121,6 +8740,7 @@ async function renderVideo() {
         const globalAnimSpeed = parseFloat(document.getElementById('mg-global-anim-speed')?.value) || 1.0;
         if (!state.videoPlan.scriptContext) state.videoPlan.scriptContext = {};
         state.videoPlan.scriptContext.mgAnimationSpeed = globalAnimSpeed;
+        state.videoPlan.scriptContext.mgOverlayShadow = state.mgOverlayShadow;
         await window.electronAPI.saveVideoPlan(state.videoPlan);
 
         updateProgress(5, 'Starting WebGL2 WYSIWYG render...');
@@ -8377,6 +8997,9 @@ function showToast(message, type = 'info') {
     setTimeout(() => { toast.classList.remove('show'); setTimeout(() => toast.remove(), 300); }, 3000);
 }
 function formatTime(s, precise) {
+    if (state.timeline?.rulerSecondsOnly) {
+        return precise ? `${s.toFixed(2)}s` : `${Math.floor(s)}s`;
+    }
     const m = Math.floor(s / 60);
     const sec = s % 60;
     if (precise) {
@@ -8477,11 +9100,31 @@ function setupStyleLearner() {
         elements.buildStyleProfile.addEventListener('change', saveSettings);
     }
 
-    // Open learn dialog
-    elements.btnLearnStyle.addEventListener('click', () => {
-        const dlg = elements.learnStyleDialog;
-        if (dlg) dlg.style.display = (dlg.style.display === 'none' ? 'block' : 'none');
+    // Open Style Studio (replaces the old inline learn dialog)
+    elements.btnLearnStyle.addEventListener('click', async () => {
+        try {
+            if (window.electronAPI?.openStyleStudio) {
+                await window.electronAPI.openStyleStudio();
+            } else {
+                // Fallback to legacy inline dialog if studio IPC missing
+                const dlg = elements.learnStyleDialog;
+                if (dlg) dlg.style.display = (dlg.style.display === 'none' ? 'block' : 'none');
+            }
+        } catch (e) {
+            console.error('[StyleStudio] Failed to open:', e);
+        }
     });
+
+    // Mode toggle: single vs multi
+    if (elements.learnStyleMode) {
+        elements.learnStyleMode.addEventListener('change', () => {
+            const isMulti = elements.learnStyleMode.value === 'multi';
+            if (elements.learnStyleUrl) elements.learnStyleUrl.style.display = isMulti ? 'none' : 'block';
+            if (elements.learnStyleUrls) elements.learnStyleUrls.style.display = isMulti ? 'block' : 'none';
+            if (elements.learnStyleName) elements.learnStyleName.style.display = isMulti ? 'block' : 'none';
+            if (elements.learnStyleBrowse) elements.learnStyleBrowse.style.display = isMulti ? 'none' : '';
+        });
+    }
 
     // Cancel
     if (elements.learnStyleCancel) {
@@ -8489,6 +9132,8 @@ function setupStyleLearner() {
             elements.learnStyleDialog.style.display = 'none';
             elements.learnStyleProgress.style.display = 'none';
             elements.learnStyleUrl.value = '';
+            if (elements.learnStyleUrls) elements.learnStyleUrls.value = '';
+            if (elements.learnStyleName) elements.learnStyleName.value = '';
         });
     }
 
@@ -8515,49 +9160,137 @@ function setupStyleLearner() {
         });
     }
 
-    // Start analysis
+    // Start analysis (single or multi)
     if (elements.learnStyleStart) {
         elements.learnStyleStart.addEventListener('click', async () => {
-            const input = (elements.learnStyleUrl.value || '').trim();
-            if (!input) {
-                showToast('Enter a YouTube URL or pick a local video file', 'error');
-                return;
-            }
-            if (!window.electronAPI?.learnStyle) {
-                showToast('Style Learner not available', 'error');
-                return;
-            }
-            elements.learnStyleProgress.style.display = 'block';
-            elements.learnStyleBar.style.width = '0%';
-            elements.learnStyleMsg.textContent = 'Starting…';
-            elements.learnStyleStart.disabled = true;
-            try {
-                const result = await window.electronAPI.learnStyle(input);
-                if (result && result.success) {
-                    elements.learnStyleBar.style.width = '100%';
-                    elements.learnStyleMsg.textContent = `✓ Saved: ${result.profile?.name || 'profile'}`;
-                    showToast(`Learned style: ${result.profile?.name || 'profile'}`, 'success');
-                    await refreshStyleProfileDropdown();
-                    if (result.path) {
-                        elements.buildStyleProfile.value = result.path;
-                        saveSettings();
+            const isMulti = elements.learnStyleMode?.value === 'multi';
+
+            if (isMulti) {
+                // Multi-video channel learning
+                const urlsRaw = (elements.learnStyleUrls?.value || '').trim();
+                const urls = urlsRaw.split('\n').map(u => u.trim()).filter(Boolean);
+                if (urls.length === 0) {
+                    showToast('Enter at least one YouTube URL (one per line)', 'error');
+                    return;
+                }
+                if (!window.electronAPI?.learnStyleMulti) {
+                    showToast('Multi-video learning not available', 'error');
+                    return;
+                }
+                const profileName = (elements.learnStyleName?.value || '').trim() || undefined;
+                elements.learnStyleProgress.style.display = 'block';
+                elements.learnStyleBar.style.width = '0%';
+                elements.learnStyleMsg.textContent = `Analyzing ${urls.length} videos...`;
+                elements.learnStyleStart.disabled = true;
+                try {
+                    const result = await window.electronAPI.learnStyleMulti(urls, profileName);
+                    if (result && result.success) {
+                        elements.learnStyleBar.style.width = '100%';
+                        const mergedLabel = result.profile?.mergedFrom ? ` (merged from ${result.profile.mergedFrom} videos)` : '';
+                        elements.learnStyleMsg.textContent = `Done: ${result.profile?.name || 'profile'}${mergedLabel}`;
+                        showToast(`Channel style learned: ${result.profile?.name || 'profile'}${mergedLabel}`, 'success');
+                        await refreshStyleProfileDropdown();
+                        if (result.path) {
+                            elements.buildStyleProfile.value = result.path;
+                            saveSettings();
+                        }
+                        setTimeout(() => {
+                            elements.learnStyleDialog.style.display = 'none';
+                            elements.learnStyleProgress.style.display = 'none';
+                            elements.learnStyleUrls.value = '';
+                            if (elements.learnStyleName) elements.learnStyleName.value = '';
+                        }, 2000);
+                    } else {
+                        const err = (result && result.error) || 'Unknown error';
+                        elements.learnStyleMsg.textContent = `Error: ${err}`;
+                        showToast(`Multi-learn failed: ${err}`, 'error');
                     }
-                    setTimeout(() => {
-                        elements.learnStyleDialog.style.display = 'none';
-                        elements.learnStyleProgress.style.display = 'none';
-                        elements.learnStyleUrl.value = '';
-                    }, 1500);
+                } catch (e) {
+                    elements.learnStyleMsg.textContent = `Error: ${e.message || e}`;
+                    showToast(`Multi-learn error: ${e.message || e}`, 'error');
+                } finally {
+                    elements.learnStyleStart.disabled = false;
+                }
+            } else {
+                // Single video learning (existing flow)
+                const input = (elements.learnStyleUrl.value || '').trim();
+                if (!input) {
+                    showToast('Enter a YouTube URL or pick a local video file', 'error');
+                    return;
+                }
+                if (!window.electronAPI?.learnStyle) {
+                    showToast('Style Learner not available', 'error');
+                    return;
+                }
+                elements.learnStyleProgress.style.display = 'block';
+                elements.learnStyleBar.style.width = '0%';
+                elements.learnStyleMsg.textContent = 'Starting...';
+                elements.learnStyleStart.disabled = true;
+                try {
+                    const result = await window.electronAPI.learnStyle(input);
+                    if (result && result.success) {
+                        elements.learnStyleBar.style.width = '100%';
+                        elements.learnStyleMsg.textContent = `Done: ${result.profile?.name || 'profile'}`;
+                        showToast(`Learned style: ${result.profile?.name || 'profile'}`, 'success');
+                        await refreshStyleProfileDropdown();
+                        if (result.path) {
+                            elements.buildStyleProfile.value = result.path;
+                            saveSettings();
+                        }
+                        setTimeout(() => {
+                            elements.learnStyleDialog.style.display = 'none';
+                            elements.learnStyleProgress.style.display = 'none';
+                            elements.learnStyleUrl.value = '';
+                        }, 1500);
+                    } else {
+                        const err = (result && result.error) || 'Unknown error';
+                        elements.learnStyleMsg.textContent = `Error: ${err}`;
+                        showToast(`Style learner failed: ${err}`, 'error');
+                    }
+                } catch (e) {
+                    elements.learnStyleMsg.textContent = `Error: ${e.message || e}`;
+                    showToast(`Style learner error: ${e.message || e}`, 'error');
+                } finally {
+                    elements.learnStyleStart.disabled = false;
+                }
+            }
+        });
+    }
+
+    // Compare style with current build
+    if (elements.btnCompareStyle) {
+        elements.btnCompareStyle.addEventListener('click', async () => {
+            const profilePath = elements.buildStyleProfile?.value;
+            if (!profilePath || profilePath === 'none') {
+                showToast('Select a style profile first', 'error');
+                return;
+            }
+            if (!state.videoPlan || !state.videoPlan.scenes?.length) {
+                showToast('Load a video plan first (run a build or load a project)', 'error');
+                return;
+            }
+            if (!window.electronAPI?.compareStyle) {
+                showToast('Style comparison not available', 'error');
+                return;
+            }
+            try {
+                const result = await window.electronAPI.compareStyle(profilePath, state.videoPlan);
+                if (result && result.success && elements.styleComparisonText) {
+                    elements.styleComparisonText.textContent = result.report;
+                    elements.styleComparisonReport.style.display = 'block';
                 } else {
-                    const err = (result && result.error) || 'Unknown error';
-                    elements.learnStyleMsg.textContent = `✕ ${err}`;
-                    showToast(`Style learner failed: ${err}`, 'error');
+                    showToast(`Comparison failed: ${result?.error || 'unknown'}`, 'error');
                 }
             } catch (e) {
-                elements.learnStyleMsg.textContent = `✕ ${e.message || e}`;
-                showToast(`Style learner error: ${e.message || e}`, 'error');
-            } finally {
-                elements.learnStyleStart.disabled = false;
+                showToast(`Comparison error: ${e.message || e}`, 'error');
             }
+        });
+    }
+
+    // Close comparison report
+    if (elements.styleComparisonClose) {
+        elements.styleComparisonClose.addEventListener('click', () => {
+            if (elements.styleComparisonReport) elements.styleComparisonReport.style.display = 'none';
         });
     }
 
@@ -8566,10 +9299,15 @@ function setupStyleLearner() {
 
     // ── Map Preview Test handler ──
     if (elements.btnMapTest) {
-        elements.btnMapTest.addEventListener('click', () => {
+        elements.btnMapTest.addEventListener('click', async () => {
             const locStr = (elements.mapTestLocations?.value || '').trim();
-            if (!locStr) {
-                elements.mapTestStatus.textContent = 'Enter at least one location';
+            const useAIPlannerEarly = !!elements.mapUsePlanner?.checked;
+            const narrationEarly = (elements.mapTestNarration?.value || '').trim();
+            // Locations are only mandatory when NOT using the AI Planner, OR when
+            // AI Planner is on but narration is also empty. With AI Planner + narration,
+            // entity extraction in map-provider.js will pull places from the narration.
+            if (!locStr && !(useAIPlannerEarly && narrationEarly)) {
+                elements.mapTestStatus.textContent = 'Enter at least one location (or enable AI Planner + narration)';
                 return;
             }
             // Parse waypoint format: "United States 0-3 z1.0, Texas 3-8 z3.0 t0.3 b15 o20"
@@ -8578,16 +9316,26 @@ function setupStyleLearner() {
             // b<bearing>  = static bearing/rotation in degrees (e.g. b15 = 15°)
             // o<orbit>   = orbit speed in deg/sec (camera slowly rotates around the point)
             // Or plain: "Berlin, Tokyo, Moscow"
-            const parts = locStr.split(',').map(s => s.trim()).filter(Boolean);
+            const parts = locStr ? locStr.split(',').map(s => s.trim()).filter(Boolean) : [];
             const waypoints = [];
             const locations = [];
             const wpRegex = /^(.+?)\s+(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*(.*)$/;
             let hasWaypoints = false;
+            // Preserve user casing exactly when ANY uppercase char is present
+            // (so "Bab-el-Mandeb Strait" survives intact). Auto-title-case only
+            // all-lowercase input as a convenience.
+            const normalizeName = (s) => {
+                const t = s.trim();
+                if (/[A-Z]/.test(t)) return t;
+                return t.split(/\s+/).map(w =>
+                    w.split('-').map(sub => sub ? sub.charAt(0).toUpperCase() + sub.slice(1) : sub).join('-')
+                ).join(' ');
+            };
             for (const part of parts) {
                 const m = part.match(wpRegex);
                 if (m) {
                     hasWaypoints = true;
-                    const name = m[1].trim().split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ');
+                    const name = normalizeName(m[1]);
                     const extras = m[4] || '';
                     const zMatch = extras.match(/z(\d+(?:\.\d+)?)/);
                     const tMatch = extras.match(/t(\d+(?:\.\d+)?)/);
@@ -8604,12 +9352,100 @@ function setupStyleLearner() {
                     });
                     locations.push(name);
                 } else {
-                    const name = part.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ');
-                    locations.push(name);
+                    locations.push(normalizeName(part));
                 }
             }
             const mapStyle = elements.mapTestStyle?.value || 'dark';
             const title = elements.mapTestTitle?.value || '';
+
+            // ── AI Planner mode: emulate a real build by routing through ai-map-planner.js ──
+            // The locations field supplies the entity list; the narration textarea supplies the
+            // scene text the planner uses to pick waypoints, zooms, and timings.
+            const useAIPlanner = !!elements.mapUsePlanner?.checked;
+            if (useAIPlanner) {
+                const planner = window._mapPlanner;
+                if (!planner || !planner.planMapAnimations) {
+                    elements.mapTestStatus.textContent = 'AI Map Planner not available (check preload)';
+                    return;
+                }
+                const narration = (elements.mapTestNarration?.value || '').trim();
+                if (!narration && locations.length === 0) {
+                    elements.mapTestStatus.textContent = 'AI Planner: enter locations or narration first';
+                    return;
+                }
+                const sceneDurUI = parseInt(elements.mapDuration?.value) || 7;
+                const variantOverride = elements.mapVariant?.value || 'auto';
+                const variant = variantOverride !== 'auto' ? variantOverride : 'regionHighlight';
+
+                // Build a synthetic mapChart MG matching what VP would emit.
+                // - If the user typed locations, use "Location: #N" subtext pairs (step-1 extraction).
+                // - If locations are empty, stash the narration in mg.text so step-2b GEO_COORDS
+                //   scan auto-discovers places mentioned in the narration ("Europe", "Asia", etc.).
+                const subtextPairs = locations.map((loc, i) => `${loc}: #${i + 1}`).join(', ');
+                const syntheticMG = {
+                    type: 'mapChart',
+                    text: locations.length === 0 ? narration : (title || ''),
+                    subtext: subtextPairs,
+                    sceneIndex: 0,
+                    duration: sceneDurUI,
+                    mapVariant: variant,
+                    subType: variant,
+                };
+
+                // Build a minimal scriptContext: entities array + place tags so
+                // map-provider.extractEntities recognises every typed location.
+                const entityTypes = {};
+                for (const loc of locations) entityTypes[loc] = 'place';
+                const scriptContext = {
+                    entities: locations.slice(),
+                    entityTypes,
+                    pacing: 'medium',
+                    format: 'documentary',
+                    tone: 'neutral',
+                };
+
+                // One-scene array — narration is what the AI reads.
+                const scenes = [{
+                    text: narration,
+                    startTime: 0,
+                    endTime: sceneDurUI,
+                    duration: sceneDurUI * 30,
+                    words: [],
+                }];
+
+                elements.mapTestStatus.textContent = 'AI Planner: calling planMapAnimations()...';
+                try {
+                    await planner.planMapAnimations([syntheticMG], scriptContext, '', scenes);
+                } catch (err) {
+                    console.warn('[Map Test] AI Planner failed:', err);
+                    elements.mapTestStatus.textContent = `AI Planner failed: ${err.message}`;
+                    return;
+                }
+
+                const planned = syntheticMG._mapWaypoints || [];
+                if (planned.length === 0) {
+                    elements.mapTestStatus.textContent = 'AI Planner returned no waypoints';
+                    return;
+                }
+                console.log(`[Map Test] AI Planner produced ${planned.length} waypoint(s)`);
+                for (const wp of planned) {
+                    const params = [];
+                    if (wp.zoom != null) params.push(`z${wp.zoom}`);
+                    if (wp.tilt != null) params.push(`t${wp.tilt}`);
+                    if (wp.bearing != null) params.push(`b${wp.bearing}`);
+                    if (wp.orbit != null) params.push(`o${wp.orbit}`);
+                    console.log(`  📍 ${wp.name} ${wp.startTime}-${wp.endTime}s ${params.join(' ')}`);
+                }
+                elements.mapTestStatus.textContent = `AI Planner: ${planned.length} waypoints planned`;
+
+                // Use the planner's place list (covers names it added, e.g. ocean basins
+                // promoted via swarms) so geocoding + boundaries cover everything it cares about.
+                const plannedNames = Array.from(new Set(planned.map(w => w.name).filter(Boolean)));
+                const swarms = syntheticMG._mapSwarms || [];
+                _injectMapTest(plannedNames.length ? plannedNames : locations, mapStyle, title, planned, swarms);
+                return;
+            }
+
             _injectMapTest(locations, mapStyle, title, hasWaypoints ? waypoints : null);
         });
     }
@@ -8728,7 +9564,7 @@ function _drawCountryPolygon(ctx, feature, toX, toY, fillColor, strokeColor, str
  * Uses geocoded pins from the build pipeline if available, otherwise
  * creates a mapChart with subtext for the renderer to resolve.
  */
-function _injectMapTest(locations, mapStyle, title, waypoints) {
+function _injectMapTest(locations, mapStyle, title, waypoints, swarms) {
     const statusEl = document.getElementById('map-test-status');
     const setStatus = (msg) => { if (statusEl) statusEl.textContent = msg; };
 
@@ -8799,6 +9635,8 @@ function _injectMapTest(locations, mapStyle, title, waypoints) {
         _mapPolyColor: polyColorChoice,
         _mapCinematic: cinematic,
         _mapWaypoints: waypoints || null,
+        _mapSwarms: (swarms && swarms.length > 0) ? swarms : null,
+        _mapBigMap: !!(waypoints && waypoints.length > 0),
         mgData: {
             type: 'mapChart',
             mapStyle: mapStyle,
@@ -8822,6 +9660,8 @@ function _injectMapTest(locations, mapStyle, title, waypoints) {
             _mapPolyColor: polyColorChoice,
             _mapCinematic: cinematic,
             _mapWaypoints: waypoints || null,
+            _mapSwarms: (swarms && swarms.length > 0) ? swarms : null,
+            _mapBigMap: !!(waypoints && waypoints.length > 0),
         },
     };
 
@@ -9226,6 +10066,9 @@ function _showMapTestPopup(testScene, setStatus) {
     setStatus('✓ Map preview — Space to play/pause, drag to scrub');
 }
 
+// Icon image cache for map waypoints (keyword/name → HTMLImageElement)
+const _mapIconImgCache = {};
+
 function _renderMapTestFrame(ctx, frame, fps, mg, mapImg, anim) {
     // Resolve map data from mgData if not on the scene object directly
     const _mgd = mg.mgData || mg;
@@ -9233,6 +10076,7 @@ function _renderMapTestFrame(ctx, frame, fps, mg, mapImg, anim) {
     if (!mg._mapWaypoints && _mgd._mapWaypoints) mg._mapWaypoints = _mgd._mapWaypoints;
     if (!mg._wpCoords && _mgd._wpCoords) mg._wpCoords = _mgd._wpCoords;
     if (!mg._mapBigMap && _mgd._mapBigMap) mg._mapBigMap = _mgd._mapBigMap;
+    if (!mg._mapIcons && _mgd._mapIcons) mg._mapIcons = _mgd._mapIcons;
     if (!mg._osmBoundaries && _mgd._osmBoundaries) mg._osmBoundaries = _mgd._osmBoundaries;
     const W = 1920, H = 1080;
     const elapsed = frame / fps;
@@ -9553,17 +10397,16 @@ function _renderMapTestFrame(ctx, frame, fps, mg, mapImg, anim) {
     }
 
     ctx.save();
-    const tiltCompScale = 1; // strips now fill full width, no compensation needed
     if (wpBigMapCamera) {
         // Big map waypoint: scale + rotate around waypoint, centered on screen
         ctx.translate(W / 2, H / 2);
         if (useBearing) ctx.rotate(bearingRad);
-        ctx.scale(camScale * tiltCompScale, camScale * tiltCompScale);
+        ctx.scale(camScale, camScale);
         ctx.translate(-wpCamX, -wpCamY);
     } else {
         ctx.translate(W / 2 + driftX, H / 2 + driftY);
         if (useBearing) ctx.rotate(bearingRad);
-        ctx.scale(camScale * tiltCompScale, camScale * tiltCompScale);
+        ctx.scale(camScale, camScale);
         ctx.translate(-W / 2, -H / 2);
     }
 
@@ -9778,7 +10621,9 @@ function _renderMapTestFrame(ctx, frame, fps, mg, mapImg, anim) {
     }
 
     // ══ 3. FLIGHT ARCS (curved 3D-style arcs between locations) ══
-    if (pins.length >= 2) {
+    // Only route/comparison variants get arcs — locator/regionHighlight should NOT connect pins.
+    const _arcVariants = new Set(['route', 'comparison']);
+    if (_arcVariants.has(variant) && pins.length >= 2) {
         for (let i = 0; i < pins.length - 1; i++) {
             const a = pins[i], b = pins[i + 1];
             const dist = Math.hypot(b.x - a.x, b.y - a.y);
@@ -9888,10 +10733,60 @@ function _renderMapTestFrame(ctx, frame, fps, mg, mapImg, anim) {
         gg.addColorStop(0, pal.pinGlow); gg.addColorStop(1, 'transparent');
         ctx.fillStyle = gg; ctx.beginPath(); ctx.arc(pin.x, py, glowR, 0, Math.PI * 2); ctx.fill();
 
-        // Pin dot
+        // Pin dot or icon
         const dotR = pin.type === 'city' || pin.type === 'landmark' ? 9 : 7;
-        ctx.fillStyle = pal.pin; ctx.shadowColor = pal.pin; ctx.shadowBlur = 18;
-        ctx.beginPath(); ctx.arc(pin.x, py, dotR * eased, 0, Math.PI * 2); ctx.fill(); ctx.shadowBlur = 0;
+        // Check for icon — look up by pin label, then try waypoint match
+        let _iconKey = pin.label || pin.name;
+        let _iconImg = _mapIconImgCache[_iconKey];
+        if (!_iconImg) {
+            const _wps = mg._mapWaypoints || [];
+            for (const _wp of _wps) {
+                if (!_wp.icon) continue;
+                const _wL = (_wp.name || '').toLowerCase();
+                const _pL = (pin.label || '').toLowerCase();
+                if (_wL === _pL || _wL.includes(_pL) || _pL.includes(_wL)) {
+                    _iconImg = _mapIconImgCache[_wp.name];
+                    if (_iconImg) { _iconKey = _wp.name; break; }
+                }
+            }
+        }
+        // Lazy-load ALL icons from _mapIcons (bulk preload once)
+        if (mg._mapIcons && !mg._mapIconsPreloaded) {
+            mg._mapIconsPreloaded = true;
+            for (const [iName, iconPath] of Object.entries(mg._mapIcons)) {
+                if (_mapIconImgCache[iName] || _mapIconImgCache['__loading_' + iName]) continue;
+                _mapIconImgCache['__loading_' + iName] = true;
+                const img = new Image();
+                img.onload = () => { _mapIconImgCache[iName] = img; };
+                img.onerror = () => { _mapIconImgCache['__loading_' + iName] = false; };
+                if (iconPath.startsWith('http') || iconPath.startsWith('data:') || iconPath.startsWith('file:')) {
+                    img.src = iconPath;
+                } else if (window.electronAPI?.getFileUrl) {
+                    window.electronAPI.getFileUrl(iconPath).then(url => { if (url) img.src = url; });
+                } else {
+                    img.src = `file:///${iconPath.replace(/\\/g, '/')}`;
+                }
+            }
+        }
+
+        if (_iconImg && _iconImg.complete && _iconImg.naturalWidth > 0) {
+            // Draw icon with circular background
+            const iconSize = 40 * eased;
+            ctx.save();
+            ctx.shadowColor = pal.pin; ctx.shadowBlur = 14;
+            ctx.fillStyle = 'rgba(10,15,30,0.7)';
+            ctx.beginPath(); ctx.arc(pin.x, py, iconSize / 2 + 4, 0, Math.PI * 2); ctx.fill();
+            ctx.strokeStyle = pal.pin; ctx.lineWidth = 2;
+            ctx.beginPath(); ctx.arc(pin.x, py, iconSize / 2 + 4, 0, Math.PI * 2); ctx.stroke();
+            ctx.shadowBlur = 0;
+            ctx.beginPath(); ctx.arc(pin.x, py, iconSize / 2 + 2, 0, Math.PI * 2); ctx.clip();
+            ctx.drawImage(_iconImg, pin.x - iconSize / 2, py - iconSize / 2, iconSize, iconSize);
+            ctx.restore();
+        } else {
+            // Standard pin dot
+            ctx.fillStyle = pal.pin; ctx.shadowColor = pal.pin; ctx.shadowBlur = 18;
+            ctx.beginPath(); ctx.arc(pin.x, py, dotR * eased, 0, Math.PI * 2); ctx.fill(); ctx.shadowBlur = 0;
+        }
 
         // Outer ring
         ctx.strokeStyle = pal.pin; ctx.lineWidth = 2;
@@ -10008,12 +10903,12 @@ function _renderMapTestFrame(ctx, frame, fps, mg, mapImg, anim) {
 
         // Map projected Y to screen pixels.
         // Bottom of map anchored near screen bottom, top compresses upward.
-        const bottomScreen = H * 0.92; // bottom edge of map on screen
+        const bottomScreen = H; // anchor at actual bottom edge
         const projMax = projY[0]; // top of source = farthest = smallest projected extent
         const projMin = projY[STRIPS]; // bottom of source = closest = 0
         const projRange = projMax - projMin;
-        // Total visible height scales with tilt — more tilt = more compression
-        const visibleH = H * (0.85 - tilt * 0.15);
+        // Fill full frame height — no black bar at top
+        const visibleH = H;
 
         const screenY = new Float32Array(STRIPS + 1);
         for (let i = 0; i <= STRIPS; i++) {
@@ -10137,11 +11032,22 @@ function saveSettings() {
         buildNiche: elements.buildNiche ? elements.buildNiche.value : 'auto',
         buildLanguage: elements.buildLanguage ? elements.buildLanguage.value : 'auto',
         buildStyleProfile: elements.buildStyleProfile ? elements.buildStyleProfile.value : 'none',
-        cinematicScale: elements.cinematicScale ? elements.cinematicScale.value : '0.65',
-        clipAnalyzer: elements.clipAnalyzerToggle?.checked !== false
+        clipAnalyzer: elements.clipAnalyzerToggle?.checked !== false,
+        buildResume: elements.buildResumeToggle?.checked === true
     }));
     // Also trigger .fvp auto-save so settings persist per-project
     triggerAutoSave();
+    // Push live project context to the Style Studio agent (main process) so it
+    // knows the current video title / niche / instructions even without a .fvp.
+    try {
+        window.electronAPI?.styleStudioSetProjectContext?.({
+            videoTitle: state.videoTitle,
+            aiInstructions: state.aiInstructions,
+            buildNiche: elements.buildNiche ? elements.buildNiche.value : 'auto',
+            buildLanguage: elements.buildLanguage ? elements.buildLanguage.value : 'auto',
+            buildStyleProfile: elements.buildStyleProfile ? elements.buildStyleProfile.value : 'none',
+        });
+    } catch (_) {}
 }
 
 function getEnabledSources() {
@@ -10217,13 +11123,10 @@ function loadSettings() {
                 // Defer setting until dropdown is populated
                 state._pendingStyleProfile = s.buildStyleProfile;
             }
-            // Restore Cinematic Scale
-            if (elements.cinematicScale && s.cinematicScale) {
-                elements.cinematicScale.value = s.cinematicScale;
-                if (elements.cinematicScaleVal) elements.cinematicScaleVal.textContent = parseFloat(s.cinematicScale).toFixed(2);
-            }
             // Restore Clip Analyzer toggle
             if (elements.clipAnalyzerToggle) elements.clipAnalyzerToggle.checked = s.clipAnalyzer !== false;
+            // Restore Resume Build toggle (default OFF — fresh build unless user opts in)
+            if (elements.buildResumeToggle) elements.buildResumeToggle.checked = s.buildResume === true;
             // Restore track mute state
             if (s.mutedTracks) state.mutedTracks = s.mutedTracks;
             // Restore footage source toggles
@@ -10291,11 +11194,6 @@ function applyProjectSettings(s) {
         // Niche Preset
         if (elements.buildNiche && s.buildNiche) elements.buildNiche.value = s.buildNiche;
         if (elements.buildLanguage && s.buildLanguage) elements.buildLanguage.value = s.buildLanguage;
-        // Cinematic Scale
-        if (elements.cinematicScale && s.cinematicScale) {
-            elements.cinematicScale.value = s.cinematicScale;
-            if (elements.cinematicScaleVal) elements.cinematicScaleVal.textContent = parseFloat(s.cinematicScale).toFixed(2);
-        }
         // Track mute
         if (s.mutedTracks) state.mutedTracks = s.mutedTracks;
         // Footage sources

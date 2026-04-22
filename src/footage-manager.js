@@ -190,6 +190,100 @@ function _getUrlUseCount(url) {
     return _urlUseCount.get(key) || 0;
 }
 
+// ============ MISMATCH PENALTIES ============
+// Vision models are too willing to score "contextually related" footage highly
+// (e.g. giving 10/10 to a Kyiv living-room clip for an air-defense scene, just
+// because both are set in Ukraine). These rules apply textual penalties on top
+// of the vision score by comparing what the keyword/scene asks for against what
+// the vision model reports seeing.
+const _TARGET_OBJECTS = [
+    { tokens: ['drone', 'drones', 'uav', 'quadcopter'], label: 'drone' },
+    { tokens: ['missile', 'missiles', 'rocket', 'rockets', 'ballistic', 'cruise'], label: 'missile' },
+    { tokens: ['interceptor', 'interceptors', 'interception', 'intercept', 'intercepting'], label: 'interceptor' },
+    { tokens: ['tank', 'tanks', 'armored', 'armor'], label: 'tank' },
+    { tokens: ['jet', 'jets', 'fighter', 'warplane', 'aircraft', 'airplane'], label: 'aircraft' },
+    { tokens: ['helicopter', 'helicopters', 'chopper'], label: 'helicopter' },
+    { tokens: ['warship', 'destroyer', 'cruiser', 'frigate', 'carrier', 'battleship'], label: 'warship' },
+    { tokens: ['submarine', 'submarines'], label: 'submarine' },
+    { tokens: ['explosion', 'explosions', 'blast', 'detonation', 'detonating'], label: 'explosion' },
+    { tokens: ['fire', 'flames', 'burning', 'ablaze', 'wildfire'], label: 'fire' },
+    { tokens: ['launch', 'launching', 'liftoff', 'launched'], label: 'launch' },
+    { tokens: ['wreckage', 'debris', 'crashed', 'crash'], label: 'wreckage' },
+    { tokens: ['air defense', 'air-defense', 'sam', 'patriot', 'iron dome', 'flak'], label: 'air defense' },
+];
+
+const _OUTDOOR_KW_RE = /\b(sky|skies|airspace|airborne|flying|overflight|launch|liftoff|battlefield|frontline|field|desert|ocean|sea|aerial|drone shot|overhead|above|strike|strikes|attack|raid)\b/i;
+const _INDOOR_DESC_RE = /\b(living room|bedroom|sofa|couch|kitchen|office|studio|desk|interior|indoor|indoors|carpet|curtain|curtains|wall|walls|ceiling|hallway|hotel room|bathroom)\b/i;
+const _OVERLAY_DESC_RE = /\b(watermark|watermarks|logo|united24|timestamped|overlaid with|overlay|overlays|caption|captions|ticker|lower.third|lower-third|waveform|visualizer|audio bar|burn.?in|subtitle|subtitles|channel logo|press logo|agency stamp)\b/i;
+const _REACTION_DESC_RE = /\b(person (sitting|watching|listening|reacting|speaking|talking|standing)|people (watching|listening|reacting|standing|sitting)|audience|reporter interview|interviewee|crowd (listening|watching)|family (sitting|watching|in))\b/i;
+const _SUBJECT_KW_RE = /\b(footage|strike|strikes|attack|attacks|explosion|explosions|intercept|interception|launch|combat|raid|raids|blast|battlefield|incoming|outgoing|bomb|bombing|shelling|firing)\b/i;
+
+/**
+ * Apply post-hoc mismatch penalties to a vision score. The vision model often
+ * gives loosely-related footage a perfect score; this catches the common classes
+ * of mismatch (missing target object, indoor vs outdoor, overlays, reaction
+ * footage masquerading as subject footage) and subtracts from the score.
+ *
+ * @returns { score, penalty, reasons }
+ */
+function _applyMismatchPenalty(score, description, keyword, sceneText, clipAnalysis) {
+    if (!description) return { score, penalty: 0, reasons: [] };
+    const desc = String(description).toLowerCase();
+    const combined = `${String(keyword || '')} ${String(sceneText || '')}`.toLowerCase();
+    const reasons = [];
+    let penalty = 0;
+
+    // Missing target object: keyword asks for a specific thing, description never mentions it.
+    for (const obj of _TARGET_OBJECTS) {
+        const kwHas = obj.tokens.some(t => combined.includes(t));
+        if (!kwHas) continue;
+        const descHas = obj.tokens.some(t => desc.includes(t));
+        if (!descHas) {
+            penalty += 3;
+            reasons.push(`missing target "${obj.label}"`);
+            break; // one target mismatch is sufficient evidence
+        }
+    }
+
+    // Indoor/outdoor mismatch: outdoor subject, indoor scene.
+    if (_OUTDOOR_KW_RE.test(combined) && _INDOOR_DESC_RE.test(desc)) {
+        penalty += 3;
+        reasons.push('indoor footage for outdoor subject');
+    }
+
+    // Overlays / watermarks / audio-visualizer chrome — from the vision description…
+    if (_OVERLAY_DESC_RE.test(desc)) {
+        penalty += 2;
+        reasons.push('overlay/watermark in frame');
+    }
+    // …and from the deep clip analyzer's issues list, which is more reliable.
+    if (clipAnalysis?.issues?.length) {
+        const issuesStr = clipAnalysis.issues.join(' ').toLowerCase();
+        if (/watermark|logo|channel|stamp|agency/.test(issuesStr)) {
+            penalty += 2;
+            reasons.push('clip-analysis: watermark/logo');
+        }
+        if (/text overlay|caption|ticker|lower.third|burn.?in|subtitle/.test(issuesStr)) {
+            penalty += 2;
+            reasons.push('clip-analysis: text overlay');
+        }
+        if (/waveform|visualizer|audio bar/.test(issuesStr)) {
+            penalty += 2;
+            reasons.push('clip-analysis: audio visualizer');
+        }
+    }
+
+    // Reaction footage: keyword asks for the SUBJECT (strike/attack/explosion),
+    // description shows people reacting to it instead.
+    if (_SUBJECT_KW_RE.test(combined) && _REACTION_DESC_RE.test(desc)) {
+        penalty += 3;
+        reasons.push('reaction footage instead of subject');
+    }
+
+    const newScore = Math.max(1, score - penalty);
+    return { score: newScore, penalty, reasons };
+}
+
 // ============ INLINE VISION SCORING ============
 
 let _visionEnabled = false;
@@ -315,11 +409,20 @@ async function _scoreDownloadedMedia(filePath, ext, keyword, context) {
                 finalScore = worstScore;
             }
 
+            const mergedDesc = worstScore === bestScore
+                ? worstDesc
+                : `worst: ${worstDesc} (${worstScore}/10) | best: ${bestDesc} (${bestScore}/10) → median: ${finalScore}/10`;
+            // Apply hard mismatch penalties before returning — the vision model often
+            // inflates scores for contextually-related-but-literally-wrong footage.
+            const penaltyCheck = _applyMismatchPenalty(finalScore, `${worstDesc} | ${bestDesc}`, keyword, context?.sceneText, null);
+            if (penaltyCheck.penalty > 0) {
+                console.log(`    ⛔ Mismatch penalty -${penaltyCheck.penalty} (${penaltyCheck.reasons.join('; ')}) → ${finalScore} → ${penaltyCheck.score}`);
+            }
             return {
-                score: finalScore,
-                description: worstScore === bestScore
-                    ? worstDesc
-                    : `worst: ${worstDesc} (${worstScore}/10) | best: ${bestDesc} (${bestScore}/10) → median: ${finalScore}/10`,
+                score: penaltyCheck.score,
+                description: mergedDesc,
+                rawScore: finalScore,
+                penaltyReasons: penaltyCheck.reasons,
             };
         } else {
             return null;
@@ -854,8 +957,14 @@ async function downloadMedia(keyword, mediaType, filenameBase, sceneDuration = 1
     const sourceMap = mediaType === 'video' ? VIDEO_SOURCE_MAP : IMAGE_SOURCE_MAP;
     const providers = reorderProviders(allProviders, priorityOrder, sourceMap);
     const ext = mediaType === 'video' ? '.mp4' : '.jpg';
+    const abortSignal = scene?._abortSignal || null;
+    const isAborted = () => scene?._aborted || abortSignal?.aborted;
 
     for (const provider of providers) {
+        if (isAborted()) {
+            console.log(`  ⏱️ Scene aborted — stopping provider loop`);
+            return null;
+        }
         if (!provider.isAvailable()) continue;
 
         try {
@@ -983,8 +1092,9 @@ async function downloadMedia(keyword, mediaType, filenameBase, sceneDuration = 1
                         console.log(`  ⏭️ [Smart Trim] Skipped — ${reason}`);
                     }
 
+                    if (isAborted()) { console.log(`  ⏱️ Scene aborted — skipping download`); return null; }
                     console.log(`  ⬇️  [${provider.name}] Downloading${attempt > 0 ? ` (attempt ${attempt + 1})` : ''}...`);
-                    const finalPath = await provider.download(selected.url, outputPath, { duration: sceneDuration, keyword: keyword, _directVideoUrl: selected._directVideoUrl || null, _cachedMeta: selected._cachedMeta || selected._meta || null, _fallbackUrl: selected._fallbackUrl || null, _smartStartTime: smartStartTime, sceneText: scene?.text || '', niche: nicheId || '', videoTopic: scriptContextRef?.summary || '' });
+                    const finalPath = await provider.download(selected.url, outputPath, { duration: sceneDuration, keyword: keyword, _directVideoUrl: selected._directVideoUrl || null, _cachedMeta: selected._cachedMeta || selected._meta || null, _fallbackUrl: selected._fallbackUrl || null, _smartStartTime: smartStartTime, sceneText: scene?.text || '', niche: nicheId || '', videoTopic: scriptContextRef?.summary || '', abortSignal });
                     const finalExt = path.extname(finalPath);
                     console.log(`  ✅ [${provider.name}] Downloaded: ${path.basename(finalPath)}`);
 
@@ -1088,6 +1198,30 @@ async function downloadMedia(keyword, mediaType, filenameBase, sceneDuration = 1
                                 } else {
                                     visionScore = clipAnalysis.score;
                                 }
+                                // Re-apply mismatch penalty with the deep-clip description + issues list.
+                                // The blend alone can rescue a clip that's only "contextually" related
+                                // (right country/mood but wrong subject) — this is the final gate.
+                                const deepPenalty = _applyMismatchPenalty(
+                                    visionScore,
+                                    `${clipAnalysis.description} ${clipAnalysis.issues?.join(' ') || ''}`,
+                                    keyword,
+                                    scene?.text,
+                                    clipAnalysis
+                                );
+                                if (deepPenalty.penalty > 0) {
+                                    console.log(`  ⛔ Post-blend mismatch penalty -${deepPenalty.penalty} (${deepPenalty.reasons.join('; ')}) → ${visionScore} → ${deepPenalty.score}`);
+                                    visionScore = deepPenalty.score;
+                                    // If the penalty dropped the blended score at or below the basic-vision
+                                    // reject threshold, bail out on this result — the blend was masking
+                                    // literal-mismatch problems.
+                                    if (visionScore <= 4) {
+                                        console.log(`  ❌ Blended score now ≤4 after penalty — rejecting and trying next result`);
+                                        _blacklistUrl(dlUrl, visionScore, `penalized: ${deepPenalty.reasons.join('; ')}`);
+                                        visionRejections.push(`Penalty: ${deepPenalty.reasons.join('; ')}`);
+                                        try { fs.unlinkSync(finalPath); } catch {}
+                                        continue;
+                                    }
+                                }
                             }
                         } catch (err) {
                             // Non-fatal — deep analysis is optional
@@ -1145,8 +1279,9 @@ async function downloadMedia(keyword, mediaType, filenameBase, sceneDuration = 1
                             if (!picked) continue;
 
                             const outputPath = path.join(config.paths.temp, filenameBase + retryExt);
+                            if (isAborted()) { console.log(`  ⏱️ Scene aborted — skipping AI-retry download`); return null; }
                             console.log(`  ⬇️  [${retryProvider.name}] Retry with AI keyword...`);
-                            const finalPath = await retryProvider.download(picked.url, outputPath, { duration: sceneDuration, keyword: suggestion.keyword, _directVideoUrl: picked._directVideoUrl || null, sceneText: scene?.text || '', niche: nicheId || '', videoTopic: scriptContextRef?.summary || '' });
+                            const finalPath = await retryProvider.download(picked.url, outputPath, { duration: sceneDuration, keyword: suggestion.keyword, _directVideoUrl: picked._directVideoUrl || null, sceneText: scene?.text || '', niche: nicheId || '', videoTopic: scriptContextRef?.summary || '', abortSignal });
                             const finalExt = path.extname(finalPath);
                             console.log(`  ✅ [${retryProvider.name}] Downloaded: ${path.basename(finalPath)}`);
 
@@ -1260,6 +1395,8 @@ async function downloadAllMedia(scenes, scriptContext, options = {}) {
     const _readyScenes = new Set();  // scenes that finished and are ready to flush
     let _nextFlush = 0;              // next scene index to flush in order
 
+    const _flushedScenes = new Set(); // scenes whose logs have already been emitted — late async must be discarded
+
     function _flushSceneLog(sceneIdx) {
         _readyScenes.add(sceneIdx);
 
@@ -1272,21 +1409,36 @@ async function downloadAllMedia(scenes, scriptContext, options = {}) {
             }
             _sceneBuffers.delete(_nextFlush);
             _readyScenes.delete(_nextFlush);
+            _flushedScenes.add(_nextFlush);
             _nextFlush++;
         }
     }
 
-    // Hijack console.log — route to scene buffer via AsyncLocalStorage
+    // Hijack console.log — route to scene buffer via AsyncLocalStorage.
+    // NOTE: We install this hijack PERMANENTLY (no restore). Reason:
+    // aborted/timed-out scene tasks can continue running provider chains
+    // (network retries, vision fallbacks) for minutes after downloadAllMedia
+    // returns. Their console.log calls still carry the scene's AsyncLocalStorage
+    // context. If we restored the original console.log, those late logs would
+    // spill into whatever step is running next (Step 6 MG, Step 6.05, etc.),
+    // making output unreadable. Keeping the hijack installed lets us detect
+    // scene-scoped late logs and silently drop them.
     const _prevLog = console.log;
     console.log = function (...args) {
         const store = _logStorage.getStore();
         if (store && store.sceneIdx !== undefined) {
+            // Scene already flushed — discard late async output (timed-out providers, etc.)
+            if (_flushedScenes.has(store.sceneIdx)) {
+                return;
+            }
             const line = args.map(a => typeof a === 'string' ? a : String(a)).join(' ');
             const buf = _sceneBuffers.get(store.sceneIdx);
             if (buf) {
                 buf.push(line);
                 return;
             }
+            // Buffer is gone but flush flag missing — treat as already-emitted, discard
+            return;
         }
         // Outside scene context — print immediately
         _originalConsoleLog.apply(console, args);
@@ -1417,6 +1569,14 @@ async function downloadAllMedia(scenes, scriptContext, options = {}) {
                 }
             }
 
+            // If the outer timeout already fired, drop any late completion on the floor —
+            // the timeout handler has already written the final scene state and logged it.
+            if (scene._aborted) {
+                _originalConsoleLog(`  ⏱️ [Scene ${si}] late completion ignored (scene was aborted)`);
+                if (!_readyScenes.has(i)) _flushSceneLog(i);
+                return;
+            }
+
             if (result) {
                 scene.mediaFile = result.path;
                 scene.mediaExtension = result.ext;
@@ -1440,15 +1600,30 @@ async function downloadAllMedia(scenes, scriptContext, options = {}) {
         });
     };
 
-    // Wrap each task with a hard per-scene timeout so a hung download never blocks the build
+    // Wrap each task with a hard per-scene timeout so a hung download never blocks the build.
+    // We attach an AbortController so in-flight HTTP requests cancel on timeout, and flip a
+    // scene._aborted flag so any late completion inside _makeSceneTask bails out before
+    // overwriting the timeout's failure state (and before logging a phantom "DONE").
     const tasks = scenes.map((scene, i) => async () => {
         const si = scene.index !== undefined ? scene.index : i;
-        const timeoutPromise = new Promise((_, reject) =>
-            setTimeout(() => reject(new Error(`timed out after ${SCENE_TIMEOUT_MS / 60000} min`)), SCENE_TIMEOUT_MS)
-        );
+        const controller = new AbortController();
+        scene._abortSignal = controller.signal;
+        scene._aborted = false;
+        let timeoutId = null;
+        const timeoutPromise = new Promise((_, reject) => {
+            timeoutId = setTimeout(() => {
+                scene._aborted = true;
+                try { controller.abort(); } catch (_) {}
+                reject(new Error(`timed out after ${SCENE_TIMEOUT_MS / 60000} min`));
+            }, SCENE_TIMEOUT_MS);
+        });
         try {
             await Promise.race([_makeSceneTask(scene, i)(), timeoutPromise]);
+            if (timeoutId) clearTimeout(timeoutId);
         } catch (err) {
+            if (timeoutId) clearTimeout(timeoutId);
+            scene._aborted = true;
+            try { controller.abort(); } catch (_) {}
             _originalConsoleLog(`  ⏱️ [Scene ${si}] TIMEOUT — skipping: ${err.message}`);
             scene.mediaFile = null;
             scene.mediaExtension = (scene.mediaType === 'image') ? '.jpg' : '.mp4';
@@ -1462,8 +1637,9 @@ async function downloadAllMedia(scenes, scriptContext, options = {}) {
 
     await parallelWithLimit(tasks, CONCURRENCY);
 
-    // Restore console.log
-    console.log = _prevLog;
+    // NOTE: Intentionally NOT restoring console.log here. See comment above the
+    // hijack installation — aborted scene tasks can keep emitting logs for
+    // minutes after we return, and the hijack is what silences them.
 
     // Post-download: Probe dimensions for scenes missing them (YouTube, some web-image providers)
     let probeCount = 0;

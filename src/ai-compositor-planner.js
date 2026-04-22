@@ -295,7 +295,12 @@ function buildV2Scenes(directives, scenes) {
         if (!parentScene) continue;
 
         const startTime = parentScene.startTime + (d.startOffset || 1.0);
-        const duration = Math.min(4.0, parentScene.endTime - startTime - 0.5);
+        // Let the overlay live to the end of the parent scene (minus a 0.5s safety tail).
+        // Previously hard-capped at 4s — now mirrors the parent scene window.
+        const rawEnd = parentScene.endTime - 0.5;
+        const duration = d.durationSec && d.durationSec > 0
+            ? Math.min(d.durationSec, rawEnd - startTime)
+            : (rawEnd - startTime);
         if (duration < 1.5) continue;
 
         const endTime = startTime + duration;
@@ -358,7 +363,11 @@ function buildExplainerDirectives(directives, scenes) {
         if (!parentScene) continue;
 
         const startTime = parentScene.startTime + (d.startOffset || 1.0);
-        const duration = Math.min(4.0, parentScene.endTime - startTime - 0.5);
+        // Let the explainer live to the end of the parent scene (minus a 0.5s tail).
+        const rawEnd = parentScene.endTime - 0.5;
+        const duration = d.durationSec && d.durationSec > 0
+            ? Math.min(d.durationSec, rawEnd - startTime)
+            : (rawEnd - startTime);
         if (duration < 1.5) continue;
 
         explainers.push({

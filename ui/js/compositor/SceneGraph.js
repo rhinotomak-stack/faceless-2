@@ -176,14 +176,18 @@ class SceneGraph {
     getTransitionAtFrame(frame) {
         for (const t of this._transitions) {
             if (frame >= t._startFrame && frame < t._endFrame) {
-                const progress = (frame - t._startFrame) / t._durationFrames;
+                const linear = (frame - t._startFrame) / t._durationFrames;
+                const clamped = Math.max(0, Math.min(1, linear));
+                // Smooth ease-in-out (cubic bezier approximation)
+                // Accelerates gently, decelerates gently — no abrupt start/end
+                const progress = clamped * clamped * (3 - 2 * clamped); // smoothstep
                 const sceneA = this._scenes.find(s => s.index === t.fromIndex);
                 const sceneB = this._scenes.find(s => s.index === t.toIndex);
                 if (sceneA && sceneB) {
                     return {
                         sceneA,
                         sceneB,
-                        progress: Math.max(0, Math.min(1, progress)),
+                        progress,
                         type: t.type,
                     };
                 }

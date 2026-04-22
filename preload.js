@@ -113,6 +113,14 @@ try {
     console.warn('Map Provider not available:', e.message);
 }
 
+// Expose AI Map Planner to renderer (end-to-end map test: VP-style instructions → planned waypoints)
+try {
+    const mapPlanner = require('./src/ai-map-planner');
+    window._mapPlanner = mapPlanner;
+} catch (e) {
+    console.warn('AI Map Planner not available:', e.message);
+}
+
 // Expose Electron IPC methods to the renderer process
 window.electronAPI = {
     // Copy file to project folder
@@ -233,6 +241,11 @@ window.electronAPI = {
         return ipcRenderer.invoke('get-sfx-path', filename);
     },
 
+    // Download real SFX from Freesound API
+    downloadRealSfx: () => {
+        return ipcRenderer.invoke('download-real-sfx');
+    },
+
     // Scan assets/overlays/ folder for available overlay files
     scanOverlays: () => {
         return ipcRenderer.invoke('scan-overlays');
@@ -277,8 +290,10 @@ window.electronAPI = {
     qwenPoolStatus: () => ipcRenderer.invoke('qwen-pool-status'),
     qwenPoolReset: () => ipcRenderer.invoke('qwen-pool-reset'),
 
-    // Style Learner — analyze reference video, scan saved profiles, pick local file
+    // Style Learner — analyze reference video(s), scan saved profiles, compare, pick local file
     learnStyle: (input) => ipcRenderer.invoke('learn-style', input),
+    learnStyleMulti: (urls, name) => ipcRenderer.invoke('learn-style-multi', urls, name),
+    compareStyle: (profilePath, videoPlan) => ipcRenderer.invoke('compare-style', profilePath, videoPlan),
     scanStyleProfiles: () => ipcRenderer.invoke('scan-style-profiles'),
     pickVideoFile: () => ipcRenderer.invoke('pick-video-file'),
     onLearnStyleProgress: (callback) => {
@@ -333,6 +348,42 @@ window.electronAPI = {
 
     // Open QA Chat (developer niche knowledge tester)
     openQAChat: () => ipcRenderer.invoke('open-qa-chat'),
+
+    // ========================================
+    // Style Studio Agent — conversational style analyst
+    // ========================================
+    openStyleStudio: () => ipcRenderer.invoke('open-style-studio'),
+    styleStudioStart: (input, options) => ipcRenderer.invoke('style-studio-start', input, options),
+    styleStudioAddVideo: (sessionId, input) => ipcRenderer.invoke('style-studio-add-video', sessionId, input),
+    styleStudioChat: (sessionId, message) => ipcRenderer.invoke('style-studio-chat', sessionId, message),
+    styleStudioAnalyzeScript: (sessionId) => ipcRenderer.invoke('style-studio-analyze-script', sessionId),
+    styleStudioExtractProfile: (sessionId) => ipcRenderer.invoke('style-studio-extract-profile', sessionId),
+    styleStudioSaveProfile: (sessionId, name) => ipcRenderer.invoke('style-studio-save-profile', sessionId, name),
+    styleStudioEndSession: (sessionId) => ipcRenderer.invoke('style-studio-end-session', sessionId),
+    styleStudioSessionInfo: (sessionId) => ipcRenderer.invoke('style-studio-session-info', sessionId),
+    styleStudioSetCodeAccess: (sessionId, enabled) => ipcRenderer.invoke('style-studio-set-code-access', sessionId, enabled),
+    styleStudioSetProjectContext: (ctx) => ipcRenderer.invoke('style-studio-set-project-context', ctx),
+    // Session persistence
+    styleStudioCheckSaved: () => ipcRenderer.invoke('style-studio-check-saved'),
+    styleStudioRestore: () => ipcRenderer.invoke('style-studio-restore'),
+    styleStudioDiscardSaved: () => ipcRenderer.invoke('style-studio-discard-saved'),
+    // Memory
+    styleStudioLoadMemory: () => ipcRenderer.invoke('style-studio-load-memory'),
+    styleStudioSaveMemory: (text, category) => ipcRenderer.invoke('style-studio-save-memory', text, category),
+    styleStudioDeleteMemory: (index) => ipcRenderer.invoke('style-studio-delete-memory', index),
+    styleStudioClearMemory: () => ipcRenderer.invoke('style-studio-clear-memory'),
+    // In-studio audio transcription (Whisper)
+    styleStudioPickAudio: () => ipcRenderer.invoke('style-studio-pick-audio'),
+    styleStudioTranscribeAudio: (audioPath, options) => ipcRenderer.invoke('style-studio-transcribe-audio', audioPath, options),
+    styleStudioGetTranscriptInfo: () => ipcRenderer.invoke('style-studio-get-transcript-info'),
+    onStyleStudioTranscribeProgress: (callback) => {
+        ipcRenderer.removeAllListeners('style-studio-transcribe-progress');
+        ipcRenderer.on('style-studio-transcribe-progress', (event, data) => callback(data));
+    },
+    onStyleStudioProgress: (callback) => {
+        ipcRenderer.removeAllListeners('style-studio-progress');
+        ipcRenderer.on('style-studio-progress', (event, data) => callback(data));
+    },
 };
 
 console.log('✅ Electron preload script loaded');

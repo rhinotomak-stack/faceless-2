@@ -58,16 +58,15 @@ APP OVERVIEW:
     // ── MG rules ──
     parts.push(`
 MOTION GRAPHICS (MG) RULES:
-- EXPLAINER category: ALL 16 overlay MG types are available (headline, lowerThird, callout, statCounter, focusWord, progressBar, barChart, donutChart, rankingList, timeline, comparisonCard, bulletList, mapChart, explainer, kineticText, typewriter).
-- NEWS category: ONLY 4 overlay MG types allowed: lowerThird, typewriter, callout, statCounter.
-  → News = footage-first. Heavy graphics compete with raw footage.
+- EXPLAINER category: rich overlay MG usage is allowed by default, but some explainer sub-niches narrow the list. Always check each niche's resolved allowedMGs below.
+- NEWS category: overlay MGs stay minimal/footage-first. Some news sub-niches may expand slightly (for example map-heavy or infographic-heavy niches), so check the resolved niche config below.
 - Templates (statCard, factCard, personIntro, etc.) are FULLSCREEN designed screens, separate from overlay MGs.`);
 
     // ── Provider rules ──
     parts.push(`
 FOOTAGE SOURCE RULES:
-- EXPLAINER niches: NEVER use Telegram or vkVideo — those carry breaking news/war footage. Use youtube, pexels, pixabay, reddit, bing, googleScrape.
-- NEWS niches: Can use all sources. news.military and news.politics can use Telegram + VK for combat/government footage.
+- Provider access is niche-specific. Most explainer niches avoid Telegram/vkVideo, but some documentary explainers may allow them when the resolved niche config says so.
+- NEWS niches usually have broader source access. Use the resolved niche data below for exact exclusions and footage priority.
 - Stock providers (Pexels, Pixabay): clean B-roll, generic footage.
 - YouTube: documentaries, archival footage, product demos, real-world events.
 - Telegram/VK: raw war footage, press briefings, regional government events.`);

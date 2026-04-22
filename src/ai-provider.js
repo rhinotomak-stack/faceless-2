@@ -17,6 +17,52 @@ const vertex = require('./vertex-auth');
 const { postNvidiaChatCompletion } = require('./nvidia-client');
 
 // ============================================================
+// AI THINKING MODE — set by build pipeline, used by _geminiText, _qwenText, _deepseekText
+// ============================================================
+// Budget map: thinking level → token budget for Gemini 2.5 models
+const THINKING_BUDGET_MAP = { high: 16384, medium: 8192, low: 4096 };
+let _thinkingMode = 'off'; // 'off', 'low', 'medium', 'high'
+
+/**
+ * Set the AI thinking mode for all subsequent AI calls in this process.
+ * Called from build-video.js with the user's dropdown selection.
+ * Affects: Gemini (thinkingConfig budget), Qwen (enable_thinking), DeepSeek (reasoning_effort).
+ */
+function setAIThinking(mode) {
+    _thinkingMode = THINKING_BUDGET_MAP[mode] ? mode : 'off';
+    if (_thinkingMode !== 'off') {
+        console.log(`  🧠 AI Thinking mode: ${_thinkingMode}`);
+    }
+}
+
+// Keep backward compat alias
+const setGeminiThinking = setAIThinking;
+
+function _getThinkingConfig() {
+    if (_thinkingMode === 'off') return null;
+    const budget = THINKING_BUDGET_MAP[_thinkingMode];
+    if (!budget) return null;
+    return { thinkingBudget: budget };
+}
+
+function getAIThinking() {
+    return {
+        mode: _thinkingMode,
+        budget: _thinkingMode === 'off' ? 0 : (THINKING_BUDGET_MAP[_thinkingMode] || 0),
+    };
+}
+
+/**
+ * Strip <think>...</think> tags from Qwen/DeepSeek thinking responses.
+ * These models wrap chain-of-thought in <think> blocks before the actual answer.
+ */
+function _stripThinkingTags(text) {
+    if (!text) return '';
+    // Remove all <think>...</think> blocks (can be multiline)
+    return text.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+}
+
+// ============================================================
 // QWEN MODEL ROTATION — rotate through free-quota models on 403/429
 // ============================================================
 
@@ -85,151 +131,210 @@ const QWEN_OMNI_POOL = [
     'qwen2.5-omni-7b',
 ];
 
-// Track exhausted models — persisted to disk so dead models stay dead across restarts
-// File stores: { _apiKeyHash: "abc123", modelName: true|timestamp, ... }
-// When user changes QWEN_API_KEY in .env → hash changes → file resets (new key = fresh quotas)
+// ============================================================
+// MULTI-KEY EXHAUSTION TRACKING — each API key has independent model quota
+// ============================================================
+// File stores: { keys: { hash1: { model: true|timestamp }, hash2: { ... } } }
+// Each key tracks its own exhausted models separately.
+// Primary key is used first; fallback keys activate only when primary is fully exhausted.
 const _exhaustedModelsFile = require('path').join(__dirname, '..', '.qwen-exhausted-models.json');
-let _exhaustedModels = {}; // { modelName: true (permanent) | timestamp (cooldown expiry) }
+let _perKeyExhaustion = {}; // { keyHash: { modelName: true|timestamp } }
 
 function _hashApiKey(key) {
     if (!key) return '';
     return require('crypto').createHash('md5').update(key).digest('hex').substring(0, 12);
 }
 
-// Load persisted state on startup — reset if API key changed
+// Load persisted state on startup
 try {
     const fs = require('fs');
-    const currentKeyHash = _hashApiKey(config.qwen?.apiKey);
+    const allKeys = config.qwen?.apiKeys || [];
+    const keyHashes = new Set(allKeys.map(k => _hashApiKey(k)));
+
     if (fs.existsSync(_exhaustedModelsFile)) {
         const saved = JSON.parse(fs.readFileSync(_exhaustedModelsFile, 'utf8'));
-        if (saved._apiKeyHash && saved._apiKeyHash !== currentKeyHash) {
-            console.log(`  🔄 [Qwen Pool] API key changed — resetting all exhausted models (fresh quotas)`);
-            _exhaustedModels = {};
-            fs.writeFileSync(_exhaustedModelsFile, JSON.stringify({ _apiKeyHash: currentKeyHash }, null, 2));
-        } else {
+
+        // Migrate old single-key format → new multi-key format
+        if (saved._apiKeyHash && !saved.keys) {
+            const oldHash = saved._apiKeyHash;
             delete saved._apiKeyHash;
-            _exhaustedModels = saved;
-            const count = Object.keys(_exhaustedModels).filter(k => _exhaustedModels[k] === true).length;
-            if (count > 0) console.log(`  🔄 [Qwen Pool] ${count} models permanently exhausted (loaded from disk)`);
+            _perKeyExhaustion[oldHash] = saved;
+            console.log(`  🔄 [Qwen Pool] Migrated old format → multi-key tracking`);
+        } else if (saved.keys) {
+            _perKeyExhaustion = saved.keys;
+        }
+
+        // Log status per key
+        for (const hash of keyHashes) {
+            const map = _perKeyExhaustion[hash] || {};
+            const count = Object.values(map).filter(v => v === true).length;
+            const keyIdx = allKeys.findIndex(k => _hashApiKey(k) === hash) + 1;
+            if (count > 0) console.log(`  🔑 [Qwen Key ${keyIdx}] ${count} models permanently exhausted`);
         }
     }
 } catch (e) { /* fresh start */ }
 
 function _saveExhaustedModels() {
     try {
-        const toSave = { _apiKeyHash: _hashApiKey(config.qwen?.apiKey), ..._exhaustedModels };
-        require('fs').writeFileSync(_exhaustedModelsFile, JSON.stringify(toSave, null, 2));
+        require('fs').writeFileSync(_exhaustedModelsFile, JSON.stringify({ keys: _perKeyExhaustion }, null, 2));
     } catch (e) { /* non-fatal */ }
 }
 
 /**
+ * Get exhaustion map for a specific key.
+ */
+function _getKeyExhaustion(apiKey) {
+    const hash = _hashApiKey(apiKey);
+    if (!_perKeyExhaustion[hash]) _perKeyExhaustion[hash] = {};
+    return _perKeyExhaustion[hash];
+}
+
+/**
  * Check if a Qwen API error indicates quota exhaustion.
- * DashScope returns 403 with AllocationQuota.FreeTierOnly on free quota exhaustion.
- * Also handles 429 (rate limit) with shorter cooldown.
+ *
+ * Permanent (`exhausted`) is RESERVED for real free-tier depletion only, because
+ * once a model is marked permanent on a key it is NEVER retried on that key again
+ * — quota does not refill per-key on Alibaba. False positives permanently burn a
+ * live model. We therefore require an EXPLICIT marker in the error payload
+ * (DashScope's canonical code `AllocationQuota.FreeTierOnly` or
+ * `QuotaExceeded.FreeTier`). Every other failure mode — generic 403, 404, 429,
+ * 5xx, timeouts — is a cooldown (`rate_limited`).
  */
 function _isQuotaError(err) {
     const status = err.response?.status;
-    const msg = err.response?.data?.error?.message || err.message || '';
-    // 403 = quota exhausted — treat ALL 403s as quota errors for Qwen models.
-    // Some 403 responses don't include "Quota" in the message body.
-    if (status === 403) {
-        return 'exhausted';
+    const data = err.response?.data || {};
+    const code = (data.error?.code || data.code || '').toLowerCase();
+    const msg = (data.error?.message || err.message || '').toLowerCase();
+
+    // Real free-tier exhaustion — DashScope emits a canonical code. Match the code
+    // first (authoritative), then fall back to an exact phrase match on the
+    // message to catch cases where only the message carries it.
+    const explicitExhausted =
+        code.includes('allocationquota.freetieronly') ||
+        code.includes('quotaexceeded.freetier') ||
+        msg.includes('allocationquota.freetieronly') ||
+        msg.includes('quotaexceeded.freetier') ||
+        msg.includes('free tier quota');
+    if (explicitExhausted) return 'exhausted';
+
+    // Everything else that can reasonably be a transient or model-specific error
+    // is a cooldown, NOT permanent. This covers: generic 403s, regional 404s,
+    // bad-request 400s, rate-limit 429s, server errors 5xx.
+    if (status === 400 || status === 403 || status === 404) return 'rate_limited';
+    if (status === 429) return 'rate_limited';
+    if (status === 500 || status === 502 || status === 503) return 'rate_limited';
+    return null;
+}
+
+/**
+ * Mark a model as exhausted or rate-limited FOR A SPECIFIC KEY.
+ */
+function _markModelExhausted(model, reason, apiKey) {
+    const map = _getKeyExhaustion(apiKey);
+    const keyIdx = (config.qwen?.apiKeys || []).findIndex(k => k === apiKey) + 1;
+    if (reason === 'exhausted') {
+        map[model] = true; // permanent
+        _saveExhaustedModels();
+        console.log(`  💀 [Qwen Key ${keyIdx}] ${model} — QUOTA EXHAUSTED (permanent)`);
+    } else {
+        map[model] = Date.now() + 120000; // 2min cooldown
+        console.log(`  🔄 [Qwen Key ${keyIdx}] ${model} — rate limited (2min cooldown)`);
     }
-    // 404 = model deprecated/removed — permanently dead, rotate away
-    if (status === 404) {
-        return 'exhausted';
+}
+
+/**
+ * Check if a model is available for a specific key.
+ */
+function _isModelAvailable(model, apiKey) {
+    const map = _getKeyExhaustion(apiKey);
+    const state = map[model];
+    if (!state) return true;
+    if (state === true) return false;
+    return state < Date.now(); // cooldown expired
+}
+
+/**
+ * Get the next available model from a pool for a specific key.
+ */
+function _getAvailableModel(pool, configuredModel, apiKey) {
+    // Try configured model first
+    if (configuredModel && _isModelAvailable(configuredModel, apiKey)) {
+        return configuredModel;
     }
-    // 400 = bad request — model doesn't accept this input format or is disabled, mark as exhausted
-    if (status === 400) {
-        return 'exhausted';
-    }
-    // 500/502/503 = server error — model is broken right now, treat as temporary (60s cooldown)
-    if (status === 500 || status === 502 || status === 503) {
-        return 'rate_limited';
-    }
-    // 429 = rate limited (temporary — try again in 60s)
-    if (status === 429) {
-        return 'rate_limited';
+    for (const model of pool) {
+        if (_isModelAvailable(model, apiKey)) return model;
     }
     return null;
 }
 
 /**
- * Mark a model as exhausted or rate-limited.
- * Exhausted = permanent (free quota is gone forever, persisted to disk).
- * Rate-limited = 60s cooldown (temporary throttle, in-memory only).
+ * Get the best key + model combo. Tries keys in order (primary first).
+ * Each key starts from top of pool independently.
+ * Returns { apiKey, model } or null if everything exhausted.
  */
-function _markModelExhausted(model, reason) {
-    if (reason === 'exhausted') {
-        _exhaustedModels[model] = true; // permanent
-        _saveExhaustedModels();
-        console.log(`  💀 [Qwen Pool] ${model} — FREE QUOTA EXHAUSTED (permanent, saved to disk)`);
-    } else {
-        _exhaustedModels[model] = Date.now() + 60000; // 60s cooldown
-        console.log(`  🔄 [Qwen Pool] ${model} — rate limited (60s cooldown)`);
+function _getBestKeyAndModel(pool, configuredModel) {
+    const keys = config.qwen?.apiKeys || [];
+    if (keys.length === 0) return null;
+
+    for (let i = 0; i < keys.length; i++) {
+        const key = keys[i];
+        const model = _getAvailableModel(pool, i === 0 ? configuredModel : null, key);
+        if (model) {
+            return { apiKey: key, model, keyIndex: i + 1 };
+        }
     }
+    return null; // all keys × all models exhausted
 }
 
 /**
- * Get the next available model from a pool.
- * Skips permanently exhausted and temporarily rate-limited models.
- * Returns null if all exhausted.
- */
-function _getAvailableModel(pool, configuredModel) {
-    const now = Date.now();
-
-    const isAvailable = (m) => {
-        const state = _exhaustedModels[m];
-        if (!state) return true;           // never exhausted
-        if (state === true) return false;   // permanently exhausted
-        return state < now;                 // rate-limited but cooldown expired
-    };
-
-    // Try configured model first if it's available
-    if (configuredModel && isAvailable(configuredModel)) {
-        return configuredModel;
-    }
-
-    for (const model of pool) {
-        if (isAvailable(model)) return model;
-    }
-    return null; // all exhausted
-}
-
-/**
- * Get pool status: how many models remain available.
+ * Get pool status across all keys.
  */
 function _getPoolStatus(pool) {
-    const now = Date.now();
-    let available = 0;
-    for (const m of pool) {
-        const state = _exhaustedModels[m];
-        if (!state || (state !== true && state < now)) available++;
+    const keys = config.qwen?.apiKeys || [];
+    let totalAvailable = 0;
+    const perKey = [];
+    for (let i = 0; i < keys.length; i++) {
+        let available = 0;
+        for (const m of pool) {
+            if (_isModelAvailable(m, keys[i])) available++;
+        }
+        totalAvailable += available;
+        perKey.push({ keyIndex: i + 1, available, total: pool.length });
     }
-    return { available, total: pool.length };
+    return { available: totalAvailable, total: pool.length * keys.length, perKey };
 }
 
 /**
- * Call Qwen VL with auto-rotation through model pool.
- * On quota/rate error → rotate to next model and retry.
+ * Call Qwen VL with multi-key auto-rotation through model pool.
+ * Each API key has independent model exhaustion tracking.
+ * Primary key is used first; fallback keys activate only when primary's pool is fully exhausted.
+ * On quota/rate error → rotate model (same key) → if all models dead → next key from top of pool.
  */
 async function _qwenVisionWithRotation(prompt, base64Image, mimeType, maxTokens) {
     const baseUrl = config.qwen.baseUrl || 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1';
     const configuredModel = config.qwen.visionModel;
-    const now = Date.now();
+    const allKeys = config.qwen.apiKeys || [];
+    if (allKeys.length === 0) throw new Error('No Qwen API keys configured');
 
-    // Build attempt list: try configured model first, then pool models
-    const tried = new Set();
+    // Track what we've tried across all keys to avoid infinite loops
+    const triedCombos = new Set(); // "keyHash:model"
+    const maxAttempts = allKeys.length * (QWEN_VL_POOL.length + 1);
 
-    for (let attempt = 0; attempt < QWEN_VL_POOL.length + 1; attempt++) {
-        const model = attempt === 0
-            ? (_getAvailableModel([], configuredModel) || _getAvailableModel(QWEN_VL_POOL, null))
-            : _getAvailableModel(QWEN_VL_POOL.filter(m => !tried.has(m)), null);
-
-        if (!model) {
-            throw new Error('All Qwen VL models exhausted — no free quota left');
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        // Find best available key+model combo
+        const combo = _getBestKeyAndModel(QWEN_VL_POOL, configuredModel);
+        if (!combo) {
+            throw new Error('All Qwen VL models exhausted across all API keys — no quota left');
         }
-        tried.add(model);
+
+        const { apiKey, model, keyIndex } = combo;
+        const comboKey = `${_hashApiKey(apiKey)}:${model}`;
+        if (triedCombos.has(comboKey)) {
+            // Already tried this exact combo — mark as rate_limited to skip it
+            _markModelExhausted(model, 'rate_limited', apiKey);
+            continue;
+        }
+        triedCombos.add(comboKey);
 
         try {
             // QVQ models REQUIRE stream:true — non-streaming returns 400
@@ -252,13 +357,12 @@ async function _qwenVisionWithRotation(prompt, base64Image, mimeType, maxTokens)
                 // Stream response — collect chunks
                 const response = await axios.post(`${baseUrl}/chat/completions`, body, {
                     headers: {
-                        'Authorization': `Bearer ${config.qwen.apiKey}`,
+                        'Authorization': `Bearer ${apiKey}`,
                         'Content-Type': 'application/json'
                     },
                     timeout: 60000,
                     responseType: 'text',
                 });
-                // Parse SSE lines: "data: {...}"
                 const lines = (response.data || '').split('\n');
                 for (const line of lines) {
                     if (!line.startsWith('data: ') || line.includes('[DONE]')) continue;
@@ -271,7 +375,7 @@ async function _qwenVisionWithRotation(prompt, base64Image, mimeType, maxTokens)
             } else {
                 const response = await axios.post(`${baseUrl}/chat/completions`, body, {
                     headers: {
-                        'Authorization': `Bearer ${config.qwen.apiKey}`,
+                        'Authorization': `Bearer ${apiKey}`,
                         'Content-Type': 'application/json'
                     },
                     timeout: 25000,
@@ -280,8 +384,8 @@ async function _qwenVisionWithRotation(prompt, base64Image, mimeType, maxTokens)
             }
 
             if (text.trim()) {
-                if (model !== configuredModel) {
-                    console.log(`  👁️ [Qwen VL] Used rotated model: ${model}`);
+                if (model !== configuredModel || keyIndex > 1) {
+                    console.log(`  👁️ [Qwen VL] Key ${keyIndex}, model: ${model}`);
                 }
                 return text;
             }
@@ -289,34 +393,42 @@ async function _qwenVisionWithRotation(prompt, base64Image, mimeType, maxTokens)
             const isTimeout = err.code === 'ECONNABORTED' || err.code === 'ETIMEDOUT' || err.message?.includes('timeout');
             const quotaErr = _isQuotaError(err);
             if (quotaErr || isTimeout) {
-                if (isTimeout) console.log(`  ⏱️ [Qwen VL] Timeout on ${model} — rotating`);
-                else _markModelExhausted(model, quotaErr);
-                continue; // try next model
+                if (isTimeout) console.log(`  ⏱️ [Qwen VL] Key ${keyIndex} timeout on ${model} — rotating`);
+                else _markModelExhausted(model, quotaErr, apiKey);
+                continue; // try next model or next key
             }
             throw err; // non-quota error — bubble up
         }
     }
 
-    throw new Error('All Qwen VL models failed');
+    throw new Error('All Qwen VL models failed across all keys');
 }
 
 /**
- * Call Qwen Omni with auto-rotation through model pool.
- * On quota/rate error → rotate to next model and retry.
+ * Call Qwen Omni with multi-key auto-rotation through model pool.
+ * Same multi-key logic as VL pool — each key has independent exhaustion tracking.
  */
 async function _qwenOmniWithRotation(content, maxTokens, configuredModel) {
     const baseUrl = config.qwen.baseUrl || 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1';
-    const tried = new Set();
+    const allKeys = config.qwen.apiKeys || [];
+    if (allKeys.length === 0) throw new Error('No Qwen API keys configured');
 
-    for (let attempt = 0; attempt < QWEN_OMNI_POOL.length + 1; attempt++) {
-        const model = attempt === 0
-            ? (_getAvailableModel([], configuredModel) || _getAvailableModel(QWEN_OMNI_POOL, null))
-            : _getAvailableModel(QWEN_OMNI_POOL.filter(m => !tried.has(m)), null);
+    const triedCombos = new Set();
+    const maxAttempts = allKeys.length * (QWEN_OMNI_POOL.length + 1);
 
-        if (!model) {
-            throw new Error('All Qwen Omni models exhausted — no free quota left');
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        const combo = _getBestKeyAndModel(QWEN_OMNI_POOL, configuredModel);
+        if (!combo) {
+            throw new Error('All Qwen Omni models exhausted across all API keys');
         }
-        tried.add(model);
+
+        const { apiKey, model, keyIndex } = combo;
+        const comboKey = `${_hashApiKey(apiKey)}:${model}`;
+        if (triedCombos.has(comboKey)) {
+            _markModelExhausted(model, 'rate_limited', apiKey);
+            continue;
+        }
+        triedCombos.add(comboKey);
 
         try {
             const response = await axios.post(`${baseUrl}/chat/completions`, {
@@ -325,7 +437,7 @@ async function _qwenOmniWithRotation(content, maxTokens, configuredModel) {
                 max_tokens: maxTokens,
             }, {
                 headers: {
-                    'Authorization': `Bearer ${config.qwen.apiKey}`,
+                    'Authorization': `Bearer ${apiKey}`,
                     'Content-Type': 'application/json',
                 },
                 timeout: 30000,
@@ -333,8 +445,8 @@ async function _qwenOmniWithRotation(content, maxTokens, configuredModel) {
 
             const text = response.data?.choices?.[0]?.message?.content || '';
             if (text.trim()) {
-                if (model !== configuredModel) {
-                    console.log(`  🎥 [Qwen Omni] Used rotated model: ${model}`);
+                if (model !== configuredModel || keyIndex > 1) {
+                    console.log(`  🎥 [Qwen Omni] Key ${keyIndex}, model: ${model}`);
                 }
                 return text;
             }
@@ -342,15 +454,15 @@ async function _qwenOmniWithRotation(content, maxTokens, configuredModel) {
             const isTimeout = err.code === 'ECONNABORTED' || err.code === 'ETIMEDOUT' || err.message?.includes('timeout');
             const quotaErr = _isQuotaError(err);
             if (quotaErr || isTimeout) {
-                if (isTimeout) console.log(`  ⏱️ [Qwen Omni] Timeout on ${model} — rotating`);
-                else _markModelExhausted(model, quotaErr);
-                continue; // try next model
+                if (isTimeout) console.log(`  ⏱️ [Qwen Omni] Key ${keyIndex} timeout on ${model} — rotating`);
+                else _markModelExhausted(model, quotaErr, apiKey);
+                continue;
             }
-            throw err; // non-quota error — bubble up
+            throw err;
         }
     }
 
-    throw new Error('All Qwen Omni models failed');
+    throw new Error('All Qwen Omni models failed across all keys');
 }
 
 // Log models once on first call
@@ -359,6 +471,9 @@ function _logModelsOnce() {
     if (_modelsLogged) return;
     _modelsLogged = true;
     const p = config.aiProvider || 'ollama';
+    const hostOf = (url) => {
+        try { return new URL(url).host; } catch { return url || ''; }
+    };
     if (p === 'nvidia') {
         console.log(`  🤖 Text model: ${config.nvidia.model}`);
         console.log(`  👁️ Vision model: ${config.nvidia.visionModel}`);
@@ -366,11 +481,18 @@ function _logModelsOnce() {
         console.log(`  🤖 Text model: ${config.ollama.model}`);
         console.log(`  👁️ Vision model: ${config.ollama.visionModel}`);
     } else if (p === 'qwen') {
-        console.log(`  🤖 Text model: ${config.qwen?.model || 'qwen-plus'}`);
+        const keyCount = (config.qwen?.apiKeys || []).length;
+        console.log(`  ðŸŒ DashScope endpoint: ${hostOf(config.qwen?.baseUrl)}`);
+        console.log(`  🤖 Text model: ${config.qwen?.model || 'qwen-plus'} (${keyCount} API key${keyCount !== 1 ? 's' : ''})`);
         const vlStatus = _getPoolStatus(QWEN_VL_POOL);
         const omniStatus = _getPoolStatus(QWEN_OMNI_POOL);
         console.log(`  👁️ Vision model: ${config.qwen?.visionModel || 'qwen-vl-plus'} (pool: ${vlStatus.available}/${vlStatus.total} available)`);
         console.log(`  🎥 Omni model: ${process.env.QWEN_OMNI_MODEL || 'qwen-omni-turbo'} (pool: ${omniStatus.available}/${omniStatus.total} available)`);
+        if (keyCount > 1) {
+            for (const info of vlStatus.perKey) {
+                console.log(`     🔑 Key ${info.keyIndex}: ${info.available}/${info.total} VL models available`);
+            }
+        }
     } else if (p === 'deepseek') {
         console.log(`  🤖 Text model: ${config.deepseek?.model || 'deepseek-chat'}`);
     } else if (p === 'claude') {
@@ -378,6 +500,15 @@ function _logModelsOnce() {
     } else if (p === 'openai') {
         console.log(`  🤖 Text model: ${config.openai?.model || 'gpt-4o'}`);
     } else if (p === 'gemini') {
+        if (vertex.isVertexEnabled()) {
+            const regions = vertex.getAllRegions();
+            const regionStr = regions.length > 1
+                ? `${regions[0]} +${regions.length - 1} fallback (${regions.slice(1).join(', ')})`
+                : regions[0];
+            console.log(`  🌐 Gemini endpoint: Vertex (${regionStr})`);
+        } else {
+            console.log(`  🌐 Gemini endpoint: ${hostOf(config.gemini?.baseUrl)}`);
+        }
         console.log(`  🤖 Text model: ${config.gemini?.model || 'gemini-pro'}`);
     } else if (p === 'groq') {
         console.log(`  🤖 Text model: ${config.groq?.model || 'llama-3.3-70b'}`);
@@ -419,15 +550,17 @@ async function callAI(prompt, options = {}) {
     for (let i = 0; i < chain.length; i++) {
         const current = chain[i];
         const isFallback = i > 0;
+        // Fallbacks skip thinking mode — recovery should be fast, not pondered.
+        const dispatchOpts = { maxTokens, temperature, systemPrompt, skipThinking: isFallback };
 
         try {
-            const text = await _dispatchText(current, prompt, { maxTokens, temperature, systemPrompt });
+            const text = await _dispatchText(current, prompt, dispatchOpts);
 
             if (!text || text.trim().length === 0) {
                 // Retry once on same provider before fallback
                 try {
                     console.log(`  ⚠️ [${current}] Empty response, retrying...`);
-                    const retry = await _dispatchText(current, prompt, { maxTokens, temperature, systemPrompt });
+                    const retry = await _dispatchText(current, prompt, dispatchOpts);
                     if (retry && retry.trim().length > 0) {
                         if (isFallback) console.log(`  ✅ [${current}] Text fallback succeeded`);
                         return retry;
@@ -456,7 +589,7 @@ async function callAI(prompt, options = {}) {
     return '';
 }
 
-async function _dispatchText(provider, prompt, { maxTokens, temperature, systemPrompt }) {
+async function _dispatchText(provider, prompt, { maxTokens, temperature, systemPrompt, skipThinking }) {
     switch (provider) {
         case 'ollama':
             return await _ollamaText(prompt, maxTokens, temperature);
@@ -467,7 +600,7 @@ async function _dispatchText(provider, prompt, { maxTokens, temperature, systemP
         case 'deepseek':
             return await _deepseekText(prompt, maxTokens, temperature, systemPrompt);
         case 'qwen':
-            return await _qwenText(prompt, maxTokens, temperature, systemPrompt);
+            return await _qwenText(prompt, maxTokens, temperature, systemPrompt, { skipThinking });
         case 'gemini':
             return await _geminiText(prompt, maxTokens, temperature, systemPrompt);
         case 'nvidia':
@@ -730,46 +863,93 @@ async function _deepseekText(prompt, maxTokens, temperature, systemPrompt) {
     if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
     messages.push({ role: 'user', content: prompt });
 
+    const thinkingEnabled = _thinkingMode !== 'off';
+
     const body = {
         model: config.deepseek.model,
         messages,
-        max_tokens: maxTokens
+        max_tokens: thinkingEnabled ? maxTokens * 4 : maxTokens
     };
     if (temperature !== undefined) body.temperature = temperature;
+
+    // DeepSeek R1/R2 reasoning — uses reasoning_effort parameter (low/medium/high)
+    if (thinkingEnabled) {
+        body.reasoning_effort = _thinkingMode; // 'low', 'medium', 'high' maps directly
+    }
 
     const response = await axios.post('https://api.deepseek.com/chat/completions', body, {
         headers: {
             'Authorization': `Bearer ${config.deepseek.apiKey}`,
             'Content-Type': 'application/json'
         },
-        timeout: 60000
+        timeout: thinkingEnabled ? 180000 : 60000
     });
-    return response.data.choices[0].message.content || '';
+
+    const raw = response.data.choices[0].message.content || '';
+    // DeepSeek also uses <think> tags for chain-of-thought
+    return thinkingEnabled ? _stripThinkingTags(raw) : raw;
 }
 
-async function _qwenText(prompt, maxTokens, temperature, systemPrompt) {
-    if (!config.qwen.apiKey) throw new Error('Qwen API key not set in .env file');
+async function _qwenText(prompt, maxTokens, temperature, systemPrompt, opts = {}) {
+    const allKeys = config.qwen.apiKeys || [];
+    if (allKeys.length === 0) throw new Error('Qwen API key not set in .env file');
 
     const messages = [];
     if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
     messages.push({ role: 'user', content: prompt });
 
+    // When called as a fallback (e.g., Gemini 429 → Qwen), skip thinking mode for faster recovery.
+    // Thinking mode on big fallback prompts can take 3+ minutes and frequently times out — useless in fallback context.
+    const thinkingEnabled = _thinkingMode !== 'off' && !opts.skipThinking;
+    const requestedMaxTokens = thinkingEnabled ? maxTokens * 4 : maxTokens;
+    const isLargePrompt = prompt.length > 12000 || requestedMaxTokens > 1200;
+    // Large planner/director prompts don't need giant Qwen outputs, but they do need more wall-clock
+    // time to produce the first bytes. Cap output size a bit and give them a longer timeout.
+    const effectiveMaxTokens = (!thinkingEnabled && isLargePrompt)
+        ? Math.min(requestedMaxTokens, 1200)
+        : requestedMaxTokens;
+
     const body = {
         model: config.qwen.model,
         messages,
-        max_tokens: maxTokens
+        max_tokens: effectiveMaxTokens
     };
     if (temperature !== undefined) body.temperature = temperature;
+    if (thinkingEnabled) body.enable_thinking = true;
 
     const baseUrl = config.qwen.baseUrl || 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1';
-    const response = await axios.post(`${baseUrl}/chat/completions`, body, {
-        headers: {
-            'Authorization': `Bearer ${config.qwen.apiKey}`,
-            'Content-Type': 'application/json'
-        },
-        timeout: 60000
-    });
-    return response.data.choices[0].message.content || '';
+    // Large prompts routinely take longer than a minute on Qwen text models.
+    // Give them more time, but keep small prompts snappy.
+    const timeout = thinkingEnabled ? 120000 : (isLargePrompt ? 120000 : 60000);
+    if (isLargePrompt && !thinkingEnabled) {
+        console.log(`  [Qwen Text] Large prompt mode: ${prompt.length} chars, max_tokens ${requestedMaxTokens} -> ${effectiveMaxTokens}, timeout ${Math.round(timeout / 1000)}s`);
+    }
+
+    // Try each key in order — text model is the same across keys, just different quotas
+    for (let i = 0; i < allKeys.length; i++) {
+        try {
+            const response = await axios.post(`${baseUrl}/chat/completions`, body, {
+                headers: {
+                    'Authorization': `Bearer ${allKeys[i]}`,
+                    'Content-Type': 'application/json'
+                },
+                timeout,
+            });
+            const raw = response.data.choices[0].message.content || '';
+            if (i > 0) console.log(`  🔑 [Qwen Text] Used fallback key ${i + 1}`);
+            return thinkingEnabled ? _stripThinkingTags(raw) : raw;
+        } catch (err) {
+            const status = err.response?.status;
+            const isTimeout = err.code === 'ECONNABORTED' || err.message?.includes('timeout');
+            // Rotatable errors: quota, rate limit, server error
+            if (status === 403 || status === 429 || status === 500 || status === 502 || status === 503 || isTimeout) {
+                console.log(`  ⚠️ [Qwen Text] Key ${i + 1} failed (${isTimeout ? 'timeout' : status}) — ${i < allKeys.length - 1 ? 'trying next key' : 'no more keys'}`);
+                continue;
+            }
+            throw err; // non-rotatable error
+        }
+    }
+    throw new Error('All Qwen API keys failed for text call');
 }
 
 // ============================================================
@@ -791,6 +971,34 @@ function _rotateGeminiKey(reason) {
     console.log(`  🔄 [Gemini] Key ${oldIdx + 1}/${keys.length} ${reason} — switching to key ${_geminiKeyIndex + 1}`);
     return true;
 }
+
+/**
+ * Parse Gemini 429 error to extract wait-time (seconds). Gemini returns retryDelay in the
+ * error body's details[].retryDelay as "30s", or Retry-After header.
+ * Returns milliseconds to wait, clamped to [5s, 60s]. Returns 0 if not a 429 or no hint.
+ */
+function _parseGeminiRetryDelay(err) {
+    if (err?.response?.status !== 429) return 0;
+    // Header first
+    const retryAfter = err.response.headers?.['retry-after'];
+    if (retryAfter) {
+        const sec = parseInt(retryAfter, 10);
+        if (sec > 0) return Math.min(Math.max(sec, 5), 60) * 1000;
+    }
+    // Body details (generativelanguage.googleapis.com returns google.rpc.RetryInfo)
+    const details = err.response.data?.error?.details || [];
+    for (const d of details) {
+        const delay = d?.retryDelay || d?.retry_delay;
+        if (typeof delay === 'string') {
+            const m = delay.match(/^(\d+)s$/);
+            if (m) return Math.min(Math.max(parseInt(m[1], 10), 5), 60) * 1000;
+        }
+    }
+    // Default: 30s (Gemini 2.5 Pro free tier RPM window is ~30s)
+    return 30000;
+}
+
+function _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 async function _geminiText(prompt, maxTokens, temperature, systemPrompt) {
     const useVertex = vertex.isVertexEnabled();
@@ -815,9 +1023,15 @@ async function _geminiText(prompt, maxTokens, temperature, systemPrompt) {
         };
         if (systemPrompt) body.systemInstruction = { parts: [{ text: systemPrompt }] };
         if (temperature !== undefined) body.generationConfig.temperature = temperature;
+        const thinkCfg = _getThinkingConfig();
+        if (thinkCfg) body.generationConfig.thinkingConfig = thinkCfg;
 
         const model = config.gemini.model;
-        const maxAttempts = useVertex ? 1 : keys.length;
+        // Vertex: max attempts = region count + 1 backoff slot. Non-Vertex: key-rotation based.
+        const vertexRegionCount = useVertex ? vertex.getRegionCount() : 1;
+        const maxAttempts = useVertex ? vertexRegionCount + 1 : keys.length + 1;
+        let backoffUsed = false;
+        let lastRegion = null;
 
         for (let attempt = 0; attempt < maxAttempts; attempt++) {
             try {
@@ -826,26 +1040,47 @@ async function _geminiText(prompt, maxTokens, temperature, systemPrompt) {
                     const auth = await vertex.getVertexAuth(model);
                     url = auth.url;
                     headers = auth.headers;
+                    lastRegion = auth.region;
                 } else {
                     const apiKey = _getGeminiKey();
                     url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
                     headers = { 'Content-Type': 'application/json' };
                 }
 
-                const response = await axios.post(url, body, { headers, timeout: 120000 });
-                const text = response.data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+                const response = await axios.post(url, body, { headers, timeout: 180000 });
+                // With thinking enabled, the answer is in the last non-thought part
+                const parts = response.data?.candidates?.[0]?.content?.parts || [];
+                const textPart = parts.filter(p => !p.thought).pop();
+                const text = textPart?.text || '';
                 if (!text) console.log(`  ⚠️ [Gemini] Empty response content`);
                 return text;
             } catch (err) {
                 const status = err.response?.status;
                 const isTimeout = err.code === 'ECONNABORTED' || err.message?.includes('timeout');
+                // Vertex: rotate regions on 429/503/timeout
+                if (useVertex && (status === 429 || status === 503 || isTimeout) && lastRegion) {
+                    const retryMs = status === 429 ? _parseGeminiRetryDelay(err) : undefined;
+                    if (vertex.markRegionThrottled(lastRegion, retryMs)) {
+                        continue; // another healthy region available
+                    }
+                    // All regions throttled — fall through to backoff/throw
+                }
+                // Non-Vertex: try key rotation first
                 if (!useVertex && (isTimeout || status === 429 || status === 401 || status === 403) && _rotateGeminiKey(isTimeout ? 'timeout' : `HTTP ${status}`)) {
+                    continue;
+                }
+                // Rotation exhausted — for 429 try a single backoff wait before giving up
+                if (status === 429 && !backoffUsed) {
+                    const waitMs = _parseGeminiRetryDelay(err);
+                    console.log(`  ⏳ [Gemini] 429 rate limit — waiting ${Math.round(waitMs / 1000)}s before retry`);
+                    await _sleep(waitMs);
+                    backoffUsed = true;
                     continue;
                 }
                 throw err;
             }
         }
-        throw new Error(`Gemini: all keys exhausted`);
+        throw new Error(useVertex ? `Gemini Vertex: all regions exhausted` : `Gemini: all keys exhausted`);
     }
 
     // OpenAI-compat format — works with regular AIzaSy... keys
@@ -860,7 +1095,8 @@ async function _geminiText(prompt, maxTokens, temperature, systemPrompt) {
     };
     if (temperature !== undefined) body.temperature = temperature;
 
-    const maxAttempts = keys.length;
+    const maxAttempts = keys.length + 1; // extra slot for 429 backoff retry
+    let backoffUsed = false;
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
         const apiKey = _getGeminiKey();
         try {
@@ -879,6 +1115,13 @@ async function _geminiText(prompt, maxTokens, temperature, systemPrompt) {
         } catch (err) {
             const status = err.response?.status;
             const isTimeout = err.code === 'ECONNABORTED' || err.message?.includes('timeout');
+            if (status === 429 && !_rotateGeminiKey('HTTP 429') && !backoffUsed) {
+                const waitMs = _parseGeminiRetryDelay(err);
+                console.log(`  ⏳ [Gemini] 429 rate limit — waiting ${Math.round(waitMs / 1000)}s before retry`);
+                await _sleep(waitMs);
+                backoffUsed = true;
+                continue;
+            }
             if ((isTimeout || status === 429 || status === 401 || status === 403) && _rotateGeminiKey(isTimeout ? 'timeout' : `HTTP ${status}`)) {
                 continue;
             }
@@ -989,7 +1232,8 @@ async function _deepseekVision(prompt, base64Image, mimeType, maxTokens) {
 }
 
 async function _qwenVision(prompt, base64Image, mimeType, maxTokens) {
-    if (!config.qwen.apiKey) throw new Error('Qwen API key not set');
+    const keys = config.qwen.apiKeys || [];
+    if (keys.length === 0) throw new Error('Qwen API key not set');
     return _qwenVisionWithRotation(prompt, base64Image, mimeType, maxTokens);
 }
 
@@ -1002,8 +1246,10 @@ async function _geminiVision(prompt, base64Image, mimeType, maxTokens) {
     }
 
     const geminiTokens = maxTokens * 8;
-    const firstKey = (keys && keys[0]) || '';
-    const useNativeFormat = useVertex || firstKey.startsWith('AQ.');
+    // Always use native format for vision — OpenAI-compat shim (v1beta/openai)
+    // is unreliable for Gemini 2.5/3 vision models. Native endpoint works with
+    // both regular AIzaSy... keys and Vertex/service-account auth.
+    const useNativeFormat = true;
 
     if (useNativeFormat) {
         // Native generateContent format — works with Vertex AI keys and service accounts
@@ -1017,9 +1263,13 @@ async function _geminiVision(prompt, base64Image, mimeType, maxTokens) {
             }],
             generationConfig: { maxOutputTokens: geminiTokens },
         };
+        const thinkCfg = _getThinkingConfig();
+        if (thinkCfg) body.generationConfig.thinkingConfig = thinkCfg;
 
         const model = config.gemini.visionModel;
-        const maxAttempts = useVertex ? 1 : keys.length;
+        const vertexRegionCount = useVertex ? vertex.getRegionCount() : 1;
+        const maxAttempts = useVertex ? vertexRegionCount : keys.length;
+        let lastRegion = null;
 
         for (let attempt = 0; attempt < maxAttempts; attempt++) {
             try {
@@ -1028,24 +1278,32 @@ async function _geminiVision(prompt, base64Image, mimeType, maxTokens) {
                     const auth = await vertex.getVertexAuth(model);
                     url = auth.url;
                     headers = auth.headers;
+                    lastRegion = auth.region;
                 } else {
                     const apiKey = _getGeminiKey();
                     url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
                     headers = { 'Content-Type': 'application/json' };
                 }
 
-                const response = await axios.post(url, body, { headers, timeout: 120000 });
-                return response.data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+                const response = await axios.post(url, body, { headers, timeout: 180000 });
+                const parts = response.data?.candidates?.[0]?.content?.parts || [];
+                const textPart = parts.filter(p => !p.thought).pop();
+                return textPart?.text || '';
             } catch (err) {
                 const status = err.response?.status;
                 const isTimeout = err.code === 'ECONNABORTED' || err.message?.includes('timeout');
+                // Vertex: rotate regions on 429/503/timeout
+                if (useVertex && (status === 429 || status === 503 || isTimeout) && lastRegion) {
+                    const retryMs = status === 429 ? _parseGeminiRetryDelay(err) : undefined;
+                    if (vertex.markRegionThrottled(lastRegion, retryMs)) continue;
+                }
                 if (!useVertex && (isTimeout || status === 429 || status === 401 || status === 403) && _rotateGeminiKey(isTimeout ? 'timeout' : `HTTP ${status}`)) {
                     continue;
                 }
                 throw err;
             }
         }
-        throw new Error(`Gemini vision: all keys exhausted`);
+        throw new Error(useVertex ? `Gemini vision Vertex: all regions exhausted` : `Gemini vision: all keys exhausted`);
     }
 
     // OpenAI-compat format — works with regular AIzaSy... keys
@@ -1178,7 +1436,7 @@ async function callVideoAI(prompt, frames, options = {}) {
 
     // Try Qwen Omni first (designed for multi-image/video understanding)
     // Uses model rotation — auto-switches when free quota runs out
-    if (config.qwen.apiKey) {
+    if ((config.qwen.apiKeys || []).length > 0) {
         try {
             const omniModel = model || process.env.QWEN_OMNI_MODEL || 'qwen-omni-turbo';
             const text = await _qwenOmniWithRotation(content, maxTokens, omniModel);
@@ -1201,19 +1459,32 @@ async function callVideoAI(prompt, frames, options = {}) {
     }
 
     if (vertex.isVertexEnabled()) {
-        try {
-            const auth = await vertex.getVertexAuth(geminiModel);
-            const response = await axios.post(auth.url, {
-                contents: [{ parts }],
-                generationConfig: { maxOutputTokens: maxTokens * 8 },
-            }, {
-                headers: auth.headers,
-                timeout: 90000,
-            });
-            const text = response.data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-            if (text.trim()) return text;
-        } catch (err) {
-            console.log(`  ⚠️ [gemini/vertex] Video AI fallback failed: ${err.message}`);
+        const regionCount = vertex.getRegionCount();
+        for (let attempt = 0; attempt < regionCount; attempt++) {
+            let lastRegion = null;
+            try {
+                const auth = await vertex.getVertexAuth(geminiModel);
+                lastRegion = auth.region;
+                const response = await axios.post(auth.url, {
+                    contents: [{ parts }],
+                    generationConfig: { maxOutputTokens: maxTokens * 8 },
+                }, {
+                    headers: auth.headers,
+                    timeout: 90000,
+                });
+                const text = response.data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+                if (text.trim()) return text;
+                break; // empty response — don't keep retrying other regions
+            } catch (err) {
+                const status = err.response?.status;
+                const isTimeout = err.code === 'ECONNABORTED' || err.message?.includes('timeout');
+                if ((status === 429 || status === 503 || isTimeout) && lastRegion) {
+                    const retryMs = status === 429 ? _parseGeminiRetryDelay(err) : undefined;
+                    if (vertex.markRegionThrottled(lastRegion, retryMs)) continue;
+                }
+                console.log(`  ⚠️ [gemini/vertex] Video AI fallback failed: ${err.message}`);
+                break;
+            }
         }
     } else if (config.gemini.apiKeys && config.gemini.apiKeys.length > 0) {
         for (let attempt = 0; attempt < config.gemini.apiKeys.length; attempt++) {
@@ -1249,4 +1520,4 @@ async function callVideoAI(prompt, frames, options = {}) {
 // EXPORTS
 // ============================================================
 
-module.exports = { callAI, callVisionAI, callVideoAI };
+module.exports = { callAI, callVisionAI, callVideoAI, setAIThinking, setGeminiThinking, getAIThinking };

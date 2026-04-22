@@ -108,16 +108,16 @@ const TEMPLATE_REGISTRY = {
     },
     imageShowcase: {
         label: 'Image Showcase',
-        variants: ['standard', 'minimal', 'cinematic'],
+        variants: ['standard', 'minimal', 'cinematic', 'collage'],
         defaultVariant: 'standard',
         minDur: 4,
-        maxDur: 7,
-        animations: ['slideOpposite', 'fadeSlide', 'springScale'],
+        maxDur: 8,
+        animations: ['slideOpposite', 'fadeSlide', 'springScale', 'scatterDrop'],
         defaultAnimation: 'slideOpposite',
         requiresItems: true,
         contentFields: ['text', 'items'],
         needsItemImages: true,
-        itemImageCount: 2,
+        itemImageCount: 3,
     },
     statCard: {
         label: 'Stat Card',
@@ -143,6 +143,32 @@ const TEMPLATE_REGISTRY = {
         contentFields: ['text', 'subText', 'items'],
         needsItemImages: true,
         itemImageCount: 2,
+    },
+    splitScreen: {
+        label: 'Split Screen',
+        variants: ['vertical', 'diagonal', 'reveal'],
+        defaultVariant: 'vertical',
+        minDur: 4,
+        maxDur: 8,
+        animations: ['slideInward', 'wipeReveal', 'springScale'],
+        defaultAnimation: 'slideInward',
+        requiresItems: true,
+        contentFields: ['text', 'items'],
+        needsItemImages: true,
+        itemImageCount: 2,
+    },
+    infographic: {
+        label: 'Infographic',
+        variants: ['grid', 'horizontal', 'radial'],
+        defaultVariant: 'grid',
+        minDur: 5,
+        maxDur: 10,
+        animations: ['staggerSlide', 'popIn', 'cascade'],
+        defaultAnimation: 'staggerSlide',
+        requiresItems: true,
+        contentFields: ['text', 'items'],
+        needsItemImages: true,
+        itemImageCount: 5,
     },
 };
 
@@ -197,13 +223,46 @@ async function processTemplates(scenes, scriptContext, mgScenes, aiInstructions)
     const candidates = _buildCandidates(scenes, scriptContext, allowedTemplates);
     console.log(`  [Templates] ${candidates.length} candidate scene(s) from Visual Planner hints`);
 
-    // ── Step 3: AI template selection (if candidates exist) ──
-    if (candidates.length > 0) {
+    // ── Step 2.5: Direct-build candidates whose VP hint is already complete ──
+    // If VP produced real content (e.g. "statCard: energy -75% Energy; shield -90% Insurance"),
+    // skip the second AI call and build the template straight from the hint.
+    const directCandidates = [];
+    const aiCandidates = [];
+    for (const cand of candidates) {
+        const registry = TEMPLATE_REGISTRY[cand.hintType];
+        const parsed = _parseVPTemplateHint(cand.hintType, cand.hintContent);
+        if (_isVPHintUsable(cand.hintType, parsed, registry)) {
+            directCandidates.push(cand);
+        } else {
+            aiCandidates.push(cand);
+        }
+    }
+
+    if (directCandidates.length > 0) {
+        console.log(`  [Templates] ${directCandidates.length} direct-build (VP content used verbatim) | ${aiCandidates.length} need AI`);
+        for (const cand of directCandidates) {
+            if (templateScenes.length >= maxTemplates) break;
+            const tpl = _buildTemplateFromVPHint(cand, themeId);
+            if (!tpl) continue;
+            if (!_checkV3Conflict(tpl, v3Ranges, templateScenes)) {
+                templateScenes.push(tpl);
+                v3Ranges.push({ start: tpl.startTime, end: tpl.endTime });
+                stats.byType[tpl.type] = (stats.byType[tpl.type] || 0) + 1;
+                console.log(`  [Templates] ${tpl.type} on scene ${tpl.sceneIndex} @ ${tpl.startTime.toFixed(1)}s-${tpl.endTime.toFixed(1)}s "${(tpl.text || '').substring(0, 40)}" [vp-direct]`);
+            } else {
+                stats.conflicts++;
+                stats.skipped++;
+            }
+        }
+    }
+
+    // ── Step 3: AI template selection for candidates with thin/missing VP content ──
+    if (aiCandidates.length > 0) {
         const nonListicleMax = maxTemplates - templateScenes.length;
         if (nonListicleMax > 0) {
             try {
                 const aiTemplates = await _aiSelectTemplates(
-                    candidates, scenes, scriptContext, mgScenes,
+                    aiCandidates, scenes, scriptContext, mgScenes,
                     v3Ranges, templateScenes, themeId, nicheId,
                     nonListicleMax, aiInstructions
                 );
@@ -219,7 +278,7 @@ async function processTemplates(scenes, scriptContext, mgScenes, aiInstructions)
                     }
                 }
             } catch (err) {
-                console.log(`  [Templates] AI selection failed: ${err.message} — continuing with rule-based only`);
+                console.log(`  [Templates] AI selection failed: ${err.message} — continuing with direct-build only`);
             }
         }
     }
@@ -261,10 +320,8 @@ function _resolveListicleGrid(scenes, scriptContext, themeId) {
     });
 
     const startTime = overviewScene.startTime;
-    const duration = Math.min(
-        (overviewScene.endTime || overviewScene.startTime + 5) - overviewScene.startTime,
-        6
-    );
+    // listicleGrid mirrors the overview scene duration — no hard cap.
+    const duration = (overviewScene.endTime || overviewScene.startTime + 5) - overviewScene.startTime;
 
     // Use listicle-format generator for base structure
     const gridMG = generateListicleGridMG(
@@ -374,6 +431,8 @@ AVAILABLE TEMPLATE TYPES:
 - imageShowcase: Dual-image showcase with typewriter title. Two images slide in from opposite sides. Use when narration references two related concepts, people, places, or contrasting visuals. Needs exactly 2 items describing the images.
 - statCard: Icon + big number + label infographic (like TV news stats). Use when narration mentions 1-3 specific numbers, percentages, or statistics. Items format: "iconHint number label" per stat. Icon hints: energy, shield, home, money, people, globe, chart, clock, building, car, health, tech. Example: items: "shield -90% Insurance Premiums; energy -75% Energy Bills"
 - personIntro: Person introduction card — portrait photo + big name + role/date + optional context image. Use when a NAMED PERSON is introduced for the FIRST TIME. Shows their portrait on one side, name + details on the other, then a context image appears. text=person name, subText=role/title/year, items="person portrait description; context image description". Example: text: "Wallace Neff" | subText: "Architect, 1941" | items: "Wallace Neff portrait photo 1940s; Wallace Neff bubble house dome 1941"
+- splitScreen: Vertical split-screen showing two images/concepts side by side with labels. Use when narration EXPLICITLY COMPARES two things visually (before/after, two countries, two perspectives, two locations). Needs exactly 2 items: each item is "label | image search query". Example: text: "Russia vs Japan" | items: "Russia military parade; Japan Self-Defense Forces exercise"
+- infographic: Multi-item visual layout with icons, images, titles, and values. Use when narration lists 3-5+ distinct items each with a stat/price/detail (e.g., weapon costs, country GDP, building specs). Items format: "title | value | image search query" per item. Example: text: "Top Defense Budgets" | items: "United States | $886B | pentagon building; China | $296B | chinese military; India | $83B | indian army parade; UK | $75B | british royal navy; France | $56B | french military"
 
 CANDIDATE SCENES (Visual Planner flagged these):
 ${candidateStr}
@@ -454,7 +513,18 @@ function _parseAIResponse(response, candidates, scenes, themeId) {
         const scene = candidate.scene;
         const startTime = scene.startTime;
         const sceneDur = (scene.endTime || scene.startTime + 4) - scene.startTime;
-        const duration = Math.min(Math.max(sceneDur, registry.minDur), registry.maxDur);
+        // Template duration follows scene duration exactly — no hard cap.
+        // Only skip if the scene is too short for the template to feel natural
+        // (animation would be cut off mid-reveal).
+        if (sceneDur < registry.minDur) continue;
+
+        // Item-image templates need ≥ itemImageCount items (one per panel).
+        // Without enough items, the template renders with empty/blank panels.
+        if (registry.needsItemImages && registry.itemImageCount && items.length < registry.itemImageCount) {
+            console.warn(`   ⚠️  Skipping ${type} on scene ${sceneIdx + 1}: needs ${registry.itemImageCount} items, AI returned ${items.length}`);
+            continue;
+        }
+        const duration = sceneDur;
         const { variant, animation } = _pickVariantAndAnimation(type, themeId);
 
         results.push({
@@ -482,6 +552,145 @@ function _parseAIResponse(response, candidates, scenes, themeId) {
     }
 
     return results;
+}
+
+// ============ VP-HINT DIRECT BUILD ============
+// When the Visual Planner already produced usable template content (text + items),
+// skip the second AI call and build the template straight from VP's hint. Saves a
+// full AI round-trip and makes VP's plan actually the plan.
+
+/**
+ * Parse VP's templateHint content into { text, subText, items } per template format.
+ * Returns null if the content isn't parseable/complete for that type.
+ *
+ * Expected formats (from ai-visual-planner.js prompt):
+ *   chapterCard    : "Chapter Title"
+ *   locationCard   : "Place, Country"
+ *   quoteCard      : "the quote text"
+ *   keyTakeaway    : "main point"
+ *   comparisonCard : "Thing A vs Thing B"
+ *   timelineCard   : "Date1: Event | Date2: Event"
+ *   factCard       : "Title | fact1; fact2; fact3; fact4"
+ *   imageShowcase  : "Title | image1 desc; image2 desc; image3 desc"
+ *   statCard       : "energy -75% Label; shield -90% Label"
+ *   personIntro    : "Person Name | Role/Title, Year"
+ *   splitScreen    : "Title | Left Label; Right Label"
+ *   infographic    : "Title | Item1 Title | Value | image; Item2 Title | Value | image"
+ */
+function _parseVPTemplateHint(type, content) {
+    if (!content || typeof content !== 'string') return null;
+    const raw = content.trim();
+    if (!raw || raw.toLowerCase() === 'none') return null;
+
+    const pipeParts = raw.split('|').map(s => s.trim()).filter(Boolean);
+    const semiSplit = s => s.split(';').map(x => x.trim()).filter(Boolean);
+
+    switch (type) {
+        case 'chapterCard':
+        case 'locationCard':
+        case 'quoteCard':
+        case 'keyTakeaway':
+        case 'comparisonCard':
+            return { text: raw, subText: '', items: [] };
+
+        case 'personIntro':
+            // "Name | Role, Year" — name = text, role = subText. Items come from
+            // VP's item-image hints if present beyond the first two parts.
+            if (pipeParts.length >= 2) {
+                return {
+                    text: pipeParts[0],
+                    subText: pipeParts[1],
+                    items: pipeParts.length >= 3 ? semiSplit(pipeParts.slice(2).join('|')) : [],
+                };
+            }
+            return null; // needs name + role at minimum
+
+        case 'statCard':
+            // "iconHint N label; iconHint N label" — no title, items only
+            return { text: '', subText: '', items: semiSplit(raw) };
+
+        case 'timelineCard':
+        case 'factCard':
+        case 'imageShowcase':
+        case 'splitScreen':
+        case 'infographic': {
+            // "Title | item1; item2" — title first, items semi-separated after pipe
+            if (pipeParts.length >= 2) {
+                const itemsPart = pipeParts.slice(1).join('|');
+                return {
+                    text: pipeParts[0],
+                    subText: '',
+                    items: semiSplit(itemsPart),
+                };
+            }
+            // Single pipe-less string — fall back to treating whole thing as items
+            const items = semiSplit(raw);
+            if (items.length >= 2) return { text: '', subText: '', items };
+            return null;
+        }
+
+        default:
+            return { text: raw, subText: '', items: [] };
+    }
+}
+
+/**
+ * Whether VP's hint content is complete enough to skip the second AI call.
+ * Checks item-count requirements for item-image templates.
+ */
+function _isVPHintUsable(type, parsed, registry) {
+    if (!parsed) return false;
+    if (registry?.needsItemImages && registry?.itemImageCount) {
+        return (parsed.items?.length || 0) >= registry.itemImageCount;
+    }
+    if (registry?.requiresItems) {
+        // For non-image item templates (factCard, statCard, comparisonCard, timelineCard)
+        // we need at least 2 items OR we need real text to render.
+        return (parsed.items?.length || 0) >= 2 || (parsed.text || '').length > 0;
+    }
+    // Text-only templates — any non-empty text works
+    return (parsed.text || '').length > 0;
+}
+
+/**
+ * Build a template scene object directly from VP's hint, mirroring the shape
+ * produced by _parseAIResponse so downstream code can't tell the difference.
+ */
+function _buildTemplateFromVPHint(candidate, themeId) {
+    const { scene, hintType, hintContent } = candidate;
+    const registry = TEMPLATE_REGISTRY[hintType];
+    if (!registry) return null;
+
+    const parsed = _parseVPTemplateHint(hintType, hintContent);
+    if (!_isVPHintUsable(hintType, parsed, registry)) return null;
+
+    const sceneDur = (scene.endTime || scene.startTime + 4) - scene.startTime;
+    if (sceneDur < registry.minDur) return null;
+
+    const { variant, animation } = _pickVariantAndAnimation(hintType, themeId);
+
+    return {
+        type: hintType,
+        templateType: true,
+        text: parsed.text,
+        subText: parsed.subText,
+        items: parsed.items,
+        startTime: scene.startTime,
+        endTime: scene.startTime + sceneDur,
+        duration: sceneDur,
+        trackId: 'video-track-3',
+        mediaType: 'template',
+        style: _pickStyle(themeId),
+        themeId,
+        variant,
+        animation,
+        sceneIndex: candidate.sceneIndex,
+        selectionMode: 'vp-direct',
+        confidence: 0.9,
+        position: 'center',
+        category: 'fullscreen',
+        keyword: `Template: ${hintType}`,
+    };
 }
 
 // ============ STYLING HELPERS ============

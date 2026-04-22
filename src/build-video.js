@@ -24,10 +24,12 @@ function cleanFolder(folderPath, label) {
     let cleaned = 0;
     const mediaExts = new Set(['.mp4', '.jpg', '.jpeg', '.png', '.webp', '.bmp', '.gif', '.webm', '.mov', '.mkv', '.mp3', '.wav']);
 
-    // Resume detection: if scene-N.mp4/jpg files already exist, this is a restart of a
-    // cancelled build — preserve downloaded scenes so footage-manager can skip them.
+    // Resume detection: if scene-N.mp4/jpg files already exist AND user opted into
+    // resume mode, preserve downloaded scenes so footage-manager can skip them.
+    // When BUILD_RESUME !== 'true', always wipe everything (fresh build).
+    const resumeAllowed = process.env.BUILD_RESUME === 'true';
     const hasSceneFiles = files.some(f => /^scene-\d+\.(mp4|jpg|jpeg|png|webp)$/i.test(f));
-    if (hasSceneFiles && label === 'temp') {
+    if (resumeAllowed && hasSceneFiles && label === 'temp') {
         // Only clean non-scene files (MG pre-renders, tmp files, etc.) — keep scene-N media
         for (const file of files) {
             if (/^scene-\d+\.(mp4|jpg|jpeg|png|webp)$/i.test(file)) continue; // keep
@@ -254,14 +256,333 @@ async function buildDumbVideo(transcription, audioFile, directorsBrief) {
     return videoPlan;
 }
 
+// ═══════════════════════════════════════════════════════════════
+// Time-Targeted Directive Parser
+// Parses user AI instructions for time/scene-targeted commands:
+//   "Use map animation in the first 22s"
+//   "splitScreen at 3:58"
+//   "No maps after 1:00"
+//   "Use infographic on scene 5"
+// ═══════════════════════════════════════════════════════════════
+
+const DIRECTIVE_MG_ALIASES = {
+    'map': 'mapChart', 'maps': 'mapChart', 'map animation': 'mapChart', 'map chart': 'mapChart',
+    'split screen': 'splitScreen', 'split-screen': 'splitScreen', 'splitscreen': 'splitScreen',
+    'infographic': 'infographic', 'infographics': 'infographic',
+    'comparison': 'comparisonCard', 'compare': 'comparisonCard',
+    'stat': 'statCard', 'stats': 'statCard', 'statistics': 'statCard',
+    'fact': 'factCard', 'facts': 'factCard',
+    'chart': 'barChart', 'bar chart': 'barChart',
+    'timeline': 'timelineCard',
+    'quote': 'quoteCard',
+    'chapter': 'chapterCard',
+    'person': 'personIntro', 'person intro': 'personIntro',
+    'location': 'locationCard',
+    'image showcase': 'imageShowcase', 'showcase': 'imageShowcase',
+    'donut': 'donutChart', 'donut chart': 'donutChart',
+    'ranking': 'rankingList',
+};
+
+function _parseTimestamp(str) {
+    // "22s" → 22, "1:30" → 90, "0:22" → 22, "3m" → 180, "first 22s" → 22
+    if (!str) return null;
+    str = str.trim().toLowerCase();
+    // MM:SS
+    const mmss = str.match(/^(\d{1,3}):(\d{2})$/);
+    if (mmss) return parseInt(mmss[1]) * 60 + parseInt(mmss[2]);
+    // N.MM (dot-typo for colon MM:SS — "0.22s" is almost always "0:22" = 22s,
+    // not a literal 0.22 seconds). Only triggers when the fractional part is
+    // exactly 2 digits AND ≤ 59, so real sub-second values like "0.5s" or
+    // "1.25s" keep their literal meaning.
+    const dotMMSS = str.match(/^(\d{1,3})\.(\d{2})\s*s?(?:ec(?:onds?)?)?$/);
+    if (dotMMSS) {
+        const mm = parseInt(dotMMSS[1]);
+        const ss = parseInt(dotMMSS[2]);
+        if (ss <= 59) return mm * 60 + ss;
+    }
+    // Ns or N seconds
+    const sec = str.match(/^(\d+(?:\.\d+)?)\s*s(?:ec(?:onds?)?)?$/);
+    if (sec) return parseFloat(sec[1]);
+    // Nm or N minutes
+    const min = str.match(/^(\d+(?:\.\d+)?)\s*m(?:in(?:utes?)?)?$/);
+    if (min) return parseFloat(min[1]) * 60;
+    // bare number (assume seconds)
+    const bare = str.match(/^(\d+(?:\.\d+)?)$/);
+    if (bare) return parseFloat(bare[1]);
+    return null;
+}
+
+function _loadStudioPlan(audioDuration) {
+    const projectDir = process.env.PROJECT_DIR || process.cwd();
+    const planPath = path.join(projectDir, 'styles', '.studio-plan.json');
+    if (!fs.existsSync(planPath)) return null;
+
+    try {
+        const raw = JSON.parse(fs.readFileSync(planPath, 'utf8'));
+        if (!raw || raw.version !== 2 || !Array.isArray(raw.scenes) || raw.scenes.length < 2) return null;
+        if (Math.abs((raw.audioDuration || 0) - audioDuration) > 2) {
+            console.log(`   ⚠️ Studio plan duration ${raw.audioDuration?.toFixed?.(1)}s doesn't match audio ${audioDuration.toFixed(1)}s — skipping`);
+            return null;
+        }
+
+        const fps = config.video.fps;
+        const scenes = raw.scenes.map((s, i) => ({
+            index: i,
+            text: s.text || '',
+            startTime: s.startTime,
+            endTime: s.endTime,
+            duration: Math.round((s.endTime - s.startTime) * fps),
+            words: Array.isArray(s.words) ? s.words : [],
+            // Visual fields (if studio plan includes them)
+            ...(s.keyword && { keyword: s.keyword }),
+            ...(s.stockQuery && { stockQuery: s.stockQuery }),
+            ...(s.webQuery && { webQuery: s.webQuery }),
+            ...(s.sourceHint && { sourceHint: s.sourceHint }),
+            ...(s.framing && { framing: s.framing }),
+            ...(s.effectPreset && { effectPreset: s.effectPreset }),
+            ...(s.mgHint && { mgHint: s.mgHint }),
+            ...(s.fullscreenMG && { fullscreenMG: s.fullscreenMG }),
+            ...(s.templateHint && { templateHint: s.templateHint }),
+            ...(s.visualIntent && { visualIntent: s.visualIntent }),
+            ...(s.backgroundId && { backgroundId: s.backgroundId }),
+            ...(s.floatingAnim && { floatingAnim: s.floatingAnim }),
+            ...(s.mediaType && { mediaType: s.mediaType }),
+        }));
+
+        // Build scriptContext from brief (or defaults)
+        const brief = raw.brief || {};
+        const { pickNicheFromContent } = require('./niches');
+        const scriptContext = {
+            summary: brief.summary || '',
+            theme: brief.tone || '',
+            tone: brief.tone || '',
+            mood: '',
+            pacing: brief.pacing || 'moderate',
+            visualStyle: '',
+            entities: brief.entities || [],
+            entityTypes: brief.entityTypes || {},
+            keyStats: [],
+            mainPoints: [],
+            targetAudience: '',
+            emotionalArc: '',
+            format: brief.format || 'documentary',
+            sections: [],
+            ctaDetected: brief.ctaDetected || false,
+            ctaStartTime: brief.ctaStartTime || null,
+            hookEndTime: brief.hookEndTime || null,
+            eventType: brief.eventType || 'educational',
+            densityTarget: 3,
+            nicheId: brief.nicheId || 'general',
+            themeId: brief.themeId || 'standard',
+        };
+
+        // If niche wasn't in brief, try to detect from summary
+        if (!brief.nicheId && scriptContext.summary) {
+            try {
+                const detected = pickNicheFromContent(scriptContext);
+                if (detected) scriptContext.nicheId = detected;
+            } catch (_) {}
+        }
+
+        return { scenes, scriptContext, hasVisualPlan: raw.hasVisualPlan === true };
+    } catch (e) {
+        console.log(`   ⚠️ Studio plan load failed: ${e.message}`);
+        return null;
+    }
+}
+
+function _applyTimeDirectives(instructions, scenes, scriptContext) {
+    if (!instructions || scenes.length === 0) return 0;
+
+    let applied = 0;
+    // Split by newlines and sentences
+    const lines = instructions.split(/[.\n]/).map(l => l.trim()).filter(Boolean);
+
+    for (const line of lines) {
+        const lower = line.toLowerCase();
+
+        // ── Pattern: "Use <MG type> in the first <time>" ──
+        // "Use map animation in the first 22s"
+        // "Use splitScreen in first 0:30"
+        let m = lower.match(/use\s+(.+?)\s+(?:in|for|during)\s+(?:the\s+)?first\s+(.+)/);
+        if (m) {
+            const mgType = _resolveMGAlias(m[1]);
+            let endTime = _parseTimestamp(m[2]);
+            if (mgType && endTime != null) {
+                // Safety net: if the parsed window is shorter than the first scene
+                // (typically means the user typed a malformed time like "0.22s"),
+                // clamp to at least the first scene's end so the directive applies
+                // to the opening scene instead of silently matching zero scenes.
+                const firstSceneEnd = scenes[0]?.endTime || 0;
+                if (endTime < firstSceneEnd) {
+                    console.log(`   ⚠️ Directive "${line}" — parsed end ${endTime.toFixed(2)}s is shorter than scene 0 (${firstSceneEnd.toFixed(1)}s); clamping to first scene`);
+                    endTime = firstSceneEnd;
+                }
+                applied += _forceFullscreenMG(scenes, mgType, 0, endTime, line);
+                continue;
+            }
+        }
+
+        // ── Pattern: "Use <MG type> at <time>" / "Use <MG type> around <time>" ──
+        // "Use splitScreen at 3:58"
+        m = lower.match(/use\s+(.+?)\s+(?:at|around|near)\s+(.+)/);
+        if (m) {
+            const mgType = _resolveMGAlias(m[1]);
+            const targetTime = _parseTimestamp(m[2]);
+            if (mgType && targetTime != null) {
+                // Find closest scene to this timestamp
+                applied += _forceFullscreenMG(scenes, mgType, targetTime - 2, targetTime + 4, line);
+                continue;
+            }
+        }
+
+        // ── Pattern: "Use <MG type> from <time> to <time>" / "between <time> and <time>" ──
+        m = lower.match(/use\s+(.+?)\s+(?:from|between)\s+(.+?)\s+(?:to|and|-)\s+(.+)/);
+        if (m) {
+            const mgType = _resolveMGAlias(m[1]);
+            const startTime = _parseTimestamp(m[2]);
+            const endTime = _parseTimestamp(m[3]);
+            if (mgType && startTime != null && endTime != null) {
+                applied += _forceFullscreenMG(scenes, mgType, startTime, endTime, line);
+                continue;
+            }
+        }
+
+        // ── Pattern: "No <MG type> after <time>" / "No maps after 1:00" ──
+        m = lower.match(/no\s+(.+?)\s+after\s+(.+)/);
+        if (m) {
+            const mgType = _resolveMGAlias(m[1]);
+            const afterTime = _parseTimestamp(m[2]);
+            if (mgType && afterTime != null) {
+                // Remove any fullscreenMG of this type after the timestamp
+                for (const s of scenes) {
+                    if (!s.fullscreenMG) continue;
+                    const colonIdx = s.fullscreenMG.indexOf(':');
+                    const existingType = colonIdx > 0 ? s.fullscreenMG.substring(0, colonIdx).trim() : s.fullscreenMG.trim();
+                    if (existingType === mgType && s.startTime > afterTime) {
+                        console.log(`   ⚡ Directive "${line}" → removed ${mgType} from scene ${s.index} (${s.startTime.toFixed(1)}s)`);
+                        s.fullscreenMG = null;
+                        applied++;
+                    }
+                }
+                continue;
+            }
+        }
+
+        // ── Pattern: "<MG type> on scene <N>" / "scene <N> should be <MG type>" ──
+        m = lower.match(/(?:use\s+)?(.+?)\s+(?:on|for)\s+scene\s+(\d+)/);
+        if (!m) m = lower.match(/scene\s+(\d+)\s+(?:should\s+(?:be|use|have)\s+)(.+)/);
+        if (m) {
+            const mgType = _resolveMGAlias(m[1]) || _resolveMGAlias(m[2]);
+            const sceneIdx = parseInt(m[2]) || parseInt(m[1]);
+            if (mgType && !isNaN(sceneIdx)) {
+                const scene = scenes.find(s => s.index === sceneIdx);
+                if (scene) {
+                    scene.fullscreenMG = mgType + ': ' + (scene.text || '').substring(0, 80);
+                    scene.keyword = null;
+                    scene.stockQuery = null;
+                    scene.sourceHint = null;
+                    console.log(`   ⚡ Directive "${line}" → scene ${sceneIdx} forced to ${mgType}`);
+                    applied++;
+                }
+                continue;
+            }
+        }
+    }
+
+    return applied;
+}
+
+function _resolveMGAlias(text) {
+    if (!text) return null;
+    text = text.trim().toLowerCase().replace(/['"]/g, '');
+    // Direct match
+    if (DIRECTIVE_MG_ALIASES[text]) return DIRECTIVE_MG_ALIASES[text];
+    // Check if it's already a valid type
+    const { FULLSCREEN_MG_TYPES } = require('./ai-motion-graphics');
+    if (FULLSCREEN_MG_TYPES.has(text)) return text;
+    const { TEMPLATE_TYPES } = require('./ai-templates');
+    if (TEMPLATE_TYPES && TEMPLATE_TYPES.has(text)) return text;
+    // Partial match
+    for (const [alias, type] of Object.entries(DIRECTIVE_MG_ALIASES)) {
+        if (text.includes(alias) || alias.includes(text)) return type;
+    }
+    return null;
+}
+
+function _forceFullscreenMG(scenes, mgType, startTime, endTime, directive) {
+    let count = 0;
+    // Find scenes that overlap with the time range
+    const candidates = scenes.filter(s => {
+        const sceneEnd = s.endTime || (s.startTime + 3);
+        return s.startTime < endTime && sceneEnd > startTime;
+    });
+
+    if (candidates.length === 0) {
+        console.log(`   ⚠️ Directive "${directive}" — no scenes found in ${startTime.toFixed(1)}s-${endTime.toFixed(1)}s`);
+        return 0;
+    }
+
+    // If range is short (< 8s), pick the best single scene
+    // If range is longer, force all scenes in range
+    const targetScenes = (endTime - startTime) <= 8
+        ? [candidates.reduce((best, s) => {
+            const sMid = (s.startTime + (s.endTime || s.startTime + 3)) / 2;
+            const bMid = (best.startTime + (best.endTime || best.startTime + 3)) / 2;
+            const targetMid = (startTime + endTime) / 2;
+            return Math.abs(sMid - targetMid) < Math.abs(bMid - targetMid) ? s : best;
+        })]
+        : candidates;
+
+    for (const s of targetScenes) {
+        if (s.fullscreenMG) {
+            // Already has a fullscreen MG — check if it's the same type
+            const colonIdx = s.fullscreenMG.indexOf(':');
+            const existingType = colonIdx > 0 ? s.fullscreenMG.substring(0, colonIdx).trim() : s.fullscreenMG.trim();
+            if (existingType === mgType) continue; // already set
+        }
+        s.fullscreenMG = mgType + ': ' + (s.text || '').substring(0, 80);
+        s.keyword = null;
+        s.stockQuery = null;
+        s.sourceHint = null;
+        console.log(`   ⚡ Directive "${directive}" → scene ${s.index} (${s.startTime.toFixed(1)}s) forced to ${mgType}`);
+        count++;
+    }
+    return count;
+}
+
 async function buildVideo() {
     log.banner('FACELESS VIDEO GENERATOR - AUTO BUILD');
 
     const startTime = Date.now();
+    const PROJECT_DIR = process.env.PROJECT_DIR || path.join(__dirname, '..');
+    const CHECKPOINT_FILE = path.join(PROJECT_DIR, '.build-checkpoint.json');
+
+    // ── Resume from checkpoint? ──
+    // If a checkpoint exists from a previous failed build (same audio file),
+    // skip Steps 0-4.8 (transcription, AI Director, Visual Planner, Orchestrator)
+    // and jump straight to Step 5 (download). Saves time AND AI credits.
+    // Gated by BUILD_RESUME env var — when OFF (default), checkpoint is deleted and every step runs fresh.
+    const resumeAllowed = process.env.BUILD_RESUME === 'true';
+    const resumeMode = resumeAllowed && fs.existsSync(CHECKPOINT_FILE);
+    let checkpoint = null;
+    if (resumeMode) {
+        try {
+            checkpoint = JSON.parse(fs.readFileSync(CHECKPOINT_FILE, 'utf8'));
+            log.ok(`♻️  Build checkpoint found (saved ${new Date(checkpoint._savedAt).toLocaleString()})`);
+            log.ok(`   ${checkpoint.scenes.length} scenes, ${checkpoint.scriptContext?.nicheId || 'auto'} niche — skipping Steps 0-4.8`);
+        } catch (e) {
+            log.warn(`Checkpoint file corrupt — starting fresh build`);
+            checkpoint = null;
+            try { fs.unlinkSync(CHECKPOINT_FILE); } catch (_) {}
+        }
+    } else if (!resumeAllowed && fs.existsSync(CHECKPOINT_FILE)) {
+        // Resume OFF — remove stale checkpoint so it can't accidentally leak into a later build
+        try { fs.unlinkSync(CHECKPOINT_FILE); log.info('🧹 Cleared stale checkpoint (Resume Build is OFF)'); } catch (_) {}
+    }
 
     // Step 0: Clean old build artifacts
     log.step('🧹 Step 0: Cleaning old build files');
-    const PROJECT_DIR = process.env.PROJECT_DIR || path.join(__dirname, '..');
     cleanFolder(path.join(PROJECT_DIR, 'public'), 'public');
     cleanFolder(config.paths.temp, 'temp');
 
@@ -322,6 +643,39 @@ async function buildVideo() {
     }
     log.br();
 
+    // AI thinking mode (from UI dropdown — works for Gemini, Qwen, DeepSeek)
+    const aiThinkingMode = (process.env.AI_THINKING || process.env.GEMINI_THINKING || 'off').trim().toLowerCase();
+    if (aiThinkingMode !== 'off') {
+        const { setAIThinking } = require('./ai-provider');
+        setAIThinking(aiThinkingMode);
+    }
+
+    // Variables that flow from Steps 2-4.8 into Step 5+
+    let transcription, buildLanguage, scenesWithKeywords, scriptContext, buildManifest, actualAudioDuration;
+    let aiInstructions = '';
+    const plannedV2Scenes = [];
+    const compositorExplainers = [];
+
+    // ── RESUME PATH: restore from checkpoint ──
+    if (checkpoint && checkpoint.audioFile === audioFile) {
+        log.step('♻️  Resuming from checkpoint — skipping Steps 2-4.8');
+        transcription = checkpoint.transcription;
+        buildLanguage = checkpoint.buildLanguage;
+        scenesWithKeywords = checkpoint.scenes;
+        scriptContext = checkpoint.scriptContext;
+        buildManifest = checkpoint.buildManifest || null;
+        actualAudioDuration = checkpoint.actualAudioDuration;
+        aiInstructions = (process.env.AI_INSTRUCTIONS || '').trim();
+        log.ok(`Restored ${scenesWithKeywords.length} scenes, niche=${scriptContext.nicheId}, lang=${buildLanguage}`);
+        log.ok(`Saved ${((Date.now() - startTime) / 1000).toFixed(0)}s+ of AI calls & transcription`);
+        log.br();
+    } else {
+    // ── FRESH BUILD PATH: run Steps 2-4.8 ──
+    if (checkpoint && checkpoint.audioFile !== audioFile) {
+        log.warn(`Checkpoint is for "${checkpoint.audioFile}" but building "${audioFile}" — starting fresh`);
+        try { fs.unlinkSync(CHECKPOINT_FILE); } catch (_) {}
+    }
+
     // Step 2: Transcribe
     log.step('🎙️ Step 2: Transcribing audio');
     const audioPath = path.join(config.paths.input, audioFile);
@@ -335,11 +689,11 @@ async function buildVideo() {
     if (hintCode) log.kv('Language override', `${langOverride} (hinting Whisper)`);
     else log.kv('Language', 'auto (Whisper will detect)');
 
-    const transcription = await transcribeAudio(audioPath, { languageHint: hintCode });
+    transcription = await transcribeAudio(audioPath, { languageHint: hintCode });
 
     // Resolve the final build language: explicit override wins, else Whisper's detection,
     // else fall back to English. Stored on scriptContext so all downstream steps see it.
-    const buildLanguage = resolveBuildLanguage(langOverride, transcription.language);
+    buildLanguage = resolveBuildLanguage(langOverride, transcription.language);
     log.kv('Build language', `${buildLanguage}${buildLanguage !== (transcription.language || 'en') && langOverride === 'auto' ? ' (unsupported auto-detect, falling back)' : ''}`);
 
     // ====================================================================
@@ -356,9 +710,36 @@ async function buildVideo() {
         return dumbResult;
     }
 
+    actualAudioDuration = transcription.duration || (transcription.segments.length > 0 ? transcription.segments[transcription.segments.length - 1].end : 0);
+
+    // ── Studio Plan: check if Style Studio produced a combined plan ──
+    const studioPlan = _loadStudioPlan(actualAudioDuration);
+    if (studioPlan) {
+        log.step('🎨 Steps 3+4: Style Studio Plan (pre-built by agent)');
+        let scenes = studioPlan.scenes;
+        scriptContext = studioPlan.scriptContext;
+        scriptContext.language = buildLanguage;
+        if (directorsBrief.styleProfile) {
+            scriptContext.styleProfile = directorsBrief.styleProfile;
+            scriptContext.styleBlock = directorsBrief.styleBlock;
+        }
+        log.ok(`Loaded ${scenes.length} scenes from Style Studio plan`);
+        if (studioPlan.hasVisualPlan) {
+            log.ok(`Visual plan included — skipping Step 4 (Visual Planner)`);
+            scenesWithKeywords = scenes;
+        } else {
+            log.ok(`No visual plan — running Step 4 normally`);
+            scenesWithKeywords = await planVisuals(scenes, scriptContext, directorsBrief);
+        }
+        log.br();
+    } else {
+    // ── Normal path: AI Director + Visual Planner ──
+
     // Step 3: AI Director — Scene creation + context analysis + format detection
     log.step('🎬 Step 3: AI Director (Scene Creation + Context Analysis)');
-    let { scenes, scriptContext } = await analyzeAndCreateScenes(transcription, directorsBrief);
+    const dirResult = await analyzeAndCreateScenes(transcription, directorsBrief);
+    let scenes = dirResult.scenes;
+    scriptContext = dirResult.scriptContext;
     // Attach resolved language to scriptContext so ALL downstream AI steps + the renderer see it.
     // This is the single place language enters the scriptContext — no other code should set it.
     scriptContext.language = buildLanguage;
@@ -369,14 +750,10 @@ async function buildVideo() {
     }
     log.ok(`Created ${scenes.length} scenes with rich context (lang=${buildLanguage})`);
     log.br();
-    const actualAudioDuration = transcription.duration || (transcription.segments.length > 0 ? transcription.segments[transcription.segments.length - 1].end : 0);
-
-    // Phase 0 (scene splitting) REMOVED — Director handles scene boundaries with full narrative context.
-    // Blind duration-based splitting destroyed story beats and created unfindable keyword fragments.
 
     // Step 4: Visual Planning — Batch keywords + media type + source hints
     log.step('🎨 Step 4: Visual Planner (Batch Keyword Generation)');
-    const scenesWithKeywords = await planVisuals(scenes, scriptContext, directorsBrief);
+    scenesWithKeywords = await planVisuals(scenes, scriptContext, directorsBrief);
 
     // DEBUG: Stop after Visual Planner for testing
     if (process.env.STOP_AFTER === 'visual-planner') {
@@ -388,49 +765,67 @@ async function buildVideo() {
         process.exit(0);
     }
 
-    // Recipe system disabled — was mis-detecting genres (e.g. "listicle-history" for business videos)
-    const aiInstructions = directorsBrief.freeInstructions || '';
+    } // end of studioPlan else (normal Director + VP path)
 
-    // Step 4.7: Compositor Planner — DISABLED (V2 overlay system needs rework)
-    const nicheId = scriptContext.nicheId || 'general';
-    const plannedV2Scenes = [];
-    const compositorExplainers = [];
-
-    // Step 4.5: Perplexity Research (optional — enriches keywords with real-world sources)
-    if (config.perplexity?.apiKey) {
-        log.step('🔬 Step 4.5: Media Research (Perplexity)');
-        try {
-            const { researchSceneMedia } = require('./ai-research');
-            await researchSceneMedia(scenesWithKeywords, scriptContext);
-        } catch (error) {
-            log.warn(`Research step failed: ${error.message} (continuing without)`);
-            log.br();
+    // ── Step 4.1: Parse time-targeted directives from AI Instructions ──
+    aiInstructions = directorsBrief.freeInstructions || '';
+    if (aiInstructions) {
+        const directiveCount = _applyTimeDirectives(aiInstructions, scenesWithKeywords, scriptContext);
+        if (directiveCount > 0) {
+            log.ok(`Applied ${directiveCount} time-targeted directive(s) from AI Instructions`);
         }
     }
 
-    // Promote mgHint → fullscreenMG when the hint is a fullscreen MG type
-    // This prevents wasted footage downloads for scenes the MG engine will cover entirely
+    // Step 4.7: Compositor Planner — DISABLED (V2 overlay system needs rework)
+    const nicheId = scriptContext.nicheId || 'general';
+
+    // Promote mgHint → fullscreenMG when the hint is a fullscreen MG type.
+    // This prevents wasted footage downloads for scenes the MG engine will cover
+    // entirely — BUT only when it's safe:
+    //   - not a hook scene (needs strong visual footage to grab attention)
+    //   - not a CTA scene (needs closing footage, handled upstream by VP guard too)
+    //   - not a scene the planner already chose a templateHint for (templates win)
+    // Otherwise we silently swallow the AI's editorial intent.
     const { FULLSCREEN_MG_TYPES: _FSMG } = require('./ai-motion-graphics');
+    const _hookEnd = parseFloat(scriptContext.hookEndTime);
+    const _ctaStart = parseFloat(scriptContext.ctaStartTime);
+    const _ctaOn = !!scriptContext.ctaDetected;
+    const _phaseOf = (s) => {
+        const st = s.startTime || 0;
+        if (!Number.isNaN(_hookEnd) && st < _hookEnd) return 'hook';
+        if (_ctaOn && !Number.isNaN(_ctaStart) && st >= _ctaStart) return 'cta';
+        return 'body';
+    };
+    let _promoted = 0, _promoSkipped = 0;
     for (const s of scenesWithKeywords) {
         if (s.fullscreenMG) continue; // already set by VP
         if (!s.mgHint) continue;
+        if (s.templateHint) continue; // planner chose a template — respect it
 
-        // Parse mgHint — format: "type: content" or just "type"
         const hintStr = String(s.mgHint).trim();
         const colonIdx = hintStr.indexOf(':');
         const hintType = colonIdx > 0 ? hintStr.substring(0, colonIdx).trim() : hintStr;
+        if (!_FSMG.has(hintType)) continue;
 
-        if (_FSMG.has(hintType)) {
-            s.fullscreenMG = s.mgHint;
-            s.mgHint = null; // consumed — don't double-place
-            // Clear download fields — this scene is now a fullscreen MG
-            s.keyword = null;
-            s.stockQuery = null;
-            s.webQuery = null;
-            s.mediaType = null;
-            s.sourceHint = null;
-            log.info(`   Scene ${s.index}: promoted mgHint "${hintType}" → fullscreenMG (saves a download)`);
+        const phase = _phaseOf(s);
+        if (phase === 'hook' || phase === 'cta') {
+            _promoSkipped++;
+            log.info(`   Scene ${s.index}: kept mgHint "${hintType}" as overlay (${phase} zone — no fullscreen promotion)`);
+            continue;
         }
+
+        s.fullscreenMG = s.mgHint;
+        s.mgHint = null;
+        s.keyword = null;
+        s.stockQuery = null;
+        s.webQuery = null;
+        s.mediaType = null;
+        s.sourceHint = null;
+        _promoted++;
+        log.info(`   Scene ${s.index}: promoted mgHint "${hintType}" → fullscreenMG (saves a download)`);
+    }
+    if (_promoted > 0 || _promoSkipped > 0) {
+        log.info(`   🎛️  mgHint promoter: ${_promoted} promoted, ${_promoSkipped} kept as overlay`);
     }
 
     // Mark listicle overview scene as template early — saves a wasted footage download
@@ -477,7 +872,7 @@ async function buildVideo() {
 
     // ── Orchestrator Phase 1: Pre-Build AI Review ──
     log.step('🧠 Step 4.8: Orchestrator — Pre-Build Review');
-    let buildManifest = null;
+    buildManifest = null;
     try {
         const orchResult = await preBuildReview(scenesWithKeywords, scriptContext);
         buildManifest = orchResult.manifest;
@@ -491,6 +886,27 @@ async function buildVideo() {
         log.warn(`Orchestrator Phase 1 failed: ${error.message} — continuing without`);
     }
     log.br();
+
+    // ── Save checkpoint (Steps 2-4.8 complete) ──
+    // If the build fails later (download, MG, etc.), next build resumes from here.
+    try {
+        const checkpointData = {
+            _savedAt: Date.now(),
+            audioFile,
+            transcription,
+            buildLanguage,
+            scenes: scenesWithKeywords,
+            scriptContext,
+            buildManifest,
+            actualAudioDuration,
+        };
+        fs.writeFileSync(CHECKPOINT_FILE, JSON.stringify(checkpointData));
+        log.ok(`💾 Checkpoint saved — next build will resume from Step 5 if same audio`);
+    } catch (e) {
+        log.warn(`Checkpoint save failed: ${e.message}`);
+    }
+
+    } // end of fresh build else block
 
     // Separate fullscreenMG scenes (no footage needed) from footage scenes
     const fullscreenMGScenes = scenesWithKeywords.filter(s => s.fullscreenMG);
@@ -665,6 +1081,64 @@ async function buildVideo() {
         }
     }
 
+    // ── Explainer floating bias ──
+    // Explainer videos (educational/documentary) feel more premium with floating
+    // scenes mixed in. Convert ~40% of fullscreen wide scenes to floating with
+    // slide animations. News stays as-is (urgent/raw look). Cinematic untouched.
+    let explainerFloatingCount = 0;
+    const isExplainer = (scriptContext?.nicheId || '').startsWith('explainer');
+    if (isExplainer) {
+        const FLOATING_BIAS = 0.4; // ~40% of eligible scenes flip to floating
+        const FLOATING_ANIMS = ['slideRight', 'slideLeft', 'slideUp', 'fadeScale'];
+        const pacing = scriptContext.pacing || 'moderate';
+        const pacingBase = pacing === 'fast' ? 0.3 : pacing === 'slow' ? 0.7 : 0.5;
+
+        // Eligible: wide-enough scenes with no AI framing tag (i.e. fellthrough to fullscreen)
+        const eligible = scenesWithMedia.filter(s => {
+            const w = s.mediaWidth || 0, h = s.mediaHeight || 0;
+            if (w <= 0 || h <= 0) return false;
+            const ratio = w / h;
+            if (ratio < 1.2) return false;       // narrow — math already handled it
+            if (s._framingLocked) return false;  // Visual Planner explicitly chose the framing
+            if (s.framing === 'cinematic') return false; // AI chose cinematic, leave alone
+            if (s.framing === 'floating') return false;  // already floating
+            if (s.fullscreenMG) return false;    // MG scene, no footage framing
+            return true;
+        });
+
+        // Deterministic stride pick — every Nth eligible scene becomes floating
+        const stride = Math.max(2, Math.round(1 / FLOATING_BIAS)); // FLOATING_BIAS=0.4 → stride=3
+        for (let i = 0; i < eligible.length; i++) {
+            if (i % stride !== 1) continue; // pick 2nd, 5th, 8th...
+            const scene = eligible[i];
+            const w = scene.mediaWidth, h = scene.mediaHeight;
+            const ratio = w / h;
+            const targetRatio = 1920 / 1080;
+            const fillFactor = Math.min(1, (ratio - 1.0) / (targetRatio - 1.0));
+            const floatingScale = 0.45 + fillFactor * 0.10;
+
+            scene.framing = 'floating';
+            scene.fitMode = 'cover';
+            scene.scale = Math.round(floatingScale * 100) / 100;
+            scene.borderRadius = scene.borderRadius || 4;
+            scene.shadow = scene.shadow !== undefined ? scene.shadow : 0.5;
+            // Vary animation across scenes for visual rhythm
+            scene.floatingAnim = scene.floatingAnim || FLOATING_ANIMS[i % FLOATING_ANIMS.length];
+            const sceneDur = (scene.endTime || 0) - (scene.startTime || 0);
+            const durationAdj = sceneDur < 4 ? -0.1 : sceneDur > 7 ? 0.15 : 0;
+            scene.floatingAnimDuration = scene.floatingAnimDuration || Math.round((pacingBase + durationAdj) * 100) / 100;
+            if (!scene.background || scene.background === 'none') {
+                scene.background = 'blur';
+            }
+            scene.posX = scene.posX || 0;
+            scene.posY = scene.posY || 0;
+            // Bookkeeping — was counted as fullscreen, now floating
+            fullscreenCount--;
+            cinematicCount++;
+            explainerFloatingCount++;
+        }
+    }
+
     // Assign custom background assets to some non-widescreen scenes (variety)
     // Every ~3rd blur scene gets a custom asset background instead
     if (themeBgAssets.length > 0) {
@@ -684,6 +1158,9 @@ async function buildVideo() {
         log.ok(`${autoContainCount} auto-framed (non-widescreen) + ${cinematicCount} cinematic + ${fullscreenCount} fullscreen`);
     } else {
         log.ok('All scenes fullscreen — no auto-framing needed');
+    }
+    if (explainerFloatingCount > 0) {
+        log.ok(`Explainer bias: ${explainerFloatingCount} wide scenes flipped to floating with slide animation`);
     }
     if (customBgCount > 0) {
         log.ok(`${customBgCount} scenes using custom background assets`);
@@ -757,6 +1234,61 @@ async function buildVideo() {
         log.info(`📊 MG cap: ${before} → ${allMGs.length} (${directorsBrief.qualityTier} tier, max ${maxMGs})`);
     }
 
+    // Merge adjacent same-type fullscreen MGs into one continuous MG.
+    // When the Visual Planner assigns (e.g.) mapChart to two consecutive scenes, each
+    // becomes its own MG with a tiny gap between them — V1 footage from before the
+    // first map peeks through that gap. Merging collapses them into a single animated
+    // visual covering both scenes' data, which is the smarter planner behavior.
+    const MERGE_GAP_THRESHOLD = 2.5; // seconds
+    {
+        const fsList = allMGs
+            .filter(mg => mg.category === 'fullscreen')
+            .sort((a, b) => a.startTime - b.startTime);
+        const toRemove = new Set();
+        let mergedCount = 0;
+        for (let i = 0; i < fsList.length; i++) {
+            const cur = fsList[i];
+            if (toRemove.has(cur)) continue;
+            for (let j = i + 1; j < fsList.length; j++) {
+                const next = fsList[j];
+                if (toRemove.has(next)) continue;
+                if (next.type !== cur.type) break;
+                const curEnd = cur.startTime + cur.duration;
+                const gap = next.startTime - curEnd;
+                if (gap > MERGE_GAP_THRESHOLD) break;
+                const nextEnd = next.startTime + next.duration;
+                cur.duration = Math.max(curEnd, nextEnd) - cur.startTime;
+                const curText = (cur.text || '').trim();
+                const nextText = (next.text || '').trim();
+                if (nextText && nextText !== curText) {
+                    cur.text = curText ? `${curText}, ${nextText}` : nextText;
+                }
+                const curSub = (cur.subtext || '').trim();
+                const nextSub = (next.subtext || '').trim();
+                if (nextSub && nextSub !== curSub) {
+                    cur.subtext = curSub ? `${curSub} ${nextSub}` : nextSub;
+                }
+                cur._mergedFrom = (cur._mergedFrom || [cur.sceneIndex]).concat(next.sceneIndex);
+                // Promote map variant so the planner produces enough waypoints
+                // to pan/zoom from one location to the next across the merged span.
+                // locator (1-2 wp) / regionHighlight (1-3 wp) → route (3-6 wp).
+                if (cur.type === 'mapChart') {
+                    const v = cur.mapVariant || cur.subType;
+                    if (v === 'locator' || v === 'regionHighlight' || !v) {
+                        cur.mapVariant = 'route';
+                        cur.subType = 'route';
+                    }
+                }
+                toRemove.add(next);
+                mergedCount++;
+            }
+        }
+        if (mergedCount > 0) {
+            allMGs = allMGs.filter(mg => !toRemove.has(mg));
+            log.info(`🔀 Merged ${mergedCount} adjacent fullscreen MG(s) with same type (gap ≤ ${MERGE_GAP_THRESHOLD}s) — one continuous visual instead of neighbors with a gap`);
+        }
+    }
+
     // Split MGs: overlay types stay in motionGraphics, full-screen types become V3 scenes
     let motionGraphics = allMGs.filter(mg => mg.category !== 'fullscreen');
     const fullscreenMGs = allMGs.filter(mg => mg.category === 'fullscreen');
@@ -798,8 +1330,13 @@ async function buildVideo() {
     // Carve out gaps in V2 scenes where full-screen MGs exist
     // Full-screen MGs ARE the visual — no footage should play underneath
     if (mgScenes.length > 0) {
+        // Minimum V1 fragment duration. Anything shorter is a sliver — fullscreen MGs
+        // cover those moments visually on V3, and carving them produces duplicate-text
+        // fragments. Absorb them into an adjacent full scene instead of keeping them.
+        const MIN_FRAGMENT_DUR = 1.5;
         const mgRanges = mgScenes.map(mg => ({ start: mg.startTime, end: mg.endTime }));
         let carved = [];
+        let absorbedCount = 0;
         for (const scene of scenesWithMedia) {
             let parts = [{ startTime: scene.startTime, endTime: scene.endTime }];
             for (const range of mgRanges) {
@@ -824,9 +1361,11 @@ async function buildVideo() {
                 }
                 parts = newParts;
             }
+            // Drop sub-threshold fragments so they don't leak duplicate text onto V1
+            const kept = parts.filter(p => (p.endTime - p.startTime) >= MIN_FRAGMENT_DUR);
+            absorbedCount += parts.length - kept.length;
             // Create scene copies for surviving parts
-            for (const part of parts) {
-                if (part.endTime - part.startTime < 0.3) continue; // skip tiny fragments
+            for (const part of kept) {
                 const trimmedScene = { ...scene };
                 const offsetFromOriginal = part.startTime - scene.startTime;
                 trimmedScene.startTime = part.startTime;
@@ -838,9 +1377,28 @@ async function buildVideo() {
                 carved.push(trimmedScene);
             }
         }
+        // Seamless coverage: extend kept scenes to close any sub-threshold gaps
+        // created by dropped fragments. V1 should never have a visible gap — the
+        // fullscreen MG on V3 covers the intended visual, and V1 bridges under it.
+        carved.sort((a, b) => a.startTime - b.startTime);
+        const mgIntersects = (s, e) => mgRanges.some(r => s < r.end && e > r.start);
+        let bridged = 0;
+        for (let i = 0; i < carved.length - 1; i++) {
+            const cur = carved[i];
+            const nxt = carved[i + 1];
+            const gap = nxt.startTime - cur.endTime;
+            if (gap > 0.01 && gap < MIN_FRAGMENT_DUR && !mgIntersects(cur.endTime, nxt.startTime)) {
+                // Gap is not covered by any MG — extend current scene to close it
+                cur.endTime = nxt.startTime;
+                cur.duration = cur.endTime - cur.startTime;
+                bridged++;
+            }
+        }
         const removed = scenesWithMedia.length - carved.length;
         scenesWithMedia = carved;
         if (removed > 0) log.info(`🔪 Carved ${removed} scene(s) to make room for full-screen MGs`);
+        if (absorbedCount > 0) log.info(`🧹 Absorbed ${absorbedCount} sub-threshold fragment(s) (<${MIN_FRAGMENT_DUR}s) — prevents duplicate-text slivers`);
+        if (bridged > 0) log.info(`🔗 Bridged ${bridged} V1 gap(s) left by absorbed fragments`);
     }
 
     log.ok(`Placed ${allMGs.length} motion graphics (style: ${log.pc.cyan(mgStyle)})`);
@@ -879,7 +1437,7 @@ async function buildVideo() {
         log.step('🗺️ Step 6.05: Map Animation Planner');
         try {
             const { planMapAnimations } = require('./ai-map-planner');
-            const enriched = await planMapAnimations(allMGs, scriptContext, combinedInstructions);
+            const enriched = await planMapAnimations(allMGs, scriptContext, combinedInstructions, scenesWithMedia);
             if (enriched > 0) {
                 log.ok(`Planned ${enriched} map animation(s) with waypoints`);
             } else {
@@ -908,6 +1466,43 @@ async function buildVideo() {
         }
         log.br();
 
+        // Step 6.07: Download contextual icons for map waypoints
+        const mapsWithIcons = allMGs.filter(mg => mg.type === 'mapChart' && (mg._mapWaypoints?.some(wp => wp.icon) || mg._mapSwarms?.length > 0));
+        if (mapsWithIcons.length > 0) {
+            log.step('🏷️ Step 6.07: Map Waypoint Icons');
+            try {
+                const { downloadWaypointIcons, downloadMapIcon } = require('./icon-provider');
+                let totalIcons = 0;
+                for (const mg of mapsWithIcons) {
+                    // Waypoint icons
+                    const iconMap = await downloadWaypointIcons(mg);
+                    // Swarm icons
+                    if (mg._mapSwarms) {
+                        for (const sw of mg._mapSwarms) {
+                            for (const loc of sw.locations) {
+                                if (!loc.icon) continue;
+                                const iconPath = await downloadMapIcon(loc.icon);
+                                if (iconPath) {
+                                    iconMap[loc.name] = iconPath;
+                                    loc._iconFile = iconPath;
+                                }
+                            }
+                        }
+                    }
+                    const count = Object.keys(iconMap).length;
+                    if (count > 0) {
+                        mg._mapIcons = iconMap;
+                        totalIcons += count;
+                    }
+                }
+                if (totalIcons > 0) log.ok(`Downloaded ${totalIcons} map icon(s)`);
+                else log.dim('No map icons downloaded');
+            } catch (e) {
+                log.warn(`Map icon download failed: ${e.message}`);
+            }
+            log.br();
+        }
+
         // Propagate map data from allMGs to mgScenes (mgScenes are copies)
         for (const mg of fullscreenMGs) {
             if (mg.type !== 'mapChart') continue;
@@ -924,6 +1519,9 @@ async function buildVideo() {
             if (mg._bigMapSize) target._bigMapSize = mg._bigMapSize;
             if (mg._wpCoords) target._wpCoords = mg._wpCoords;
             if (mg._mapBigMap) target._mapBigMap = mg._mapBigMap;
+            if (mg._mapIcons) target._mapIcons = mg._mapIcons;
+            if (mg._mapSwarms) target._mapSwarms = mg._mapSwarms;
+            if (mg._mapRoutePath) target._mapRoutePath = mg._mapRoutePath;
         }
     }
 
@@ -955,9 +1553,15 @@ async function buildVideo() {
                 log.warn(`Template item images failed: ${itemErr.message} — continuing without`);
             }
 
-            // Copy the underlying V1 scene's media file to each template
-            // (the scene already had footage downloaded in Step 5 — reuse it as template background)
+            // Copy the underlying V1 scene's media file to each template as a FALLBACK bg.
+            // Only when the template did NOT already get a dedicated bg (tpl-bg-*.jpg),
+            // since the renderer prefers templateMediaFile over templateBgFile — reusing the
+            // scene clip there would make the template visually identical to surrounding footage.
             for (const tpl of templateScenes) {
+                if (tpl.templateBgFile) {
+                    log.dim(`   🎨 [${tpl.type}] using dedicated bg: ${tpl.templateBgFile}`);
+                    continue;
+                }
                 const srcScene = scenesWithMedia.find(s =>
                     s.startTime <= tpl.startTime && s.endTime >= tpl.endTime
                 ) || scenesWithMedia.find(s =>
@@ -974,8 +1578,10 @@ async function buildVideo() {
 
             // Carve V1 scenes for template scenes (same logic as fullscreen MG carving)
             if (templateScenes.length > 0) {
+                const MIN_FRAGMENT_DUR = 1.5;
                 const tplRanges = templateScenes.map(tpl => ({ start: tpl.startTime, end: tpl.endTime }));
                 let carved = [];
+                let absorbedCount = 0;
                 for (const scene of scenesWithMedia) {
                     let parts = [{ startTime: scene.startTime, endTime: scene.endTime }];
                     for (const range of tplRanges) {
@@ -996,8 +1602,9 @@ async function buildVideo() {
                         }
                         parts = newParts;
                     }
-                    for (const part of parts) {
-                        if (part.endTime - part.startTime < 0.3) continue;
+                    const kept = parts.filter(p => (p.endTime - p.startTime) >= MIN_FRAGMENT_DUR);
+                    absorbedCount += parts.length - kept.length;
+                    for (const part of kept) {
                         const trimmedScene = { ...scene };
                         const offsetFromOriginal = part.startTime - scene.startTime;
                         trimmedScene.startTime = part.startTime;
@@ -1009,9 +1616,25 @@ async function buildVideo() {
                         carved.push(trimmedScene);
                     }
                 }
+                // Seamless coverage: bridge sub-threshold gaps left by absorbed fragments
+                carved.sort((a, b) => a.startTime - b.startTime);
+                const tplIntersects = (s, e) => tplRanges.some(r => s < r.end && e > r.start);
+                let bridged = 0;
+                for (let i = 0; i < carved.length - 1; i++) {
+                    const cur = carved[i];
+                    const nxt = carved[i + 1];
+                    const gap = nxt.startTime - cur.endTime;
+                    if (gap > 0.01 && gap < MIN_FRAGMENT_DUR && !tplIntersects(cur.endTime, nxt.startTime)) {
+                        cur.endTime = nxt.startTime;
+                        cur.duration = cur.endTime - cur.startTime;
+                        bridged++;
+                    }
+                }
                 const tplRemoved = scenesWithMedia.length - carved.length;
                 scenesWithMedia = carved;
                 if (tplRemoved > 0) log.info(`🔪 Carved ${tplRemoved} scene(s) to make room for templates`);
+                if (absorbedCount > 0) log.info(`🧹 Absorbed ${absorbedCount} sub-threshold template fragment(s) (<${MIN_FRAGMENT_DUR}s)`);
+                if (bridged > 0) log.info(`🔗 Bridged ${bridged} V1 gap(s) left by absorbed template fragments`);
             }
 
             // Remove overlay MGs that overlap with template time windows
@@ -1036,7 +1659,51 @@ async function buildVideo() {
     }
     log.br();
 
-    // Step 6.95: (removed — backgroundCanvas was dead code, never rendered)
+    // Step 6.95: Download real SFX from Freesound API
+    {
+        const transitionTypes = new Set();
+        for (const scene of scenesWithMedia) {
+            if (scene.transition?.type && scene.transition.type !== 'cut' && scene.transition.type !== 'none') {
+                transitionTypes.add(scene.transition.type);
+            }
+        }
+        // Collect MG types too — fullscreenMG on scenes + overlay MGs in allMGs
+        const mgTypes = new Set();
+        for (const scene of scenesWithMedia) {
+            if (scene.fullscreenMG) {
+                const colonIdx = scene.fullscreenMG.indexOf(':');
+                const t = colonIdx > 0 ? scene.fullscreenMG.substring(0, colonIdx).trim() : scene.fullscreenMG.trim();
+                if (t) mgTypes.add(t);
+            }
+        }
+        if (Array.isArray(allMGs)) {
+            for (const mg of allMGs) {
+                if (mg?.type) mgTypes.add(mg.type);
+            }
+        }
+        if (Array.isArray(templateScenes)) {
+            for (const tpl of templateScenes) {
+                if (tpl?.type) mgTypes.add(tpl.type);
+            }
+        }
+        if (transitionTypes.size > 0 || mgTypes.size > 0) {
+            log.step('🔊 Step 6.95: SFX Download');
+            try {
+                const { downloadSfxForTransitions } = require('./sfx-provider');
+                const sfxResult = await downloadSfxForTransitions([...transitionTypes], { mgTypes: [...mgTypes], log });
+                if (sfxResult.noKey) {
+                    log.warn('No FREESOUND_API_KEY — using bundled SFX');
+                } else if (sfxResult.downloaded > 0) {
+                    log.ok(`Downloaded ${sfxResult.downloaded} real SFX (${sfxResult.skipped} cached, ${sfxResult.failed} fallback)`);
+                } else {
+                    log.ok(`All ${sfxResult.skipped} SFX already cached`);
+                }
+            } catch (e) {
+                log.warn(`SFX download failed: ${e.message} — using bundled SFX`);
+            }
+            log.br();
+        }
+    }
 
     // Assign final scene indices (after carving, these match the file names scene-0, scene-1, etc.)
     scenesWithMedia.forEach((scene, i) => { scene.index = i; });
@@ -1065,6 +1732,141 @@ async function buildVideo() {
         }
     } catch (e) { /* themes.js not available — skip */ }
 
+    // Generate SFX clips for the video plan (used by export muxer)
+    const planSfxClips = [];
+    try {
+        const { TRANSITION_TO_SFX, MG_TO_SFX } = require('./sfx-provider');
+        const transitionSfxDurations = {
+            fade: 0.5,
+            fade_to_black: 0.4,
+            dissolve: 0.5,
+            crossfade: 0.5,
+            blur: 0.5,
+            crossBlur: 0.5,
+            morph: 0.5,
+            dreamFade: 0.5,
+            colorFade: 0.5,
+            luma: 0.5,
+            lumaFade: 0.5,
+            lumaDark: 0.5,
+            filmBurn: 0.6,
+            filmGrain: 0.6,
+            reveal: 0.6,
+            ink: 0.6,
+            shadowWipe: 0.3,
+            ripple: 0.7,
+            wipe: 0.3,
+            slide: 0.4,
+            push: 0.4,
+            swipe: 0.3,
+            splitWipe: 0.3,
+            zoom: 0.5,
+            zoomBlur: 0.5,
+            zoomOut: 0.5,
+            zoomRotate: 0.6,
+            panLeft: 0.4,
+            panRight: 0.4,
+            panUp: 0.4,
+            panDown: 0.4,
+            whip: 0.3,
+            whipPan: 0.3,
+            directionalBlur: 0.3,
+            spin: 0.6,
+            bounce: 0.4,
+            lightLeak: 0.6,
+            warmLeak: 0.6,
+            coolLeak: 0.6,
+            flare: 0.6,
+            flash: 0.3,
+            cameraFlash: 0.3,
+            vignetteBlink: 0.3,
+            glitch: 0.4,
+            pixelate: 0.4,
+            mosaic: 0.4,
+            dataMosh: 0.4,
+            scanline: 0.5,
+            rgbSplit: 0.4,
+            static: 0.5,
+            prismShift: 0.5,
+            diagonalStripes: 0.3,
+            rectangles: 0.3,
+            diamonds: 0.4,
+            blinds: 0.4,
+            circles: 0.5,
+            shutterSlice: 0.3,
+        };
+        const mgSfxDurations = {
+            headline: 0.25,
+            lowerThird: 0.35,
+            callout: 0.35,
+            focusWord: 0.25,
+            statCounter: 0.15,
+            progressBar: 0.15,
+            bulletList: 0.25,
+            barChart: 0.4,
+            donutChart: 0.4,
+            comparisonCard: 0.4,
+            timeline: 0.5,
+            rankingList: 0.5,
+            kineticText: 0.2,
+            typewriter: 0.3,
+            subscribeCTA: 0.5,
+            mapChart: 0.4,
+            explainer: 0.35,
+            listicleCounter: 0.15,
+            progressTracker: 0.15,
+            splitScreen: 0.35,
+            infographic: 0.4,
+            factCard: 0.25,
+            statCard: 0.4,
+            personIntro: 0.35,
+            imageShowcase: 0.25,
+            listicleGrid: 0.25,
+            chapterCard: 0.35,
+            locationCard: 0.35,
+            quoteCard: 0.5,
+            keyTakeaway: 0.4,
+            timelineCard: 0.5,
+        };
+
+        // Transition SFX — at each scene boundary
+        const sortedScenes = [...allScenes].filter(s => !s.isMGScene).sort((a, b) => a.startTime - b.startTime);
+        for (let i = 1; i < sortedScenes.length; i++) {
+            const prev = sortedScenes[i - 1];
+            const curr = sortedScenes[i];
+            if (Math.abs(curr.startTime - prev.endTime) > 0.1) continue;
+            const transType = curr.transition?.type || 'crossfade';
+            if (transType === 'cut' || transType === 'none') continue;
+            const sfxFile = TRANSITION_TO_SFX[transType] || 'sfx-fade.mp3';
+            const sfxDuration = transitionSfxDurations[transType] || Math.max(0.3, (curr.transition?.duration || 0.5) + 0.1);
+            planSfxClips.push({
+                file: sfxFile,
+                startTime: Math.max(0, curr.startTime - 0.15),
+                duration: sfxDuration,
+                volume: 0.35,
+                transitionType: transType,
+            });
+        }
+
+        // MG SFX — on MG enter
+        const allMGsForSfx = [...(motionGraphics || []), ...(mgScenes || []), ...(templateScenes || [])];
+        for (const mg of allMGsForSfx) {
+            if (mg.disabled) continue;
+            const sfxFile = MG_TO_SFX[mg.type];
+            if (!sfxFile) continue;
+            planSfxClips.push({
+                file: sfxFile,
+                startTime: mg.startTime || 0,
+                duration: mgSfxDurations[mg.type] || 0.5,
+                volume: 0.25,
+                transitionType: mg.type,
+            });
+        }
+        if (planSfxClips.length > 0) {
+            log.ok(`Generated ${planSfxClips.length} SFX clips for plan (${planSfxClips.filter(s => s.volume > 0.3).length} transition + ${planSfxClips.filter(s => s.volume <= 0.3).length} MG)`);
+        }
+    } catch (e) { log.warn(`SFX clip generation failed: ${e.message}`); }
+
     const videoPlan = {
         audio: audioFile,
         totalDuration: actualAudioDuration,
@@ -1075,6 +1877,8 @@ async function buildVideo() {
         mgScenes: mgScenes,
         templateScenes: templateScenes,
         motionGraphics: motionGraphics,
+        sfxClips: planSfxClips,
+        sfxEnabled: true,
         mgStyle: mgStyle,
         mapStyle: mapStyle,
         scriptContext: scriptContext,
@@ -1294,6 +2098,14 @@ async function buildVideo() {
     log.br();
     log.info(`🚀 Open the app and use the WebGL2 renderer to render your video.`);
     log.br();
+
+    // ── Clean up checkpoint on successful build ──
+    try {
+        if (fs.existsSync(CHECKPOINT_FILE)) {
+            fs.unlinkSync(CHECKPOINT_FILE);
+            log.dim('   🗑️ Build checkpoint cleared (build succeeded)');
+        }
+    } catch (_) {}
 }
 
 // Run

@@ -46,9 +46,9 @@ const THEMES = {
         },
 
         transitions: {
-            primary: ['flash', 'wipe', 'luma', 'directionalBlur', 'shadowWipe', 'vignetteBlink'],
-            secondary: ['fade', 'dissolve', 'colorFade', 'cameraFlash'],
-            avoid: ['ripple', 'spin', 'mosaic', 'dreamFade', 'bounce']
+            primary: ['flash', 'wipe', 'luma', 'directionalBlur', 'shadowWipe', 'vignetteBlink', 'lumaDark', 'panLeft'],
+            secondary: ['fade', 'dissolve', 'colorFade', 'cameraFlash', 'warmLeak', 'diamonds'],
+            avoid: ['ripple', 'spin', 'mosaic', 'dreamFade', 'bounce', 'diagonalStripes', 'rectangles', 'coolLeak']
         },
 
         overlays: {
@@ -91,9 +91,9 @@ const THEMES = {
         },
 
         transitions: {
-            primary: ['dissolve', 'crossBlur', 'colorFade', 'luma', 'flare', 'lightLeak'],
-            secondary: ['fade', 'reveal', 'blur', 'dreamFade', 'filmGrain'],
-            avoid: ['glitch', 'pixelate', 'swipe', 'dataMosh', 'static', 'bounce']
+            primary: ['dissolve', 'crossBlur', 'colorFade', 'luma', 'flare', 'lightLeak', 'warmLeak', 'lumaFade'],
+            secondary: ['fade', 'reveal', 'blur', 'dreamFade', 'filmGrain', 'circles', 'diamonds'],
+            avoid: ['glitch', 'pixelate', 'swipe', 'dataMosh', 'static', 'bounce', 'diagonalStripes', 'rectangles', 'whipPan']
         },
 
         overlays: {
@@ -136,9 +136,9 @@ const THEMES = {
         },
 
         transitions: {
-            primary: ['swipe', 'push', 'directionalBlur', 'zoom', 'whip', 'zoomBlur', 'glitch'],
-            secondary: ['wipe', 'flash', 'slide', 'splitWipe', 'shutterSlice'],
-            avoid: ['dissolve', 'ripple', 'dreamFade', 'ink', 'morph']
+            primary: ['swipe', 'push', 'directionalBlur', 'zoom', 'whip', 'zoomBlur', 'glitch', 'whipPan', 'diagonalStripes', 'panLeft', 'panRight'],
+            secondary: ['wipe', 'flash', 'slide', 'splitWipe', 'shutterSlice', 'rectangles', 'blinds', 'coolLeak', 'zoomRotate', 'rgbSplit'],
+            avoid: ['dissolve', 'ripple', 'dreamFade', 'ink', 'morph', 'circles']
         },
 
         overlays: {
@@ -181,9 +181,9 @@ const THEMES = {
         },
 
         transitions: {
-            primary: ['dissolve', 'crossBlur', 'fade', 'ripple', 'dreamFade', 'morph'],
-            secondary: ['luma', 'blur', 'crossfade', 'lightLeak', 'ink'],
-            avoid: ['glitch', 'flash', 'pixelate', 'dataMosh', 'static', 'rgbSplit']
+            primary: ['dissolve', 'crossBlur', 'fade', 'ripple', 'dreamFade', 'morph', 'lumaFade', 'circles'],
+            secondary: ['luma', 'blur', 'crossfade', 'lightLeak', 'ink', 'warmLeak', 'diamonds'],
+            avoid: ['glitch', 'flash', 'pixelate', 'dataMosh', 'static', 'rgbSplit', 'whipPan', 'diagonalStripes', 'rectangles', 'blinds']
         },
 
         overlays: {
@@ -226,9 +226,9 @@ const THEMES = {
         },
 
         transitions: {
-            primary: ['push', 'slide', 'fade', 'crossBlur', 'splitWipe', 'wipe'],
-            secondary: ['dissolve', 'luma', 'blur', 'morph', 'zoom'],
-            avoid: ['glitch', 'pixelate', 'dataMosh', 'static', 'rgbSplit', 'spin']
+            primary: ['push', 'slide', 'fade', 'crossBlur', 'splitWipe', 'wipe', 'panLeft', 'panRight', 'blinds'],
+            secondary: ['dissolve', 'luma', 'blur', 'morph', 'zoom', 'diamonds', 'warmLeak', 'lumaFade'],
+            avoid: ['glitch', 'pixelate', 'dataMosh', 'static', 'rgbSplit', 'spin', 'whipPan', 'zoomRotate']
         },
 
         overlays: {
@@ -514,6 +514,14 @@ const TRANSITION_LIBRARY = {
         duration: 500,
         intensity: 'low',
         sfx: null // Silent transition
+    },
+    fade_to_black: {
+        id: 'fade_to_black',
+        name: 'Fade To Black',
+        category: 'smooth',
+        duration: 400,
+        intensity: 'medium',
+        sfx: null
     },
     dissolve: {
         id: 'dissolve',
@@ -842,6 +850,142 @@ const TRANSITION_LIBRARY = {
         duration: 400,
         intensity: 'high',
         sfx: 'tv-static.mp3'
+    },
+
+    // CAMERA MOTION (Mister Horse-style pans & whips)
+    panLeft: {
+        id: 'panLeft',
+        name: 'Pan Left',
+        category: 'energetic',
+        duration: 400,
+        intensity: 'medium',
+        sfx: 'whoosh-soft.mp3'
+    },
+    panRight: {
+        id: 'panRight',
+        name: 'Pan Right',
+        category: 'energetic',
+        duration: 400,
+        intensity: 'medium',
+        sfx: 'whoosh-soft.mp3'
+    },
+    panUp: {
+        id: 'panUp',
+        name: 'Pan Up',
+        category: 'energetic',
+        duration: 400,
+        intensity: 'medium',
+        sfx: 'whoosh-soft.mp3'
+    },
+    panDown: {
+        id: 'panDown',
+        name: 'Pan Down',
+        category: 'energetic',
+        duration: 400,
+        intensity: 'medium',
+        sfx: 'whoosh-soft.mp3'
+    },
+    whipPan: {
+        id: 'whipPan',
+        name: 'Whip Pan',
+        category: 'energetic',
+        duration: 300,
+        intensity: 'high',
+        sfx: 'whip-pan.mp3'
+    },
+    zoomOut: {
+        id: 'zoomOut',
+        name: 'Zoom Out',
+        category: 'energetic',
+        duration: 450,
+        intensity: 'high',
+        sfx: 'zoom-in.mp3'
+    },
+    zoomRotate: {
+        id: 'zoomRotate',
+        name: 'Zoom Rotate',
+        category: 'dramatic',
+        duration: 500,
+        intensity: 'high',
+        sfx: 'spin.mp3'
+    },
+
+    // LIGHT LEAKS (Mister Horse-style warm/cool washes)
+    warmLeak: {
+        id: 'warmLeak',
+        name: 'Warm Light Leak',
+        category: 'cinematic',
+        duration: 600,
+        intensity: 'medium',
+        sfx: null
+    },
+    coolLeak: {
+        id: 'coolLeak',
+        name: 'Cool Light Leak',
+        category: 'cinematic',
+        duration: 600,
+        intensity: 'medium',
+        sfx: null
+    },
+
+    // SHAPES (Mister Horse-style geometric wipes)
+    diagonalStripes: {
+        id: 'diagonalStripes',
+        name: 'Diagonal Stripes',
+        category: 'energetic',
+        duration: 400,
+        intensity: 'high',
+        sfx: 'swipe.mp3'
+    },
+    rectangles: {
+        id: 'rectangles',
+        name: 'Rectangles',
+        category: 'energetic',
+        duration: 450,
+        intensity: 'high',
+        sfx: 'shutter.mp3'
+    },
+    diamonds: {
+        id: 'diamonds',
+        name: 'Diamond Wipe',
+        category: 'energetic',
+        duration: 450,
+        intensity: 'medium',
+        sfx: 'swipe.mp3'
+    },
+    blinds: {
+        id: 'blinds',
+        name: 'Blinds',
+        category: 'energetic',
+        duration: 400,
+        intensity: 'medium',
+        sfx: 'shutter.mp3'
+    },
+    circles: {
+        id: 'circles',
+        name: 'Circle Wipe',
+        category: 'smooth',
+        duration: 500,
+        intensity: 'medium',
+        sfx: null
+    },
+
+    // LUMA VARIANTS
+    lumaFade: {
+        id: 'lumaFade',
+        name: 'Luma Fade',
+        category: 'smooth',
+        duration: 600,
+        intensity: 'medium',
+        sfx: null
+    },
+    lumaDark: {
+        id: 'lumaDark',
+        name: 'Luma Dark',
+        category: 'dramatic',
+        duration: 600,
+        intensity: 'medium',
+        sfx: null
     }
 };
 
@@ -1119,7 +1263,7 @@ const TEMPLATE_THEME_OVERRIDES = {
         comparisonCard: { variant: 'split',     animation: 'flipIn' },
         timelineCard:   { variant: 'cinematic', animation: 'cascade' },
         factCard:       { variant: 'splitPanel', animation: 'slideRight' },
-        imageShowcase:  { variant: 'cinematic', animation: 'slideOpposite' },
+        imageShowcase:  { variant: 'collage', animation: 'scatterDrop' },
         statCard:       { variant: 'sideBySide', animation: 'countUp' },
         personIntro:    { variant: 'standard',  animation: 'slideRight' },
     },
@@ -1131,7 +1275,7 @@ const TEMPLATE_THEME_OVERRIDES = {
         comparisonCard:  { variant: 'standard',  animation: 'staggerSlide' },
         timelineCard:    { variant: 'standard',  animation: 'cascade' },
         factCard:        { variant: 'numbered',   animation: 'staggerSlide' },
-        imageShowcase:   { variant: 'standard',  animation: 'slideOpposite' },
+        imageShowcase:   { variant: 'collage',  animation: 'scatterDrop' },
         statCard:        { variant: 'stacked',    animation: 'countUp' },
         personIntro:     { variant: 'cinematic',  animation: 'fadeSlide' },
     },

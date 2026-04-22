@@ -196,10 +196,13 @@ const MG_REGISTRY = {
         label: 'Kinetic Text',
         group: 'fullscreen',
         types: {
-            standard:  { label: 'Standard',       animation: 'springScale' },
+            centered: { label: 'Centered',  animation: 'springStagger' },
+            rise:     { label: 'Rise Up',   animation: 'slideUp' },
+            cascade:  { label: 'Cascade',   animation: 'springStagger' },
+            punch:    { label: 'Punch',     animation: 'springStagger' },
         },
-        animations: ['springScale'],
-        defaultType: 'standard',
+        animations: ['springStagger', 'slideUp', 'fadeIn'],
+        defaultType: 'centered',
         fields: ['text'],
     },
 

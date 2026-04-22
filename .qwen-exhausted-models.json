@@ -1,7 +1,62 @@
 {
-  "_apiKeyHash": "9b6a79d99927",
-  "qwen-vl-max-latest": true,
-  "qwen3-vl-235b-a22b-instruct": true,
-  "qvq-max-latest": true,
-  "qwen-omni-turbo": true
+  "keys": {
+    "9b6a79d99927": {
+      "qwen3.5-omni-plus-2026-03-15": 1776110013427
+    },
+    "e724a2e0a4c3": {
+      "qvq-max": 1776882101322,
+      "qwen3-vl-plus": true,
+      "qwen3-vl-plus-2025-12-19": true,
+      "qwen3-vl-plus-2025-09-23": 1776862060004,
+      "qwen-vl-plus-2025-08-15": 1776862060876,
+      "qwen-vl-plus-2025-01-25": 1776862061418,
+      "qwen3-vl-30b-a3b-instruct": 1776862062677,
+      "qwen2.5-vl-32b-instruct": 1776862063660,
+      "qwen3-vl-flash": 1776862065010,
+      "qwen3-vl-flash-2026-01-22": 1776862066953,
+      "qwen3-vl-flash-2025-10-15": 1776862068168,
+      "qwen3-vl-8b-instruct": 1776862069238,
+      "qwen3-vl-8b-thinking": 1776862072279,
+      "qwen3-vl-235b-a22b-thinking": 1776862082888,
+      "qwen2.5-vl-72b-instruct": 1776862083681,
+      "qwen-vl-plus-latest": 1776862084845,
+      "qwen-vl-plus-2025-05-07": 1776862085812,
+      "qwen3-vl-30b-a3b-thinking": 1776862088418,
+      "qwen-vl-ocr-2025-11-20": 1776862095870,
+      "qwen2.5-vl-7b-instruct": 1776862096800,
+      "qwen2.5-vl-3b-instruct": 1776862097395,
+      "qwen3-vl-235b-a22b-instruct": true,
+      "qvq-max-latest": true,
+      "qvq-max-2025-03-25": true
+    },
+    "7210dba846f7": {
+      "qwen-vl-max-latest": true,
+      "qwen3-vl-235b-a22b-instruct": true,
+      "qvq-max-latest": true,
+      "qvq-max": 1776882083171,
+      "qvq-max-2025-03-25": true,
+      "qwen-omni-turbo": true,
+      "qwen3-vl-plus": true,
+      "qwen3-vl-plus-2025-12-19": true,
+      "qwen3-vl-plus-2025-09-23": true,
+      "qwen-vl-plus-2025-08-15": true,
+      "qwen-vl-plus-2025-01-25": true,
+      "qwen3-vl-30b-a3b-instruct": true,
+      "qwen2.5-vl-32b-instruct": true,
+      "qwen3-vl-flash": true,
+      "qwen3-vl-flash-2026-01-22": 1776882099399,
+      "qwen3-vl-flash-2025-10-15": true,
+      "qwen3-vl-8b-instruct": true,
+      "qwen3-vl-8b-thinking": true,
+      "qwen3-vl-235b-a22b-thinking": true,
+      "qwen2.5-vl-72b-instruct": true,
+      "qwen-vl-plus-latest": true,
+      "qwen-vl-plus-2025-05-07": true,
+      "qwen3-vl-30b-a3b-thinking": true,
+      "qwen-vl-ocr-2025-11-20": true,
+      "qwen2.5-vl-7b-instruct": true,
+      "qwen2.5-vl-3b-instruct": true,
+      "qwen3.5-omni-plus": true
+    }
+  }
 }

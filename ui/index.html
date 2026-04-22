@@ -99,6 +99,11 @@
                         <span class="toggle-label">Smart AI (uses API credits)</span>
                     </label>
                     <small class="ai-instructions-hint" id="smart-ai-hint">When OFF: no AI calls, uses Whisper segments + random keywords/transitions/MGs. Free!</small>
+                    <label class="toggle-row" style="margin-top:8px">
+                        <input type="checkbox" id="build-resume-toggle">
+                        <span class="toggle-label">Resume from previous build</span>
+                    </label>
+                    <small class="ai-instructions-hint">When ON: skips completed steps and keeps cached scene media. When OFF: fresh build from scratch every time.</small>
                     <label>AI Provider:</label>
                     <select id="ai-provider">
                         <option value="ollama">Ollama (Free, Local)</option>
@@ -126,6 +131,15 @@
                     <label style="margin-top:8px">Video Title:</label>
                     <input type="text" id="video-title" placeholder="e.g., How Monolithic Domes Are Built" style="width:100%;padding:6px 8px;border:1px solid #555;border-radius:4px;background:#2a2a2a;color:#eee;font-size:13px">
                     <small class="ai-instructions-hint">Guides AI niche detection, keyword generation &amp; visual planning</small>
+
+                    <label style="margin-top:8px">AI Thinking:</label>
+                    <select id="ai-thinking">
+                        <option value="off" selected>Off (default, fastest)</option>
+                        <option value="low">Low</option>
+                        <option value="medium">Medium</option>
+                        <option value="high">High (best quality, slowest)</option>
+                    </select>
+                    <small class="ai-instructions-hint">Deeper reasoning for AI Director &amp; Visual Planner. Works with Gemini, Qwen, DeepSeek.</small>
 
                     <label style="margin-top:8px">AI Instructions:</label>
                     <textarea id="ai-instructions" rows="3" placeholder="e.g., Use charts for statistics, cinematic style, prefer kinetic text for quotes..."></textarea>
@@ -204,25 +218,46 @@
                         <select id="build-style-profile" style="flex:1">
                             <option value="none" selected>None (AI decides)</option>
                         </select>
-                        <button id="btn-learn-style" class="btn-small" style="padding:4px 10px;font-size:11px;background:#3a2a4a;color:#ddd;border:1px solid #5a4a6a;border-radius:4px;cursor:pointer;" title="Learn editing style from a reference YouTube video or local file">+ Learn</button>
+                        <button id="btn-learn-style" class="btn-small" style="padding:4px 10px;font-size:11px;background:#3a2a1a;color:#fbbf24;border:1px solid #f59e0b;border-radius:4px;cursor:pointer;font-weight:600;" title="Open Learner — chat-based reference-video analyst with persistent Gemini sessions">✦ Learner</button>
                     </div>
-                    <small style="display:block; margin-top:4px; color:#888">Feed a reference video → AI extracts pacing, footage style, MGs, transitions, effects → guides the entire build.</small>
+                    <small style="display:block; margin-top:4px; color:#888">Feed reference video(s) → AI extracts pacing, footage, MGs, transitions, effects, color palette, audio style → guides the entire build.</small>
+                    <div style="display:flex;gap:6px;margin-top:4px;">
+                        <button id="btn-compare-style" class="btn-small" style="padding:4px 10px;font-size:11px;background:#1a2a3a;color:#8ac;border:1px solid #2a4a5a;border-radius:4px;cursor:pointer;" title="Compare selected style profile against the current build">Compare</button>
+                    </div>
 
                     <!-- Learn Style dialog (hidden by default) -->
                     <div id="learn-style-dialog" style="display:none;margin-top:8px;padding:10px;background:#1f1a2a;border:1px solid #4a3a5a;border-radius:6px;">
-                        <div style="font-size:12px;color:#ccc;margin-bottom:6px;">📺 Learn Style from Reference Video</div>
-                        <input type="text" id="learn-style-url" placeholder="YouTube URL (or click 'Browse' for local file)" style="width:100%;padding:6px;background:#0f0a1a;color:#ddd;border:1px solid #3a2a4a;border-radius:4px;font-size:11px;box-sizing:border-box;">
+                        <div style="font-size:12px;color:#ccc;margin-bottom:6px;">Learn Style from Reference Video(s)</div>
+                        <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;">
+                            <label style="font-size:10px;color:#aaa;white-space:nowrap;">Mode:</label>
+                            <select id="learn-style-mode" style="padding:3px 6px;font-size:10px;background:#0f0a1a;color:#ddd;border:1px solid #3a2a4a;border-radius:4px;">
+                                <option value="single" selected>Single Video</option>
+                                <option value="multi">Multi-Video (Channel Style)</option>
+                            </select>
+                        </div>
+                        <input type="text" id="learn-style-url" placeholder="YouTube URL or local file path" style="width:100%;padding:6px;background:#0f0a1a;color:#ddd;border:1px solid #3a2a4a;border-radius:4px;font-size:11px;box-sizing:border-box;">
+                        <textarea id="learn-style-urls" placeholder="One YouTube URL per line (3-5 videos from the same channel for best results)" rows="4" style="display:none;width:100%;padding:6px;background:#0f0a1a;color:#ddd;border:1px solid #3a2a4a;border-radius:4px;font-size:11px;box-sizing:border-box;margin-top:4px;resize:vertical;font-family:inherit;"></textarea>
+                        <input type="text" id="learn-style-name" placeholder="Profile name (optional — auto-detects from video)" style="display:none;width:100%;padding:6px;background:#0f0a1a;color:#ddd;border:1px solid #3a2a4a;border-radius:4px;font-size:11px;box-sizing:border-box;margin-top:4px;">
                         <div style="display:flex;gap:6px;margin-top:6px;">
-                            <button id="learn-style-browse" style="padding:4px 10px;font-size:11px;background:#2a2a3a;color:#ccc;border:1px solid #444;border-radius:4px;cursor:pointer;">📁 Browse</button>
-                            <button id="learn-style-start" style="flex:1;padding:4px 10px;font-size:11px;background:#5a4a6a;color:#fff;border:1px solid #6a5a7a;border-radius:4px;cursor:pointer;">▶ Analyze</button>
-                            <button id="learn-style-cancel" style="padding:4px 10px;font-size:11px;background:#2a1a1a;color:#ccc;border:1px solid #4a2a2a;border-radius:4px;cursor:pointer;">✕</button>
+                            <button id="learn-style-browse" style="padding:4px 10px;font-size:11px;background:#2a2a3a;color:#ccc;border:1px solid #444;border-radius:4px;cursor:pointer;">Browse</button>
+                            <button id="learn-style-start" style="flex:1;padding:4px 10px;font-size:11px;background:#5a4a6a;color:#fff;border:1px solid #6a5a7a;border-radius:4px;cursor:pointer;">Analyze</button>
+                            <button id="learn-style-cancel" style="padding:4px 10px;font-size:11px;background:#2a1a1a;color:#ccc;border:1px solid #4a2a2a;border-radius:4px;cursor:pointer;">Cancel</button>
                         </div>
                         <div id="learn-style-progress" style="display:none;margin-top:8px;">
                             <div style="height:6px;background:#0f0a1a;border-radius:3px;overflow:hidden;">
                                 <div id="learn-style-bar" style="height:100%;width:0%;background:linear-gradient(90deg,#5a4a6a,#7a5a8a);transition:width 0.3s;"></div>
                             </div>
-                            <div id="learn-style-msg" style="font-size:10px;color:#aaa;margin-top:4px;">Initializing…</div>
+                            <div id="learn-style-msg" style="font-size:10px;color:#aaa;margin-top:4px;">Initializing...</div>
                         </div>
+                    </div>
+
+                    <!-- Style Comparison Report (hidden by default) -->
+                    <div id="style-comparison-report" style="display:none;margin-top:8px;padding:10px;background:#0f1a2a;border:1px solid #1a3a5a;border-radius:6px;">
+                        <div style="display:flex;justify-content:space-between;align-items:center;">
+                            <div style="font-size:12px;color:#8ac;">Style Comparison Report</div>
+                            <button id="style-comparison-close" style="padding:2px 8px;font-size:10px;background:transparent;color:#888;border:1px solid #333;border-radius:3px;cursor:pointer;">Close</button>
+                        </div>
+                        <pre id="style-comparison-text" style="margin-top:6px;font-size:10px;color:#bbb;white-space:pre-wrap;max-height:300px;overflow-y:auto;line-height:1.5;"></pre>
                     </div>
 
                     <!-- Map Test Panel (dev tool) -->
@@ -326,16 +361,20 @@
                                     <input type="checkbox" id="map-cinematic" style="accent-color:#00d4ff;cursor:pointer;">
                                     <span style="font-size:9px;color:#555;">Overview → Fast zoom → 3D orbit</span>
                                 </div>
+
+                                <!-- AI Planner mode: emulate a real build (VP-style instructions → AI Map Planner → rendered map) -->
+                                <div style="margin-top:10px;padding-top:8px;border-top:1px dashed #1a3a4a;">
+                                    <div style="display:flex;align-items:center;gap:6px;">
+                                        <label style="font-size:10px;color:#888;min-width:72px;cursor:pointer;" for="map-use-planner">AI Planner</label>
+                                        <input type="checkbox" id="map-use-planner" style="accent-color:#00d4ff;cursor:pointer;">
+                                        <span style="font-size:9px;color:#555;">Route locations + narration through ai-map-planner.js</span>
+                                    </div>
+                                    <textarea id="map-test-narration" placeholder="Scene narration (what the narrator says over this map) — feeds the AI planner the same way a real build does. Example: 'Europe is particularly vulnerable, because this route carries nearly 40% of its LNG imports through the Strait of Hormuz.'" style="width:100%;margin-top:6px;padding:6px;background:#0a0f1a;color:#ddd;border:1px solid #1a3a4a;border-radius:4px;font-size:11px;box-sizing:border-box;resize:vertical;min-height:54px;font-family:inherit;"></textarea>
+                                    <div style="font-size:9px;color:#555;margin-top:4px;">When enabled, the "Locations" field above supplies the entity list; the planner picks waypoints, zooms, and timings.</div>
+                                </div>
                             </div>
                         </div>
                     </div>
-
-                    <label style="margin-top:12px">Cinematic Scale:</label>
-                    <div style="display:flex;align-items:center;gap:8px">
-                        <input type="range" id="cinematic-scale" min="0.4" max="1" step="0.05" value="0.65" style="flex:1">
-                        <span id="cinematic-scale-val" style="color:#aaa;font-size:12px;min-width:30px">0.65</span>
-                    </div>
-                    <small style="display:block; margin-top:4px; color:#888">Scale for cinematic-framed scenes (0.4=small with big gradient, 1=fullscreen)</small>
 
                     <label style="margin-top:12px">MG Animation Speed:</label>
                     <div style="display:flex;align-items:center;gap:8px">
@@ -343,6 +382,13 @@
                         <span id="mg-global-anim-speed-val" style="color:#aaa;font-size:12px;min-width:30px">0.7x</span>
                     </div>
                     <small style="display:block; margin-top:4px; color:#888">Default speed for all MG overlays (0.3=slow, 1=normal, 2=fast)</small>
+
+                    <label style="margin-top:12px">MG Shadow:</label>
+                    <div style="display:flex;align-items:center;gap:8px">
+                        <input type="range" id="mg-global-shadow" min="0" max="1" step="0.05" value="0.55" style="flex:1">
+                        <span id="mg-global-shadow-val" style="color:#aaa;font-size:12px;min-width:36px">55%</span>
+                    </div>
+                    <small style="display:block; margin-top:4px; color:#888">Soft shadow strength for all overlay MGs (0=off, 1=strong)</small>
                 </div>
 
                 <div class="panel-section">
@@ -440,6 +486,10 @@
                         <input type="range" id="sfx-volume" min="0" max="1" step="0.05" value="0.35" style="flex:1">
                         <span id="sfx-volume-label" style="min-width:36px;text-align:right">35%</span>
                     </div>
+                    <button id="btn-download-sfx" class="btn-secondary" style="margin-top:8px;width:100%;font-size:12px;padding:6px 10px" title="Download high-quality SFX from Freesound (requires FREESOUND_API_KEY)">
+                        🎵 Download Real SFX
+                    </button>
+                    <small id="sfx-download-status" style="display:block;margin-top:4px;color:#888"></small>
                 </div>
 
                 <div class="panel-section">
@@ -776,7 +826,6 @@
                                         <option value="timeline">Timeline</option>
                                         <option value="comparisonCard">Comparison</option>
                                         <option value="bulletList">Bullet List</option>
-                                        <option value="mapChart">Map</option>
                                         <option value="kineticText">Kinetic Text</option>
                                         <option value="explainer">Explainer</option>
                                     </optgroup>
@@ -904,6 +953,94 @@
                                 <label>Anim Speed</label>
                                 <input type="range" id="mg-anim-speed" class="property-slider" min="0.3" max="2" step="0.1" value="1">
                                 <span id="mg-anim-speed-val" class="property-value">1.0x</span>
+                            </div>
+                        </div>
+
+                        <!-- Map Properties Panel -->
+                        <div id="map-properties" class="clip-properties hidden">
+                            <div class="property-row">
+                                <label>Map Style</label>
+                                <select id="map-prop-style" class="property-select">
+                                    <option value="dark">Dark</option>
+                                    <option value="natural">Natural Earth</option>
+                                    <option value="satellite">Satellite</option>
+                                    <option value="light">Light</option>
+                                    <option value="political">Political</option>
+                                </select>
+                            </div>
+                            <div class="property-row">
+                                <label>Variant</label>
+                                <select id="map-prop-variant" class="property-select">
+                                    <option value="auto">Auto-detect</option>
+                                    <option value="locator">Locator</option>
+                                    <option value="route">Route</option>
+                                    <option value="regionHighlight">Region Highlight</option>
+                                    <option value="comparison">Comparison</option>
+                                </select>
+                            </div>
+                            <div class="property-row">
+                                <label>Waypoints</label>
+                                <input type="text" id="map-prop-waypoints" class="property-input" placeholder="Iran 0-6 z1, Oman 6-14 z2.5 t0.2 o15" style="font-size:10px;">
+                            </div>
+                            <div class="property-row">
+                                <label>Title</label>
+                                <input type="text" id="map-prop-title" class="property-input" placeholder="Map title">
+                            </div>
+                            <div class="property-row">
+                                <label>Locations</label>
+                                <input type="text" id="map-prop-subtext" class="property-input" placeholder="Iran: label, Oman: label">
+                            </div>
+                            <div class="property-row">
+                                <label>Zoom Speed</label>
+                                <input type="range" id="map-prop-zoom-speed" class="property-slider" min="0.3" max="3" step="0.1" value="1">
+                                <span id="map-prop-zoom-speed-val" class="property-value">1.0x</span>
+                            </div>
+                            <div class="property-row">
+                                <label>Poly Speed</label>
+                                <input type="range" id="map-prop-poly-speed" class="property-slider" min="0.3" max="3" step="0.1" value="1">
+                                <span id="map-prop-poly-speed-val" class="property-value">1.0x</span>
+                            </div>
+                            <div class="property-row">
+                                <label>Easing</label>
+                                <select id="map-prop-easing" class="property-select">
+                                    <option value="cubic">Cubic (smooth)</option>
+                                    <option value="elastic">Elastic (bounce)</option>
+                                    <option value="expo">Expo (snappy)</option>
+                                    <option value="linear">Linear</option>
+                                </select>
+                            </div>
+                            <div class="property-row">
+                                <label>Poly Color</label>
+                                <select id="map-prop-poly-color" class="property-select">
+                                    <option value="auto">Auto (match style)</option>
+                                    <option value="cyan">Cyan</option>
+                                    <option value="red">Red</option>
+                                    <option value="green">Green</option>
+                                    <option value="gold">Gold</option>
+                                    <option value="magenta">Magenta</option>
+                                    <option value="orange">Orange</option>
+                                    <option value="white">White</option>
+                                    <option value="blue">Blue</option>
+                                </select>
+                            </div>
+                            <div style="padding:4px 0 2px;font-size:10px;color:#888;text-transform:uppercase;letter-spacing:0.5px;border-top:1px solid #333;margin-top:4px">Keyframes (Start → End)</div>
+                            <div class="property-row">
+                                <label>3D Tilt</label>
+                                <input type="range" id="map-prop-tilt-start" class="property-slider" min="0" max="1" step="0.05" value="0" style="flex:1">
+                                <span style="color:#555;font-size:10px">→</span>
+                                <input type="range" id="map-prop-tilt-end" class="property-slider" min="0" max="1" step="0.05" value="0.5" style="flex:1">
+                                <span id="map-prop-tilt-val" class="property-value" style="min-width:48px">0→50%</span>
+                            </div>
+                            <div class="property-row">
+                                <label>Zoom</label>
+                                <input type="range" id="map-prop-zoom-start" class="property-slider" min="0.5" max="1.5" step="0.05" value="0.8" style="flex:1">
+                                <span style="color:#555;font-size:10px">→</span>
+                                <input type="range" id="map-prop-zoom-end" class="property-slider" min="0.5" max="1.5" step="0.05" value="1.0" style="flex:1">
+                                <span id="map-prop-zoom-val" class="property-value" style="min-width:48px">.8→1.0</span>
+                            </div>
+                            <div class="property-row">
+                                <label style="display:flex;align-items:center;gap:4px;">Cinematic <input type="checkbox" id="map-prop-cinematic" style="accent-color:#00d4ff"></label>
+                                <span style="font-size:9px;color:#555;flex:1">Overview → Zoom → 3D orbit</span>
                             </div>
                         </div>
 

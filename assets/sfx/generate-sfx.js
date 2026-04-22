@@ -127,6 +127,37 @@ const sfx = [
         // High-frequency shimmering tones
         cmd: `-f lavfi -i "sine=f=2400:d=0.5" -f lavfi -i "sine=f=3200:d=0.5" -filter_complex "[0][1]amix=inputs=2:duration=first,tremolo=f=6:d=0.3,afade=t=in:ss=0:d=0.1,afade=t=out:st=0.25:d=0.25,volume=0.08" -ar 44100 -b:a 128k`
     },
+    // ===== NEW: Camera, Light Leak, Shape SFX =====
+    {
+        name: 'sfx-pan.mp3',
+        desc: 'Camera pan swoosh (panLeft/Right/Up/Down)',
+        // Smooth directional whoosh, softer than whip
+        cmd: `-f lavfi -i "anoisesrc=d=0.4:c=pink:a=0.1" -af "bandpass=f=1800:w=1200,afade=t=in:ss=0:d=0.04,afade=t=out:st=0.15:d=0.25,volume=0.3" -ar 44100 -b:a 128k`
+    },
+    {
+        name: 'sfx-warm-leak.mp3',
+        desc: 'Warm light shimmer (warmLeak)',
+        // Soft warm tones with gentle shimmer
+        cmd: `-f lavfi -i "sine=f=600:d=0.6" -f lavfi -i "sine=f=900:d=0.6" -f lavfi -i "anoisesrc=d=0.6:c=pink:a=0.03" -filter_complex "[0][1][2]amix=inputs=3:duration=first,afade=t=in:ss=0:d=0.15,afade=t=out:st=0.3:d=0.3,volume=0.08" -ar 44100 -b:a 128k`
+    },
+    {
+        name: 'sfx-cool-leak.mp3',
+        desc: 'Cool breeze shimmer (coolLeak)',
+        // Airy high tones with cool feel
+        cmd: `-f lavfi -i "sine=f=1800:d=0.6" -f lavfi -i "anoisesrc=d=0.6:c=pink:a=0.05" -filter_complex "[0][1]amix=inputs=2:duration=first,highpass=f=800,afade=t=in:ss=0:d=0.1,afade=t=out:st=0.3:d=0.3,volume=0.08" -ar 44100 -b:a 128k`
+    },
+    {
+        name: 'sfx-blinds.mp3',
+        desc: 'Blinds shutter reveal (blinds)',
+        // Quick mechanical rattle
+        cmd: `-f lavfi -i "anoisesrc=d=0.4:c=white:a=0.15" -af "tremolo=f=25:d=0.8,bandpass=f=3000:w=2000,afade=t=in:ss=0:d=0.02,afade=t=out:st=0.15:d=0.25,volume=0.35" -ar 44100 -b:a 128k`
+    },
+    {
+        name: 'sfx-diamond.mp3',
+        desc: 'Diamond reveal sparkle (diamonds)',
+        // Bright sparkle with geometric feel
+        cmd: `-f lavfi -i "sine=f=2000:d=0.4" -f lavfi -i "sine=f=2800:d=0.4" -filter_complex "[0][1]amix=inputs=2:duration=first,tremolo=f=10:d=0.4,afade=t=in:ss=0:d=0.03,afade=t=out:st=0.15:d=0.25,volume=0.12" -ar 44100 -b:a 128k`
+    },
     // ===== MG (Motion Graphics) SFX =====
     {
         name: 'sfx-mg-pop.mp3',
@@ -172,11 +203,24 @@ const sfx = [
     }
 ];
 
+const forceAll = process.argv.includes('--force');
+
 console.log('Generating SFX audio files...\n');
+if (!forceAll) console.log('  (Skipping files > 5KB — likely real downloads. Use --force to overwrite all)\n');
+
+let generated = 0, skipped = 0;
 
 for (const s of sfx) {
     const outPath = path.join(outDir, s.name);
-    // Remove existing
+
+    // Skip files > 5KB (likely real Freesound downloads) unless --force
+    if (!forceAll && fs.existsSync(outPath) && fs.statSync(outPath).size > 5000) {
+        console.log(`  SKIP  ${s.name} (real SFX detected, ${(fs.statSync(outPath).size/1024).toFixed(1)}KB)`);
+        skipped++;
+        continue;
+    }
+
+    // Remove existing synthetic file
     if (fs.existsSync(outPath)) fs.unlinkSync(outPath);
 
     const fullCmd = `ffmpeg -y ${s.cmd} "${outPath}" 2>&1`;
@@ -184,10 +228,12 @@ for (const s of sfx) {
         execSync(fullCmd, { stdio: 'pipe' });
         const size = fs.statSync(outPath).size;
         console.log(`  OK  ${s.name} (${(size/1024).toFixed(1)}KB) - ${s.desc}`);
+        generated++;
     } catch (e) {
         console.error(`  FAIL  ${s.name} - ${e.message}`);
     }
 }
 
-console.log('\nDone! SFX files generated in:', outDir);
-console.log('Replace with real SFX files for better quality.');
+console.log(`\nDone! ${generated} generated, ${skipped} skipped (real SFX preserved).`);
+console.log('SFX files in:', outDir);
+console.log('Use "Download Real SFX" button in the app or set FREESOUND_API_KEY for high-quality sounds.');
