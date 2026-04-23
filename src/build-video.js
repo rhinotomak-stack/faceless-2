@@ -1522,7 +1522,10 @@ async function buildVideo() {
         log.step('🗺️ Step 6.06: Map Images');
         try {
             const { downloadMapsForMGs } = require('./map-provider');
-            const mapCount = await downloadMapsForMGs(allMGs, scriptContext, config.paths.temp, scenesWithMedia);
+            // Slice 3: must pass the full compiled scene set (scenesWithKeywords) —
+            // fullscreen map scenes are split out of scenesWithMedia at line 980,
+            // so the provider would never find scene._mapScene there.
+            const mapCount = await downloadMapsForMGs(allMGs, scriptContext, config.paths.temp, scenesWithKeywords);
             if (mapCount > 0) {
                 log.ok(`Downloaded ${mapCount} map image(s) for ${mapMGs.length} mapChart scene(s)`);
             } else {
