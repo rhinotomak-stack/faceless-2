@@ -183,11 +183,31 @@ class MGRenderer {
     }
 
     /**
+     * Phase B: resolve the authoritative MapScene + renderAssets for a mapChart MG.
+     * New builds attach `_mapScene` end-to-end (compiler → provider → build-video
+     * merge-back → video-plan.json → SceneGraph). Old video-plan.json files
+     * without `_mapScene` still work via the per-field legacy fallbacks below.
+     * A one-shot warning fires the first time the legacy path is taken.
+     */
+    _resolveMapData(mg) {
+        const ms = mg._mapScene || mg.mgData?._mapScene || null;
+        const ra = ms?.renderAssets || null;
+        if (!ms && !this._mapLegacyWarned) {
+            this._mapLegacyWarned = true;
+            console.warn('[MGRenderer] Map scene has no _mapScene — using legacy side-channel fields. This fallback will be removed after Phase C.');
+        }
+        return { ms, ra };
+    }
+
+    /**
      * Lazily load a map image for mapChart MGs. Non-blocking.
      * Once loaded, subsequent renders will draw it as background.
      */
     _ensureMapImage(mg) {
-        const file = mg.mapImageFile;
+        const { ra } = this._resolveMapData(mg);
+        // Phase B: filename comes from MapScene.renderAssets when present; the
+        // browser-resolved URL still rides on mg (runtime, not build-time data).
+        const file = (ra && ra.mapImageFile) || mg.mapImageFile;
         const url = mg._mapImageUrl;
         if (!file || this._mapImages[file] || this._mapImageLoading[file]) return;
         if (!url) return; // URL not yet resolved by app.js
@@ -225,7 +245,8 @@ class MGRenderer {
      * Uses _mapIcons from build pipeline (file paths) or icon URLs.
      */
     _ensureMapIcons(mg) {
-        const icons = mg._mapIcons;
+        const { ra } = this._resolveMapData(mg);
+        const icons = (ra && ra.icons) || mg._mapIcons;
         if (!icons || typeof icons !== 'object') return;
         for (const [name, iconPath] of Object.entries(icons)) {
             const key = `__mapicon_${name}`;
@@ -3513,7 +3534,16 @@ class MGRenderer {
     // ========================================================================
 
     _renderMapChart(ctx, frame, fps, mg, s, anim, scriptContext) {
-        // Resolve map data from mgData if not on the scene object directly
+        // ── Phase B: resolve the authoritative MapScene + renderAssets once ──
+        // All downstream reads below pull from these locals (not mg._map* / mg.mapImageFile).
+        // When _mapScene is present (new builds), renderAssets is the source of truth.
+        // When it's missing (old plans loaded from disk), the legacy hydration bridge
+        // below still promotes mgData fields onto mg so the fallbacks resolve.
+        const { ms: _mapScene, ra: _ra } = this._resolveMapData(mg);
+
+        // Legacy hydration bridge — only useful when _mapScene is missing. Kept
+        // verbatim so old video-plan.json files render identically while the
+        // migration is in flight. Safe to remove after Phase C.
         const _mgd = mg.mgData || mg;
         if (!mg._bigMapSize && _mgd._bigMapSize) mg._bigMapSize = _mgd._bigMapSize;
         if (!mg._mapWaypoints && _mgd._mapWaypoints) mg._mapWaypoints = _mgd._mapWaypoints;
@@ -3523,6 +3553,19 @@ class MGRenderer {
         if (!mg._mapIcons && _mgd._mapIcons) mg._mapIcons = _mgd._mapIcons;
         if (!mg._mapSwarms && _mgd._mapSwarms) mg._mapSwarms = _mgd._mapSwarms;
         if (!mg._mapRoutePath && _mgd._mapRoutePath) mg._mapRoutePath = _mgd._mapRoutePath;
+
+        // ── Unified read surface: prefer MapScene.renderAssets, fall back to mg.* ──
+        // These are the ONLY names used for map-data reads below this block. User-
+        // tunable UI keyframes (mg._mapZoomSpeed, mg._mapPanXStart, etc.) are NOT
+        // MapScene data and continue to read from mg directly.
+        const _mapImageFile  = (_ra && _ra.mapImageFile) || mg.mapImageFile  || null;
+        const _mapView       = (_ra && _ra.mapView)      || mg._mapView      || null;
+        const _mapPins       = (_ra && _ra.mapView && _ra.mapView.pins) || mg._mapPins || [];
+        const _bigMapSize    = (_ra && _ra.bigMapSize)   || mg._bigMapSize   || null;
+        const _mapWaypoints  = (_ra && _ra.waypoints)    || mg._mapWaypoints || null;
+        const _wpCoords      = (_ra && _ra.wpCoords)     || mg._wpCoords     || [];
+        const _mapSwarms     = (_ra && _ra.swarms)       || mg._mapSwarms    || null;
+        const _mapRoutePath  = (_ra && _ra.routePath != null) ? !!_ra.routePath : !!mg._mapRoutePath;
         const { opacity, enterProgress } = anim;
         const W = 1920, H = 1080;
         const elapsed = frame / fps;
@@ -3652,17 +3695,17 @@ class MGRenderer {
         // ── Determine map view (center + zoom) ──
         const cinematicMode = mg._mapCinematic || false;
         const variant = mg.subType || 'standard';
-        const multiPin = (mg._mapPins || []).length >= 2;
+        const multiPin = _mapPins.length >= 2;
 
         // ── Keyframe time (shared by tilt + zoom) ──
         const kfT = Math.min(1, elapsed / totalDuration);
         const kfEased = _ease(kfT, easingMode);
 
         // ── Projection: single map for everything (big map for waypoints) ──
-        const bigMapSize = mg._bigMapSize || null;
+        const bigMapSize = _bigMapSize;
         const IMG_W = bigMapSize ? bigMapSize.w : W;
         const IMG_H = bigMapSize ? bigMapSize.h : H;
-        const mapView = mg._mapView || null;
+        const mapView = _mapView;
 
         let toX, toY;
         if (mapView) {
@@ -3682,9 +3725,10 @@ class MGRenderer {
         }
 
         // ═══ WAYPOINT SYSTEM ═══
-        const _waypoints = mg._mapWaypoints || null;
-        const _wpPins = mg._mapPins || [];
-        const _wpCoords = mg._wpCoords || [];
+        // Renamed locals below preserve the original read sites unchanged.
+        const _waypoints = _mapWaypoints;
+        const _wpPins    = _mapPins;
+        // `_wpCoords` is already resolved at the top — no redeclaration.
         let activeWpIdx = -1, wpTransition = 0, wpCamX = IMG_W / 2, wpCamY = IMG_H / 2;
         let prevWpIdx = -1;
 
@@ -3915,7 +3959,7 @@ class MGRenderer {
         }
 
         // ── 1. BACKGROUND: API map image or polygon fallback (with camera animation) ──
-        const hasMapImage = mg.mapImageFile && this._mapImages && this._mapImages[mg.mapImageFile];
+        const hasMapImage = _mapImageFile && this._mapImages && this._mapImages[_mapImageFile];
 
         ctx.save();
         if (wpBigMapCamera) {
@@ -3931,7 +3975,7 @@ class MGRenderer {
         }
 
         if (hasMapImage) {
-            const mapImg = this._mapImages[mg.mapImageFile];
+            const mapImg = this._mapImages[_mapImageFile];
             ctx.globalAlpha = opacity * Math.min(1, enterProgress * 2);
             ctx.drawImage(mapImg, 0, 0, IMG_W, IMG_H);
             ctx.globalAlpha = opacity;
@@ -3939,11 +3983,11 @@ class MGRenderer {
             this._renderMapChartFallbackBg(ctx, mg, W, H, opacity, enterProgress, pal);
         }
 
-        // ── 2. Gather pin entities (use geocoded _mapPins when available) ──
-        // Build geocoded pin lookup from _mapPins (set by map-provider geocoding)
+        // ── 2. Gather pin entities (use geocoded pins when available) ──
+        // Build geocoded pin lookup from the resolved pin list (set by map-provider geocoding).
         const geocodedPins = {};
-        if (mg._mapPins && Array.isArray(mg._mapPins)) {
-            for (const gp of mg._mapPins) {
+        if (Array.isArray(_mapPins)) {
+            for (const gp of _mapPins) {
                 geocodedPins[gp.name.toLowerCase()] = gp;
             }
         }
@@ -4227,7 +4271,7 @@ class MGRenderer {
         }
 
         // ── 3b. Animated route path (dashed line drawing between waypoints) ──
-        if (mg._mapRoutePath && hasWaypoints && wpPositions.length >= 2) {
+        if (_mapRoutePath && hasWaypoints && wpPositions.length >= 2) {
             ctx.save();
             // Build ground-level path through all waypoints in order
             const routePts = wpPositions.filter(wp => wp.px != null && wp.py != null);
@@ -4333,11 +4377,11 @@ class MGRenderer {
         }
 
         // ── 3c. Icon swarms (multiple icons appear simultaneously) ──
-        if (mg._mapSwarms && mg._mapSwarms.length > 0) {
-            const swarmCoords = mg._wpCoords || [];
-            const swarmPins = mg._mapPins || [];
+        if (_mapSwarms && _mapSwarms.length > 0) {
+            const swarmCoords = _wpCoords;
+            const swarmPins   = _mapPins;
 
-            for (const sw of mg._mapSwarms) {
+            for (const sw of _mapSwarms) {
                 const swarmT = Math.min(1, Math.max(0, (elapsed - sw.startTime) / Math.max(0.5, sw.endTime - sw.startTime)));
                 if (swarmT <= 0) continue;
 
@@ -4561,7 +4605,7 @@ class MGRenderer {
             let iconImg = this._mapIcons[`__mapicon_${pin.label}`];
             if (!iconImg) {
                 // Try matching via waypoint: find a waypoint whose name matches this pin
-                const wps = mg._mapWaypoints || [];
+                const wps = _mapWaypoints || [];
                 for (const wp of wps) {
                     if (!wp.icon) continue;
                     const wpLow = (wp.name || '').toLowerCase();
