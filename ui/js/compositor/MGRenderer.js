@@ -3730,21 +3730,20 @@ class MGRenderer {
         // Renamed locals below preserve the original read sites unchanged.
         let _waypoints = _mapWaypoints;
         const _wpPins    = _mapPins;
+        let _stopsDrivenCamera = false;
 
         // Slice 5b: when the provider attached a populated cameraPlan.stops
         // array to _mapScene, feed those stops in as the waypoint source.
         // Stops carry the same per-subject camera intent (lon/lat/zoom/tilt/
         // bearing/orbit/startTime/endTime) but come from the authoritative
-        // provider pipeline with coords already geocoded. Everything
-        // downstream (wpPositions build, per-wp camera, bbox-fit safety net
-        // at line ~3841) runs unchanged and continues to clamp zoom for
-        // route/comparison variants. The build-time USE_CAMERA_PLAN_STOPS
-        // flag is the single source of truth — it gates whether stops get
-        // written into video-plan.json at build time. At render time we
-        // don't re-check process.env (Electron renderer process doesn't
-        // have the Node env populated); the presence of a valid stops
-        // array IS the signal. Stops missing/null/invalid → _waypoints
-        // stays pointed at the legacy _mapWaypoints.
+        // provider pipeline with coords already geocoded. The build-time
+        // USE_CAMERA_PLAN_STOPS flag is the single source of truth — it
+        // gates whether stops get written into video-plan.json at build
+        // time. At render time we don't re-check process.env (Electron
+        // renderer process doesn't have Node env populated); the presence
+        // of a valid stops array IS the signal. Stops missing/null/invalid
+        // → _waypoints stays pointed at the legacy _mapWaypoints and the
+        // bbox-fit fallback runs as before.
         try {
             const _stops = (_mapScene && _mapScene.cameraPlan && Array.isArray(_mapScene.cameraPlan.stops))
                 ? _mapScene.cameraPlan.stops : null;
@@ -3769,11 +3768,15 @@ class MGRenderer {
                     }));
                 if (_wpsFromStops.length > 0) {
                     _waypoints = _wpsFromStops;
+                    _stopsDrivenCamera = true;
                     if (!this._stopsLogged) this._stopsLogged = new Set();
-                    const _sceneKey = `scene${mg.sceneIndex ?? '?'}`;
+                    // Dedupe by compiler-set sceneIndex on _mapScene, not mg.sceneIndex
+                    // — mg.sceneIndex is preview-undefined, which collapses every map
+                    // scene into a single `scene?` key and suppresses subsequent logs.
+                    const _sceneKey = `scene${_mapScene.sceneIndex ?? mg.sceneIndex ?? '?'}`;
                     if (!this._stopsLogged.has(_sceneKey)) {
                         this._stopsLogged.add(_sceneKey);
-                        console.log(`[MGRenderer] map scene=${mg.sceneIndex ?? '?'} using cameraPlan.stops (${_wpsFromStops.length} stops, mode=${_mapScene.mapMode || '?'})`);
+                        console.log(`[MGRenderer] map scene=${_mapScene.sceneIndex ?? mg.sceneIndex ?? '?'} using cameraPlan.stops (${_wpsFromStops.length} stops, mode=${_mapScene.mapMode || '?'})`);
                     }
                 }
             }
@@ -3886,7 +3889,13 @@ class MGRenderer {
                 // bigmap edges (black bars) because each waypoint sits near the
                 // edge of the wide-shot bigmap. These variants are one held
                 // wide frame, not a tour — override any interpolation above.
-                if (wideCap != null && wpPositions.length > 1) {
+                //
+                // Slice 5b: when cameraPlan.stops drives the camera, those stops
+                // ARE the authoritative per-subject pan/zoom intent. Skip this
+                // bbox-fit override so stops' lon/lat pan and per-stop zoom
+                // actually show up on screen. Stops absent → this block runs as
+                // before (legacy fallback, unchanged behavior).
+                if (wideCap != null && wpPositions.length > 1 && !_stopsDrivenCamera) {
                     const xs = wpPositions.map(p => p.px);
                     const ys = wpPositions.map(p => p.py);
                     const minX = Math.min(...xs), maxX = Math.max(...xs);
