@@ -3731,19 +3731,22 @@ class MGRenderer {
         let _waypoints = _mapWaypoints;
         const _wpPins    = _mapPins;
 
-        // Slice 5b: when USE_CAMERA_PLAN_STOPS is enabled AND the provider
-        // attached cameraPlan.stops to _mapScene, feed those stops in as the
-        // waypoint source. Stops carry the same per-subject camera intent
-        // (lon/lat/zoom/tilt/bearing/orbit/startTime/endTime) but come from
-        // the authoritative provider pipeline with coords already geocoded.
-        // Everything downstream (wpPositions build, per-wp camera, bbox-fit
-        // safety net at line ~3841) runs unchanged and continues to clamp
-        // zoom for route/comparison variants. Flag off OR stops missing/
-        // invalid → _waypoints stays pointed at the legacy _mapWaypoints.
+        // Slice 5b: when the provider attached a populated cameraPlan.stops
+        // array to _mapScene, feed those stops in as the waypoint source.
+        // Stops carry the same per-subject camera intent (lon/lat/zoom/tilt/
+        // bearing/orbit/startTime/endTime) but come from the authoritative
+        // provider pipeline with coords already geocoded. Everything
+        // downstream (wpPositions build, per-wp camera, bbox-fit safety net
+        // at line ~3841) runs unchanged and continues to clamp zoom for
+        // route/comparison variants. The build-time USE_CAMERA_PLAN_STOPS
+        // flag is the single source of truth — it gates whether stops get
+        // written into video-plan.json at build time. At render time we
+        // don't re-check process.env (Electron renderer process doesn't
+        // have the Node env populated); the presence of a valid stops
+        // array IS the signal. Stops missing/null/invalid → _waypoints
+        // stays pointed at the legacy _mapWaypoints.
         try {
-            const _useStops = (typeof process !== 'undefined' && process.env
-                && String(process.env.USE_CAMERA_PLAN_STOPS || '').toLowerCase() === 'true');
-            const _stops = (_useStops && _mapScene && _mapScene.cameraPlan && Array.isArray(_mapScene.cameraPlan.stops))
+            const _stops = (_mapScene && _mapScene.cameraPlan && Array.isArray(_mapScene.cameraPlan.stops))
                 ? _mapScene.cameraPlan.stops : null;
             if (_stops && _stops.length > 0) {
                 const _wpsFromStops = _stops
