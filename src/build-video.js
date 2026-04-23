@@ -1504,7 +1504,9 @@ async function buildVideo() {
         log.step('🗺️ Step 6.05: Map Animation Planner');
         try {
             const { planMapAnimations } = require('./ai-map-planner');
-            const enriched = await planMapAnimations(allMGs, scriptContext, combinedInstructions, scenesWithMedia);
+            // Must pass scenesWithKeywords (full compiled set with _mapScene) —
+            // fullscreen map scenes were split out of scenesWithMedia at line 980.
+            const enriched = await planMapAnimations(allMGs, scriptContext, combinedInstructions, scenesWithKeywords);
             if (enriched > 0) {
                 log.ok(`Planned ${enriched} map animation(s) with waypoints`);
             } else {

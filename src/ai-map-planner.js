@@ -419,15 +419,27 @@ async function planMapAnimations(allMGs, scriptContext, aiInstructions, scenes) 
 
     let enriched = 0;
     for (const mg of mapMGs) {
-        const locations = extractEntities(mg, scriptContext);
-
-        // Scene narration is the authoritative context for picking waypoints/swarms.
-        // For mapChart, mg.text is usually '' and mg.subtext holds "Place: label" pairs
-        // (not real narration), so we look up the actual scene text by sceneIndex.
-        const scene = Array.isArray(scenes) && Number.isInteger(mg.sceneIndex)
-            ? scenes[mg.sceneIndex]
+        // Identity-based scene lookup (matches map-provider's convention).
+        // Positional scenes[mg.sceneIndex] is wrong when scene arrays have been
+        // carved / reindexed — use scene.index equality instead.
+        const scene = (Array.isArray(scenes) && mg.sceneIndex != null)
+            ? scenes.find(s => s && s.index === mg.sceneIndex) || null
             : null;
         const sceneText = scene?.text || '';
+        const mapScene = scene?._mapScene || null;
+
+        // Slice 3+ alignment: MapScene.subjects is authoritative. The planner's
+        // AI call is strictly about camera choreography — it should plan against
+        // the same subjects the provider geocodes, not re-derive via a trimmed
+        // payload parse. Only fall back to extractEntities when there's no
+        // compiled MapScene (legacy scenes).
+        let locations;
+        if (mapScene && Array.isArray(mapScene.subjects) && mapScene.subjects.length > 0) {
+            locations = mapScene.subjects.map(s => s.name).filter(Boolean);
+            console.log(`      🧭 MapScene subjects (${mapScene.mapMode}): ${locations.join(', ')}`);
+        } else {
+            locations = extractEntities(mg, scriptContext);
+        }
 
         if (locations.length === 0) {
             const label = mg.text || sceneText.substring(0, 60) || '(no text)';
