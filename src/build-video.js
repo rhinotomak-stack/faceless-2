@@ -758,6 +758,16 @@ async function buildVideo() {
                 log.warn(`Map disposition enforcement failed (studio): ${err.message}`);
             }
         }
+
+        // Slice 2: compile authoritative MapScene objects for every surviving map scene.
+        try {
+            const { compileMapScenes, logCompiledMapScenes } = require('./map-compiler');
+            const { compiled, skipped } = compileMapScenes(scenesWithKeywords, scriptContext, scriptContext._mapDispositions || []);
+            scriptContext._mapScenes = compiled;
+            logCompiledMapScenes(compiled, skipped);
+        } catch (err) {
+            log.warn(`Map compiler failed (studio): ${err.message} — downstream will use legacy payload only`);
+        }
         log.br();
     } else {
     // ── Normal path: AI Director + Visual Planner ──
@@ -806,6 +816,16 @@ async function buildVideo() {
         } catch (err) {
             log.warn(`Map disposition enforcement failed: ${err.message}`);
         }
+    }
+
+    // Slice 2: compile authoritative MapScene objects for every surviving map scene.
+    try {
+        const { compileMapScenes, logCompiledMapScenes } = require('./map-compiler');
+        const { compiled, skipped } = compileMapScenes(scenesWithKeywords, scriptContext, scriptContext._mapDispositions || []);
+        scriptContext._mapScenes = compiled;
+        logCompiledMapScenes(compiled, skipped);
+    } catch (err) {
+        log.warn(`Map compiler failed: ${err.message} — downstream will use legacy payload only`);
     }
 
     // DEBUG: Stop after Visual Planner for testing
