@@ -187,12 +187,14 @@ class MGRenderer {
      * New builds attach `_mapScene` end-to-end (compiler → provider → build-video
      * merge-back → video-plan.json → SceneGraph). Old video-plan.json files
      * without `_mapScene` still work via the per-field legacy fallbacks below.
-     * A one-shot warning fires the first time the legacy path is taken.
+     * A one-shot warning fires the first time the legacy path is taken — but only
+     * when called from the actual draw path (`warn: true`). Preload helpers stay
+     * silent so the warning can't race ahead of render and mislead debugging.
      */
-    _resolveMapData(mg) {
+    _resolveMapData(mg, { warn = false } = {}) {
         const ms = mg._mapScene || mg.mgData?._mapScene || null;
         const ra = ms?.renderAssets || null;
-        if (!ms && !this._mapLegacyWarned) {
+        if (warn && !ms && !this._mapLegacyWarned) {
             this._mapLegacyWarned = true;
             console.warn('[MGRenderer] Map scene has no _mapScene — using legacy side-channel fields. This fallback will be removed after Phase C.');
         }
@@ -3539,7 +3541,7 @@ class MGRenderer {
         // When _mapScene is present (new builds), renderAssets is the source of truth.
         // When it's missing (old plans loaded from disk), the legacy hydration bridge
         // below still promotes mgData fields onto mg so the fallbacks resolve.
-        const { ms: _mapScene, ra: _ra } = this._resolveMapData(mg);
+        const { ms: _mapScene, ra: _ra } = this._resolveMapData(mg, { warn: true });
 
         // Legacy hydration bridge — only useful when _mapScene is missing. Kept
         // verbatim so old video-plan.json files render identically while the
@@ -3751,29 +3753,42 @@ class MGRenderer {
                 if (coord) {
                     wpPositions.push({ ...wp, lon: coord.lon, lat: coord.lat, px: toX(coord.lon), py: toY(coord.lat) });
                 } else {
-                    wpPositions.push({ ...wp, lon: 0, lat: 0, px: IMG_W / 2, py: IMG_H / 2 });
+                    // Phase C: DROP unresolved waypoints. Silently recentering them
+                    // to IMG_W/2, IMG_H/2 hid bad planner/geocoder output behind a
+                    // camera re-aim — same class of bug the pin path already kills
+                    // by returning null at the fallback site. Downstream gates all
+                    // read `wpPositions.length > 0`, so a fully dropped set falls
+                    // through to the standard camera path cleanly.
+                    if (!this._mapDropWarned) this._mapDropWarned = new Set();
+                    const _dropKey = `${mg.sceneIndex ?? 'noidx'}:${wp.name}`;
+                    if (!this._mapDropWarned.has(_dropKey)) {
+                        this._mapDropWarned.add(_dropKey);
+                        console.warn(`[MGRenderer] Dropping unresolved waypoint: "${wp.name}" (scene ${mg.sceneIndex ?? '?'})`);
+                    }
                 }
             }
 
-            for (let wi = wpPositions.length - 1; wi >= 0; wi--) {
-                if (elapsed >= wpPositions[wi].startTime) { activeWpIdx = wi; break; }
-            }
-            if (activeWpIdx < 0) activeWpIdx = 0;
-            prevWpIdx = activeWpIdx > 0 ? activeWpIdx - 1 : -1;
+            if (wpPositions.length > 0) {
+                for (let wi = wpPositions.length - 1; wi >= 0; wi--) {
+                    if (elapsed >= wpPositions[wi].startTime) { activeWpIdx = wi; break; }
+                }
+                if (activeWpIdx < 0) activeWpIdx = 0;
+                prevWpIdx = activeWpIdx > 0 ? activeWpIdx - 1 : -1;
 
-            const awp = wpPositions[activeWpIdx];
-            const wpElapsed = elapsed - awp.startTime;
-            const transitionDur = 1.2 / zoomSpd;
-            wpTransition = Math.min(1, wpElapsed / transitionDur);
-            const wpEase = _ease(wpTransition, easingMode);
+                const awp = wpPositions[activeWpIdx];
+                const wpElapsed = elapsed - awp.startTime;
+                const transitionDur = 1.2 / zoomSpd;
+                wpTransition = Math.min(1, wpElapsed / transitionDur);
+                const wpEase = _ease(wpTransition, easingMode);
 
-            if (prevWpIdx >= 0 && wpTransition < 1) {
-                const prev = wpPositions[prevWpIdx];
-                wpCamX = prev.px + (awp.px - prev.px) * wpEase;
-                wpCamY = prev.py + (awp.py - prev.py) * wpEase;
-            } else {
-                wpCamX = awp.px;
-                wpCamY = awp.py;
+                if (prevWpIdx >= 0 && wpTransition < 1) {
+                    const prev = wpPositions[prevWpIdx];
+                    wpCamX = prev.px + (awp.px - prev.px) * wpEase;
+                    wpCamY = prev.py + (awp.py - prev.py) * wpEase;
+                } else {
+                    wpCamX = awp.px;
+                    wpCamY = awp.py;
+                }
             }
         }
 
