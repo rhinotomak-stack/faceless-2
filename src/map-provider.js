@@ -717,6 +717,114 @@ function extractEntities(mg, scriptContext) {
 }
 
 /**
+ * Slice 5b: generate cameraPlan.stops from materialized waypoints + geocoded
+ * coordinates. Flag-gated behind USE_CAMERA_PLAN_STOPS. When the flag is off,
+ * or any validation fails, stops remain null and the renderer falls back to
+ * its legacy bbox-fit / per-mode camera path (unchanged today).
+ *
+ * Shape (per stop): { subjectId, lon, lat, zoom, tilt, bearing, orbit,
+ *                     startTime, endTime, dwellSec, easeIn, label }
+ *
+ * Sources:
+ *   - timing + camera intent  → mg._mapWaypoints (from _materializeWaypoints…)
+ *   - lon/lat                 → mg._wpCoords (big-map) ?? view.pins (standard)
+ *                               ?? mapScene.geometry.pins
+ *   - subjectId               → mapScene.subjects[].id (name-match)
+ */
+function _buildCameraPlanStops(mapScene, mg, view) {
+    if (String(process.env.USE_CAMERA_PLAN_STOPS || '').toLowerCase() !== 'true') {
+        return null;
+    }
+    if (!mapScene || !Array.isArray(mapScene.subjects) || mapScene.subjects.length === 0) {
+        return null;
+    }
+
+    const waypoints = Array.isArray(mg._mapWaypoints) ? mg._mapWaypoints : [];
+    if (waypoints.length === 0) {
+        console.log(`      🎥 cameraPlan.stops: scene=${mapScene.sceneIndex} SKIPPED (no waypoints)`);
+        return null;
+    }
+
+    // Case-insensitive name → {lon,lat} lookup from every available source.
+    const coordLookup = new Map();
+    const addLookup = (name, lon, lat) => {
+        if (!name || typeof lon !== 'number' || typeof lat !== 'number') return;
+        if (!Number.isFinite(lon) || !Number.isFinite(lat)) return;
+        const key = String(name).toLowerCase().trim();
+        if (!key) return;
+        if (!coordLookup.has(key)) coordLookup.set(key, { lon, lat });
+    };
+    if (Array.isArray(mg._wpCoords)) {
+        for (const c of mg._wpCoords) addLookup(c.name, c.lon, c.lat);
+    }
+    if (view && Array.isArray(view.pins)) {
+        for (const p of view.pins) addLookup(p.name, p.lon, p.lat);
+    }
+    if (mapScene.geometry && Array.isArray(mapScene.geometry.pins)) {
+        for (const p of mapScene.geometry.pins) addLookup(p.name, p.lon, p.lat);
+    }
+
+    const findCoord = (name) => {
+        const lower = String(name || '').toLowerCase().trim();
+        if (!lower) return null;
+        if (coordLookup.has(lower)) return coordLookup.get(lower);
+        // Loose contains-match (mirrors the big-map wpCoords lookup policy).
+        for (const [k, v] of coordLookup) {
+            if (k.includes(lower) || lower.includes(k)) return v;
+        }
+        return null;
+    };
+
+    const subjectByName = new Map();
+    for (const s of mapScene.subjects) {
+        if (s && s.name) subjectByName.set(String(s.name).toLowerCase().trim(), s);
+    }
+
+    const stops = [];
+    let rejectReason = null;
+    for (const wp of waypoints) {
+        const coord = findCoord(wp.name);
+        if (!coord) { rejectReason = `no coord for "${wp.name}"`; break; }
+
+        const zoom = Number(wp.zoom);
+        if (!Number.isFinite(zoom) || zoom <= 0) { rejectReason = `bad zoom for "${wp.name}"`; break; }
+
+        const startTime = Number(wp.startTime);
+        const endTime   = Number(wp.endTime);
+        if (!Number.isFinite(startTime) || !Number.isFinite(endTime) || endTime <= startTime) {
+            rejectReason = `bad timing for "${wp.name}"`; break;
+        }
+
+        const subj = subjectByName.get(String(wp.name).toLowerCase().trim()) || null;
+
+        stops.push({
+            subjectId: subj?.id || null,
+            lon: coord.lon,
+            lat: coord.lat,
+            zoom,
+            tilt:    (wp.tilt    != null && Number.isFinite(Number(wp.tilt)))    ? Number(wp.tilt)    : 0,
+            bearing: (wp.bearing != null && Number.isFinite(Number(wp.bearing))) ? Number(wp.bearing) : 0,
+            orbit:   (wp.orbit   != null && Number.isFinite(Number(wp.orbit)))   ? Number(wp.orbit)   : 0,
+            startTime,
+            endTime,
+            dwellSec: endTime - startTime,
+            easeIn: 'smooth',
+            label: wp.name || null,
+        });
+    }
+
+    if (rejectReason || stops.length === 0) {
+        console.log(`      🎥 cameraPlan.stops: scene=${mapScene.sceneIndex} REJECTED (${rejectReason || 'no valid stops'}) — falling back to null`);
+        return null;
+    }
+
+    const avgDwell = stops.reduce((a, s) => a + s.dwellSec, 0) / stops.length;
+    const framing = mapScene.cameraPlan?.framing || '?';
+    console.log(`      🎥 cameraPlan.stops: scene=${mapScene.sceneIndex} mode=${mapScene.mapMode} stops=${stops.length} framing=${framing} (dwell avg=${avgDwell.toFixed(1)}s)`);
+    return stops;
+}
+
+/**
  * Populate the MapScene.geometry + renderAssets artifacts after a successful
  * download. Slice 4 consumes these to drive the renderer without reading the
  * legacy mg._mapView / mg._mapPins side-channels.
@@ -728,6 +836,13 @@ function _populateMapSceneAssets(mapScene, mg, view) {
         zoom: view.zoom,
         pins: Array.isArray(view.pins) ? view.pins : [],
     };
+    // Slice 5b: flag-gated cameraPlan.stops generation. Writes into the
+    // existing cameraPlan slot that the compiler leaves as { framing, stops: null }.
+    // When the flag is off, or validation fails, stops stay null and the
+    // renderer's legacy bbox-fit / per-mode camera path runs unchanged.
+    if (mapScene.cameraPlan) {
+        mapScene.cameraPlan.stops = _buildCameraPlanStops(mapScene, mg, view);
+    }
     // renderAssets is the full, self-contained snapshot the renderer will read
     // once Phase B lands. Mirror every legacy side-channel field here so the
     // renderer has no reason to reach for mg._mapWaypoints / mg._mapView / etc.
