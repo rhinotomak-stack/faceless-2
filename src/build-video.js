@@ -1607,6 +1607,10 @@ async function buildVideo() {
             if (mg._mapIcons) target._mapIcons = mg._mapIcons;
             if (mg._mapSwarms) target._mapSwarms = mg._mapSwarms;
             if (mg._mapRoutePath) target._mapRoutePath = mg._mapRoutePath;
+            // Phase B prep: the authoritative MapScene (subjects, cameraPlan,
+            // annotationPlan, geometry, renderAssets) rides along on the scene
+            // so the renderer can consume it directly in the next slice.
+            if (mg._mapScene) target._mapScene = mg._mapScene;
         }
     }
 

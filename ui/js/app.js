@@ -5853,6 +5853,13 @@ async function loadVideoPlan({ freshBuild = false } = {}) {
                     sceneObj._mapIcons = core._mapIcons;
                     if (sceneObj.mgData) sceneObj.mgData._mapIcons = core._mapIcons;
                 }
+                // Phase B prep: authoritative MapScene (subjects, cameraPlan,
+                // annotationPlan, geometry, renderAssets). Renderer will consume
+                // this directly once the legacy per-field lookups are retired.
+                if (core._mapScene) {
+                    sceneObj._mapScene = core._mapScene;
+                    if (sceneObj.mgData) sceneObj.mgData._mapScene = core._mapScene;
+                }
                 // Pre-resolve map image URL for preview
                 if (core.mapImageFile && window.electronAPI?.getProjectInfo && window.electronAPI?.getFileUrl) {
                     window.electronAPI.getProjectInfo().then(async (info) => {

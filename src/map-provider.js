@@ -728,11 +728,22 @@ function _populateMapSceneAssets(mapScene, mg, view) {
         zoom: view.zoom,
         pins: Array.isArray(view.pins) ? view.pins : [],
     };
+    // renderAssets is the full, self-contained snapshot the renderer will read
+    // once Phase B lands. Mirror every legacy side-channel field here so the
+    // renderer has no reason to reach for mg._mapWaypoints / mg._mapView / etc.
+    // Values are captured by reference — no deep clones — which matches how the
+    // legacy fields were shared too.
     mapScene.renderAssets = {
         mapImageFile: mg.mapImageFile || null,
-        bigMapSize: mg._bigMapSize || null,
+        bigMapSize:   mg._bigMapSize    || null,
         osmBoundaries: mg._osmBoundaries || null,
-        mapView: mg._mapView || view,
+        mapView:      mg._mapView       || view,
+        waypoints:    Array.isArray(mg._mapWaypoints) ? mg._mapWaypoints : null,
+        wpCoords:     Array.isArray(mg._wpCoords)     ? mg._wpCoords     : null,
+        swarms:       Array.isArray(mg._mapSwarms)    ? mg._mapSwarms    : null,
+        icons:        mg._mapIcons      || null,
+        routePath:    !!mg._mapRoutePath,
+        bigMap:       !!mg._mapBigMap,
     };
 }
 
@@ -822,6 +833,14 @@ async function downloadMapForMG(mg, scriptContext, tempDir, scenes) {
         ? scenes.find(s => s && s.index === mg.sceneIndex) || null
         : null;
     const mapScene = mg._mapScene || ownerScene?._mapScene || null;
+
+    // Slice 4 prep for Phase B: pin the resolved MapScene back onto the MG
+    // itself, so downstream (build-video merge-back, video-plan.json, renderer)
+    // always finds it on mg._mapScene without having to re-walk the scenes
+    // array. Single-scene MGs previously only had it on the owning scene.
+    if (mapScene && mg._mapScene !== mapScene) {
+        mg._mapScene = mapScene;
+    }
 
     // Slice 4: materialize deterministic waypoints from MapScene.subjects BEFORE
     // the big-map / pin logic runs. Previously the AI map planner populated
