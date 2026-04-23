@@ -869,12 +869,15 @@ function _populateMapSceneAssets(mapScene, mg, view) {
  * mg._mapRoutePath). No AI, no narration parsing — choreography is derived
  * from the compiler's canonical subject list in the order it produced them.
  *
- * Mode behavior:
- *   - locator:    first subject wide (z=1.0), subsequent tight (z=2.5)
+ * Mode behavior (tuned for calmer camera — user feedback: remove aggressive
+ * zoom-toward-subject choreography):
+ *   - locator:    held-wide across all subjects (z=1.2, gentle pan only).
  *   - route:      held-wide across all subjects (z=1.4, no tilt);
  *                 also sets mg._mapRoutePath so the renderer draws the arc.
- *   - region:     first wide (z=1.0), then tight (z=1.8) per region.
+ *   - region:     first wide (z=1.0), subsequent slightly tighter (z=1.3).
  *   - comparison: held-wide across all subjects (z=1.3, no tilt).
+ * Tilt is null in every mode — the old 0.15 tilt on locator/region tight
+ * shots added "dolly-in" feel that read as unnecessary motion.
  */
 function _materializeWaypointsFromMapScene(mg, mapScene) {
     if (!mapScene) return;
@@ -888,13 +891,10 @@ function _materializeWaypointsFromMapScene(mg, mapScene) {
     const zoomFor = (i) => {
         if (mode === 'route')      return 1.4;
         if (mode === 'comparison') return 1.3;
-        if (mode === 'region')     return i === 0 ? 1.0 : 1.8;
-        return i === 0 ? 1.0 : 2.5;
+        if (mode === 'region')     return i === 0 ? 1.0 : 1.3;
+        return 1.2; // locator: all subjects at the same wide zoom
     };
-    const tiltFor = (i) => {
-        if (mode === 'route' || mode === 'comparison') return null;
-        return i === 0 ? null : 0.15;
-    };
+    const tiltFor = (_i) => null; // all modes: no tilt/dolly
 
     const waypoints = subjects.map((s, i) => ({
         name: s.name,
