@@ -758,16 +758,6 @@ async function buildVideo() {
                 log.warn(`Map disposition enforcement failed (studio): ${err.message}`);
             }
         }
-
-        // Slice 2: compile authoritative MapScene objects for every surviving map scene.
-        try {
-            const { compileMapScenes, logCompiledMapScenes } = require('./map-compiler');
-            const { compiled, skipped } = compileMapScenes(scenesWithKeywords, scriptContext, scriptContext._mapDispositions || []);
-            scriptContext._mapScenes = compiled;
-            logCompiledMapScenes(compiled, skipped);
-        } catch (err) {
-            log.warn(`Map compiler failed (studio): ${err.message} — downstream will use legacy payload only`);
-        }
         log.br();
     } else {
     // ── Normal path: AI Director + Visual Planner ──
@@ -816,16 +806,6 @@ async function buildVideo() {
         } catch (err) {
             log.warn(`Map disposition enforcement failed: ${err.message}`);
         }
-    }
-
-    // Slice 2: compile authoritative MapScene objects for every surviving map scene.
-    try {
-        const { compileMapScenes, logCompiledMapScenes } = require('./map-compiler');
-        const { compiled, skipped } = compileMapScenes(scenesWithKeywords, scriptContext, scriptContext._mapDispositions || []);
-        scriptContext._mapScenes = compiled;
-        logCompiledMapScenes(compiled, skipped);
-    } catch (err) {
-        log.warn(`Map compiler failed: ${err.message} — downstream will use legacy payload only`);
     }
 
     // DEBUG: Stop after Visual Planner for testing
@@ -941,6 +921,19 @@ async function buildVideo() {
             if (!s.mediaType) s.mediaType = 'video';
             if (!s.sourceHint) s.sourceHint = 'stock';
         }
+    }
+
+    // Slice 2: compile authoritative MapScene objects for every surviving map scene.
+    // Runs ONCE on the final post-mutation state (after directives, mgHint promotion,
+    // listicle injection, and niche filtering) so MapScene reflects what will actually render.
+    // Shared by both studio and normal paths (branch split ended above).
+    try {
+        const { compileMapScenes, logCompiledMapScenes } = require('./map-compiler');
+        const { compiled, skipped } = compileMapScenes(scenesWithKeywords, scriptContext, scriptContext._mapDispositions || []);
+        scriptContext._mapScenes = compiled;
+        logCompiledMapScenes(compiled, skipped);
+    } catch (err) {
+        log.warn(`Map compiler failed: ${err.message} — downstream will use legacy payload only`);
     }
 
     // ── Orchestrator Phase 1: Pre-Build AI Review ──
