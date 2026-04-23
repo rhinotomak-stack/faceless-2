@@ -113,14 +113,6 @@ try {
     console.warn('Map Provider not available:', e.message);
 }
 
-// Expose AI Map Planner to renderer (end-to-end map test: VP-style instructions → planned waypoints)
-try {
-    const mapPlanner = require('./src/ai-map-planner');
-    window._mapPlanner = mapPlanner;
-} catch (e) {
-    console.warn('AI Map Planner not available:', e.message);
-}
-
 // Expose Electron IPC methods to the renderer process
 window.electronAPI = {
     // Copy file to project folder

@@ -294,6 +294,94 @@ function compileMapScenes(scenes, scriptContext, dispositions) {
     return { compiled, skipped };
 }
 
+// Merge multiple source MapScenes into a single MapScene spanning them all.
+// Used when build-video.js collapses adjacent same-type fullscreen mapChart MGs
+// (see MERGE_GAP_THRESHOLD block): the survivor mg keeps only the first source
+// sceneIndex, so a naive `scene._mapScene` lookup loses subjects from the
+// merged-away scenes. This helper unions subjects across all source MapScenes,
+// reassigns roles for the new mapMode, and re-derives purpose/framing so the
+// planner and provider see the TRUE full-span subject set.
+//
+// `variantOrMode` is the merged MG's mapVariant (build-video promotes
+// locator/regionHighlight → route during merge). Pass whatever the MG has now.
+function mergeMapScenes(mapScenes, variantOrMode) {
+    if (!Array.isArray(mapScenes) || mapScenes.length === 0) return null;
+    if (mapScenes.length === 1) return mapScenes[0];
+
+    // Resolve target mapMode: prefer the merged MG's current variant, else the
+    // first source's mapMode (e.g. two locators merge into a locator-ish view
+    // only if build-video didn't promote them).
+    const vk = String(variantOrMode || '').toLowerCase();
+    const mapMode = VARIANT_TO_MODE[vk] || mapScenes[0].mapMode || DEFAULT_MODE;
+
+    // Union subjects across sources, deduped by id (slug) then name (case-insensitive),
+    // preserving first-seen order so primary-of-first stays primary.
+    const seen = new Set();
+    const pool = [];
+    for (const ms of mapScenes) {
+        for (const s of (ms.subjects || [])) {
+            const key = (s.id || '').toLowerCase() || (s.name || '').toLowerCase();
+            if (!key || seen.has(key)) continue;
+            seen.add(key);
+            pool.push(s);
+        }
+    }
+    const cap = MODE_SUBJECT_CAPS[mapMode] || 5;
+    const capped = pool.slice(0, cap);
+    const droppedForCap = Math.max(0, pool.length - capped.length);
+
+    // Reassign roles for the merged mode (comparison → all primary; others →
+    // first primary, rest secondary). Preserve kind from the source.
+    const roles = _assignRoles(capped.map(s => s.name), mapMode);
+    const subjects = capped.map((s, i) => ({
+        id: s.id,
+        name: s.name,
+        kind: s.kind || 'place',
+        role: roles[i],
+    }));
+
+    const mapPurpose = MODE_TO_DEFAULT_PURPOSE[mapMode] || 'establish-location';
+    const framing = (mapMode === 'route' || mapMode === 'comparison') ? 'held-wide'
+                  : mapMode === 'region' ? 'establish-then-tight'
+                  : 'sequential-stops';
+
+    const annotationPlan = {
+        labels: subjects.map(s => ({
+            subjectId: s.id,
+            style: (mapMode === 'comparison' || mapMode === 'region') ? 'callout' : 'pin',
+            text: s.name,
+        })),
+    };
+
+    // Inherit the first source's fallback policy; min rises to match new mode.
+    const firstFb = mapScenes[0].fallbackPolicy || {};
+    const fallbackPolicy = {
+        onGeocodeFail:       firstFb.onGeocodeFail       || 'drop-subject',
+        onTooManySubjects:   firstFb.onTooManySubjects   || 'reduce-to-primary',
+        minSubjectsRequired: MODE_MIN_SUBJECTS[mapMode]  || 1,
+    };
+
+    return {
+        sceneIndex: mapScenes[0].sceneIndex, // first owner — legacy log anchor
+        mapPurpose,
+        mapMode,
+        subjects,
+        geometry: null,     // provider will populate
+        cameraPlan: { framing, stops: null },
+        annotationPlan,
+        renderAssets: null, // provider will populate
+        fallbackPolicy,
+        provenance: {
+            source: 'merged',
+            disposition: mapScenes[0].provenance?.disposition || null,
+            rawPayload: mapScenes.map(ms => ms.provenance?.rawPayload).filter(Boolean).join(' || '),
+            mapVariantInput: variantOrMode || null,
+            mergedFromScenes: mapScenes.map(ms => ms.sceneIndex),
+            droppedForCap,
+        },
+    };
+}
+
 // ── Summary log ─────────────────────────────────────────────────────────
 function logCompiledMapScenes(compiled, skipped) {
     console.log('\n════════════════════════════════════════════════════════════');
@@ -323,6 +411,7 @@ function logCompiledMapScenes(compiled, skipped) {
 module.exports = {
     compileMapScenes,
     logCompiledMapScenes,
+    mergeMapScenes,
     // Exposed for tests + Slice 5 niche-policy overrides:
     _MODE_SUBJECT_CAPS: MODE_SUBJECT_CAPS,
     _MODE_MIN_SUBJECTS: MODE_MIN_SUBJECTS,

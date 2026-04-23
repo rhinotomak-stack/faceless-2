@@ -89,7 +89,7 @@ const TOPIC_FILE_MAP = {
     compositor:   ['ui/js/compositor/Compositor.js', 'ui/js/compositor/SceneGraph.js'],
     render:       ['ui/js/compositor/Compositor.js', 'ui/js/compositor/ExportPipeline.js'],
     animation:    ['ui/js/compositor/AnimationUtils.js', 'src/mg-registry.js'],
-    map:          ['src/map-provider.js', 'src/ai-map-planner.js'],
+    map:          ['src/map-provider.js', 'src/map-compiler.js', 'src/map-assignment.js'],
     overlay:      ['src/build-video.js'],
     subtitle:     ['ui/js/compositor/Compositor.js'],
     audio:        ['src/build-video.js'],

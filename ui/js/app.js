@@ -623,8 +623,6 @@ const elements = {
     mapPanYVal: document.getElementById('map-pan-y-val'),
     mapVariant: document.getElementById('map-variant'),
     mapCinematic: document.getElementById('map-cinematic'),
-    mapUsePlanner: document.getElementById('map-use-planner'),
-    mapTestNarration: document.getElementById('map-test-narration'),
     // Clip analyzer toggle
     clipAnalyzerToggle: document.getElementById('clip-analyzer-toggle'),
     // Resume build toggle (skip completed steps + reuse cached scene media)
@@ -9301,13 +9299,8 @@ function setupStyleLearner() {
     if (elements.btnMapTest) {
         elements.btnMapTest.addEventListener('click', async () => {
             const locStr = (elements.mapTestLocations?.value || '').trim();
-            const useAIPlannerEarly = !!elements.mapUsePlanner?.checked;
-            const narrationEarly = (elements.mapTestNarration?.value || '').trim();
-            // Locations are only mandatory when NOT using the AI Planner, OR when
-            // AI Planner is on but narration is also empty. With AI Planner + narration,
-            // entity extraction in map-provider.js will pull places from the narration.
-            if (!locStr && !(useAIPlannerEarly && narrationEarly)) {
-                elements.mapTestStatus.textContent = 'Enter at least one location (or enable AI Planner + narration)';
+            if (!locStr) {
+                elements.mapTestStatus.textContent = 'Enter at least one location';
                 return;
             }
             // Parse waypoint format: "United States 0-3 z1.0, Texas 3-8 z3.0 t0.3 b15 o20"
@@ -9358,94 +9351,10 @@ function setupStyleLearner() {
             const mapStyle = elements.mapTestStyle?.value || 'dark';
             const title = elements.mapTestTitle?.value || '';
 
-            // ── AI Planner mode: emulate a real build by routing through ai-map-planner.js ──
-            // The locations field supplies the entity list; the narration textarea supplies the
-            // scene text the planner uses to pick waypoints, zooms, and timings.
-            const useAIPlanner = !!elements.mapUsePlanner?.checked;
-            if (useAIPlanner) {
-                const planner = window._mapPlanner;
-                if (!planner || !planner.planMapAnimations) {
-                    elements.mapTestStatus.textContent = 'AI Map Planner not available (check preload)';
-                    return;
-                }
-                const narration = (elements.mapTestNarration?.value || '').trim();
-                if (!narration && locations.length === 0) {
-                    elements.mapTestStatus.textContent = 'AI Planner: enter locations or narration first';
-                    return;
-                }
-                const sceneDurUI = parseInt(elements.mapDuration?.value) || 7;
-                const variantOverride = elements.mapVariant?.value || 'auto';
-                const variant = variantOverride !== 'auto' ? variantOverride : 'regionHighlight';
-
-                // Build a synthetic mapChart MG matching what VP would emit.
-                // - If the user typed locations, use "Location: #N" subtext pairs (step-1 extraction).
-                // - If locations are empty, stash the narration in mg.text so step-2b GEO_COORDS
-                //   scan auto-discovers places mentioned in the narration ("Europe", "Asia", etc.).
-                const subtextPairs = locations.map((loc, i) => `${loc}: #${i + 1}`).join(', ');
-                const syntheticMG = {
-                    type: 'mapChart',
-                    text: locations.length === 0 ? narration : (title || ''),
-                    subtext: subtextPairs,
-                    sceneIndex: 0,
-                    duration: sceneDurUI,
-                    mapVariant: variant,
-                    subType: variant,
-                };
-
-                // Build a minimal scriptContext: entities array + place tags so
-                // map-provider.extractEntities recognises every typed location.
-                const entityTypes = {};
-                for (const loc of locations) entityTypes[loc] = 'place';
-                const scriptContext = {
-                    entities: locations.slice(),
-                    entityTypes,
-                    pacing: 'medium',
-                    format: 'documentary',
-                    tone: 'neutral',
-                };
-
-                // One-scene array — narration is what the AI reads.
-                const scenes = [{
-                    text: narration,
-                    startTime: 0,
-                    endTime: sceneDurUI,
-                    duration: sceneDurUI * 30,
-                    words: [],
-                }];
-
-                elements.mapTestStatus.textContent = 'AI Planner: calling planMapAnimations()...';
-                try {
-                    await planner.planMapAnimations([syntheticMG], scriptContext, '', scenes);
-                } catch (err) {
-                    console.warn('[Map Test] AI Planner failed:', err);
-                    elements.mapTestStatus.textContent = `AI Planner failed: ${err.message}`;
-                    return;
-                }
-
-                const planned = syntheticMG._mapWaypoints || [];
-                if (planned.length === 0) {
-                    elements.mapTestStatus.textContent = 'AI Planner returned no waypoints';
-                    return;
-                }
-                console.log(`[Map Test] AI Planner produced ${planned.length} waypoint(s)`);
-                for (const wp of planned) {
-                    const params = [];
-                    if (wp.zoom != null) params.push(`z${wp.zoom}`);
-                    if (wp.tilt != null) params.push(`t${wp.tilt}`);
-                    if (wp.bearing != null) params.push(`b${wp.bearing}`);
-                    if (wp.orbit != null) params.push(`o${wp.orbit}`);
-                    console.log(`  📍 ${wp.name} ${wp.startTime}-${wp.endTime}s ${params.join(' ')}`);
-                }
-                elements.mapTestStatus.textContent = `AI Planner: ${planned.length} waypoints planned`;
-
-                // Use the planner's place list (covers names it added, e.g. ocean basins
-                // promoted via swarms) so geocoding + boundaries cover everything it cares about.
-                const plannedNames = Array.from(new Set(planned.map(w => w.name).filter(Boolean)));
-                const swarms = syntheticMG._mapSwarms || [];
-                _injectMapTest(plannedNames.length ? plannedNames : locations, mapStyle, title, planned, swarms);
-                return;
-            }
-
+            // Slice 4 (Apr 23): AI Planner mode removed. Waypoints are now
+            // materialized deterministically from MapScene inside map-provider.js
+            // — a UI-level AI planner emulation no longer matches the real
+            // pipeline, so the Map Test tool runs in pure manual/locations mode.
             _injectMapTest(locations, mapStyle, title, hasWaypoints ? waypoints : null);
         });
     }

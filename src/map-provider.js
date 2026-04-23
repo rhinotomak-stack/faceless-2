@@ -737,6 +737,58 @@ function _populateMapSceneAssets(mapScene, mg, view) {
 }
 
 /**
+ * Slice 4: deterministic waypoint materializer. Replaces the deleted AI map
+ * planner by projecting MapScene.subjects + mapMode onto the legacy waypoint
+ * fields the renderer still reads (mg._mapWaypoints, mg._mapBigMap,
+ * mg._mapRoutePath). No AI, no narration parsing — choreography is derived
+ * from the compiler's canonical subject list in the order it produced them.
+ *
+ * Mode behavior:
+ *   - locator:    first subject wide (z=1.0), subsequent tight (z=2.5)
+ *   - route:      held-wide across all subjects (z=1.4, no tilt);
+ *                 also sets mg._mapRoutePath so the renderer draws the arc.
+ *   - region:     first wide (z=1.0), then tight (z=1.8) per region.
+ *   - comparison: held-wide across all subjects (z=1.3, no tilt).
+ */
+function _materializeWaypointsFromMapScene(mg, mapScene) {
+    if (!mapScene) return;
+    const subjects = Array.isArray(mapScene.subjects) ? mapScene.subjects : [];
+    if (subjects.length === 0) return;
+
+    const mode = mapScene.mapMode || 'locator';
+    const duration = Math.max(2, mg.duration || 8);
+    const perWp = Math.max(2, duration / subjects.length);
+
+    const zoomFor = (i) => {
+        if (mode === 'route')      return 1.4;
+        if (mode === 'comparison') return 1.3;
+        if (mode === 'region')     return i === 0 ? 1.0 : 1.8;
+        return i === 0 ? 1.0 : 2.5;
+    };
+    const tiltFor = (i) => {
+        if (mode === 'route' || mode === 'comparison') return null;
+        return i === 0 ? null : 0.15;
+    };
+
+    const waypoints = subjects.map((s, i) => ({
+        name: s.name,
+        startTime: Math.min(i * perWp, Math.max(0, duration - 1)),
+        endTime: Math.min((i + 1) * perWp, duration),
+        zoom: zoomFor(i),
+        tilt: tiltFor(i),
+        bearing: null,
+        orbit: null,
+        icon: null,
+    }));
+
+    mg._mapWaypoints = waypoints;
+    mg._mapBigMap = true;
+    mg._mapRoutePath = mode === 'route';
+
+    console.log(`      🧭 Materialized ${waypoints.length} waypoint(s) from MapScene (${mode}): ${waypoints.map(w => `${w.name} z${w.zoom}`).join(', ')}`);
+}
+
+/**
  * Download a static map image for a mapChart MG.
  * Tries MapTiler (tile stitching) first, then Geoapify (static API).
  * Now with geocoding: resolves city/landmark names → exact coordinates.
@@ -761,10 +813,23 @@ async function downloadMapForMG(mg, scriptContext, tempDir, scenes) {
 
     const entityTypes = scriptContext?.entityTypes || {};
 
-    // Slice 3: look up the authoritative MapScene (compiler output).
-    const mapScene = (Array.isArray(scenes) && mg.sceneIndex != null)
-        ? scenes.find(s => s && s.index === mg.sceneIndex)?._mapScene || null
+    // Slice 3: look up the authoritative MapScene.
+    // Precedence:
+    //   1. mg._mapScene — set by build-video when adjacent map MGs are merged
+    //      across multiple scenes (multi-scene route). Covers the full span.
+    //   2. scene._mapScene — single-scene map from the compiler.
+    const ownerScene = (Array.isArray(scenes) && mg.sceneIndex != null)
+        ? scenes.find(s => s && s.index === mg.sceneIndex) || null
         : null;
+    const mapScene = mg._mapScene || ownerScene?._mapScene || null;
+
+    // Slice 4: materialize deterministic waypoints from MapScene.subjects BEFORE
+    // the big-map / pin logic runs. Previously the AI map planner populated
+    // mg._mapWaypoints in a separate pipeline step; now the provider owns it.
+    // Skip if waypoints were already attached (e.g. UI Map Test manual override).
+    if (mapScene && !Array.isArray(mg._mapWaypoints)) {
+        _materializeWaypointsFromMapScene(mg, mapScene);
+    }
 
     let entities;
     if (mapScene && Array.isArray(mapScene.subjects) && mapScene.subjects.length > 0) {

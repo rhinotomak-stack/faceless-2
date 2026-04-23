@@ -1353,6 +1353,35 @@ async function buildVideo() {
         if (mergedCount > 0) {
             allMGs = allMGs.filter(mg => !toRemove.has(mg));
             log.info(`🔀 Merged ${mergedCount} adjacent fullscreen MG(s) with same type (gap ≤ ${MERGE_GAP_THRESHOLD}s) — one continuous visual instead of neighbors with a gap`);
+
+            // Synthesize a unified MapScene for each merged mapChart MG so the
+            // planner + provider see subjects from the WHOLE merged span, not
+            // just the first owning scene. Without this, a merged route that
+            // spans 3 scenes would only geocode the first scene's subjects.
+            try {
+                const { mergeMapScenes } = require('./map-compiler');
+                let synthesized = 0;
+                for (const mg of allMGs) {
+                    if (mg.type !== 'mapChart') continue;
+                    if (!Array.isArray(mg._mergedFrom) || mg._mergedFrom.length < 2) continue;
+                    const owners = mg._mergedFrom
+                        .map(idx => scenesWithKeywords.find(s => s && s.index === idx))
+                        .filter(Boolean);
+                    const sources = owners.map(s => s._mapScene).filter(Boolean);
+                    if (sources.length < 2) continue; // single source → scene lookup suffices
+                    const merged = mergeMapScenes(sources, mg.mapVariant);
+                    if (merged) {
+                        mg._mapScene = merged;
+                        synthesized++;
+                        log.dim(`   🔀 Merged MapScene for MG spanning scenes [${mg._mergedFrom.join(',')}]: ${merged.subjects.map(s => s.name).join(', ')} (${merged.mapMode})`);
+                    }
+                }
+                if (synthesized > 0) {
+                    log.info(`🧭 Synthesized ${synthesized} merged MapScene(s) for multi-scene map MG(s)`);
+                }
+            } catch (err) {
+                log.warn(`Merged MapScene synthesis failed: ${err.message} — planner/provider will use first-scene MapScene only`);
+            }
         }
     }
 
@@ -1498,25 +1527,9 @@ async function buildVideo() {
         log.br();
     }
 
-    // Step 6.05: AI Map Animation Planner — enrich mapChart MGs with waypoints
-    const mapMGsForPlanning = allMGs.filter(mg => mg.type === 'mapChart');
-    if (mapMGsForPlanning.length > 0) {
-        log.step('🗺️ Step 6.05: Map Animation Planner');
-        try {
-            const { planMapAnimations } = require('./ai-map-planner');
-            // Must pass scenesWithKeywords (full compiled set with _mapScene) —
-            // fullscreen map scenes were split out of scenesWithMedia at line 980.
-            const enriched = await planMapAnimations(allMGs, scriptContext, combinedInstructions, scenesWithKeywords);
-            if (enriched > 0) {
-                log.ok(`Planned ${enriched} map animation(s) with waypoints`);
-            } else {
-                log.dim('No map animations enriched (no locations found)');
-            }
-        } catch (e) {
-            log.warn(`Map planner failed: ${e.message} — maps will use basic animation`);
-        }
-        log.br();
-    }
+    // Slice 4 (Apr 23): AI Map Planner deleted. Waypoints are now materialized
+    // deterministically from MapScene.subjects inside map-provider.js — no
+    // separate pipeline step, no AI narration re-parse.
 
     // Step 6.06: Download static map images for mapChart MGs (via MapTiler API)
     const mapMGs = allMGs.filter(mg => mg.type === 'mapChart');
@@ -1586,7 +1599,7 @@ async function buildVideo() {
                 if (mg._mapPins) target._mapPins = mg._mapPins;
                 if (mg._osmBoundaries) target._osmBoundaries = mg._osmBoundaries;
             }
-            // Waypoint animation data (from ai-map-planner.js)
+            // Waypoint animation data (materialized from MapScene in map-provider.js)
             if (mg._mapWaypoints) target._mapWaypoints = mg._mapWaypoints;
             if (mg._bigMapSize) target._bigMapSize = mg._bigMapSize;
             if (mg._wpCoords) target._wpCoords = mg._wpCoords;
