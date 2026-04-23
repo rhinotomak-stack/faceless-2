@@ -183,21 +183,16 @@ class MGRenderer {
     }
 
     /**
-     * Phase B: resolve the authoritative MapScene + renderAssets for a mapChart MG.
-     * New builds attach `_mapScene` end-to-end (compiler → provider → build-video
-     * merge-back → video-plan.json → SceneGraph). Old video-plan.json files
-     * without `_mapScene` still work via the per-field legacy fallbacks below.
-     * A one-shot warning fires the first time the legacy path is taken — but only
-     * when called from the actual draw path (`warn: true`). Preload helpers stay
-     * silent so the warning can't race ahead of render and mislead debugging.
+     * Resolve the authoritative MapScene + renderAssets for a mapChart MG.
+     * Post-Slice-6: `_mapScene` is the sole source of truth — the compiler and
+     * provider attach it end-to-end (compiler → provider → build-video merge-back
+     * → video-plan.json → SceneGraph). Callers that get `{ ms: null }` must bail
+     * (preload helpers) or skip render (_renderMapChart) — there is no legacy
+     * side-channel fallback to hydrate from anymore.
      */
-    _resolveMapData(mg, { warn = false } = {}) {
+    _resolveMapData(mg) {
         const ms = mg._mapScene || mg.mgData?._mapScene || null;
         const ra = ms?.renderAssets || null;
-        if (warn && !ms && !this._mapLegacyWarned) {
-            this._mapLegacyWarned = true;
-            console.warn('[MGRenderer] Map scene has no _mapScene — using legacy side-channel fields. This fallback will be removed after Phase C.');
-        }
         return { ms, ra };
     }
 
@@ -207,9 +202,10 @@ class MGRenderer {
      */
     _ensureMapImage(mg) {
         const { ra } = this._resolveMapData(mg);
-        // Phase B: filename comes from MapScene.renderAssets when present; the
-        // browser-resolved URL still rides on mg (runtime, not build-time data).
-        const file = (ra && ra.mapImageFile) || mg.mapImageFile;
+        if (!ra) return; // No MapScene → nothing to preload.
+        // Filename comes from MapScene.renderAssets; the browser-resolved URL
+        // still rides on mg (runtime, not build-time data).
+        const file = ra.mapImageFile;
         const url = mg._mapImageUrl;
         if (!file || this._mapImages[file] || this._mapImageLoading[file]) return;
         if (!url) return; // URL not yet resolved by app.js
@@ -248,7 +244,8 @@ class MGRenderer {
      */
     _ensureMapIcons(mg) {
         const { ra } = this._resolveMapData(mg);
-        const icons = (ra && ra.icons) || mg._mapIcons;
+        if (!ra) return; // No MapScene → nothing to preload.
+        const icons = ra.icons;
         if (!icons || typeof icons !== 'object') return;
         for (const [name, iconPath] of Object.entries(icons)) {
             const key = `__mapicon_${name}`;
@@ -3536,38 +3533,33 @@ class MGRenderer {
     // ========================================================================
 
     _renderMapChart(ctx, frame, fps, mg, s, anim, scriptContext) {
-        // ── Phase B: resolve the authoritative MapScene + renderAssets once ──
-        // All downstream reads below pull from these locals (not mg._map* / mg.mapImageFile).
-        // When _mapScene is present (new builds), renderAssets is the source of truth.
-        // When it's missing (old plans loaded from disk), the legacy hydration bridge
-        // below still promotes mgData fields onto mg so the fallbacks resolve.
-        const { ms: _mapScene, ra: _ra } = this._resolveMapData(mg, { warn: true });
+        // ── Slice 6: _mapScene is the sole source of truth for map data ──
+        // Every mapChart MG must carry a compiled MapScene end-to-end. Missing
+        // _mapScene means upstream compilation skipped the scene (or the
+        // video-plan.json predates Slice 4) — we no longer fall back to stale
+        // side-channel fields. User-tunable UI keyframes (mg._mapZoomSpeed,
+        // mg._mapPanXStart, etc.) are NOT MapScene data and continue to read
+        // from mg directly throughout this function.
+        const { ms: _mapScene, ra: _ra } = this._resolveMapData(mg);
+        if (!_ra) {
+            if (!this._mapNoSceneWarned) this._mapNoSceneWarned = new Set();
+            const _noSceneKey = String(mg.sceneIndex ?? 'noidx');
+            if (!this._mapNoSceneWarned.has(_noSceneKey)) {
+                this._mapNoSceneWarned.add(_noSceneKey);
+                console.error(`[MGRenderer] mapChart scene ${mg.sceneIndex ?? '?'} has no _mapScene — skipping render. Rebuild the project to regenerate the MapScene.`);
+            }
+            return;
+        }
 
-        // Legacy hydration bridge — only useful when _mapScene is missing. Kept
-        // verbatim so old video-plan.json files render identically while the
-        // migration is in flight. Safe to remove after Phase C.
-        const _mgd = mg.mgData || mg;
-        if (!mg._bigMapSize && _mgd._bigMapSize) mg._bigMapSize = _mgd._bigMapSize;
-        if (!mg._mapWaypoints && _mgd._mapWaypoints) mg._mapWaypoints = _mgd._mapWaypoints;
-        if (!mg._wpCoords && _mgd._wpCoords) mg._wpCoords = _mgd._wpCoords;
-        if (!mg._mapBigMap && _mgd._mapBigMap) mg._mapBigMap = _mgd._mapBigMap;
-        if (!mg._osmBoundaries && _mgd._osmBoundaries) mg._osmBoundaries = _mgd._osmBoundaries;
-        if (!mg._mapIcons && _mgd._mapIcons) mg._mapIcons = _mgd._mapIcons;
-        if (!mg._mapSwarms && _mgd._mapSwarms) mg._mapSwarms = _mgd._mapSwarms;
-        if (!mg._mapRoutePath && _mgd._mapRoutePath) mg._mapRoutePath = _mgd._mapRoutePath;
-
-        // ── Unified read surface: prefer MapScene.renderAssets, fall back to mg.* ──
-        // These are the ONLY names used for map-data reads below this block. User-
-        // tunable UI keyframes (mg._mapZoomSpeed, mg._mapPanXStart, etc.) are NOT
-        // MapScene data and continue to read from mg directly.
-        const _mapImageFile  = (_ra && _ra.mapImageFile) || mg.mapImageFile  || null;
-        const _mapView       = (_ra && _ra.mapView)      || mg._mapView      || null;
-        const _mapPins       = (_ra && _ra.mapView && _ra.mapView.pins) || mg._mapPins || [];
-        const _bigMapSize    = (_ra && _ra.bigMapSize)   || mg._bigMapSize   || null;
-        const _mapWaypoints  = (_ra && _ra.waypoints)    || mg._mapWaypoints || null;
-        const _wpCoords      = (_ra && _ra.wpCoords)     || mg._wpCoords     || [];
-        const _mapSwarms     = (_ra && _ra.swarms)       || mg._mapSwarms    || null;
-        const _mapRoutePath  = (_ra && _ra.routePath != null) ? !!_ra.routePath : !!mg._mapRoutePath;
+        // Unified read surface — every downstream read uses these locals.
+        const _mapImageFile  = _ra.mapImageFile || null;
+        const _mapView       = _ra.mapView      || null;
+        const _mapPins       = _ra.mapView?.pins || [];
+        const _bigMapSize    = _ra.bigMapSize   || null;
+        const _mapWaypoints  = _ra.waypoints    || null;
+        const _wpCoords      = _ra.wpCoords     || [];
+        const _mapSwarms     = _ra.swarms       || null;
+        const _mapRoutePath  = !!_ra.routePath;
         const { opacity, enterProgress } = anim;
         const W = 1920, H = 1080;
         const elapsed = frame / fps;

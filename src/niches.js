@@ -2524,6 +2524,89 @@ function getNicheSplitConfig(nicheId) {
 }
 
 // ============================================================
+// MAP POLICY (Slice 5a) — per-niche overrides for MapScene compilation
+// ============================================================
+//
+// Map policy controls how the compiler clamps subjects and resolves the
+// map mode when VP's mapVariant is missing/ambiguous. Global defaults live
+// in map-compiler.js (MODE_SUBJECT_CAPS / MODE_MIN_SUBJECTS); this layer
+// lets specific niches widen or tighten those caps per mapMode, or set a
+// preferred mode order when variant input is unclear.
+//
+// Shape of a niche override (all fields optional; missing fields inherit
+// from DEFAULT_MAP_POLICY):
+//   {
+//     subjectCaps:    { locator, route, region, comparison }, // max subjects
+//     minSubjects:    { locator, route, region, comparison }, // min to compile
+//     preferredModes: ['route', 'locator', ...],              // tie-break order
+//   }
+//
+// `preferredModes` only takes effect when the incoming mapVariant is absent
+// or unrecognized — a VP-supplied variant (locator | route | regionHighlight
+// | comparison) always wins.
+const DEFAULT_MAP_POLICY = {
+    subjectCaps:    { locator: 3, route: 2, region: 5, comparison: 4 },
+    minSubjects:    { locator: 1, route: 2, region: 1, comparison: 2 },
+    preferredModes: ['locator', 'region', 'route', 'comparison'],
+};
+
+const MAP_POLICY_OVERRIDES = {
+    // MILITARY — narration walks through multi-stop routes (troop movements,
+    // supply lines, strike corridors). Default route cap of 2 is too tight;
+    // bump to 4 so a 3-4 stop advance can render as one continuous map scene
+    // instead of two half-routes.
+    'news.military':      { subjectCaps: { route: 4 }, preferredModes: ['route', 'locator', 'region', 'comparison'] },
+    'explainer.military': { subjectCaps: { route: 4 }, preferredModes: ['route', 'locator', 'region', 'comparison'] },
+
+    // POLITICS — locator-and-comparison dominant (one capital, or two nations
+    // in dialogue). Routes are rare; region highlights are rarer still.
+    'news.politics':      { preferredModes: ['locator', 'comparison', 'region', 'route'] },
+    'explainer.politics': { preferredModes: ['locator', 'comparison', 'region', 'route'] },
+
+    // HISTORY — expeditions, expansions, trade routes all want more stops.
+    // Also widen region for empires/territories that sprawl beyond 5 subjects.
+    'explainer.history':  { subjectCaps: { route: 5, region: 6 }, preferredModes: ['route', 'region', 'locator', 'comparison'] },
+
+    // CRIME — location-heavy (scene, suspect, victim). Locator dominant;
+    // comparison rare but useful (e.g. two cities where the suspect operated).
+    'explainer.crime':    { preferredModes: ['locator', 'comparison', 'region', 'route'] },
+
+    // NATURE — habitats/biomes/migration ranges → region dominant with a
+    // wider cap so multi-biome/multi-range surveys fit one frame.
+    'explainer.nature':   { subjectCaps: { region: 7 }, preferredModes: ['region', 'locator', 'route', 'comparison'] },
+
+    // ECONOMY — country-pair comparisons dominate (GDP, currency crises,
+    // trade imbalances). Comparison first, locator for single-country stories.
+    'news.economy':       { preferredModes: ['comparison', 'locator', 'region', 'route'] },
+};
+
+function _deepMergeMapPolicy(base, override) {
+    const out = {
+        subjectCaps:    Object.assign({}, base.subjectCaps),
+        minSubjects:    Object.assign({}, base.minSubjects),
+        preferredModes: [...base.preferredModes],
+    };
+    if (!override) return out;
+    if (override.subjectCaps)    Object.assign(out.subjectCaps,    override.subjectCaps);
+    if (override.minSubjects)    Object.assign(out.minSubjects,    override.minSubjects);
+    if (Array.isArray(override.preferredModes) && override.preferredModes.length) {
+        out.preferredModes = [...override.preferredModes];
+    }
+    return out;
+}
+
+/**
+ * Get the effective map policy for a niche id.
+ * Missing niche → DEFAULT_MAP_POLICY.
+ * Missing fields in override → inherit from DEFAULT_MAP_POLICY.
+ */
+function getNicheMapPolicy(nicheId) {
+    const id = String(nicheId || '').trim();
+    const override = MAP_POLICY_OVERRIDES[id] || null;
+    return _deepMergeMapPolicy(DEFAULT_MAP_POLICY, override);
+}
+
+// ============================================================
 // EXPORTS
 // ============================================================
 
@@ -2542,5 +2625,8 @@ module.exports = {
     getFallbackKeywords,
     DEFAULT_SCENE_SPLIT,
     SCENE_SPLIT_OVERRIDES,
-    getNicheSplitConfig
+    getNicheSplitConfig,
+    DEFAULT_MAP_POLICY,
+    MAP_POLICY_OVERRIDES,
+    getNicheMapPolicy,
 };

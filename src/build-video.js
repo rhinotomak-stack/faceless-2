@@ -1360,6 +1360,13 @@ async function buildVideo() {
             // spans 3 scenes would only geocode the first scene's subjects.
             try {
                 const { mergeMapScenes } = require('./map-compiler');
+                // Slice 5a: pass the resolved niche map policy so the merged
+                // MapScene uses niche-specific caps/minimums, matching what
+                // compileMapScenes applied upstream.
+                let _mergePolicy = null;
+                try {
+                    _mergePolicy = require('./niches').getNicheMapPolicy(scriptContext?.nicheId);
+                } catch (_) { /* fall through to compiler defaults */ }
                 let synthesized = 0;
                 for (const mg of allMGs) {
                     if (mg.type !== 'mapChart') continue;
@@ -1369,7 +1376,7 @@ async function buildVideo() {
                         .filter(Boolean);
                     const sources = owners.map(s => s._mapScene).filter(Boolean);
                     if (sources.length < 2) continue; // single source → scene lookup suffices
-                    const merged = mergeMapScenes(sources, mg.mapVariant);
+                    const merged = mergeMapScenes(sources, mg.mapVariant, _mergePolicy);
                     if (merged) {
                         mg._mapScene = merged;
                         synthesized++;

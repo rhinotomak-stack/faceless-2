@@ -178,6 +178,40 @@ function compileMapScenes(scenes, scriptContext, dispositions) {
     const entityTypes = scriptContext?.entityTypes || {};
     const dispositionBySceneIdx = new Map((dispositions || []).map(d => [d.sceneIndex, d]));
 
+    // Slice 5a: resolve per-niche map policy (subject caps, min subjects,
+    // preferredModes). Policy is resolved once per build since nicheId
+    // doesn't change scene-to-scene. Defensive require so unit-test harnesses
+    // that stub out niches.js still get a working compiler with defaults.
+    let policy;
+    try {
+        const { getNicheMapPolicy } = require('./niches');
+        policy = getNicheMapPolicy(scriptContext?.nicheId);
+    } catch (_err) {
+        policy = {
+            subjectCaps: { ...MODE_SUBJECT_CAPS },
+            minSubjects: { ...MODE_MIN_SUBJECTS },
+            preferredModes: ['locator', 'region', 'route', 'comparison'],
+        };
+    }
+    // Log only the delta vs compiler defaults — a pure-default policy is
+    // silent so this doesn't spam generic builds.
+    const _capsDelta = Object.entries(policy.subjectCaps)
+        .filter(([m, v]) => v !== MODE_SUBJECT_CAPS[m])
+        .map(([m, v]) => `${m}:${MODE_SUBJECT_CAPS[m]}→${v}`);
+    const _minsDelta = Object.entries(policy.minSubjects)
+        .filter(([m, v]) => v !== MODE_MIN_SUBJECTS[m])
+        .map(([m, v]) => `${m}:${MODE_MIN_SUBJECTS[m]}→${v}`);
+    const _defaultModes = ['locator', 'region', 'route', 'comparison'];
+    const _modesChanged = policy.preferredModes.length !== _defaultModes.length
+        || policy.preferredModes.some((m, i) => m !== _defaultModes[i]);
+    if (_capsDelta.length || _minsDelta.length || _modesChanged) {
+        console.log(`   🧭 Map policy (niche=${scriptContext?.nicheId || 'default'}): ` +
+            (_capsDelta.length ? `caps[${_capsDelta.join(', ')}] ` : '') +
+            (_minsDelta.length ? `min[${_minsDelta.join(', ')}] ` : '') +
+            (_modesChanged ? `preferred=[${policy.preferredModes.join('>')}]` : '')
+        );
+    }
+
     const compiled = [];
     const skipped = [];
 
@@ -190,8 +224,10 @@ function compileMapScenes(scenes, scriptContext, dispositions) {
         const disposition = dispositionBySceneIdx.get(scene.index) || null;
 
         // ── Resolve mapMode ──
+        // VP-supplied variant wins when recognized; otherwise fall back to the
+        // niche's preferredModes[0], then the compiler-level DEFAULT_MODE.
         const variantInput = (scene.mapVariant || '').toLowerCase();
-        const mapMode = VARIANT_TO_MODE[variantInput] || DEFAULT_MODE;
+        const mapMode = VARIANT_TO_MODE[variantInput] || policy.preferredModes[0] || DEFAULT_MODE;
 
         // ── Resolve subjects ──
         // Prefer disposition's matchedPlaces (Slice 1 set these authoritatively
@@ -225,10 +261,11 @@ function compileMapScenes(scenes, scriptContext, dispositions) {
         }
 
         // ── Cap and validate ──
-        const cap = MODE_SUBJECT_CAPS[mapMode] || 4;
+        // Policy overrides win; compiler-level defaults are the safety net.
+        const cap = policy.subjectCaps[mapMode] ?? MODE_SUBJECT_CAPS[mapMode] ?? 4;
         const capped = rawNames.slice(0, cap);
         const droppedForCap = Math.max(0, rawNames.length - capped.length);
-        const min = MODE_MIN_SUBJECTS[mapMode] || 1;
+        const min = policy.minSubjects[mapMode] ?? MODE_MIN_SUBJECTS[mapMode] ?? 1;
         if (capped.length < min) {
             skipped.push({ sceneIndex: scene.index, reason: `mode=${mapMode} requires ≥${min} subjects, got ${capped.length}` });
             continue;
@@ -304,7 +341,9 @@ function compileMapScenes(scenes, scriptContext, dispositions) {
 //
 // `variantOrMode` is the merged MG's mapVariant (build-video promotes
 // locator/regionHighlight → route during merge). Pass whatever the MG has now.
-function mergeMapScenes(mapScenes, variantOrMode) {
+// `policy` is the resolved niche map policy (Slice 5a). Optional — omitting
+// it falls back to compiler defaults for backward compatibility.
+function mergeMapScenes(mapScenes, variantOrMode, policy) {
     if (!Array.isArray(mapScenes) || mapScenes.length === 0) return null;
     if (mapScenes.length === 1) return mapScenes[0];
 
@@ -326,7 +365,7 @@ function mergeMapScenes(mapScenes, variantOrMode) {
             pool.push(s);
         }
     }
-    const cap = MODE_SUBJECT_CAPS[mapMode] || 5;
+    const cap = (policy?.subjectCaps?.[mapMode]) ?? MODE_SUBJECT_CAPS[mapMode] ?? 5;
     const capped = pool.slice(0, cap);
     const droppedForCap = Math.max(0, pool.length - capped.length);
 
@@ -354,11 +393,12 @@ function mergeMapScenes(mapScenes, variantOrMode) {
     };
 
     // Inherit the first source's fallback policy; min rises to match new mode.
+    const fbMin = (policy?.minSubjects?.[mapMode]) ?? MODE_MIN_SUBJECTS[mapMode] ?? 1;
     const firstFb = mapScenes[0].fallbackPolicy || {};
     const fallbackPolicy = {
         onGeocodeFail:       firstFb.onGeocodeFail       || 'drop-subject',
         onTooManySubjects:   firstFb.onTooManySubjects   || 'reduce-to-primary',
-        minSubjectsRequired: MODE_MIN_SUBJECTS[mapMode]  || 1,
+        minSubjectsRequired: fbMin,
     };
 
     return {
