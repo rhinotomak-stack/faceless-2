@@ -724,12 +724,39 @@ async function buildVideo() {
             scriptContext.styleBlock = directorsBrief.styleBlock;
         }
         log.ok(`Loaded ${scenes.length} scenes from Style Studio plan`);
+
+        // Step 3.5: Map Assignment — same deterministic gate as the normal
+        // path. Runs once on the studio scenes, then the enforcer is applied
+        // once against whichever scenes array reaches the pipeline
+        // (pre-built OR VP-output). Slice 1 must gate both entry paths.
+        try {
+            const { assignMapDispositions, logDispositions } = require('./map-assignment');
+            const dispositions = assignMapDispositions(scenes, scriptContext, scriptContext.styleProfile || null, null);
+            logDispositions(dispositions, scriptContext);
+            scriptContext._mapDispositions = dispositions;
+        } catch (err) {
+            log.warn(`Map assignment failed (studio): ${err.message} — enforcement skipped`);
+            scriptContext._mapDispositions = null;
+        }
+
         if (studioPlan.hasVisualPlan) {
             log.ok(`Visual plan included — skipping Step 4 (Visual Planner)`);
             scenesWithKeywords = scenes;
         } else {
             log.ok(`No visual plan — running Step 4 normally`);
             scenesWithKeywords = await planVisuals(scenes, scriptContext, directorsBrief);
+        }
+
+        if (scriptContext._mapDispositions) {
+            try {
+                const { enforceDispositions } = require('./map-assignment');
+                const { blocked, upgraded, upgradeSkipped } = enforceDispositions(scenesWithKeywords, scriptContext._mapDispositions);
+                const finalMap = scenesWithKeywords.filter(s => typeof s.fullscreenMG === 'string' && s.fullscreenMG.toLowerCase().startsWith('mapchart'));
+                console.log(`   [VP] Map disposition enforcement (studio): blocked=${blocked} upgraded=${upgraded} skipped=${upgradeSkipped}`);
+                console.log(`   [VP] Final map scenes: ${finalMap.map(s => s.index).join(', ') || 'none'}  (${finalMap.length} of ${scenesWithKeywords.length})`);
+            } catch (err) {
+                log.warn(`Map disposition enforcement failed (studio): ${err.message}`);
+            }
         }
         log.br();
     } else {
@@ -772,9 +799,9 @@ async function buildVideo() {
     if (scriptContext._mapDispositions) {
         try {
             const { enforceDispositions } = require('./map-assignment');
-            const { blocked, upgraded } = enforceDispositions(scenesWithKeywords, scriptContext._mapDispositions);
+            const { blocked, upgraded, upgradeSkipped } = enforceDispositions(scenesWithKeywords, scriptContext._mapDispositions);
             const finalMap = scenesWithKeywords.filter(s => typeof s.fullscreenMG === 'string' && s.fullscreenMG.toLowerCase().startsWith('mapchart'));
-            console.log(`   [VP] Map disposition enforcement: blocked=${blocked} upgraded=${upgraded}`);
+            console.log(`   [VP] Map disposition enforcement: blocked=${blocked} upgraded=${upgraded} skipped=${upgradeSkipped}`);
             console.log(`   [VP] Final map scenes: ${finalMap.map(s => s.index).join(', ') || 'none'}  (${finalMap.length} of ${scenesWithKeywords.length})`);
         } catch (err) {
             log.warn(`Map disposition enforcement failed: ${err.message}`);

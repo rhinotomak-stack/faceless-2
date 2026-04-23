@@ -67,15 +67,30 @@ function _getNicheBaseline(nicheId) {
     return NICHE_BASELINE[nicheId] || { baseline: 'can_map', budget: 3 };
 }
 
-function _countNamedPlaces(text, entities) {
-    if (!text || !entities || !entities.length) return 0;
+// Return the place entities that actually appear in the scene text, in
+// document order of the text (so the first-mentioned place is first). Keeps
+// the original casing from the entity list so downstream map parsers can
+// geocode "Bab-el-Mandeb" — not "bab-el-mandeb".
+function _findPlacesInText(text, entities) {
+    if (!text || !entities || !entities.length) return [];
     const lower = text.toLowerCase();
-    let hits = 0;
+    const hits = [];
     for (const e of entities) {
         if (!e || e.length < 3) continue;
-        if (lower.includes(e.toLowerCase())) hits++;
+        const idx = lower.indexOf(e.toLowerCase());
+        if (idx >= 0) hits.push({ name: e, idx });
     }
-    return hits;
+    hits.sort((a, b) => a.idx - b.idx);
+    // Dedupe by lowercase name, preserving first occurrence.
+    const seen = new Set();
+    const out = [];
+    for (const h of hits) {
+        const k = h.name.toLowerCase();
+        if (seen.has(k)) continue;
+        seen.add(k);
+        out.push(h.name);
+    }
+    return out;
 }
 
 function _hasSpatialVerb(text) {
@@ -106,11 +121,14 @@ function _zoneForScene(scene, scriptContext) {
 }
 
 // Only entity kinds that geocode to a point/region. Skip people, orgs, events.
+// entityTypes is keyed by lowercase name everywhere else in the codebase
+// (ai-director stores it that way, VP reads it that way); mirror that here
+// so person/org/event names don't get miscounted as places.
 function _placeLikeEntities(scriptContext) {
     const { entities = [], entityTypes = {} } = scriptContext || {};
     const places = [];
     for (const e of entities) {
-        const t = entityTypes[e];
+        const t = entityTypes[e.toLowerCase()];
         // If we don't have a type tag, keep the entity — names like "Persian
         // Gulf" or "Red Sea" often reach us untagged and must still count.
         if (!t || t === 'place' || t === 'country' || t === 'city' || t === 'region' || t === 'waterbody') {
@@ -140,9 +158,10 @@ function assignMapDispositions(scenes, scriptContext, styleProfile = null, niche
         const zone = _zoneForScene(scene, scriptContext || {});
         const spatialVerb = _hasSpatialVerb(text);
         const abstractMarker = _hasAbstractMarker(text);
-        const placeCount = _countNamedPlaces(text, placeEntities);
+        const matchedPlaces = _findPlacesInText(text, placeEntities);
+        const placeCount = matchedPlaces.length;
 
-        const signals = { zone, spatialVerb, abstractMarker, placeCount, nicheBaseline: baseline };
+        const signals = { zone, spatialVerb, abstractMarker, placeCount, matchedPlaces, nicheBaseline: baseline };
 
         // must_not_map wins over everything:
         //   CTA zone, quote-only text, abstract framing, and zero named places
@@ -224,15 +243,30 @@ function logDispositions(dispositions, scriptContext) {
     console.log('');
 }
 
+// Build the VP-shaped mapChart payload from matched places.
+// Format: "Place A: label, Place B: label" — this is the string the parser
+// at ai-motion-graphics.js (the mapChart branch) routes into mg.subtext so
+// map-provider's entity parser can geocode the pins directly without
+// falling back to the full script-wide entity dump.
+function _buildMapChartPayload(places) {
+    if (!places || places.length === 0) return null;
+    const pairs = places.slice(0, 4).map(p => `${p}: label`).join(', ');
+    return `mapChart: ${pairs}`;
+}
+
 /**
  * Apply the disposition gate to VP-planned scenes AFTER the planner runs.
  * Hard enforcement:
  *   • must_not_map   → strip any fullscreenMG starting with "mapChart" and log
- *   • must_map       → if no mapChart present, set fullscreenMG = "mapChart: locator"
- * Returns { blocked, upgraded } counts for summary logging.
+ *   • must_map       → if no mapChart present, synthesize a real mapChart
+ *                      payload from scene-matched place entities (never
+ *                      the bare string "mapChart: locator", which would
+ *                      force the downstream parser into the script-wide
+ *                      entity dump fallback).
+ * Returns { blocked, upgraded, upgradeSkipped } counts for summary logging.
  */
 function enforceDispositions(scenes, dispositions) {
-    let blocked = 0, upgraded = 0;
+    let blocked = 0, upgraded = 0, upgradeSkipped = 0;
     const byIndex = new Map(dispositions.map(d => [d.sceneIndex, d]));
     for (const scene of scenes) {
         const d = byIndex.get(scene.index);
@@ -243,19 +277,32 @@ function enforceDispositions(scenes, dispositions) {
             console.log(`   [VP] Scene ${scene.index} fullscreenMG="${scene.fullscreenMG}" BLOCKED by must_not_map (${d.reason}) → stripped`);
             scene._mapBlockedBy = scene.fullscreenMG;
             scene.fullscreenMG = null;
+            scene.mapVariant = undefined;
             blocked++;
             continue;
         }
 
         if (d.disposition === 'must_map' && !hasMap) {
+            const places = (d.signals && d.signals.matchedPlaces) || [];
+            const payload = _buildMapChartPayload(places);
+            if (!payload) {
+                // must_map requires placeCount >= 1 by the rules above, so this
+                // path is defensive. If we somehow got here with zero matched
+                // places, refuse the upgrade rather than synthesize the bare
+                // "mapChart: locator" string the old code used.
+                console.log(`   [VP] Scene ${scene.index} must_map UPGRADE SKIPPED — no matched places (${d.reason})`);
+                upgradeSkipped++;
+                continue;
+            }
             const prev = scene.fullscreenMG || scene.mgHint || 'none';
             scene._mapUpgradedFrom = prev;
-            scene.fullscreenMG = 'mapChart: locator';
-            console.log(`   [VP] Scene ${scene.index} ${prev === 'none' ? 'no MG' : `had "${prev}"`} UPGRADED to mapChart (${d.reason})`);
+            scene.fullscreenMG = payload;
+            scene.mapVariant = 'locator';
+            console.log(`   [VP] Scene ${scene.index} ${prev === 'none' ? 'no MG' : `had "${prev}"`} UPGRADED to "${payload}" (${d.reason})`);
             upgraded++;
         }
     }
-    return { blocked, upgraded };
+    return { blocked, upgraded, upgradeSkipped };
 }
 
 module.exports = {
