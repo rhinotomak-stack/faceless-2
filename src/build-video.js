@@ -923,19 +923,6 @@ async function buildVideo() {
         }
     }
 
-    // Slice 2: compile authoritative MapScene objects for every surviving map scene.
-    // Runs ONCE on the final post-mutation state (after directives, mgHint promotion,
-    // listicle injection, and niche filtering) so MapScene reflects what will actually render.
-    // Shared by both studio and normal paths (branch split ended above).
-    try {
-        const { compileMapScenes, logCompiledMapScenes } = require('./map-compiler');
-        const { compiled, skipped } = compileMapScenes(scenesWithKeywords, scriptContext, scriptContext._mapDispositions || []);
-        scriptContext._mapScenes = compiled;
-        logCompiledMapScenes(compiled, skipped);
-    } catch (err) {
-        log.warn(`Map compiler failed: ${err.message} — downstream will use legacy payload only`);
-    }
-
     // ── Orchestrator Phase 1: Pre-Build AI Review ──
     log.step('🧠 Step 4.8: Orchestrator — Pre-Build Review');
     buildManifest = null;
@@ -952,6 +939,20 @@ async function buildVideo() {
         log.warn(`Orchestrator Phase 1 failed: ${error.message} — continuing without`);
     }
     log.br();
+
+    // Slice 2: compile authoritative MapScene objects for every surviving map scene.
+    // Runs ONCE on the FINAL post-orchestration state — after directives, mgHint promotion,
+    // listicle injection, niche filtering, AND preBuildReview mutations — so MapScene
+    // reflects the true fullscreen map state that will actually render.
+    // Shared by both studio and normal paths (branch split ended above).
+    try {
+        const { compileMapScenes, logCompiledMapScenes } = require('./map-compiler');
+        const { compiled, skipped } = compileMapScenes(scenesWithKeywords, scriptContext, scriptContext._mapDispositions || []);
+        scriptContext._mapScenes = compiled;
+        logCompiledMapScenes(compiled, skipped);
+    } catch (err) {
+        log.warn(`Map compiler failed: ${err.message} — downstream will use legacy payload only`);
+    }
 
     // ── Save checkpoint (Steps 2-4.8 complete) ──
     // If the build fails later (download, MG, etc.), next build resumes from here.
