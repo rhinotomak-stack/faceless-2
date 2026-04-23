@@ -3728,8 +3728,53 @@ class MGRenderer {
 
         // ═══ WAYPOINT SYSTEM ═══
         // Renamed locals below preserve the original read sites unchanged.
-        const _waypoints = _mapWaypoints;
+        let _waypoints = _mapWaypoints;
         const _wpPins    = _mapPins;
+
+        // Slice 5b: when USE_CAMERA_PLAN_STOPS is enabled AND the provider
+        // attached cameraPlan.stops to _mapScene, feed those stops in as the
+        // waypoint source. Stops carry the same per-subject camera intent
+        // (lon/lat/zoom/tilt/bearing/orbit/startTime/endTime) but come from
+        // the authoritative provider pipeline with coords already geocoded.
+        // Everything downstream (wpPositions build, per-wp camera, bbox-fit
+        // safety net at line ~3841) runs unchanged and continues to clamp
+        // zoom for route/comparison variants. Flag off OR stops missing/
+        // invalid → _waypoints stays pointed at the legacy _mapWaypoints.
+        try {
+            const _useStops = (typeof process !== 'undefined' && process.env
+                && String(process.env.USE_CAMERA_PLAN_STOPS || '').toLowerCase() === 'true');
+            const _stops = (_useStops && _mapScene && _mapScene.cameraPlan && Array.isArray(_mapScene.cameraPlan.stops))
+                ? _mapScene.cameraPlan.stops : null;
+            if (_stops && _stops.length > 0) {
+                const _wpsFromStops = _stops
+                    .filter(st => st
+                        && Number.isFinite(st.lon) && Number.isFinite(st.lat)
+                        && Number.isFinite(st.zoom) && st.zoom > 0
+                        && Number.isFinite(st.startTime) && Number.isFinite(st.endTime)
+                        && st.endTime > st.startTime)
+                    .map(st => ({
+                        name: st.label || st.subjectId || '',
+                        lon: st.lon,
+                        lat: st.lat,
+                        zoom: st.zoom,
+                        tilt: (st.tilt != null && Number.isFinite(st.tilt)) ? st.tilt : null,
+                        bearing: (st.bearing != null && Number.isFinite(st.bearing)) ? st.bearing : null,
+                        orbit: (st.orbit != null && Number.isFinite(st.orbit)) ? st.orbit : null,
+                        startTime: st.startTime,
+                        endTime: st.endTime,
+                        icon: null,
+                    }));
+                if (_wpsFromStops.length > 0) {
+                    _waypoints = _wpsFromStops;
+                    if (!this._stopsLogged) this._stopsLogged = new Set();
+                    const _sceneKey = `scene${mg.sceneIndex ?? '?'}`;
+                    if (!this._stopsLogged.has(_sceneKey)) {
+                        this._stopsLogged.add(_sceneKey);
+                        console.log(`[MGRenderer] map scene=${mg.sceneIndex ?? '?'} using cameraPlan.stops (${_wpsFromStops.length} stops, mode=${_mapScene.mapMode || '?'})`);
+                    }
+                }
+            }
+        } catch (_) { /* fall through to legacy _waypoints */ }
         // `_wpCoords` is already resolved at the top — no redeclaration.
         let activeWpIdx = -1, wpTransition = 0, wpCamX = IMG_W / 2, wpCamY = IMG_H / 2;
         let prevWpIdx = -1;
