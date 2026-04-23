@@ -523,6 +523,12 @@ const NICHES = {
                 bad: ['"political situation"', '"government decision"', '"world leaders meeting"'],
             }
         },
+
+        classBias: {
+            'actor-event':    { preferredSource: 'telegram' },
+            'location-event': { preferredSource: 'telegram' },
+            'object-scene':   { preferredSource: 'telegram' },
+        },
     },
 
     'news.celebrity': {
@@ -691,6 +697,13 @@ const NICHES = {
                 bad: ['"military operation"', '"war zone"', '"conflict area"'],
             }
         },
+
+        classBias: {
+            'actor-event':    { preferredSource: 'telegram' },
+            'location-event': { preferredSource: 'telegram' },
+            'object-scene':   { preferredSource: 'telegram' },
+            'data-claim':     { allowedMGs: ['statCounter', 'dataBar', 'focusWord'], allowedTemplates: ['statCard', 'factCard'] },
+        },
     },
 
     'news.tech': {
@@ -806,7 +819,13 @@ const NICHES = {
             maxOverlays: 4,
             minGapSec: 12,
             preferredTypes: ['v2', 'explainer'],
-        }
+        },
+
+        classBias: {
+            'actor-event':    { preferredSource: 'web-image', allowedTemplates: ['personIntro', 'factCard'] },
+            'location-event': { preferredSource: 'web-image' },
+            'object-scene':   { preferredSource: 'web-image' },
+        },
     },
 
     'explainer.motivation': {

@@ -164,22 +164,22 @@ const VARIANT_RULES = {
     locator: {
         desc: 'Single location spotlight. 1-2 waypoints: tight regional overview that CONTAINS the target, then zoom into the target.',
         wpCount: '1-2',
-        example: 'East Asia 0-3 z1.5 iglobe\nJapan 3-8 z2.5 t0.2 o12 itechnology',
+        example: 'East Asia 0-3 z1.5\nJapan 3-8 z2.5 t0.2 o12 itechnology',
     },
     route: {
         desc: 'Flight path between locations drawn across a HELD WIDE OVERHEAD view. All waypoints MUST stay wide (z1.0-1.8) so the full route is visible throughout — the camera does NOT zoom in on individual stops.',
         wpCount: '3-6',
-        example: 'Asia 0-2.5 z1.2 iship\nMiddle East 2.5-5 z1.3 ioil barrel\nEurope 5-9 z1.5 iport',
+        example: 'Asia 0-2.5 z1.2 iship\nMiddle East 2.5-5 z1.3\nEurope 5-9 z1.5',
     },
     regionHighlight: {
         desc: 'Country/region polygon highlight. 1-2 waypoints: tight regional overview containing the target, then zoom into highlighted region. Use SWARM for multiple sites within the region.',
         wpCount: '1-3',
-        example: 'North America 0-3 z1.5 iflag\nTexas 3-8 z3.0 t0.3 o15 ioil barrel',
+        example: 'North America 0-3 z1.5\nTexas 3-8 z3.0 t0.3 o15 ioil',
     },
     comparison: {
-        desc: 'Multiple locations compared side by side. 2-4 waypoints with roughly equal time.',
-        wpCount: '2-4',
-        example: 'China 0-3 z2.0 t0.1 ifactory\nIndia 3-6 z2.0 t0.1 itechnology\nBrazil 6-9 z2.0 t0.15 o10 iagriculture',
+        desc: 'Two or more locations compared against each other on ONE HELD WIDE FRAME that contains ALL of them simultaneously. The viewer must see every compared location on screen at the same time — the camera does NOT zoom in on each one in sequence.',
+        wpCount: '1-3',
+        example: 'Red Sea 0-4 z1.3\nMediterranean 4-9 z1.3\nAtlantic Ocean 9-15 z1.2',
     },
 };
 
@@ -225,7 +225,7 @@ CAMERA PARAMETERS (for waypoints only):
 - t (tilt): 0 = flat top-down, 0.1-0.4 = cinematic 3D perspective from above. Use on zoomed waypoints.
 - o (orbit): degrees/second camera rotation around the point. 0 = static, 10-25 = slow cinematic orbit. Only on zoomed-in waypoints.
 - b (bearing): static rotation angle in degrees. Usually 0. Use for angled/directional views.
-- i (icon): contextual icon keyword describing what this location represents in the narration. Pick a simple, recognizable symbol. Examples: "oil barrel", "military base", "factory", "port", "nuclear", "money", "wheat", "ship", "airplane", "tank", "government", "hospital", "rocket", "flag", "pipeline", "gold", "diamond", "coal", "gas", "steel", "trade".
+- i (icon): OPTIONAL. Only include when the narration clearly names a specific tangible object, action, or concrete theme for that location. Omit the "i" parameter entirely for pure geography/establishing shots. Good icon keywords are SIMPLE COMMON NOUNS: ship, oil, trade, missile, bomb, factory, nuclear, money, wheat, airport, border, tank, pipeline, gas, bank, flag, satellite, protest, troops, drone, port. BAD: proper nouns, multi-word phrases, adjectives, colors, style words (e.g. don't write "Yemeni troops" — write "troops"; don't write "red sea" — omit icon entirely, it's just geography).
 
 SWARM RULES:
 - Use SWARM when the narration mentions multiple things happening simultaneously across different locations (e.g., "bases across the country", "strikes on multiple cities", "sanctions hit several nations")
@@ -243,7 +243,10 @@ WAYPOINT RULES:
 - First waypoint: wide establishing shot (z1.0-1.8) showing a region that CONTAINS the target location(s). Prefer the most specific named region that still feels like an "overview" (sea/gulf/sub-region > continent). Use a full continent ONLY when the story genuinely spans it; use "World" ONLY for globe-spanning stories.
 ${variant === 'route' ? `- ⚠️ ROUTE VARIANT — ALL waypoints stay WIDE (z1.0-1.8). The route path is drawn across a HELD OVERHEAD view so the viewer sees the whole journey draw across the map. DO NOT zoom in to z2+ on any waypoint — that breaks the overhead view and the route disappears off-screen. The camera may PAN between wide regional views (e.g. Asia → Middle East → Europe all at z1.2-1.5), but MUST NEVER zoom in to detail (z ≥ 2.0) during the route.
 - Do NOT add tilt (t) on route waypoints — tilt breaks the overhead perspective needed to see the route path.
-- Do NOT add orbit (o) on route waypoints — orbit is for close-up cinematic beats, not wide route shots.` : `- Later waypoints: zoom in (z2.0-4.0) for detail on specific locations
+- Do NOT add orbit (o) on route waypoints — orbit is for close-up cinematic beats, not wide route shots.` : variant === 'comparison' ? `- ⚠️ COMPARISON VARIANT — the WHOLE POINT is showing multiple locations SIDE BY SIDE on ONE HELD FRAME. Pick the SMALLEST overview region (sea/sub-region/continent) that contains ALL compared locations, then stay at z1.0-1.5 the entire scene. DO NOT zoom in to individual locations — that turns the comparison into a sequential tour and defeats the variant. The camera may SOFTLY PAN between 2-3 wide framings (all z1.0-1.5), but MUST NEVER zoom past z1.6.
+- Do NOT add tilt (t) on comparison waypoints — flat top-down keeps both sides readable.
+- Do NOT add orbit (o) on comparison waypoints — orbit breaks side-by-side framing.
+- If the compared locations are far apart (e.g. Suez vs Cape of Good Hope): pick a CONTINENT or OCEAN-LEVEL overview (z0.9-1.2) that fits both — never two zoomed-in shots in sequence.` : `- Later waypoints: zoom in (z2.0-4.0) for detail on specific locations
 - Add tilt (t0.15-t0.3) on close-up waypoints for dramatic 3D effect
 - Add orbit (o10-o20) on the final or most important waypoint for cinematic feel
 - Do NOT add tilt or orbit to wide overview waypoints (z < 1.5)`}
@@ -251,7 +254,17 @@ ${variant === 'route' ? `- ⚠️ ROUTE VARIANT — ALL waypoints stay WIDE (z1.
 - Order locations to match narration flow (the order they're mentioned)
 - Last location can be slightly longer (lingering/conclusion shot)
 - Recommended waypoint count for this variant: ${rules.wpCount}
-- ALWAYS add an icon (i) for each waypoint — choose the most relevant symbol for what that location represents in the narration context
+
+ICON DISCIPLINE — THIS IS THE MOST COMMON MISTAKE, READ IT TWICE:
+- Icons are OPTIONAL. Most waypoints should NOT have an icon.
+- Add an icon ONLY when the narration at that moment names a specific physical thing or action (a ship, oil, a missile, a factory, money, wheat, troops, a border, a bomb, a flag).
+- OMIT the icon entirely (just no "i" parameter on that waypoint line) for:
+  • Pure geography shots — "Look at the Middle East", "This is the Red Sea", "Zoom into Yemen" → NO ICON
+  • Establishing/overview waypoints — the first wide shot almost never needs an icon
+  • Abstract/political ideas not tied to a concrete object — "tensions rise", "the situation escalates" → NO ICON
+  • Proper nouns — never use a country name, person's name, or place as an icon keyword
+- At MOST 1-2 icons across the whole map scene. If you used an icon on the first waypoint, think hard before adding one on a second.
+- Icon keyword must be a SINGLE common noun. Good: "oil", "ship", "missile". Bad: "red sea", "houthi drone attack", "yemeni forces".
 
 EXAMPLE for ${variant}:
 ${rules.example}`;
@@ -269,7 +282,7 @@ ${rules.example}`;
  * Waypoint format: "Name startTime-endTime z<zoom> t<tilt> b<bearing> o<orbit> i<icon>"
  * Swarm format:    "SWARM startTime-endTime\n  LocA i<icon>\n  LocB i<icon>\nEND"
  */
-function parseWaypoints(text, locations, duration) {
+function parseWaypoints(text, locations, duration, variant = null) {
     const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
     const wpRegex = /^(.+?)\s+(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*(.*)$/;
     const swarmStartRegex = /^SWARM\s+(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)/i;
@@ -348,11 +361,17 @@ function parseWaypoints(text, locations, duration) {
     // If SWARM was still open (no END), close it
     if (inSwarm && inSwarm.locations.length > 0) swarms.push(inSwarm);
 
-    // Validate: clamp times to duration, ensure no overlaps
+    // Validate: clamp times to duration, ensure no overlaps.
+    // Route + comparison variants must keep the whole frame readable, so zoom
+    // is clamped much tighter than locator/regionHighlight (renderer enforces
+    // this too, but catch it here so logs show sane values).
+    const isRoute = variant === 'route';
+    const isComparison = variant === 'comparison';
+    const maxZoom = isRoute ? 1.1 : (isComparison ? 1.6 : 6.0);
     for (const wp of waypoints) {
         wp.startTime = Math.max(0, Math.min(wp.startTime, duration));
         wp.endTime = Math.max(wp.startTime + 0.5, Math.min(wp.endTime, duration));
-        if (wp.zoom != null) wp.zoom = Math.max(0.5, Math.min(wp.zoom, 6.0));
+        if (wp.zoom != null) wp.zoom = Math.max(0.5, Math.min(wp.zoom, maxZoom));
         if (wp.tilt != null) wp.tilt = Math.max(0, Math.min(wp.tilt, 0.6));
         if (wp.orbit != null) wp.orbit = Math.max(-60, Math.min(wp.orbit, 60));
         if (wp.bearing != null) wp.bearing = Math.max(-180, Math.min(wp.bearing, 180));
@@ -431,7 +450,7 @@ async function planMapAnimations(allMGs, scriptContext, aiInstructions, scenes) 
             const response = await callAI(prompt, { temperature: 0.3 });
             console.log(`      [AI raw]: ${response.substring(0, 160).replace(/\n/g, ' | ')}`);
 
-            const parsed = parseWaypoints(response, locations, duration);
+            const parsed = parseWaypoints(response, locations, duration, variant);
             waypoints = parsed.waypoints;
             swarms = parsed.swarms || [];
 
@@ -485,6 +504,21 @@ async function planMapAnimations(allMGs, scriptContext, aiInstructions, scenes) 
                 }
                 if (clamped > 0) {
                     console.log(`      🛣️ Route variant: clamped ${clamped} waypoint zoom(s) to stay wide (route must draw across held overhead view)`);
+                }
+            }
+
+            // Comparison variant: all compared locations must be visible on ONE held
+            // wide frame. If the AI zoomed in on each one in sequence, clamp back to
+            // wide and strip tilt/orbit so the side-by-side framing stays readable.
+            if (variant === 'comparison') {
+                let clamped = 0;
+                for (const wp of waypoints) {
+                    if (wp.zoom != null && wp.zoom > 1.5) { wp.zoom = 1.3; clamped++; }
+                    if (wp.tilt != null && wp.tilt > 0.05) { wp.tilt = null; }
+                    if (wp.orbit != null) { wp.orbit = null; }
+                }
+                if (clamped > 0) {
+                    console.log(`      ⚖️  Comparison variant: clamped ${clamped} waypoint zoom(s) to stay wide (all compared locations must fit one frame)`);
                 }
             }
         } catch (err) {

@@ -59,155 +59,183 @@ function httpGet(url, timeout = 10000) {
     });
 }
 
-// Preferred icon sets (clean, consistent style for map overlays)
-const PREFERRED_PREFIXES = ['mdi', 'ph', 'lucide', 'tabler', 'carbon', 'solar', 'ic'];
+// Preferred icon sets (clean, consistent style for map overlays).
+// Phosphor-filled and Solar-bold have soft rounded geometry + consistent stroke weight
+// that reads MUCH better at small map-overlay sizes than MDI's utilitarian glyphs.
+// Order: pretty-filled first, utilitarian fallbacks last.
+const PREFERRED_PREFIXES = ['ph', 'solar', 'tabler', 'lucide', 'carbon', 'mdi', 'ic'];
 
 // ── Icon synonym map ──
 // Iconify's first match for certain words is terrible (e.g. "port" → mdi:usb-port,
 // "trade" → mdi:trademark). When a keyword appears here, skip Iconify search and
 // use this exact iconId instead. Keys are lowercased; check singular+plural.
+//
+// All primary entries use Phosphor-filled (`ph:*-fill`) — soft rounded geometry,
+// consistent stroke weight, modern look. These read MUCH better as small map
+// overlays than MDI's utilitarian glyphs. If a ph:* icon 404s, the downloader
+// falls back to Iconify search (see downloadFromIconify).
 const ICON_SYNONYMS = {
     // Maritime / shipping
-    'port':        'mdi:anchor',
-    'ports':       'mdi:anchor',
-    'harbor':      'mdi:anchor',
-    'harbors':     'mdi:anchor',
-    'harbour':     'mdi:anchor',
-    'harbours':    'mdi:anchor',
-    'dock':        'mdi:anchor',
-    'docks':       'mdi:anchor',
-    'shipping':    'mdi:ferry',
-    'ship':        'mdi:ferry',
-    'ships':       'mdi:ferry',
-    'vessel':      'mdi:ferry',
-    'vessels':     'mdi:ferry',
-    'cargo':       'mdi:package-variant',
-    'freight':     'mdi:package-variant',
-    'container':   'mdi:package-variant-closed',
-    'containers':  'mdi:package-variant-closed',
-    'tanker':      'mdi:ferry',
-    'naval':       'mdi:anchor',
-    'navy':        'mdi:anchor',
-    'maritime':    'mdi:anchor',
+    'port':        'ph:anchor-fill',
+    'ports':       'ph:anchor-fill',
+    'harbor':      'ph:anchor-fill',
+    'harbors':     'ph:anchor-fill',
+    'harbour':     'ph:anchor-fill',
+    'harbours':    'ph:anchor-fill',
+    'dock':        'ph:anchor-fill',
+    'docks':       'ph:anchor-fill',
+    'shipping':    'ph:boat-fill',
+    'ship':        'ph:boat-fill',
+    'ships':       'ph:boat-fill',
+    'vessel':      'ph:boat-fill',
+    'vessels':     'ph:boat-fill',
+    'cargo':       'ph:package-fill',
+    'freight':     'ph:package-fill',
+    'container':   'ph:package-fill',
+    'containers':  'ph:package-fill',
+    'tanker':      'ph:boat-fill',
+    'naval':       'ph:anchor-fill',
+    'navy':        'ph:anchor-fill',
+    'maritime':    'ph:anchor-fill',
     // Trade / commerce
-    'trade':       'mdi:handshake',
-    'trades':      'mdi:handshake',
-    'trading':     'mdi:handshake',
-    'commerce':    'mdi:handshake',
-    'deal':        'mdi:handshake',
-    'deals':       'mdi:handshake',
-    'agreement':   'mdi:handshake',
-    'treaty':      'mdi:handshake',
-    'alliance':    'mdi:handshake',
-    'partnership': 'mdi:handshake',
+    'trade':       'ph:handshake-fill',
+    'trades':      'ph:handshake-fill',
+    'trading':     'ph:handshake-fill',
+    'commerce':    'ph:handshake-fill',
+    'deal':        'ph:handshake-fill',
+    'deals':       'ph:handshake-fill',
+    'agreement':   'ph:handshake-fill',
+    'treaty':      'ph:handshake-fill',
+    'alliance':    'ph:handshake-fill',
+    'partnership': 'ph:handshake-fill',
     // Conflict / military
-    'war':         'mdi:sword-cross',
-    'battle':      'mdi:sword-cross',
-    'conflict':    'mdi:sword-cross',
-    'attack':      'mdi:sword-cross',
-    'strike':      'mdi:sword-cross',
-    'combat':      'mdi:sword-cross',
-    'military':    'mdi:shield-sword',
-    'army':        'mdi:shield-sword',
-    'troops':      'mdi:account-group',
-    'forces':      'mdi:shield-sword',
-    'missile':     'mdi:rocket-launch',
-    'missiles':    'mdi:rocket-launch',
-    'drone':       'mdi:quadcopter',
-    'drones':      'mdi:quadcopter',
-    'bomb':        'mdi:bomb',
-    'bombing':     'mdi:bomb',
-    'explosion':   'mdi:bomb',
+    'war':         'ph:sword-fill',
+    'battle':      'ph:sword-fill',
+    'conflict':    'ph:sword-fill',
+    'attack':      'ph:sword-fill',
+    'strike':      'ph:sword-fill',
+    'combat':      'ph:sword-fill',
+    'military':    'ph:shield-fill',
+    'army':        'ph:shield-fill',
+    'troops':      'ph:users-three-fill',
+    'forces':      'ph:shield-fill',
+    'missile':     'ph:rocket-launch-fill',
+    'missiles':    'ph:rocket-launch-fill',
+    'rocket':      'ph:rocket-launch-fill',
+    'drone':       'ph:drone-fill',
+    'drones':      'ph:drone-fill',
+    'bomb':        'ph:bomb-fill',
+    'bombing':     'ph:bomb-fill',
+    'explosion':   'ph:bomb-fill',
+    // 'tank' has no Phosphor equivalent — Iconify search falls through to tabler:tank, which looks great
+
     // Energy / resources
-    'oil':         'mdi:oil',
-    'gas':         'mdi:gas-cylinder',
-    'pipeline':    'mdi:pipe',
-    'pipelines':   'mdi:pipe',
-    'fuel':        'mdi:fuel',
-    'energy':      'mdi:lightning-bolt',
-    'power':       'mdi:lightning-bolt',
-    'electricity': 'mdi:lightning-bolt',
-    'refinery':    'mdi:factory',
-    'coal':        'mdi:diamond-stone',
-    'mining':      'mdi:pickaxe',
-    'mine':        'mdi:pickaxe',
+    'oil':         'ph:drop-fill',
+    'gas':         'ph:gas-can-fill',
+    'pipeline':    'ph:pipe-fill',
+    'pipelines':   'ph:pipe-fill',
+    'fuel':        'ph:gas-pump-fill',
+    'energy':      'ph:lightning-fill',
+    'power':       'ph:lightning-fill',
+    'electricity': 'ph:lightning-fill',
+    'refinery':    'ph:factory-fill',
+    'coal':        'ph:diamond-fill',
+    'mining':      'ph:mountains-fill',
+    'mine':        'ph:mountains-fill',
     // Finance / economy
-    'money':       'mdi:cash',
-    'cash':        'mdi:cash',
-    'dollar':      'mdi:currency-usd',
-    'dollars':     'mdi:currency-usd',
-    'euro':        'mdi:currency-eur',
-    'economy':     'mdi:chart-line',
-    'economic':    'mdi:chart-line',
-    'market':      'mdi:chart-line',
-    'markets':     'mdi:chart-line',
-    'stock':       'mdi:chart-line',
-    'stocks':      'mdi:chart-line',
-    'bank':        'mdi:bank',
-    'banks':       'mdi:bank',
-    'banking':     'mdi:bank',
-    'tax':         'mdi:cash-multiple',
-    'taxes':       'mdi:cash-multiple',
-    'tariff':      'mdi:cash-multiple',
-    'tariffs':     'mdi:cash-multiple',
-    'sanction':    'mdi:cancel',
-    'sanctions':   'mdi:cancel',
+    'money':       'ph:money-fill',
+    'cash':        'ph:money-fill',
+    'dollar':      'ph:currency-dollar-fill',
+    'dollars':     'ph:currency-dollar-fill',
+    'euro':        'ph:currency-eur-fill',
+    'economy':     'ph:chart-line-up-fill',
+    'economic':    'ph:chart-line-up-fill',
+    'market':      'ph:chart-line-up-fill',
+    'markets':     'ph:chart-line-up-fill',
+    'stock':       'ph:chart-line-up-fill',
+    'stocks':      'ph:chart-line-up-fill',
+    'bank':        'ph:bank-fill',
+    'banks':       'ph:bank-fill',
+    'banking':     'ph:bank-fill',
+    'tax':         'ph:coins-fill',
+    'taxes':       'ph:coins-fill',
+    'tariff':      'ph:coins-fill',
+    'tariffs':     'ph:coins-fill',
+    'sanction':    'ph:prohibit-fill',
+    'sanctions':   'ph:prohibit-fill',
     // Politics / government
-    'election':    'mdi:vote',
-    'elections':   'mdi:vote',
-    'vote':        'mdi:vote',
-    'votes':       'mdi:vote',
-    'voting':      'mdi:vote',
-    'government':  'mdi:bank-outline',
-    'parliament':  'mdi:bank-outline',
-    'congress':    'mdi:bank-outline',
-    'senate':      'mdi:bank-outline',
-    'president':   'mdi:account-tie',
-    'law':         'mdi:gavel',
-    'legal':       'mdi:gavel',
-    'court':       'mdi:gavel',
-    'judge':       'mdi:gavel',
-    'policy':      'mdi:file-document',
+    'election':    'ph:check-square-fill',
+    'elections':   'ph:check-square-fill',
+    'vote':        'ph:check-square-fill',
+    'votes':       'ph:check-square-fill',
+    'voting':      'ph:check-square-fill',
+    'government':  'ph:bank-fill',
+    'parliament':  'ph:bank-fill',
+    'congress':    'ph:bank-fill',
+    'senate':      'ph:bank-fill',
+    'president':   'ph:user-circle-fill',
+    'law':         'ph:gavel-fill',
+    'legal':       'ph:gavel-fill',
+    'court':       'ph:gavel-fill',
+    'judge':       'ph:gavel-fill',
+    'policy':      'ph:file-text-fill',
     // People / groups
-    'people':      'mdi:account-group',
-    'population':  'mdi:account-group',
-    'crowd':       'mdi:account-group',
-    'protest':     'mdi:bullhorn',
-    'protests':    'mdi:bullhorn',
-    'protestors':  'mdi:bullhorn',
-    'refugee':     'mdi:account-group',
-    'refugees':    'mdi:account-group',
-    'migrants':    'mdi:account-group',
+    'people':      'ph:users-three-fill',
+    'population':  'ph:users-three-fill',
+    'crowd':       'ph:users-three-fill',
+    'protest':     'ph:megaphone-fill',
+    'protests':    'ph:megaphone-fill',
+    'protestors':  'ph:megaphone-fill',
+    'refugee':     'ph:users-three-fill',
+    'refugees':    'ph:users-three-fill',
+    'migrants':    'ph:users-three-fill',
     // Places / infrastructure
-    'city':        'mdi:city',
-    'cities':      'mdi:city',
-    'capital':     'mdi:city',
-    'border':      'mdi:border-all',
-    'borders':     'mdi:border-all',
-    'airport':     'mdi:airplane',
-    'airports':    'mdi:airplane',
-    'flight':      'mdi:airplane',
-    'flights':     'mdi:airplane',
-    'factory':     'mdi:factory',
-    'factories':   'mdi:factory',
-    'school':      'mdi:school',
-    'schools':     'mdi:school',
-    'hospital':    'mdi:hospital-building',
-    'hospitals':   'mdi:hospital-building',
+    'city':        'ph:buildings-fill',
+    'cities':      'ph:buildings-fill',
+    'capital':     'ph:buildings-fill',
+    'border':      'ph:divide-fill',
+    'borders':     'ph:divide-fill',
+    'airport':     'ph:airplane-fill',
+    'airports':    'ph:airplane-fill',
+    'flight':      'ph:airplane-fill',
+    'flights':     'ph:airplane-fill',
+    'airplane':    'ph:airplane-fill',
+    'factory':     'ph:factory-fill',
+    'factories':   'ph:factory-fill',
+    'school':      'ph:graduation-cap-fill',
+    'schools':     'ph:graduation-cap-fill',
+    'hospital':    'ph:first-aid-kit-fill',
+    'hospitals':   'ph:first-aid-kit-fill',
     // Generic nav/markers (fallback-safe)
-    'location':    'mdi:map-marker',
-    'place':       'mdi:map-marker',
-    'target':      'mdi:target',
-    'destination': 'mdi:flag',
-    'start':       'mdi:flag-outline',
-    'route':       'mdi:map-marker-path',
+    'location':    'ph:map-pin-fill',
+    'place':       'ph:map-pin-fill',
+    'target':      'ph:target-fill',
+    'destination': 'ph:flag-fill',
+    'start':       'ph:flag-banner-fill',
+    'route':       'ph:path-fill',
+    'flag':        'ph:flag-fill',
+    'pin':         'ph:map-pin-fill',
     // Tech / comms
-    'internet':    'mdi:web',
-    'data':        'mdi:database',
-    'server':      'mdi:server',
-    'phone':       'mdi:cellphone',
-    'satellite':   'mdi:satellite-variant',
-    'signal':      'mdi:signal',
+    'internet':    'ph:globe-fill',
+    'data':        'ph:database-fill',
+    'server':      'ph:hard-drives-fill',
+    'phone':       'ph:device-mobile-fill',
+    'satellite':   'ph:radio-fill',
+    'signal':      'ph:wifi-high-fill',
+    // Food / agriculture
+    'wheat':       'ph:plant-fill',
+    'food':        'ph:bowl-food-fill',
+    'agriculture': 'ph:plant-fill',
+    'farm':        'ph:plant-fill',
+    // Industry / tech
+    'technology':  'ph:cpu-fill',
+    'chip':        'ph:cpu-fill',
+    'chips':       'ph:cpu-fill',
+    'semiconductor':'ph:cpu-fill',
+    'nuclear':     'ph:atom-fill',
+    'steel':       'ph:hammer-fill',
+    'gold':        'ph:coin-vertical-fill',
+    'diamond':     'ph:diamond-fill',
 };
 
 // Iconify IDs that are NEVER useful for geopolitical/news maps.
@@ -250,27 +278,10 @@ async function searchIconify(keyword) {
 }
 
 /**
- * Download SVG from Iconify, rasterize to PNG via @napi-rs/canvas.
+ * Try to fetch + rasterize a single Iconify iconId. Returns PNG buffer or null.
+ * Split out so both the synonym path and the search-fallback path can reuse it.
  */
-async function downloadFromIconify(keyword) {
-    // 1. Check synonym map first (skip search for known-bad keywords like "port" → usb-port)
-    let iconId = null;
-    let synonymHit = false;
-    if (keyword && typeof keyword === 'string') {
-        const syn = ICON_SYNONYMS[keyword.toLowerCase().trim()];
-        if (syn) {
-            iconId = syn;
-            synonymHit = true;
-        }
-    }
-
-    // 2. Fall back to Iconify search
-    if (!iconId) {
-        const icons = await searchIconify(keyword);
-        if (!icons || icons.length === 0) return null;
-        iconId = icons[0];
-    }
-
+async function _fetchAndRasterize(iconId, keyword, tag) {
     const [prefix, name] = iconId.split(':');
     if (!prefix || !name) return null;
 
@@ -301,16 +312,53 @@ async function downloadFromIconify(keyword) {
 
             const pngBuf = canvas.toBuffer('image/png');
             if (pngBuf.length > 200) {
-                console.log(`      ✅ Iconify: "${keyword}" → ${iconId}${synonymHit ? ' [synonym]' : ''} (${(pngBuf.length / 1024).toFixed(0)} KB)`);
+                console.log(`      ✅ Iconify: "${keyword}" → ${iconId}${tag ? ` [${tag}]` : ''} (${(pngBuf.length / 1024).toFixed(0)} KB)`);
                 return pngBuf;
             }
         } catch (canvasErr) {
             // No @napi-rs/canvas available — save raw SVG as fallback
-            console.log(`      ✅ Iconify: "${keyword}" → ${iconId}${synonymHit ? ' [synonym]' : ''} (SVG, no rasterizer)`);
+            console.log(`      ✅ Iconify: "${keyword}" → ${iconId}${tag ? ` [${tag}]` : ''} (SVG, no rasterizer)`);
             return svgBuf;
         }
     } catch (err) {
-        console.log(`      ⚠️ Iconify download failed for "${keyword}": ${err.message}`);
+        // Silent — caller decides whether to try fallback or give up
+    }
+    return null;
+}
+
+/**
+ * Download SVG from Iconify, rasterize to PNG via @napi-rs/canvas.
+ * Tries synonym map first, then Iconify search as fallback if synonym 404s.
+ */
+async function downloadFromIconify(keyword) {
+    // 1. Check synonym map first (skip search for known-bad keywords like "port" → usb-port).
+    //    If full keyword misses (e.g. "oil barrel"), try each whitespace-separated
+    //    word so "oil barrel" → "oil" hits ph:drop-fill.
+    const k = (keyword && typeof keyword === 'string') ? keyword.toLowerCase().trim() : null;
+    let synonymId = k ? ICON_SYNONYMS[k] : null;
+    let synonymSource = k;
+    if (!synonymId && k && k.includes(' ')) {
+        for (const word of k.split(/\s+/)) {
+            if (ICON_SYNONYMS[word]) { synonymId = ICON_SYNONYMS[word]; synonymSource = word; break; }
+        }
+    }
+
+    if (synonymId) {
+        const tag = synonymSource === k ? 'synonym' : `synonym:${synonymSource}`;
+        const buf = await _fetchAndRasterize(synonymId, keyword, tag);
+        if (buf) return buf;
+        // Synonym icon didn't exist or failed — fall through to search
+        console.log(`      ↻ Synonym "${synonymId}" unavailable, searching Iconify for "${keyword}"`);
+    }
+
+    // 2. Fall back to Iconify search (sorted by PREFERRED_PREFIXES)
+    const icons = await searchIconify(keyword);
+    if (!icons || icons.length === 0) return null;
+
+    // Try up to 3 top hits in case one is broken
+    for (let i = 0; i < Math.min(3, icons.length); i++) {
+        const buf = await _fetchAndRasterize(icons[i], keyword, i === 0 ? 'search' : `search#${i + 1}`);
+        if (buf) return buf;
     }
     return null;
 }

@@ -1024,6 +1024,52 @@ async function analyzeAndCreateScenes(transcription, directorsBrief) {
             console.log(`   🛡️  Orphan guard: ${beforeMerge} → ${scenes.length} scenes (absorbed ${beforeMerge - scenes.length} tiny scene${beforeMerge - scenes.length === 1 ? '' : 's'})`);
         }
 
+        // ── Scene Classes (flag-gated) ──
+        // Classify each scene into one of 8 fixed editorial classes and attach
+        // treatment hint, retrievability, fallback ladder. Visual Planner
+        // downstream consumes these to pick strategy deterministically instead
+        // of inventing a unique approach per scene.
+        const useSceneClasses = String(process.env.USE_SCENE_CLASSES || '').toLowerCase() === 'true';
+        if (useSceneClasses) {
+            try {
+                const { classifyScenes } = require('./scene-classifier');
+                const {
+                    mergeClassBias,
+                    deriveRetrievability,
+                    deriveFallbackLadder,
+                    resolvePreferredSource,
+                } = require('./class-treatment-map');
+
+                const classifications = await classifyScenes(scenes, scriptContext);
+                const byIndex = new Map(classifications.map(c => [c.index, c]));
+
+                for (const scene of scenes) {
+                    const cls = byIndex.get(scene.index);
+                    if (!cls) continue;
+                    const treatment = mergeClassBias(cls.sceneClass, scriptContext.nicheId);
+                    const retrievability = deriveRetrievability(cls.sceneClass, cls.classSubSignal);
+                    const fallbackLadder = deriveFallbackLadder(cls.sceneClass, retrievability);
+
+                    scene.sceneClass      = cls.sceneClass;
+                    scene.classSubSignal  = cls.classSubSignal || '';
+                    scene.classConfidence = cls.confidence;
+                    scene.treatmentHint   = {
+                        primary:          treatment.primary,
+                        alternates:       treatment.alternates,
+                        blocked:          treatment.blocked,
+                        allowedMGs:       treatment.allowedMGs,
+                        allowedTemplates: treatment.allowedTemplates,
+                        preferredSource:  resolvePreferredSource(treatment.preferredSource, scriptContext.nicheId),
+                    };
+                    scene.retrievability = retrievability;
+                    scene.fallbackLadder = fallbackLadder;
+                }
+                console.log(`   🏷️  Scene classes attached: ${classifications.length}/${scenes.length} scenes`);
+            } catch (err) {
+                console.warn(`   ⚠️  Scene classifier failed: ${err.message} — scenes continue without class tags`);
+            }
+        }
+
         // Attach style profile early so assignTransitions can use it
         // (build-video.js also attaches it later, but transitions happen here inside the Director)
         if (directorsBrief.styleProfile) {

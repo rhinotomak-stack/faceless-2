@@ -3744,10 +3744,21 @@ class MGRenderer {
             const awp = wpPositions[activeWpIdx];
             const hasPerWpZoom = wpPositions.some(wp => wp.zoom != null);
 
+            // Route + comparison variants must keep the whole frame readable —
+            // cap per-waypoint zoom much tighter than locator/regionHighlight.
+            // The AI planner is allowed to send z up to 6.0, which is correct
+            // for a single-pin close-up but turns a route into a pinball match
+            // between zoomed-in stops and turns a side-by-side comparison into
+            // a sequential tour. Clamp route ≤ 1.1, comparison ≤ 1.5.
+            const isRoute = variant === 'route';
+            const isComparison = variant === 'comparison';
+            const wideCap = isRoute ? 1.1 : (isComparison ? 1.5 : null);
+            const clampWpZoom = (z) => wideCap != null ? Math.min(z, wideCap) : z;
+
             if (hasPerWpZoom && bigMapSize) {
-                const curZoom = awp.zoom ?? globalZS;
+                const curZoom = clampWpZoom(awp.zoom ?? globalZS);
                 if (prevWpIdx >= 0 && wpTransition < 1) {
-                    const prevZoom = wpPositions[prevWpIdx].zoom ?? globalZS;
+                    const prevZoom = clampWpZoom(wpPositions[prevWpIdx].zoom ?? globalZS);
                     camScale = prevZoom + (curZoom - prevZoom) * _ease(wpTransition, easingMode);
                 } else {
                     const wpDur = awp.endTime - awp.startTime;
@@ -3756,6 +3767,7 @@ class MGRenderer {
                 }
             } else {
                 camScale = globalZS + (globalZE - globalZS) * kfEased;
+                if (wideCap != null) camScale = Math.min(camScale, wideCap);
             }
 
             if (bigMapSize) {

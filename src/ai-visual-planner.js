@@ -951,6 +951,30 @@ function _finalizeVisualPlan(enrichedScenes, scriptContext, directorsBrief, plan
         }
     }
 
+    // ── Typography run dedup ──
+    // After metaphor scenes get flipped to fullscreenMG focusWord, a cluster of
+    // adjacent abstract scenes can all become focusWord — three typography cards
+    // in a row look lazy. Alternate them and break long runs.
+    const typoFixes = _dedupTypographyRuns(enrichedScenes);
+    if (typoFixes.length > 0) {
+        console.log(`   🎨 Typography dedup: varied ${typoFixes.length} adjacent MG scene(s):`);
+        for (const f of typoFixes) {
+            console.log(`      Scene ${f.index}: ${f.before} → ${f.after}`);
+        }
+    }
+
+    // ── Class/treatment validator ──
+    // When the Scene Classifier attached sceneClass + treatmentHint, rewrite
+    // any scene whose chosen lane conflicts with its class rules.
+    // No-op when classes weren't attached (flag off or classifier failed).
+    const classFixes = _enforceClassTreatment(enrichedScenes);
+    if (classFixes.length > 0) {
+        console.log(`   🏷️  Class compliance: rewrote ${classFixes.length} scene(s) to match class treatment:`);
+        for (const f of classFixes) {
+            console.log(`      Scene ${f.index}: ${f.reason} — "${f.before}" → "${f.after}"`);
+        }
+    }
+
     // ── Global Source Diversity ──
     // Run ONCE across the full scene list (was per-batch, which missed
     // cross-chunk skew: e.g. 3 batches each 50% youtube = 50% youtube globally
@@ -1022,14 +1046,38 @@ function buildBatchPrompt(scenes, scriptContext, directorsBrief, options = {}) {
     const isNonEnglish = buildLang && buildLang !== 'en';
 
     // Build scene list with timing info
+    // If Scene Classes pass (USE_SCENE_CLASSES=true) attached class/treatment to scenes,
+    // inject them per-line so the planner picks strategy deterministically.
+    const anyClassTagged = scenes.some(s => s.sceneClass);
     let sceneList = '';
     for (const scene of scenes) {
         const duration = (scene.endTime - scene.startTime).toFixed(1);
         const period = `[${_sceneTagString(scene, scenes, scriptContext)}]`;
 
         sceneList += `SCENE ${scene.index} (${scene.startTime.toFixed(1)}s-${scene.endTime.toFixed(1)}s, ${duration}s) ${period}:\n`;
+        if (scene.sceneClass && scene.treatmentHint) {
+            const t = scene.treatmentHint;
+            const ladder = Array.isArray(scene.fallbackLadder) ? scene.fallbackLadder.join(' → ') : t.primary;
+            sceneList += `   CLASS=${scene.sceneClass} | PRIMARY=${t.primary} | LADDER=${ladder} | SOURCE=${t.preferredSource} | RETRIEVE=${scene.retrievability || 'medium'}\n`;
+            if (t.blocked && t.blocked.length) {
+                sceneList += `   BLOCKED=${t.blocked.join(',')}\n`;
+            }
+        }
         sceneList += `   "${scene.text}"\n\n`;
     }
+
+    const classLegend = anyClassTagged ? `
+
+SCENE CLASSES & TREATMENT (read before planning):
+Each scene carries CLASS (editorial role) and PRIMARY (visual lane to use first). Treat CLASS as the authoritative strategy — do NOT invent a different one.
+  - PRIMARY=footage  → choose real footage, set keyword + sourceHint, leave fullscreenMG/templateHint null
+  - PRIMARY=map      → set fullscreenMG to a map type; keyword is secondary
+  - PRIMARY=graphics → set fullscreenMG to focusWord/callout/statCounter-type; skip footage
+  - PRIMARY=template → set templateHint to one of the allowed templates; skip footage
+BLOCKED lists lanes you MUST NOT pick for that scene.
+RETRIEVE=internal-only means the scene has NO external visual referent — do NOT set keyword or webQuery; use PRIMARY only.
+LADDER is the fallback order if PRIMARY is unavailable. Stay on PRIMARY unless clearly wrong.
+SOURCE is the concrete footage provider to prefer when PRIMARY=footage (e.g. telegram for news actors, web-image for history).` : '';
 
     // Build topic anchor from summary + web context
     const summary = scriptContext.summary || '';
@@ -1186,7 +1234,7 @@ ${niche.allowedMGs.join(', ')}
 ${niche.allowedMGs.includes('mapChart') ? `- ⚠️ mapChart IS AVAILABLE for this niche. When the narration discusses geographic regions, borders, straits, trade routes, military positions, or mentions 2+ countries/locations — use fullscreenMG: "mapChart: Location1: label, Location2: label". Maps are MORE impactful than generic footage for geographic content. Pick the BEST scene for it (usually the one introducing locations).` : ''}
 
 SCENES TO PLAN (${scenes.length} total):
-
+${classLegend}
 ${sceneList}
 
 PLANNING RULES:
@@ -1420,6 +1468,38 @@ ${_buildBackgroundList(theme)}
    When framing is "fullscreen", set backgroundId to "none".
 
 11. KEYWORD FORMAT (CRITICAL — this is THE primary search term):
+
+   ⚠️ STEP 0 — CLASSIFY THE NARRATION BEFORE WRITING ANY KEYWORD:
+   Read the scene's quoted text and pick ONE of these four categories. Your choice determines whether you even NEED a keyword.
+
+   (A) CONCRETE — a camera could literally film what the narration describes right now.
+       ("container ship entering port", "grocery store aisle", "soldier patrolling")
+       → Write a keyword. Continue with the rules below.
+
+   (B) METAPHOR / ABSTRACT — narration describes an idea, comparison, or editing concept, not a filmable scene.
+       ("the network is breaking apart", "side-by-side comparison", "inflation is squeezing families",
+        "the mechanism that drives this", "a montage of chaos", "the system's grid is collapsing")
+       → DO NOT write a keyword. Set keyword="none", sourceHint="none".
+       → Go STRAIGHT to fullscreenMG:
+          • "focusWord: <1-3 word punch>" for single-concept beats (e.g. "focusWord: Collapse")
+          • "kineticText: <short phrase>" for rhythmic/impactful prose (e.g. "kineticText: Breaking Apart")
+          • templateHint="keyTakeaway: <line>" if the metaphor IS a conclusion sentence
+       → This is not a fallback — it's the CORRECT primary choice for metaphor scenes.
+
+   (C) DATA / NUMBERS — narration states ≥2 numbers, percentages, or ranked items.
+       ("exports dropped from 100 to 40", "75% energy savings, 90% insurance cut")
+       → Prefer fullscreenMG barChart/donutChart/rankingList OR templateHint statCard.
+       → Only write a keyword if you ALSO want footage behind an overlay mgHint.
+
+   (D) NEWS ACTOR — narration names a state/military actor + military/political verb.
+       ("Iran navy patrol", "Houthi forces strike", "Russian missile")
+       → Write a keyword AND force sourceHint="telegram" (or fullscreenMG="mapChart" if ≥2 locations).
+       → NEVER sourceHint="stock" on actor scenes. Stock libraries have zero matches.
+
+   ADJACENT-SCENE DIVERSITY RULE:
+   - If the PREVIOUS scene you just planned used fullscreenMG="focusWord", this scene must NOT also use focusWord. Alternate with kineticText, or go back to footage/template.
+   - If 3 scenes in a row would all be typography (focusWord/kineticText), break the run: force one of them to templateHint (keyTakeaway/statCard/imageShowcase) or concrete footage.
+
    The keyword field must be SHORT (3-6 words) and directly searchable.
    Strategy for this niche (${niche.name}): "${(() => {
        const kr = getKeywordRules(nicheId);
@@ -2187,6 +2267,181 @@ function _enforceKeywordCompliance(scenes, scriptContext) {
         }
     }
     return violations;
+}
+
+/**
+ * Break long runs of adjacent typography fullscreenMGs (focusWord/kineticText).
+ * Rule:
+ *   - 2 adjacent scenes with same typography type → flip the 2nd to the other type.
+ *   - 3 adjacent typography scenes (any mix) → flip the middle one to keyTakeaway
+ *     template if the scene has narrative weight, otherwise alternate types.
+ * Only touches scenes whose fullscreenMG starts with focusWord/kineticText — leaves
+ * data MGs (barChart, timeline, mapChart) alone.
+ */
+function _dedupTypographyRuns(scenes) {
+    const fixes = [];
+    const typoType = (s) => {
+        if (!s.fullscreenMG) return null;
+        const m = String(s.fullscreenMG).match(/^(focusWord|kineticText)\s*:/i);
+        return m ? m[1].toLowerCase() : null;
+    };
+
+    for (let i = 0; i < scenes.length; i++) {
+        const curr = typoType(scenes[i]);
+        if (!curr) continue;
+
+        // Case 1: same type as previous scene → swap the CURRENT one to the other
+        const prev = i > 0 ? typoType(scenes[i - 1]) : null;
+        if (prev && prev === curr) {
+            const other = curr === 'focusword' ? 'kineticText' : 'focusWord';
+            const body = String(scenes[i].fullscreenMG).replace(/^[^:]+:/, '').trim();
+            const before = scenes[i].fullscreenMG;
+            scenes[i].fullscreenMG = `${other}: ${body}`;
+            fixes.push({ index: scenes[i].index, before, after: scenes[i].fullscreenMG });
+            continue;
+        }
+
+        // Case 2: three typography in a row → promote middle to keyTakeaway template
+        const prev2 = i >= 2 ? typoType(scenes[i - 2]) : null;
+        if (prev && prev2) {
+            const mid = scenes[i - 1];
+            if (!mid.templateHint) {
+                const line = String(mid.text || '').split(/[.!?]/)[0].trim().slice(0, 90);
+                if (line.length >= 8) {
+                    const beforeMg = mid.fullscreenMG;
+                    mid.templateHint = `keyTakeaway: ${line}`;
+                    mid.fullscreenMG = null;
+                    mid.keyword = mid.keyword || null;
+                    fixes.push({ index: mid.index, before: beforeMg, after: `→ templateHint ${mid.templateHint}` });
+                }
+            }
+        }
+    }
+    return fixes;
+}
+
+/**
+ * Post-AI class/treatment validator.
+ * When USE_SCENE_CLASSES attached sceneClass+treatmentHint per scene, rewrite
+ * any scene whose chosen lane conflicts with its class treatment:
+ *   - BLOCKED lane chosen → rewrite to PRIMARY lane
+ *   - retrievability=internal-only with a keyword → strip keyword, flip to PRIMARY
+ *   - fullscreenMG type not in allowedMGs → replace with first allowed MG
+ *   - templateHint not in allowedTemplates → replace with first allowed template
+ *
+ * Returns array of { index, reason, before, after } for logging.
+ */
+function _enforceClassTreatment(scenes) {
+    const fixes = [];
+    for (const scene of scenes) {
+        if (!scene.sceneClass || !scene.treatmentHint) continue;
+        const t = scene.treatmentHint;
+        const blocked = new Set(t.blocked || []);
+
+        // Determine current lane
+        let currentLane = null;
+        if (scene.fullscreenMG) {
+            const fsType = String(scene.fullscreenMG).split(':')[0].trim().toLowerCase();
+            currentLane = fsType.startsWith('map') ? 'map' : 'graphics';
+        } else if (scene.templateHint) {
+            currentLane = 'template';
+        } else if (scene.keyword && scene.keyword !== 'none') {
+            currentLane = 'footage';
+        }
+
+        // Rule 1: internal-only classes must not hit external providers
+        if (scene.retrievability === 'internal-only' && currentLane === 'footage') {
+            const before = `keyword=${scene.keyword} source=${scene.sourceHint}`;
+            scene.keyword    = null;
+            scene.stockQuery = null;
+            scene.webQuery   = null;
+            scene.sourceHint = null;
+            if (t.primary === 'template' && t.allowedTemplates.length) {
+                const line = String(scene.text || '').split(/[.!?]/)[0].trim().slice(0, 80);
+                scene.templateHint = `${t.allowedTemplates[0]}: ${line}`;
+                currentLane = 'template';
+            } else {
+                const mg = (t.allowedMGs && t.allowedMGs[0]) || 'focusWord';
+                const word = _pickFocusWord(scene.text);
+                scene.fullscreenMG = `${mg}: ${word}`;
+                currentLane = 'graphics';
+            }
+            fixes.push({ index: scene.index, reason: 'internal-only → strip footage', before, after: scene.fullscreenMG || scene.templateHint });
+            continue;
+        }
+
+        // Rule 2: chose a blocked lane → swap to primary lane
+        if (currentLane && blocked.has(currentLane)) {
+            const before = `${currentLane}:${scene.fullscreenMG || scene.templateHint || scene.keyword}`;
+            _coerceSceneToLane(scene, t.primary, t);
+            fixes.push({ index: scene.index, reason: `blocked-lane ${currentLane} → primary ${t.primary}`, before, after: scene.fullscreenMG || scene.templateHint || scene.keyword });
+            continue;
+        }
+
+        // Rule 3: MG type outside allowedMGs
+        if (scene.fullscreenMG && t.allowedMGs && t.allowedMGs.length) {
+            const fsType = String(scene.fullscreenMG).split(':')[0].trim();
+            if (!t.allowedMGs.includes(fsType) && !fsType.startsWith('map')) {
+                const before = scene.fullscreenMG;
+                const rest = String(scene.fullscreenMG).split(':').slice(1).join(':').trim() || _pickFocusWord(scene.text);
+                scene.fullscreenMG = `${t.allowedMGs[0]}: ${rest}`;
+                fixes.push({ index: scene.index, reason: `MG type not allowed for ${scene.sceneClass}`, before, after: scene.fullscreenMG });
+            }
+        }
+
+        // Rule 4: templateHint outside allowedTemplates
+        if (scene.templateHint && t.allowedTemplates && t.allowedTemplates.length) {
+            const tType = String(scene.templateHint).split(':')[0].trim();
+            if (!t.allowedTemplates.includes(tType)) {
+                const before = scene.templateHint;
+                const rest = String(scene.templateHint).split(':').slice(1).join(':').trim() || String(scene.text || '').slice(0, 80);
+                scene.templateHint = `${t.allowedTemplates[0]}: ${rest}`;
+                fixes.push({ index: scene.index, reason: `template type not allowed for ${scene.sceneClass}`, before, after: scene.templateHint });
+            }
+        }
+
+        // Rule 5: footage scene should match preferredSource when AI ignored it
+        if (currentLane === 'footage' && t.preferredSource && scene.sourceHint && scene.sourceHint !== t.preferredSource) {
+            // Only override when source is clearly weaker (stock on news-actor etc.)
+            if (t.preferredSource === 'telegram' && (scene.sourceHint === 'stock' || scene.sourceHint === 'pexels' || scene.sourceHint === 'pixabay')) {
+                const before = scene.sourceHint;
+                scene.sourceHint = t.preferredSource;
+                fixes.push({ index: scene.index, reason: `source ${before} → preferred ${t.preferredSource}`, before, after: t.preferredSource });
+            }
+        }
+    }
+    return fixes;
+}
+
+function _pickFocusWord(text) {
+    const t = String(text || '');
+    const words = t.match(/\b[A-Za-z]{4,}\b/g) || [];
+    for (const w of words) {
+        if (!_isAbstractKeyword(w)) return w.toLowerCase();
+    }
+    return (words[0] || 'focus').toLowerCase();
+}
+
+function _coerceSceneToLane(scene, lane, treatment) {
+    // Clear existing lane markers
+    if (lane !== 'footage')  { scene.keyword = null; scene.stockQuery = null; scene.webQuery = null; }
+    if (lane !== 'graphics' && lane !== 'map') scene.fullscreenMG = null;
+    if (lane !== 'template') scene.templateHint = null;
+
+    const line = String(scene.text || '').split(/[.!?]/)[0].trim().slice(0, 80);
+    if (lane === 'footage') {
+        scene.keyword    = scene.keyword || _pickFocusWord(scene.text);
+        scene.sourceHint = treatment.preferredSource || scene.sourceHint || 'stock';
+        scene.mediaType  = scene.mediaType || 'video';
+    } else if (lane === 'map') {
+        scene.fullscreenMG = scene.fullscreenMG || 'mapChart: locator';
+    } else if (lane === 'graphics') {
+        const mg = (treatment.allowedMGs && treatment.allowedMGs[0]) || 'focusWord';
+        scene.fullscreenMG = `${mg}: ${_pickFocusWord(scene.text)}`;
+    } else if (lane === 'template') {
+        const tpl = (treatment.allowedTemplates && treatment.allowedTemplates[0]) || 'factCard';
+        scene.templateHint = `${tpl}: ${line}`;
+    }
 }
 
 function _enforceSourceDiversity(scenes, nicheId) {

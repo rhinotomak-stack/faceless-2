@@ -173,6 +173,88 @@ function httpsDownload(url, timeout = 15000) {
     });
 }
 
+/**
+ * HTTPS GET with a User-Agent header (Wikipedia requires one; MapTiler accepts it).
+ * Returns Buffer. Follows redirects.
+ */
+function httpsGetWithUA(url, timeout = 8000) {
+    return new Promise((resolve, reject) => {
+        const opts = {
+            timeout,
+            headers: { 'User-Agent': 'YTA-Empire/1.0 (video-gen)' },
+        };
+        const req = https.get(url, opts, (res) => {
+            if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+                httpsGetWithUA(res.headers.location, timeout).then(resolve, reject);
+                return;
+            }
+            if (res.statusCode !== 200) {
+                reject(new Error(`HTTP ${res.statusCode} for ${url}`));
+                res.resume();
+                return;
+            }
+            const chunks = [];
+            res.on('data', c => chunks.push(c));
+            res.on('end', () => resolve(Buffer.concat(chunks)));
+        });
+        req.on('error', reject);
+        req.on('timeout', () => { req.destroy(); reject(new Error('Timeout')); });
+    });
+}
+
+/**
+ * Wikipedia coordinate lookup. Uses the search generator to find the best-matching
+ * article title for a place name, then reads the coordinates property. Returns
+ * { lon, lat, zoom, type, name, geoName, fullName } or null.
+ *
+ * Deterministic (same query → same article), free, no API key. Handles any named
+ * place that has a Wikipedia article — which is basically every geopolitical
+ * location, strait, landmark, city, region on Earth.
+ */
+async function geocodeViaWikipedia(placeName) {
+    if (!placeName) return null;
+    try {
+        const q = encodeURIComponent(placeName.trim());
+        // generator=search finds the best article for loose queries like
+        // "The Bab-el-Mandeb Strait" (exact title is "Bab-el-Mandeb"); prop=coordinates
+        // returns the canonical lat/lon from the article infobox.
+        const url = `https://en.wikipedia.org/w/api.php?action=query&format=json&prop=coordinates%7Cpageprops&generator=search&gsrsearch=${q}&gsrlimit=3&redirects=1&ppprop=wikibase-shortdesc`;
+        const buf = await httpsGetWithUA(url, 6000);
+        const data = JSON.parse(buf.toString());
+        const pages = data && data.query && data.query.pages;
+        if (!pages) return null;
+
+        // Pick the first page that has coordinates (search results ordered by relevance)
+        const ordered = Object.values(pages).sort((a, b) => (a.index || 999) - (b.index || 999));
+        for (const page of ordered) {
+            const c = page.coordinates && page.coordinates[0];
+            if (!c || typeof c.lat !== 'number' || typeof c.lon !== 'number') continue;
+
+            // Decide zoom from article short description. Rough heuristic:
+            //   country → 5, region/state → 6, city → 9, landmark/strait → 7
+            const desc = (page.pageprops && page.pageprops['wikibase-shortdesc'] || '').toLowerCase();
+            let zoom = 7, type = 'landmark';
+            if (/\bcountry\b|\bsovereign state\b/.test(desc))      { zoom = 5; type = 'country'; }
+            else if (/\bregion\b|\bprovince\b|\bstate\b|\barea\b/.test(desc))  { zoom = 6; type = 'region'; }
+            else if (/\bcity\b|\bcapital\b|\btown\b|\bmunicipality\b/.test(desc)) { zoom = 9; type = 'city'; }
+            else if (/\bstrait\b|\bchannel\b|\bsea\b|\bbay\b|\bgulf\b|\bocean\b/.test(desc)) { zoom = 6; type = 'region'; }
+
+            return {
+                lon: c.lon,
+                lat: c.lat,
+                zoom,
+                type,
+                name: placeName,
+                geoName: page.title || placeName,
+                fullName: page.title || placeName,
+            };
+        }
+        return null;
+    } catch (err) {
+        return null;
+    }
+}
+
 // ══════════════════════════════════════════════════════════════════
 // Geocoding — MapTiler free tier (100K req/day)
 // Converts "Berlin", "Tokyo Tower", "Sahara Desert" → exact lon/lat
@@ -185,7 +267,7 @@ function httpsDownload(url, timeout = 15000) {
  * Returns null if geocoding fails or no results.
  */
 async function geocodePlace(placeName, apiKey) {
-    if (!placeName || !apiKey) return null;
+    if (!placeName) return null;
 
     const cacheKey = placeName.trim().toLowerCase();
     if (_geocodeCache.has(cacheKey)) return _geocodeCache.get(cacheKey);
@@ -197,6 +279,49 @@ async function geocodePlace(placeName, apiKey) {
         const result = { lon: hardcoded[0], lat: hardcoded[1], zoom: hardcoded[2] || 5, type: 'country', name: placeName };
         _geocodeCache.set(cacheKey, result);
         return result;
+    }
+
+    // Normalize common wrapper words the AI planner adds ("The X Strait", "X Sea", ...)
+    // and retry hardcoded lookup before hitting MapTiler. Without this, named bodies of
+    // water and chokepoints fall through to the API which often returns random POIs
+    // (e.g. "The Bab-el-Mandeb Strait" → a Montana street).
+    const normalized = cacheKey
+        .replace(/^the\s+/i, '')
+        .replace(/\s+(strait|sea|bay|gulf|ocean|channel|river|lake|peninsula|canal|island|islands)$/i, '')
+        .trim();
+    if (normalized && normalized !== cacheKey) {
+        const norm = Object.entries(GEO_COORDS).find(([k]) => k.toLowerCase() === normalized)?.[1];
+        if (norm) {
+            const result = { lon: norm[0], lat: norm[1], zoom: norm[2] || 5, type: 'region', name: placeName };
+            _geocodeCache.set(cacheKey, result);
+            return result;
+        }
+    }
+    // Substring fallback: "Bab-el-Mandeb" inside "The Bab-el-Mandeb Strait"
+    const substring = Object.entries(GEO_COORDS).find(([k]) => {
+        const lk = k.toLowerCase();
+        return lk.length >= 5 && cacheKey.includes(lk);
+    })?.[1];
+    if (substring) {
+        const result = { lon: substring[0], lat: substring[1], zoom: substring[2] || 5, type: 'region', name: placeName };
+        _geocodeCache.set(cacheKey, result);
+        return result;
+    }
+
+    // Wikipedia/Wikidata lookup. Deterministic, free, no key — pulls canonical
+    // coordinates from the matching article's infobox. Sits between the hardcoded
+    // dict and MapTiler so obscure-but-named places ("Bab-el-Mandeb Strait",
+    // "Khyber Pass", "DMZ Korea") resolve correctly before we risk a MapTiler
+    // street-POI false positive.
+    const wiki = await geocodeViaWikipedia(placeName);
+    if (wiki) {
+        _geocodeCache.set(cacheKey, wiki);
+        return wiki;
+    }
+
+    if (!apiKey) {
+        _geocodeCache.set(cacheKey, null);
+        return null;
     }
 
     try {
@@ -987,6 +1112,6 @@ async function fetchOSMBoundaries(placeNames) {
 module.exports = {
     downloadMapForMG, downloadMapsForMGs, computeMapView, GEO_COORDS,
     stitchMapTilerTiles, MAPTILER_STYLE_MAP, GEOAPIFY_STYLE_MAP,
-    geocodePlace, geocodePlaces, fetchOSMBoundary, fetchOSMBoundaries,
+    geocodePlace, geocodePlaces, geocodeViaWikipedia, fetchOSMBoundary, fetchOSMBoundaries,
     extractEntities, isLikelyPlace, filterPlaces,
 };
