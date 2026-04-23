@@ -3774,6 +3774,23 @@ class MGRenderer {
                 wpBigMapCamera = true;
                 driftX = 0;
                 driftY = 0;
+                // Route + comparison: lock camera to bbox-center of all waypoints
+                // and scale to fit. A per-waypoint pan at scale 1.1 clips off the
+                // bigmap edges (black bars) because each waypoint sits near the
+                // edge of the wide-shot bigmap. These variants are one held
+                // wide frame, not a tour — override any interpolation above.
+                if (wideCap != null && wpPositions.length > 1) {
+                    const xs = wpPositions.map(p => p.px);
+                    const ys = wpPositions.map(p => p.py);
+                    const minX = Math.min(...xs), maxX = Math.max(...xs);
+                    const minY = Math.min(...ys), maxY = Math.max(...ys);
+                    wpCamX = (minX + maxX) / 2;
+                    wpCamY = (minY + maxY) / 2;
+                    const spanX = Math.max(1, maxX - minX) * 1.4;
+                    const spanY = Math.max(1, maxY - minY) * 1.4;
+                    const fitScale = Math.min(W / spanX, H / spanY);
+                    camScale = Math.min(camScale, fitScale);
+                }
             } else {
                 driftX = (W / 2 - wpCamX);
                 driftY = (H / 2 - wpCamY);

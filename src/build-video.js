@@ -751,9 +751,35 @@ async function buildVideo() {
     log.ok(`Created ${scenes.length} scenes with rich context (lang=${buildLanguage})`);
     log.br();
 
+    // Step 3.5: Map Assignment — deterministic per-scene disposition
+    // (must_map | can_map | must_not_map). Runs BEFORE VP so the planner's
+    // output can be gated. Part of the map-system rebuild (slice 1).
+    try {
+        const { assignMapDispositions, logDispositions } = require('./map-assignment');
+        const dispositions = assignMapDispositions(scenes, scriptContext, scriptContext.styleProfile || null, null);
+        logDispositions(dispositions, scriptContext);
+        scriptContext._mapDispositions = dispositions;
+    } catch (err) {
+        log.warn(`Map assignment failed: ${err.message} — VP will run without disposition gate`);
+        scriptContext._mapDispositions = null;
+    }
+
     // Step 4: Visual Planning — Batch keywords + media type + source hints
     log.step('🎨 Step 4: Visual Planner (Batch Keyword Generation)');
     scenesWithKeywords = await planVisuals(scenes, scriptContext, directorsBrief);
+
+    // Apply map-disposition gate: strip mapChart from must_not_map, upgrade must_map.
+    if (scriptContext._mapDispositions) {
+        try {
+            const { enforceDispositions } = require('./map-assignment');
+            const { blocked, upgraded } = enforceDispositions(scenesWithKeywords, scriptContext._mapDispositions);
+            const finalMap = scenesWithKeywords.filter(s => typeof s.fullscreenMG === 'string' && s.fullscreenMG.toLowerCase().startsWith('mapchart'));
+            console.log(`   [VP] Map disposition enforcement: blocked=${blocked} upgraded=${upgraded}`);
+            console.log(`   [VP] Final map scenes: ${finalMap.map(s => s.index).join(', ') || 'none'}  (${finalMap.length} of ${scenesWithKeywords.length})`);
+        } catch (err) {
+            log.warn(`Map disposition enforcement failed: ${err.message}`);
+        }
+    }
 
     // DEBUG: Stop after Visual Planner for testing
     if (process.env.STOP_AFTER === 'visual-planner') {

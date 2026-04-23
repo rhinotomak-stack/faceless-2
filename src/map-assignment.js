@@ -1,0 +1,266 @@
+// Map Assignment Layer — Slice 1 of the map-system rebuild.
+//
+// Deterministic (no AI) per-scene decision: should this scene become a map?
+//
+// Produces a disposition for every scene BEFORE the Visual Planner runs so
+// the planner can honor a hard gate: must_not_map scenes never receive a
+// mapChart fullscreenMG, and must_map scenes are upgraded to mapChart even
+// if the AI picked something weaker. Output is advisory input for VP +
+// (later slices) the MapCompiler.
+//
+// Decisions come from:
+//   • spatial verb patterns in scene text  ("through the strait of",
+//     "across Europe", "from X to Y", "bordering", "located in")
+//   • named-place presence (scriptContext.entities + entityTypes)
+//   • zone (hook / body / cta)  — CTA is rarely a map
+//   • abstract markers          — "imagine", "what if", quoted dialogue,
+//                                 inner monologue, metaphor language
+//   • niche mapPolicy baseline  — some niches map freely, others never
+//
+// This module NEVER calls AI. It is fast, pure, and deterministic.
+
+const SPATIAL_VERB_PATTERNS = [
+    /\b(through|across|along|into|out of|between|beyond|past)\b\s+(the\s+)?[A-Z]/,
+    /\bfrom\s+[A-Z][A-Za-z\- ]{2,30}\s+(to|toward|towards)\s+[A-Z]/,
+    /\b(borders?|bordering|located|situated|lies|lying|sits|sat|sitting)\s+(in|on|at|along|between|near|next to|beside)\b/i,
+    /\b(stretch(es|ed|ing)?|span(s|ned|ning)?|run(s|ning)?|flows?|cross(es|ed|ing)?)\s+(across|from|between|through|along)\b/i,
+    /\b(route|corridor|passage|strait|channel|border|frontier|coastline|shoreline)\b/i,
+    /\b(north|south|east|west|northern|southern|eastern|western)\s+(of|coast|border|part|region|tip|edge)\b/i,
+    /\b(heads?|head(ed|ing)|travell?(ed|ing)?|sail(ed|ing)?|mov(e|ed|ing)|push(ed|ing)?|advanc(e|ed|ing))\s+(into|toward|towards|through|across|along|from)\b/i,
+];
+
+const ABSTRACT_MARKERS = [
+    /\b(imagine|what if|suppose|consider|picture this|think about|let's say)\b/i,
+    /\b(means?|meaning|metaphor|represent(s|ed|ing)?|symboliz(e|es|ed|ing))\b/i,
+    /\b(feel(s|ing)?|felt|believ(e|ed|ing)|hop(e|ed|ing)|dream(ed|ing|s)?|fear(ed|ing|s)?)\b/i,
+    /^".*"$/,                                                 // whole scene is a quoted line
+    /\b(like comments? below|subscribe|hit the bell|click|share this|watch|stay tuned)\b/i,
+    /\b(today we|in this video|we'll explore|coming up|next time)\b/i,
+];
+
+// Niche baseline — what does this niche prefer when the signals are ambiguous?
+// explainer.politics, explainer.military, news.military, news.politics map
+// readily. explainer.nature and explainer.history also benefit from location
+// shots. Pure commentary / motivational / diy niches rarely need maps.
+const NICHE_BASELINE = {
+    'news.politics':       { baseline: 'can_map', budget: 6 },
+    'news.military':       { baseline: 'can_map', budget: 6 },
+    'news.economy':        { baseline: 'can_map', budget: 4 },
+    'news.tech':           { baseline: 'must_not_map', budget: 2 },
+    'news.celebrity':      { baseline: 'must_not_map', budget: 1 },
+    'news.sport':          { baseline: 'must_not_map', budget: 1 },
+    'explainer.politics':  { baseline: 'can_map', budget: 6 },
+    'explainer.military':  { baseline: 'can_map', budget: 6 },
+    'explainer.history':   { baseline: 'can_map', budget: 5 },
+    'explainer.nature':    { baseline: 'can_map', budget: 4 },
+    'explainer.crime':     { baseline: 'can_map', budget: 3 },
+    'explainer.business':  { baseline: 'can_map', budget: 3 },
+    'explainer.tech':      { baseline: 'must_not_map', budget: 2 },
+    'explainer.luxury':    { baseline: 'must_not_map', budget: 1 },
+    'explainer.sport':     { baseline: 'must_not_map', budget: 1 },
+    'explainer.motivation':{ baseline: 'must_not_map', budget: 0 },
+    'explainer.food':      { baseline: 'must_not_map', budget: 1 },
+    'explainer.diy':       { baseline: 'must_not_map', budget: 0 },
+};
+
+function _getNicheBaseline(nicheId) {
+    return NICHE_BASELINE[nicheId] || { baseline: 'can_map', budget: 3 };
+}
+
+function _countNamedPlaces(text, entities) {
+    if (!text || !entities || !entities.length) return 0;
+    const lower = text.toLowerCase();
+    let hits = 0;
+    for (const e of entities) {
+        if (!e || e.length < 3) continue;
+        if (lower.includes(e.toLowerCase())) hits++;
+    }
+    return hits;
+}
+
+function _hasSpatialVerb(text) {
+    if (!text) return null;
+    for (const rx of SPATIAL_VERB_PATTERNS) {
+        const m = text.match(rx);
+        if (m) return m[0].trim();
+    }
+    return null;
+}
+
+function _hasAbstractMarker(text) {
+    if (!text) return null;
+    for (const rx of ABSTRACT_MARKERS) {
+        const m = text.match(rx);
+        if (m) return m[0].trim();
+    }
+    return null;
+}
+
+function _zoneForScene(scene, scriptContext) {
+    const midpoint = (scene.startTime + scene.endTime) / 2;
+    const hookEnd = scriptContext.hookEndTime || 0;
+    const ctaStart = scriptContext.ctaStartTime || Infinity;
+    if (midpoint <= hookEnd) return 'hook';
+    if (midpoint >= ctaStart) return 'cta';
+    return 'body';
+}
+
+// Only entity kinds that geocode to a point/region. Skip people, orgs, events.
+function _placeLikeEntities(scriptContext) {
+    const { entities = [], entityTypes = {} } = scriptContext || {};
+    const places = [];
+    for (const e of entities) {
+        const t = entityTypes[e];
+        // If we don't have a type tag, keep the entity — names like "Persian
+        // Gulf" or "Red Sea" often reach us untagged and must still count.
+        if (!t || t === 'place' || t === 'country' || t === 'city' || t === 'region' || t === 'waterbody') {
+            places.push(e);
+        }
+    }
+    return places;
+}
+
+/**
+ * Assign a map disposition to every scene.
+ *
+ * @param {Array} scenes                 director scenes (index, text, startTime, endTime)
+ * @param {Object} scriptContext         director context (entities, zones, nicheId, ...)
+ * @param {Object} styleProfile          optional reference style profile
+ * @param {Object} nicheCfg              optional niche config
+ * @returns {Array<{sceneIndex, disposition, reason, signals}>}
+ */
+function assignMapDispositions(scenes, scriptContext, styleProfile = null, nicheCfg = null) {
+    if (!Array.isArray(scenes)) return [];
+    const nicheId = scriptContext?.nicheId || 'general';
+    const { baseline, budget } = _getNicheBaseline(nicheId);
+    const placeEntities = _placeLikeEntities(scriptContext || {});
+
+    const dispositions = scenes.map(scene => {
+        const text = scene.text || '';
+        const zone = _zoneForScene(scene, scriptContext || {});
+        const spatialVerb = _hasSpatialVerb(text);
+        const abstractMarker = _hasAbstractMarker(text);
+        const placeCount = _countNamedPlaces(text, placeEntities);
+
+        const signals = { zone, spatialVerb, abstractMarker, placeCount, nicheBaseline: baseline };
+
+        // must_not_map wins over everything:
+        //   CTA zone, quote-only text, abstract framing, and zero named places
+        //   all suppress the map option hard.
+        if (zone === 'cta') {
+            return { sceneIndex: scene.index, disposition: 'must_not_map', reason: 'CTA zone — closing call, not a map', signals };
+        }
+        if (abstractMarker && placeCount === 0) {
+            return { sceneIndex: scene.index, disposition: 'must_not_map', reason: `abstract marker "${abstractMarker}" + no named place`, signals };
+        }
+        if (placeCount === 0 && !spatialVerb) {
+            return { sceneIndex: scene.index, disposition: 'must_not_map', reason: 'no named place + no spatial verb', signals };
+        }
+
+        // Niche-level hard block (e.g. motivation, diy):
+        if (baseline === 'must_not_map' && !spatialVerb) {
+            return { sceneIndex: scene.index, disposition: 'must_not_map', reason: `niche baseline (${nicheId}) + no strong spatial cue`, signals };
+        }
+
+        // must_map: strong spatial cue + ≥1 named place, OR from/to route phrase
+        if (spatialVerb && placeCount >= 1) {
+            return { sceneIndex: scene.index, disposition: 'must_map', reason: `spatial verb "${spatialVerb}" + ${placeCount} named place(s)`, signals };
+        }
+
+        // Fallback — has some signals but not strong enough to force.
+        if (placeCount >= 2) {
+            return { sceneIndex: scene.index, disposition: 'can_map', reason: `${placeCount} named places, no spatial verb`, signals };
+        }
+        if (placeCount === 1 && spatialVerb) {
+            return { sceneIndex: scene.index, disposition: 'can_map', reason: `1 place + spatial phrase (weak)`, signals };
+        }
+        return { sceneIndex: scene.index, disposition: 'can_map', reason: 'ambiguous — optional map', signals };
+    });
+
+    // Budget cap: if can_map count exceeds niche budget - must_map count,
+    // downgrade the weakest can_map entries to must_not_map. Weakest = fewest
+    // named places + no spatial verb.
+    const mustMapCount = dispositions.filter(d => d.disposition === 'must_map').length;
+    const canMapCount = dispositions.filter(d => d.disposition === 'can_map').length;
+    const remainingBudget = Math.max(0, budget - mustMapCount);
+    if (canMapCount > remainingBudget) {
+        const canMapRanked = dispositions
+            .filter(d => d.disposition === 'can_map')
+            .sort((a, b) => {
+                const aScore = (a.signals.spatialVerb ? 2 : 0) + a.signals.placeCount;
+                const bScore = (b.signals.spatialVerb ? 2 : 0) + b.signals.placeCount;
+                return aScore - bScore;
+            });
+        const toDowngrade = canMapRanked.slice(0, canMapCount - remainingBudget);
+        for (const d of toDowngrade) {
+            d.disposition = 'must_not_map';
+            d.reason = `downgraded — niche budget ${budget} exceeded`;
+        }
+    }
+
+    return dispositions;
+}
+
+/**
+ * Log the assignment summary in the format the rebuild spec expects.
+ * Keep this verbose — easy to grep in production builds.
+ */
+function logDispositions(dispositions, scriptContext) {
+    const nicheId = scriptContext?.nicheId || 'general';
+    const { baseline, budget } = _getNicheBaseline(nicheId);
+    const counts = { must_map: 0, can_map: 0, must_not_map: 0 };
+    for (const d of dispositions) counts[d.disposition]++;
+
+    console.log('\n════════════════════════════════════════════════════════════');
+    console.log('🗺️  Map Assignment (deterministic)');
+    console.log('════════════════════════════════════════════════════════════');
+    console.log(`   Niche policy: ${nicheId}  baseline=${baseline}  budget=${budget}`);
+    console.log(`   ${dispositions.length} scenes analyzed → must_map=${counts.must_map}  can_map=${counts.can_map}  must_not_map=${counts.must_not_map}`);
+    console.log('');
+    for (const d of dispositions) {
+        const tag = d.disposition.padEnd(12, ' ');
+        console.log(`   Scene ${String(d.sceneIndex).padStart(2, ' ')}  ${tag}  ${d.reason}`);
+    }
+    console.log('');
+}
+
+/**
+ * Apply the disposition gate to VP-planned scenes AFTER the planner runs.
+ * Hard enforcement:
+ *   • must_not_map   → strip any fullscreenMG starting with "mapChart" and log
+ *   • must_map       → if no mapChart present, set fullscreenMG = "mapChart: locator"
+ * Returns { blocked, upgraded } counts for summary logging.
+ */
+function enforceDispositions(scenes, dispositions) {
+    let blocked = 0, upgraded = 0;
+    const byIndex = new Map(dispositions.map(d => [d.sceneIndex, d]));
+    for (const scene of scenes) {
+        const d = byIndex.get(scene.index);
+        if (!d) continue;
+        const hasMap = typeof scene.fullscreenMG === 'string' && scene.fullscreenMG.toLowerCase().startsWith('mapchart');
+
+        if (d.disposition === 'must_not_map' && hasMap) {
+            console.log(`   [VP] Scene ${scene.index} fullscreenMG="${scene.fullscreenMG}" BLOCKED by must_not_map (${d.reason}) → stripped`);
+            scene._mapBlockedBy = scene.fullscreenMG;
+            scene.fullscreenMG = null;
+            blocked++;
+            continue;
+        }
+
+        if (d.disposition === 'must_map' && !hasMap) {
+            const prev = scene.fullscreenMG || scene.mgHint || 'none';
+            scene._mapUpgradedFrom = prev;
+            scene.fullscreenMG = 'mapChart: locator';
+            console.log(`   [VP] Scene ${scene.index} ${prev === 'none' ? 'no MG' : `had "${prev}"`} UPGRADED to mapChart (${d.reason})`);
+            upgraded++;
+        }
+    }
+    return { blocked, upgraded };
+}
+
+module.exports = {
+    assignMapDispositions,
+    logDispositions,
+    enforceDispositions,
+    _NICHE_BASELINE: NICHE_BASELINE,
+};
