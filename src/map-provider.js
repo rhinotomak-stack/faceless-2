@@ -646,23 +646,30 @@ function buildGeoapifyUrl(view, mapStyle, apiKey) {
 }
 
 /**
- * Extract location names from an MG scene + scriptContext.
- * Parses the AI-generated subtext format: "Berlin: 3.6M, Tokyo: 13.9M, ..."
- * Also falls back to scriptContext.entities and GEO_COORDS dictionary scan.
+ * Extract location names from an MG's own payload (mg.text + mg.subtext).
+ *
+ * Slice 3 note: this is now a NARROW legacy-only fallback, used when the
+ * caller did not supply a compiled MapScene (src/map-compiler.js) and the
+ * planner also produced no waypoints. MapScene.subjects is the authoritative
+ * input for Slice 3+; this helper only parses what the MG payload itself
+ * claims, without scanning the GEO_COORDS dictionary or dumping
+ * scriptContext.entities across unrelated scenes.
+ *
+ * Supported inputs (in order tried, first non-empty wins):
+ *   1. Subtext "Place: label, Place: label" pairs (and meta-directive keys
+ *      like "Region: Middle East" where the value is the place).
+ *   2. Meta-directive text like "Zoom on Persian Gulf" — strip the verb
+ *      prefix, use the remainder as a single place.
  */
 function extractEntities(mg, scriptContext) {
     const entityTypes = scriptContext?.entityTypes || {};
 
-    // Meta-directive prefixes VP emits instead of actual place names
-    // ("Region: Middle East", "Zoom on Persian Gulf", "Pan to Red Sea", etc.).
-    // These describe a camera op — the REAL place is the value side.
     const META_KEY_RE = /^(region|zoom|pan|view|map|focus|overview|closeup|close-up|highlight|scene|labels?)$/i;
     const META_PREFIX_RE = /^(zoom\s+(?:on|in(?:to)?|to)|pan\s+(?:to|across)|view\s+of|focus\s+on|overview\s+of|highlight(?:ing)?|map\s+of|region:?)\s+/i;
 
     const stripMetaPrefix = (s) => {
         if (!s) return '';
         let out = String(s).trim();
-        // Strip up to 2 chained prefixes (e.g. "Map of Region: Asia")
         for (let i = 0; i < 2; i++) {
             const stripped = out.replace(META_PREFIX_RE, '').trim();
             if (stripped === out) break;
@@ -671,13 +678,7 @@ function extractEntities(mg, scriptContext) {
         return out;
     };
 
-    // Filter at each step so a bad step 1 (e.g. VP description with stray colons)
-    // doesn't block fallback to steps 2 and 3.
-
-    // 1. Parse subtext "Location: value" pairs — short fragments only.
-    //    Long fragments (>6 words) are almost always descriptive prose, not
-    //    real "Location: value" pairs, so skip them. If the key is a
-    //    meta-directive ("Region", "Zoom", "Pan"...), use the VALUE as the place.
+    // 1. Parse subtext "Location: value" pairs.
     let entities = [];
     const subtext = mg.subtext || '';
     if (subtext) {
@@ -688,7 +689,6 @@ function extractEntities(mg, scriptContext) {
                 const key = pair.substring(0, colonIdx).trim();
                 const val = pair.substring(colonIdx + 1).trim();
                 if (META_KEY_RE.test(key)) {
-                    // "Region: Middle East" → place is the value
                     if (val && val.length >= 2 && val.split(/\s+/).length <= 6) {
                         entities.push(val);
                     }
@@ -701,9 +701,8 @@ function extractEntities(mg, scriptContext) {
     let filtered = filterPlaces(entities, entityTypes, 'entities');
     if (filtered.length > 0) return filtered;
 
-    // 2a. If mg.text is a short meta-directive like "Zoom on Persian Gulf",
-    //     stripping the prefix leaves the literal place name — use it directly.
-    //     (Avoids needing every place in the GEO_COORDS key list.)
+    // 2. If mg.text is a meta-directive like "Zoom on Persian Gulf", strip the
+    //    prefix and use the remainder as a single place.
     const textStripped = stripMetaPrefix(mg.text || '');
     if (textStripped && textStripped !== (mg.text || '').trim()) {
         const wordCount = textStripped.split(/\s+/).length;
@@ -713,34 +712,44 @@ function extractEntities(mg, scriptContext) {
         }
     }
 
-    // 2b. Scan mg.text AND mg.subtext for known GEO_COORDS place names.
-    const scanText = `${stripMetaPrefix(mg.text || '')} ${stripMetaPrefix(mg.subtext || '')}`.toLowerCase();
-    if (scanText.trim()) {
-        entities = [];
-        for (const name of Object.keys(GEO_COORDS)) {
-            if (name.length > 2 && scanText.includes(name.toLowerCase())) {
-                if (!entities.includes(name)) entities.push(name);
-            }
-        }
-        filtered = filterPlaces(entities, entityTypes, 'entities');
-        if (filtered.length > 0) return filtered;
-    }
-
-    // 3. Fall back to scriptContext.entities (the authoritative list).
-    if (Array.isArray(scriptContext?.entities) && scriptContext.entities.length > 0) {
-        filtered = filterPlaces([...scriptContext.entities], entityTypes, 'entities');
-        if (filtered.length > 0) return filtered;
-    }
-
+    // No dictionary scan, no scriptContext.entities dump (Slice 3: removed).
     return [];
+}
+
+/**
+ * Populate the MapScene.geometry + renderAssets artifacts after a successful
+ * download. Slice 4 consumes these to drive the renderer without reading the
+ * legacy mg._mapView / mg._mapPins side-channels.
+ */
+function _populateMapSceneAssets(mapScene, mg, view) {
+    if (!mapScene) return;
+    mapScene.geometry = {
+        center: { lon: view.lon, lat: view.lat },
+        zoom: view.zoom,
+        pins: Array.isArray(view.pins) ? view.pins : [],
+    };
+    mapScene.renderAssets = {
+        mapImageFile: mg.mapImageFile || null,
+        bigMapSize: mg._bigMapSize || null,
+        osmBoundaries: mg._osmBoundaries || null,
+        mapView: mg._mapView || view,
+    };
 }
 
 /**
  * Download a static map image for a mapChart MG.
  * Tries MapTiler (tile stitching) first, then Geoapify (static API).
  * Now with geocoding: resolves city/landmark names → exact coordinates.
+ *
+ * Slice 3 entity resolution priority:
+ *   1. scene._mapScene.subjects (from src/map-compiler.js) — authoritative.
+ *   2. mg._mapWaypoints / mg._mapSwarms (legacy planner — removed in slice 4).
+ *   3. extractEntities(mg, scriptContext) — narrow payload-only fallback.
+ *
+ * The `scenes` argument (optional) is the list of compiled scenes; we look up
+ * the owning scene by mg.sceneIndex to find its attached MapScene.
  */
-async function downloadMapForMG(mg, scriptContext, tempDir) {
+async function downloadMapForMG(mg, scriptContext, tempDir, scenes) {
     const maptilerKey = config.maptiler?.apiKey;
     const geoapifyKey = config.geoapify?.apiKey;
 
@@ -752,39 +761,42 @@ async function downloadMapForMG(mg, scriptContext, tempDir) {
 
     const entityTypes = scriptContext?.entityTypes || {};
 
-    // Prefer the AI Map Planner's selected waypoints + swarms — that's exactly what
-    // the renderer will animate, so those are the only coords we actually need.
-    // Using them directly (instead of re-deriving from mg.text/subtext/scriptContext)
-    // avoids geocoding 20 unused script-wide entities per map and keeps OSM boundary
-    // fetches tight — no more Albania/Australia appearing on Red Sea maps.
+    // Slice 3: look up the authoritative MapScene (compiler output).
+    const mapScene = (Array.isArray(scenes) && mg.sceneIndex != null)
+        ? scenes.find(s => s && s.index === mg.sceneIndex)?._mapScene || null
+        : null;
+
     let entities;
-    const plannerNames = [];
-    const seen = new Set();
-    if (Array.isArray(mg._mapWaypoints) && mg._mapWaypoints.length > 0) {
-        for (const wp of mg._mapWaypoints) {
-            if (wp.name && !seen.has(wp.name)) {
-                plannerNames.push(wp.name);
-                seen.add(wp.name);
+    if (mapScene && Array.isArray(mapScene.subjects) && mapScene.subjects.length > 0) {
+        // Authoritative path: MapScene subjects are canonicalized + capped per mode.
+        entities = mapScene.subjects.map(s => s.name).filter(Boolean);
+        console.log(`      🧭 MapScene (${mapScene.mapMode}, ${mapScene.mapPurpose}): ${entities.join(', ')}`);
+    } else {
+        // Legacy path: planner waypoints / swarms (removed in slice 4).
+        const plannerNames = [];
+        const seen = new Set();
+        if (Array.isArray(mg._mapWaypoints) && mg._mapWaypoints.length > 0) {
+            for (const wp of mg._mapWaypoints) {
+                if (wp.name && !seen.has(wp.name)) { plannerNames.push(wp.name); seen.add(wp.name); }
             }
         }
-    }
-    if (Array.isArray(mg._mapSwarms)) {
-        for (const sw of mg._mapSwarms) {
-            for (const loc of (sw.locations || [])) {
-                if (loc.name && !seen.has(loc.name)) {
-                    plannerNames.push(loc.name);
-                    seen.add(loc.name);
+        if (Array.isArray(mg._mapSwarms)) {
+            for (const sw of mg._mapSwarms) {
+                for (const loc of (sw.locations || [])) {
+                    if (loc.name && !seen.has(loc.name)) { plannerNames.push(loc.name); seen.add(loc.name); }
                 }
             }
         }
-    }
-
-    if (plannerNames.length > 0) {
-        entities = filterPlaces(plannerNames, entityTypes, 'planner waypoints');
-        console.log(`      🎯 Using ${entities.length} planner-selected entit${entities.length === 1 ? 'y' : 'ies'} (waypoints + swarms)`);
-    } else {
-        // Planner didn't run or yielded nothing → derive from mg content as before.
-        entities = extractEntities(mg, scriptContext);
+        if (plannerNames.length > 0) {
+            entities = filterPlaces(plannerNames, entityTypes, 'planner waypoints');
+            console.log(`      🎯 Planner waypoints (no MapScene): ${entities.join(', ')}`);
+        } else {
+            // Ultimate fallback — narrow, payload-only (no dict scan, no entities dump).
+            entities = extractEntities(mg, scriptContext);
+            if (entities.length > 0) {
+                console.log(`      📝 Payload fallback: ${entities.join(', ')}`);
+            }
+        }
     }
 
     // Use geocoding for precise coordinates (async — MapTiler free tier)
@@ -927,6 +939,7 @@ async function downloadMapForMG(mg, scriptContext, tempDir) {
                     mg._mapPins = view.pins;
                     mg._bigMapSize = { w: BIG_W, h: BIG_H };
                     mg._wpCoords = wpCoords;
+                    _populateMapSceneAssets(mapScene, mg, bigView);
                     console.log(`   ✅ Big map saved: ${filename} (${(buffer.length / 1024).toFixed(0)} KB)`);
                     return true;
                 }
@@ -950,6 +963,7 @@ async function downloadMapForMG(mg, scriptContext, tempDir) {
                 mg.mapImageFile = filename;
                 mg._mapView = view;
                 if (view.pins?.length) mg._mapPins = view.pins;
+                _populateMapSceneAssets(mapScene, mg, view);
                 console.log(`   ✅ Map saved via MapTiler: ${filename} (${(buffer.length / 1024).toFixed(0)} KB)`);
                 return true;
             }
@@ -972,6 +986,7 @@ async function downloadMapForMG(mg, scriptContext, tempDir) {
                 mg.mapImageFile = filename;
                 mg._mapView = view;
                 if (view.pins?.length) mg._mapPins = view.pins;
+                _populateMapSceneAssets(mapScene, mg, view);
                 console.log(`   ✅ Map saved via Geoapify: ${filename} (${(buffer.length / 1024).toFixed(0)} KB)`);
                 return true;
             }
@@ -986,14 +1001,16 @@ async function downloadMapForMG(mg, scriptContext, tempDir) {
 
 /**
  * Download maps for all mapChart MGs in a list.
+ * `scenes` (optional) is threaded through so each MG can resolve its
+ * authoritative MapScene via mg.sceneIndex — Slice 3 of the map rebuild.
  */
-async function downloadMapsForMGs(allMGs, scriptContext, tempDir) {
+async function downloadMapsForMGs(allMGs, scriptContext, tempDir, scenes) {
     const mapMGs = allMGs.filter(mg => mg.type === 'mapChart');
     if (mapMGs.length === 0) return 0;
 
     let downloaded = 0;
     for (const mg of mapMGs) {
-        const ok = await downloadMapForMG(mg, scriptContext, tempDir);
+        const ok = await downloadMapForMG(mg, scriptContext, tempDir, scenes);
         if (ok) downloaded++;
     }
     return downloaded;

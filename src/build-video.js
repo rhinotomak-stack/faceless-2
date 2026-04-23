@@ -1522,7 +1522,7 @@ async function buildVideo() {
         log.step('🗺️ Step 6.06: Map Images');
         try {
             const { downloadMapsForMGs } = require('./map-provider');
-            const mapCount = await downloadMapsForMGs(allMGs, scriptContext, config.paths.temp);
+            const mapCount = await downloadMapsForMGs(allMGs, scriptContext, config.paths.temp, scenesWithMedia);
             if (mapCount > 0) {
                 log.ok(`Downloaded ${mapCount} map image(s) for ${mapMGs.length} mapChart scene(s)`);
             } else {
