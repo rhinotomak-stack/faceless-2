@@ -17,6 +17,7 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 const config = require('./config');
+const { getPack: getMapStylePack } = require('./map-style-packs');
 
 // ── Geocoding cache (avoids repeat API calls within same build) ──
 const _geocodeCache = new Map();
@@ -797,9 +798,15 @@ function _fitEstablishZoomFromPixels(coords, opts = {}) {
     const endpointFit = Math.min(frameW / spanX, frameH / spanY);
     const fillFrame = Math.max(frameW / imgW, frameH / imgH);
 
-    // Prefer padding, but keep the image filling the frame when possible.
+    // Prefer padding, but the IMAGE MUST FILL THE FRAME (no black bars).
+    // When the bigMap is tall/skinny relative to the span, endpointFit can be
+    // smaller than fillFrame — capping to endpointFit there leaves the scaled
+    // image smaller than the frame (black bar on whichever axis is exposed).
+    // fillFrame is a hard floor; endpointFit is only a soft ceiling when it
+    // doesn't violate the floor.
     let zoom = Math.max(paddedFit, fillFrame);
-    if (zoom > endpointFit) zoom = endpointFit;
+    if (zoom > endpointFit && endpointFit >= fillFrame) zoom = endpointFit;
+    zoom = Math.max(zoom, fillFrame);
     if (!Number.isFinite(zoom) || zoom <= 0) return null;
     return Math.max(0.25, Math.min(1.3, zoom));
 }
@@ -947,17 +954,26 @@ function _buildCameraPlanStops(mapScene, mg, view) {
         console.log(`      🎥 cameraPlan.stops: scene=${mapScene.sceneIndex} mode=${mode} establish-collapse failed — falling through to per-subject path`);
     }
 
-    // ── Route mode: long-range routes yield to legacy bbox-fit camera ──
-    // For cross-continent routes (Shanghai→Rotterdam ~116° span) we want a
-    // held corridor overview WITH a visible route line animating between
-    // endpoint pins. The renderer's legacy bbox-fit at MGRenderer.js:3898
-    // already produces exactly that: camera locks to bbox-center, zoom fits
-    // bbox under wideCap=1.1, and per-subject wpPositions still drive the
-    // dashed route-path draw-on. Emitting stops here would set
-    // _stopsDrivenCamera=true, which SKIPS that bbox-fit. So for long-range
-    // routes we return null — the legacy path is the right path.
+    // ── Route mode: authored corridor overview for long-haul routes ──
+    // For cross-continent routes (Shanghai→Rotterdam ~116° span) we want ONE
+    // held corridor-overview camera stop that shows the full journey at a
+    // glance, plus a dashed route line that animates through every waypoint
+    // inside that stable frame. Previously this branch returned null so the
+    // renderer's legacy bbox-fit at MGRenderer.js:3898 composed the shot — an
+    // intentional fallback that worked but left the shot accidental rather
+    // than authored. Now we build an explicit establish stop here and emit a
+    // separate route-geometry array (_mapRouteGeometry) so the route line
+    // still draws through all endpoints without forcing camera motion.
+    //
     // Short/local routes (≤15° span) keep per-subject stops because a camera
     // pan between nearby cities is editorially correct (troop advance, etc.).
+    //
+    // Detour geography ("around Africa") is typically tagged kind='region'
+    // (continents, seas, broad areas). When we have ≥2 country/city/waterbody
+    // anchors, regions are excluded from the FRAMING bbox so the corridor
+    // center/zoom reflects the actual path — not the detour reference. They
+    // remain in mapScene.subjects so pins, labels, and route geometry still
+    // include them; only the camera bbox ignores them.
     const ROUTE_CORRIDOR_SPAN_DEG = 15;
     if (mode === 'route' && waypoints.length >= 2) {
         let rMinLon = Infinity, rMaxLon = -Infinity, rMinLat = Infinity, rMaxLat = -Infinity;
@@ -972,8 +988,70 @@ function _buildCameraPlanStops(mapScene, mg, view) {
             rValidCount++;
         }
         const routeSpan = rValidCount >= 2 ? Math.max(rMaxLon - rMinLon, rMaxLat - rMinLat) : 0;
+
         if (routeSpan > ROUTE_CORRIDOR_SPAN_DEG) {
-            console.log(`      🎥 cameraPlan.stops: scene=${mapScene.sceneIndex} mode=route framing=route-corridor (span=${routeSpan.toFixed(0)}°, ${rValidCount} anchors) — yielding to legacy bbox-fit + routePath line`);
+            // Split subjects into framing anchors vs. excluded broad regions.
+            const nonRegionCount = (mapScene.subjects || []).filter(s => s && s.kind !== 'region').length;
+            const framingSubjects = [];
+            const excludedFromFraming = [];
+            for (const subj of (mapScene.subjects || [])) {
+                if (!subj || !subj.name) continue;
+                if (subj.kind === 'region' && nonRegionCount >= 2) {
+                    excludedFromFraming.push(subj.name);
+                    continue;
+                }
+                framingSubjects.push(subj);
+            }
+            const framingScene = Object.assign({}, mapScene, { subjects: framingSubjects });
+
+            // Build the single corridor-overview stop. _buildEstablishStop
+            // uses route-specific headroom (1.6x) so the arc has breathing
+            // room, and its pixel-fit path keeps endpoints inside the frame.
+            const corridor = _buildEstablishStop(
+                framingScene, waypoints, findCoord, subjectByName,
+                { mode: 'route', mapView: view, bigMapSize: mg._bigMapSize || null, frameW: OUT_W, frameH: OUT_H }
+            );
+
+            if (corridor) {
+                // Extend the stop to cover the FULL scene timeline so the
+                // camera holds steady while the route line animates through
+                // it. Without this, _buildEstablishStop uses the first/last
+                // waypoint start/end — which is fine but we want to be
+                // explicit that this is a single-stop establish.
+                const wpStarts = waypoints.map(w => Number(w.startTime)).filter(Number.isFinite);
+                const wpEnds   = waypoints.map(w => Number(w.endTime)).filter(Number.isFinite);
+                if (wpStarts.length) corridor.startTime = Math.min(...wpStarts);
+                if (wpEnds.length)   corridor.endTime   = Math.max(...wpEnds);
+                corridor.dwellSec = corridor.endTime - corridor.startTime;
+
+                // Route geometry — every valid waypoint coord in order, carrying
+                // the original per-waypoint timing so the renderer can animate
+                // the dashed line progressively through each segment. This is
+                // intentionally decoupled from camera stops: the corridor stop
+                // holds the frame; the geometry drives the path draw.
+                const routeGeom = [];
+                for (const wp of waypoints) {
+                    const c = findCoord(wp.name);
+                    if (!c || _looksLikePlaceholderCoord(c.lon, c.lat)) continue;
+                    const st = Number(wp.startTime);
+                    const et = Number(wp.endTime);
+                    if (!Number.isFinite(st) || !Number.isFinite(et) || et <= st) continue;
+                    routeGeom.push({ name: wp.name, lon: c.lon, lat: c.lat, startTime: st, endTime: et });
+                }
+                if (routeGeom.length >= 2) {
+                    mg._mapRouteGeometry = routeGeom;
+                }
+
+                const excludedLabel = excludedFromFraming.length > 0
+                    ? `, excluded-from-framing=[${excludedFromFraming.join(', ')}]`
+                    : '';
+                console.log(`      🎥 cameraPlan.stops: scene=${mapScene.sceneIndex} mode=route framing=route-corridor (span=${routeSpan.toFixed(0)}°, ${rValidCount} anchors → 1 corridor stop, center=[${corridor.lon.toFixed(1)},${corridor.lat.toFixed(1)}] zoom=${corridor.zoom.toFixed(2)}${excludedLabel})`);
+                if (routeGeom.length >= 2) {
+                    console.log(`      🎥 cameraPlan.stops: scene=${mapScene.sceneIndex} route geometry retained: ${routeGeom.length} points for dashed path (${routeGeom.map(p => p.name).join(' → ')})`);
+                }
+                return [corridor];
+            }
+            console.log(`      🎥 cameraPlan.stops: scene=${mapScene.sceneIndex} mode=route corridor build failed (no valid framing coords) — falling back to null (legacy bbox-fit)`);
             return null;
         } else if (rValidCount >= 2) {
             console.log(`      🎥 cameraPlan.stops: scene=${mapScene.sceneIndex} mode=route framing=local-route (span=${routeSpan.toFixed(0)}° ≤${ROUTE_CORRIDOR_SPAN_DEG}°) — per-subject stops`);
@@ -1076,7 +1154,9 @@ function _populateMapSceneAssets(mapScene, mg, view) {
         swarms:       Array.isArray(mg._mapSwarms)    ? mg._mapSwarms    : null,
         icons:        mg._mapIcons      || null,
         routePath:    !!mg._mapRoutePath,
+        routeGeometry: Array.isArray(mg._mapRouteGeometry) ? mg._mapRouteGeometry : null,
         bigMap:       !!mg._mapBigMap,
+        stylePackId:  mg.mapStylePack || null,
     };
 }
 
@@ -1301,6 +1381,14 @@ async function downloadMapForMG(mg, scriptContext, tempDir, scenes) {
 
                 const tileZoomForCam = (cz) => Math.ceil(Math.log2(1920 * cz * 360 / (80 * 512)));
                 let bigZoom = Math.max(3, Math.min(tileZoomForCam(maxWpZoom), 7));
+                // Style-pack extra-detail bump: invasions/editorial packs request +1 zoom
+                // for crisper tiles on wide shots. Hard-cap stays at 7 so we don't blow
+                // past MapTiler's useful tile resolution.
+                const _pack = getMapStylePack(mg.mapStylePack || null);
+                if (_pack && _pack.extraDetail && bigZoom < 7) {
+                    bigZoom += 1;
+                    console.log(`      🔎 Pack "${_pack.id}" requested extraDetail → bigZoom bumped to ${bigZoom}`);
+                }
 
                 const cosLat = Math.max(0.1, Math.cos(centerLat * Math.PI / 180));
                 const wideShotLonSpan = 80 / minWpZoom;
@@ -1484,38 +1572,80 @@ async function fetchOSMBoundary(placeName) {
         req.on('timeout', () => { req.destroy(); reject(new Error('Timeout')); });
     });
 
+    // Pick the largest polygon from a multi-feature response. "Largest"
+    // is a rough proxy for "the intended geographic entity" — Nominatim's
+    // first result can be a same-named tiny town when the real target is
+    // a continent/region relation.
+    const _pickBestPoly = (data) => {
+        if (!data?.features?.length) return null;
+        let best = null;
+        let bestSize = -1;
+        for (const feat of data.features) {
+            if (!feat || !feat.geometry) continue;
+            const t = feat.geometry.type;
+            if (t !== 'Polygon' && t !== 'MultiPolygon') continue;
+            const size = JSON.stringify(feat.geometry).length;
+            if (size > bestSize) { best = feat; bestSize = size; }
+        }
+        return best;
+    };
     const _extractPoly = (data) => {
         if (!data?.features?.length) return null;
         const feat = data.features[0];
         return (feat.geometry && (feat.geometry.type === 'Polygon' || feat.geometry.type === 'MultiPolygon')) ? feat : null;
     };
 
+    // Continents: Nominatim's country/city feature types miss them entirely,
+    // and the unrestricted first-result is often a same-named small town.
+    // Recognize continent names and widen the search so we pick the big
+    // polygon relation instead.
+    const CONTINENT_NAMES = new Set([
+        'asia', 'europe', 'africa', 'oceania', 'antarctica',
+        'south america', 'north america', 'australia', 'eurasia',
+    ]);
+    const isContinent = CONTINENT_NAMES.has(cacheKey);
+
     try {
         const encoded = encodeURIComponent(query);
         const base = `https://nominatim.openstreetmap.org/search?q=${encoded}&format=geojson&polygon_geojson=1&polygon_threshold=0.001&limit=1`;
+        const wideBase = `https://nominatim.openstreetmap.org/search?q=${encoded}&format=geojson&polygon_geojson=1&polygon_threshold=0.01&limit=10`;
 
-        // 1. Try country first
-        let feat = _extractPoly(await _fetchNominatim(`${base}&featuretype=country`));
+        let feat = null;
+        if (isContinent) {
+            // Continents: go straight to widened search + pick-largest-polygon.
+            feat = _pickBestPoly(await _fetchNominatim(wideBase));
+        } else {
+            // 1. Try country first
+            feat = _extractPoly(await _fetchNominatim(`${base}&featuretype=country`));
 
-        // 2. Try city (gets municipal boundary, not province)
-        if (!feat) {
-            await new Promise(r => setTimeout(r, 1100)); // rate limit
-            feat = _extractPoly(await _fetchNominatim(`${base}&featuretype=city`));
-        }
+            // 2. Try city (gets municipal boundary, not province)
+            if (!feat) {
+                await new Promise(r => setTimeout(r, 1100)); // rate limit
+                feat = _extractPoly(await _fetchNominatim(`${base}&featuretype=city`));
+            }
 
-        // 3. Unrestricted fallback (landmarks, regions, etc.)
-        if (!feat) {
-            await new Promise(r => setTimeout(r, 1100));
-            feat = _extractPoly(await _fetchNominatim(base));
+            // 3. Unrestricted fallback (landmarks, regions, etc.)
+            if (!feat) {
+                await new Promise(r => setTimeout(r, 1100));
+                feat = _extractPoly(await _fetchNominatim(base));
+            }
+
+            // 4. Last-resort widened pick-largest — same-named small towns
+            // can shadow a real region relation at limit=1.
+            if (!feat) {
+                await new Promise(r => setTimeout(r, 1100));
+                feat = _pickBestPoly(await _fetchNominatim(wideBase));
+            }
         }
 
         if (feat) {
             _osmBoundaryCache.set(cacheKey, feat);
             const level = feat.properties?.type || feat.properties?.osm_type || 'unknown';
-            console.log(`      [OSM] Boundary for "${placeName}": ${feat.geometry.type} (${level}, ${JSON.stringify(feat.geometry).length} bytes)`);
+            console.log(`      [OSM] Boundary for "${placeName}": ${feat.geometry.type} (${level}, ${JSON.stringify(feat.geometry).length} bytes${isContinent ? ', continent' : ''})`);
             return feat;
         }
 
+        console.log(`      [OSM] No polygon found for "${placeName}"${isContinent ? ' (continent)' : ''}`);
         _osmBoundaryCache.set(cacheKey, null);
         return null;
     } catch (err) {

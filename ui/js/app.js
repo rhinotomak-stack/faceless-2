@@ -578,6 +578,7 @@ const elements = {
     buildFormat: document.getElementById('build-format'),
     buildNiche: document.getElementById('build-niche'),
     buildTheme: document.getElementById('build-theme'),
+    buildMapStylePack: document.getElementById('build-map-style-pack'),
     buildLanguage: document.getElementById('build-language'),
     buildStyleProfile: document.getElementById('build-style-profile'),
     btnLearnStyle: document.getElementById('btn-learn-style'),
@@ -1282,6 +1283,12 @@ function setupEventListeners() {
     if (elements.buildTheme) {
         elements.buildTheme.addEventListener('change', () => {
             updateMGOverlay();
+            saveSettings();
+        });
+    }
+    // Map style pack dropdown — save settings (pack is applied at build time)
+    if (elements.buildMapStylePack) {
+        elements.buildMapStylePack.addEventListener('change', () => {
             saveSettings();
         });
     }
@@ -5607,6 +5614,7 @@ async function generateVideo() {
             buildFormat: elements.buildFormat.value,
             buildNiche: elements.buildNiche ? elements.buildNiche.value : 'auto',
             buildTheme: elements.buildTheme.value,
+            buildMapStylePack: elements.buildMapStylePack ? elements.buildMapStylePack.value : 'auto',
             buildLanguage: elements.buildLanguage ? elements.buildLanguage.value : 'auto',
             buildStyleProfile: elements.buildStyleProfile ? elements.buildStyleProfile.value : 'none',
             smartAI: elements.smartAiToggle ? elements.smartAiToggle.checked : true,
@@ -10978,6 +10986,7 @@ function saveSettings() {
         videoTitle: state.videoTitle,
         mutedTracks: state.mutedTracks,
         buildNiche: elements.buildNiche ? elements.buildNiche.value : 'auto',
+        buildMapStylePack: elements.buildMapStylePack ? elements.buildMapStylePack.value : 'auto',
         buildLanguage: elements.buildLanguage ? elements.buildLanguage.value : 'auto',
         buildStyleProfile: elements.buildStyleProfile ? elements.buildStyleProfile.value : 'none',
         clipAnalyzer: elements.clipAnalyzerToggle?.checked !== false,
@@ -11066,6 +11075,7 @@ function loadSettings() {
             if (elements.aiInstructions) elements.aiInstructions.value = state.aiInstructions;
             // Restore Niche Preset
             if (elements.buildNiche && s.buildNiche) elements.buildNiche.value = s.buildNiche;
+            if (elements.buildMapStylePack && s.buildMapStylePack) elements.buildMapStylePack.value = s.buildMapStylePack;
             if (elements.buildLanguage && s.buildLanguage) elements.buildLanguage.value = s.buildLanguage;
             if (elements.buildStyleProfile && s.buildStyleProfile) {
                 // Defer setting until dropdown is populated
@@ -11141,6 +11151,7 @@ function applyProjectSettings(s) {
         if (elements.aiInstructions) elements.aiInstructions.value = state.aiInstructions;
         // Niche Preset
         if (elements.buildNiche && s.buildNiche) elements.buildNiche.value = s.buildNiche;
+        if (elements.buildMapStylePack && s.buildMapStylePack) elements.buildMapStylePack.value = s.buildMapStylePack;
         if (elements.buildLanguage && s.buildLanguage) elements.buildLanguage.value = s.buildLanguage;
         // Track mute
         if (s.mutedTracks) state.mutedTracks = s.mutedTracks;

@@ -5,6 +5,7 @@ const { getTheme, MG_THEME_OVERRIDES } = require('./themes');
 const { getNiche } = require('./niches');
 const { MG_REGISTRY } = require('./mg-registry');
 const { getLanguageBlock } = require('./language-helper');
+const { pickPack: pickMapPack, DEFAULT_PACK_ID: DEFAULT_MAP_PACK_ID } = require('./map-style-packs');
 
 // Track placed MG types to avoid repetition
 let placedTypes = [];
@@ -1880,6 +1881,15 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
     // Pick style for the entire video
     const mgStyle = pickStyle(scriptContext);
     const mapStyle = pickMapStyle(scriptContext, mgStyle);
+    // Pick map style pack (orthogonal overlay look: polygons/route/pins/labels/basemap filter)
+    const mapPackUiChoice = process.env.BUILD_MAP_STYLE_PACK || 'auto';
+    const mapStylePack = pickMapPack({
+        uiChoice: mapPackUiChoice,
+        nicheId: scriptContext?.nicheId,
+        themeId: scriptContext?.themeId,
+    });
+    const mapStylePackId = mapStylePack?.id || DEFAULT_MAP_PACK_ID;
+    console.log(`  Map Pack: ${mapStylePackId} (ui=${mapPackUiChoice})`);
 
     // Resolve allowed MG types from niche (content strategy)
     const nicheId = scriptContext?.nicheId || 'general';
@@ -1981,6 +1991,7 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
         }
         if (mgType === 'mapChart') {
             mg.mapStyle = mapStyle;
+            mg.mapStylePack = mapStylePackId;
             // Honor VP's mapVariant selection (locator/route/regionHighlight/comparison).
             // Validate against registry — reject anything not in mapChart.types.
             const mapReg = MG_REGISTRY.mapChart;
@@ -2178,7 +2189,7 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
                 // Apply video-wide style
                 mg.style = mgStyle;
                 mg.selectionMode = selectionMode; // track for debugging
-                if (mg.type === 'mapChart') mg.mapStyle = mapStyle;
+                if (mg.type === 'mapChart') { mg.mapStyle = mapStyle; mg.mapStylePack = mapStylePackId; }
 
                 // Resolve subType from theme override → registry default
                 const themeId = scriptContext?.themeId || 'standard';
@@ -2273,7 +2284,7 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
             const batchThemeOvr = MG_THEME_OVERRIDES[batchThemeId] || {};
             filteredBatch.forEach(mg => {
                 mg.style = mgStyle;
-                if (mg.type === 'mapChart') mg.mapStyle = mapStyle;
+                if (mg.type === 'mapChart') { mg.mapStyle = mapStyle; mg.mapStylePack = mapStylePackId; }
                 // Resolve subType from theme override → registry default
                 const catOvr = batchThemeOvr[mg.type];
                 const catReg = MG_REGISTRY[mg.type];
@@ -2373,7 +2384,7 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
         console.log(`  📊 Types: ${typeBreakdown}`);
     }
     console.log('');
-    return { motionGraphics: results, mgStyle, mapStyle };
+    return { motionGraphics: results, mgStyle, mapStyle, mapStylePack: mapStylePackId };
 }
 
 module.exports = { processMotionGraphics, STYLE_NAMES, MAP_STYLE_NAMES, pickStyle, pickMapStyle, FULLSCREEN_MG_TYPES, generateCandidates };

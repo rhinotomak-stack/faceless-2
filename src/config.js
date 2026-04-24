@@ -9,6 +9,7 @@ require('dotenv').config({ path: appRootEnv });
 const PROJECT_OVERRIDE_KEYS = new Set([
     'AI_PROVIDER', 'AI_INSTRUCTIONS',
     'BUILD_QUALITY_TIER', 'BUILD_FORMAT', 'BUILD_THEME', 'BUILD_NICHE',
+    'BUILD_MAP_STYLE_PACK',
     'BUILD_STYLE_PROFILE',
     'SMART_AI',
     'OLLAMA_MODEL', 'OLLAMA_VISION_MODEL',

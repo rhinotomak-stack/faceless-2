@@ -204,6 +204,16 @@
                     </select>
                     <small style="display:block; margin-top:4px; color:#888">Controls background, colors, MG style, fonts</small>
 
+                    <label style="margin-top:12px">Map Style Pack:</label>
+                    <select id="build-map-style-pack">
+                        <option value="auto" selected>🤖 Auto (Niche/Theme Default)</option>
+                        <option value="neon">💠 Neon — cyan/gold overlays (classic)</option>
+                        <option value="invasions">⚔️ Invasions — red vs blue, white outlines, grayscale satellite</option>
+                        <option value="editorial">📰 Editorial — orange-red gradient, black outlines, label pills</option>
+                        <option value="geopolitical">🗺️ Geopolitical — solid color-coded political basemap</option>
+                    </select>
+                    <small style="display:block; margin-top:4px; color:#888">Visual overlay style for map scenes (polygons, route, pins, labels, basemap filter)</small>
+
                     <label style="margin-top:12px">Language:</label>
                     <select id="build-language">
                         <option value="auto" selected>🌐 Auto-Detect (from audio)</option>
@@ -1256,6 +1266,7 @@
     <script src="js/compositor/SceneGraph.js"></script>
     <script src="js/compositor/TransitionRenderer.js"></script>
     <script src="js/mg-theme-bridge.js"></script>
+    <script src="../src/map-style-packs.js"></script>
     <script src="js/compositor/MGRenderer.js"></script>
     <script src="js/compositor/Compositor.js"></script>
     <script src="js/compositor/VideoFrameSource.js"></script>

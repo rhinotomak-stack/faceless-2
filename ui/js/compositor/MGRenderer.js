@@ -3555,6 +3555,7 @@ class MGRenderer {
         if (!mg._mapIcons && _mgd._mapIcons) mg._mapIcons = _mgd._mapIcons;
         if (!mg._mapSwarms && _mgd._mapSwarms) mg._mapSwarms = _mgd._mapSwarms;
         if (!mg._mapRoutePath && _mgd._mapRoutePath) mg._mapRoutePath = _mgd._mapRoutePath;
+        if (!mg._mapRouteGeometry && _mgd._mapRouteGeometry) mg._mapRouteGeometry = _mgd._mapRouteGeometry;
         if (!mg.subType && _mgd.subType) mg.subType = _mgd.subType;
         if (!mg.mapVariant && _mgd.mapVariant) mg.mapVariant = _mgd.mapVariant;
 
@@ -3570,6 +3571,7 @@ class MGRenderer {
         const _wpCoords      = (_ra && _ra.wpCoords)     || mg._wpCoords     || [];
         const _mapSwarms     = (_ra && _ra.swarms)       || mg._mapSwarms    || null;
         const _mapRoutePath  = (_ra && _ra.routePath != null) ? !!_ra.routePath : !!mg._mapRoutePath;
+        const _mapRouteGeometry = (_ra && _ra.routeGeometry) || mg._mapRouteGeometry || null;
         const { opacity, enterProgress } = anim;
         const W = 1920, H = 1080;
         const elapsed = frame / fps;
@@ -3659,9 +3661,56 @@ class MGRenderer {
             blue:    { fill: '#4080ff', fillEdge: '#2050cc', stroke: '#4080ff', glow: 'rgba(64,128,255,0.6)' },
         };
         const polyColorKey = mg._mapPolyColor || 'auto';
-        const polyPal = (polyColorKey !== 'auto' && POLY_COLOR_OVERRIDES[polyColorKey])
+        let polyPal = (polyColorKey !== 'auto' && POLY_COLOR_OVERRIDES[polyColorKey])
             ? POLY_COLOR_OVERRIDES[polyColorKey]
             : (POLY_COLORS[mg.mapStyle || 'dark'] || POLY_COLORS.dark);
+
+        // ── Map Style Pack overrides (neon=no-op, invasions/editorial/geopolitical override slots) ──
+        // Pack id resolved at build time via ai-motion-graphics → renderAssets.stylePackId.
+        // Registry lives in src/map-style-packs.js (also exposed as window.MAP_STYLE_PACKS).
+        let stylePack = null;
+        try {
+            const packId = (_ra && _ra.stylePackId) || mg.mapStylePack || null;
+            const registry = (typeof window !== 'undefined' && window.MAP_STYLE_PACKS) ? window.MAP_STYLE_PACKS : null;
+            if (packId && packId !== 'neon' && registry && registry.PACKS && registry.PACKS[packId]) {
+                stylePack = registry.PACKS[packId];
+            }
+        } catch (_) { /* noop */ }
+        let stylePackBasemap = null;
+        if (stylePack) {
+            // Polygon: only override when user hasn't forced a specific color
+            if (polyColorKey === 'auto' && stylePack.polygon && Object.keys(stylePack.polygon).length) {
+                const pp = stylePack.polygon;
+                polyPal = {
+                    fill:     pp.fill     || polyPal.fill,
+                    fillEdge: pp.fillEdge || polyPal.fillEdge,
+                    stroke:   pp.stroke   || polyPal.stroke,
+                    glow:     pp.glow     || polyPal.glow,
+                };
+            }
+            // Route / pin / label / title slot overrides — merge onto pal
+            if (stylePack.route) {
+                if (stylePack.route.color)     pal.route     = stylePack.route.color;
+                if (stylePack.route.glowColor) pal.routeGlow = stylePack.route.glowColor;
+            }
+            if (stylePack.pin) {
+                if (stylePack.pin.color)     pal.pin     = stylePack.pin.color;
+                if (stylePack.pin.glowColor) pal.pinGlow = stylePack.pin.glowColor;
+                if (stylePack.pin.ringColor) pal.pinRing = stylePack.pin.ringColor;
+            }
+            if (stylePack.label) {
+                if (stylePack.label.bg) pal.labelBg = stylePack.label.bg;
+                if (stylePack.label.fg) pal.label   = stylePack.label.fg;
+            }
+            if (stylePack.title) {
+                if (stylePack.title.bg)     pal.titleBg     = stylePack.title.bg;
+                if (stylePack.title.border) pal.titleBorder = stylePack.title.border;
+                if (stylePack.title.text)   pal.titleText   = stylePack.title.text;
+            }
+            if (stylePack.basemap && (stylePack.basemap.desaturate || stylePack.basemap.darken || stylePack.basemap.contrast)) {
+                stylePackBasemap = stylePack.basemap;
+            }
+        }
 
         // ── Country coordinates (lon, lat) fallback for pin placement ──
         const MAP_COORDS = {
@@ -3846,6 +3895,29 @@ class MGRenderer {
             }
         }
 
+        // ── Route geometry (decoupled from camera stops) ──
+        // Long-route scenes use a single authored corridor camera stop, so
+        // wpPositions collapses to 1 and the legacy route-line draw below can't
+        // render. _mapRouteGeometry carries the full [{name,lon,lat,startTime,
+        // endTime}] sequence so the dashed path stays animated through every
+        // original waypoint regardless of how many camera stops we plan.
+        const routePathPositions = [];
+        if (Array.isArray(_mapRouteGeometry) && _mapRouteGeometry.length >= 2) {
+            for (const g of _mapRouteGeometry) {
+                if (!g || typeof g.lon !== 'number' || typeof g.lat !== 'number') continue;
+                if (!Number.isFinite(g.startTime) || !Number.isFinite(g.endTime)) continue;
+                routePathPositions.push({
+                    name: g.name || '',
+                    lon: g.lon,
+                    lat: g.lat,
+                    px: toX(g.lon),
+                    py: toY(g.lat),
+                    startTime: g.startTime,
+                    endTime: g.endTime,
+                });
+            }
+        }
+
         // ── Camera ──
         let camScale, driftX, driftY, tiltAmount;
         let wpBigMapCamera = false;
@@ -3887,6 +3959,27 @@ class MGRenderer {
                 wpBigMapCamera = true;
                 driftX = 0;
                 driftY = 0;
+
+                // Stops-driven pan clamp: when the corridor/region stop center
+                // sits near the bigmap edge, the visible window would extend
+                // beyond the stitched tile coverage and leave a black bar on
+                // the short side. Clamp wpCam so the frame always stays inside
+                // the map rectangle. (Skip when the scaled map is smaller than
+                // the frame — nothing to clamp; camera stays centered.)
+                if (_stopsDrivenCamera && camScale > 0) {
+                    const halfVisW = (W / 2) / camScale;
+                    const halfVisH = (H / 2) / camScale;
+                    if (IMG_W >= 2 * halfVisW) {
+                        wpCamX = Math.min(IMG_W - halfVisW, Math.max(halfVisW, wpCamX));
+                    } else {
+                        wpCamX = IMG_W / 2;
+                    }
+                    if (IMG_H >= 2 * halfVisH) {
+                        wpCamY = Math.min(IMG_H - halfVisH, Math.max(halfVisH, wpCamY));
+                    } else {
+                        wpCamY = IMG_H / 2;
+                    }
+                }
                 // Route + comparison: lock camera to bbox-center of all waypoints
                 // and scale to fit. A per-waypoint pan at scale 1.1 clips off the
                 // bigmap edges (black bars) because each waypoint sits near the
@@ -4075,7 +4168,19 @@ class MGRenderer {
         if (hasMapImage) {
             const mapImg = this._mapImages[_mapImageFile];
             ctx.globalAlpha = opacity * Math.min(1, enterProgress * 2);
+            // Apply style-pack basemap filter (desaturate/darken/contrast) only to the tile image
+            if (stylePackBasemap) {
+                const desat    = Number(stylePackBasemap.desaturate) || 0;
+                const darken   = Number(stylePackBasemap.darken)     || 0;
+                const contrast = Number(stylePackBasemap.contrast)   || 1;
+                const parts = [];
+                if (desat > 0.001) parts.push(`grayscale(${desat.toFixed(3)})`);
+                if (darken > 0.001) parts.push(`brightness(${(1 - darken).toFixed(3)})`);
+                if (Math.abs(contrast - 1) > 0.001) parts.push(`contrast(${contrast.toFixed(3)})`);
+                if (parts.length) ctx.filter = parts.join(' ');
+            }
             ctx.drawImage(mapImg, 0, 0, IMG_W, IMG_H);
+            if (stylePackBasemap) ctx.filter = 'none';
             ctx.globalAlpha = opacity;
         } else {
             this._renderMapChartFallbackBg(ctx, mg, W, H, opacity, enterProgress, pal);
@@ -4215,7 +4320,7 @@ class MGRenderer {
         };
 
         // Per-polygon color cycle for multiple locations
-        const POLY_CYCLE = [
+        let POLY_CYCLE = [
             { fill: '#00d4ff', fillEdge: '#0088cc', stroke: '#00d4ff', glow: 'rgba(0,212,255,0.6)' },
             { fill: '#ff6040', fillEdge: '#cc3820', stroke: '#ff6040', glow: 'rgba(255,96,64,0.6)' },
             { fill: '#40ff90', fillEdge: '#20cc60', stroke: '#40ff90', glow: 'rgba(64,255,144,0.6)' },
@@ -4225,6 +4330,16 @@ class MGRenderer {
             { fill: '#40c0ff', fillEdge: '#2090cc', stroke: '#40c0ff', glow: 'rgba(64,192,255,0.6)' },
             { fill: '#ff8020', fillEdge: '#cc6010', stroke: '#ff8020', glow: 'rgba(255,128,32,0.6)' },
         ];
+        // Pack-driven role cycle: [primary, secondary, tertiary] rotated for multi-polygon scenes.
+        // Keeps invasions red-vs-blue feel instead of rainbow when the pack defines roles.
+        if (stylePack && stylePack.polygon && stylePack.polygon.roles) {
+            const roles = stylePack.polygon.roles;
+            const packCycle = [];
+            if (roles.primary)   packCycle.push(roles.primary);
+            if (roles.secondary) packCycle.push(roles.secondary);
+            if (roles.tertiary)  packCycle.push(roles.tertiary);
+            if (packCycle.length >= 2) POLY_CYCLE = packCycle;
+        }
         const usePolyCycle = boundaryFeatures.length > 1 && polyColorKey === 'auto';
 
         for (let bi = 0; bi < boundaryFeatures.length; bi++) {
@@ -4434,10 +4549,17 @@ class MGRenderer {
         }
 
         // ── 3b. Animated route path (dashed line drawing between waypoints) ──
-        if (_mapRoutePath && hasWaypoints && wpPositions.length >= 2) {
+        // Prefer explicit _mapRouteGeometry when present — it preserves every
+        // real waypoint even when camera stops have collapsed to a single
+        // corridor-overview shot (long-route path). Falls back to wpPositions
+        // for short-route / legacy per-subject stops.
+        const _routeSrc = (routePathPositions.length >= 2)
+            ? routePathPositions
+            : ((hasWaypoints && wpPositions.length >= 2) ? wpPositions : null);
+        if (_mapRoutePath && _routeSrc) {
             ctx.save();
             // Build ground-level path through all waypoints in order
-            const routePts = wpPositions.filter(wp => wp.px != null && wp.py != null);
+            const routePts = _routeSrc.filter(wp => wp.px != null && wp.py != null);
             if (routePts.length >= 2) {
                 // Total path length for dash animation
                 let totalPathLen = 0;
@@ -5029,30 +5151,9 @@ class MGRenderer {
             }
         }
 
-        // ── 7. Location indicator (bottom-left, shows pin count + source) ──
-        if (pinPositions.length > 0) {
-            const indicatorT = Math.min(1, Math.max(0, (elapsed - 0.8) / 0.4));
-            if (indicatorT > 0) {
-                const iEased = 1 - Math.pow(1 - indicatorT, 2);
-                ctx.globalAlpha = opacity * iEased * 0.7;
-                const font = s.fontFamily || 'Arial';
-                const geocodedCount = pinPositions.filter(p => p.pinType !== 'unknown' && p.pinType !== 'country').length;
-                const locText = geocodedCount > 0
-                    ? `${pinPositions.length} location${pinPositions.length > 1 ? 's' : ''}`
-                    : `${pinPositions.length} region${pinPositions.length > 1 ? 's' : ''}`;
-                ctx.font = `600 16px ${font}`;
-                const tw = ctx.measureText(locText).width;
-                const ix = 32, iy = H - 38;
-                ctx.fillStyle = pal.titleBg;
-                MGRenderer._roundRect(ctx, ix, iy, tw + 24, 28, 6);
-                ctx.fill();
-                ctx.fillStyle = pal.pin;
-                ctx.textAlign = 'left';
-                ctx.textBaseline = 'middle';
-                ctx.fillText(locText, ix + 12, iy + 14);
-                ctx.globalAlpha = 1;
-            }
-        }
+        // ── 7. Location indicator — REMOVED per user request (was "N locations"
+        //      badge at bottom-left of map). Pin/polygon visuals speak for
+        //      themselves; the badge read as debug UI in the final output.
 
         // ── 8. Vignette overlay ──
         const vignetteGrad = ctx.createRadialGradient(W / 2, H / 2, W * 0.25, W / 2, H / 2, W * 0.7);

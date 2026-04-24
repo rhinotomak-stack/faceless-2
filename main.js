@@ -876,6 +876,9 @@ ipcMain.handle('run-build', async (event, options) => {
             if (options.buildTheme) {
                 buildEnv.BUILD_THEME = options.buildTheme;
             }
+            if (options.buildMapStylePack) {
+                buildEnv.BUILD_MAP_STYLE_PACK = options.buildMapStylePack;
+            }
             // Multi-language support: 'auto' = Whisper auto-detects from audio,
             // or a language code ('en','es','de','fr','it','ko') to force it.
             // build-video.js reads BUILD_LANGUAGE + resolves via src/language-helper.js.
