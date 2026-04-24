@@ -3556,6 +3556,7 @@ class MGRenderer {
         if (!mg._mapSwarms && _mgd._mapSwarms) mg._mapSwarms = _mgd._mapSwarms;
         if (!mg._mapRoutePath && _mgd._mapRoutePath) mg._mapRoutePath = _mgd._mapRoutePath;
         if (!mg._mapRouteGeometry && _mgd._mapRouteGeometry) mg._mapRouteGeometry = _mgd._mapRouteGeometry;
+        if (!mg._mapAlternateRouteGeometry && _mgd._mapAlternateRouteGeometry) mg._mapAlternateRouteGeometry = _mgd._mapAlternateRouteGeometry;
         if (!mg.subType && _mgd.subType) mg.subType = _mgd.subType;
         if (!mg.mapVariant && _mgd.mapVariant) mg.mapVariant = _mgd.mapVariant;
 
@@ -3572,6 +3573,7 @@ class MGRenderer {
         const _mapSwarms     = (_ra && _ra.swarms)       || mg._mapSwarms    || null;
         const _mapRoutePath  = (_ra && _ra.routePath != null) ? !!_ra.routePath : !!mg._mapRoutePath;
         const _mapRouteGeometry = (_ra && _ra.routeGeometry) || mg._mapRouteGeometry || null;
+        const _mapAlternateRouteGeometry = (_ra && _ra.alternateRouteGeometry) || mg._mapAlternateRouteGeometry || null;
         const { opacity, enterProgress } = anim;
         const W = 1920, H = 1080;
         const elapsed = frame / fps;
@@ -3914,6 +3916,21 @@ class MGRenderer {
                     py: toY(g.lat),
                     startTime: g.startTime,
                     endTime: g.endTime,
+                });
+            }
+        }
+        const alternateRoutePathPositions = [];
+        if (Array.isArray(_mapAlternateRouteGeometry) && _mapAlternateRouteGeometry.length >= 2) {
+            for (const g of _mapAlternateRouteGeometry) {
+                if (!g || typeof g.lon !== 'number' || typeof g.lat !== 'number') continue;
+                alternateRoutePathPositions.push({
+                    name: g.name || '',
+                    lon: g.lon,
+                    lat: g.lat,
+                    px: toX(g.lon),
+                    py: toY(g.lat),
+                    startTime: Number.isFinite(g.startTime) ? g.startTime : 0,
+                    endTime: Number.isFinite(g.endTime) ? g.endTime : totalDuration,
                 });
             }
         }
@@ -4556,6 +4573,57 @@ class MGRenderer {
         const _routeSrc = (routePathPositions.length >= 2)
             ? routePathPositions
             : ((hasWaypoints && wpPositions.length >= 2) ? wpPositions : null);
+        if (_mapRoutePath && alternateRoutePathPositions.length >= 2) {
+            ctx.save();
+            const altPts = alternateRoutePathPositions.filter(wp => wp.px != null && wp.py != null);
+            if (altPts.length >= 2) {
+                let totalAltLen = 0;
+                const altSegments = [];
+                for (let ri = 1; ri < altPts.length; ri++) {
+                    const dx = altPts[ri].px - altPts[ri - 1].px;
+                    const dy = altPts[ri].py - altPts[ri - 1].py;
+                    const len = Math.max(1, Math.sqrt(dx * dx + dy * dy));
+                    altSegments.push({ from: altPts[ri - 1], to: altPts[ri], len });
+                    totalAltLen += len;
+                }
+                const altStart = Math.min(...altPts.map(p => Number(p.startTime)).filter(Number.isFinite), 0);
+                const altDur = Math.max(1.4, Math.min(3.2, totalDuration * 0.45));
+                const altT = Math.min(1, Math.max(0, (elapsed - altStart - 0.25) / altDur));
+                const altE = 1 - Math.pow(1 - altT, 2);
+                const drawLen = totalAltLen * altE;
+                if (drawLen > 0) {
+                    const strokePartial = () => {
+                        ctx.beginPath();
+                        ctx.moveTo(altPts[0].px, altPts[0].py);
+                        let accumulated = 0;
+                        for (const seg of altSegments) {
+                            const remain = drawLen - accumulated;
+                            if (remain <= 0) break;
+                            const frac = Math.min(1, remain / seg.len);
+                            ctx.lineTo(seg.from.px + (seg.to.px - seg.from.px) * frac, seg.from.py + (seg.to.py - seg.from.py) * frac);
+                            accumulated += seg.len;
+                            if (frac < 1) break;
+                        }
+                        ctx.stroke();
+                    };
+                    ctx.globalAlpha = opacity * 0.22;
+                    ctx.strokeStyle = pal.routeGlow || pal.pin;
+                    ctx.lineWidth = 10;
+                    ctx.setLineDash([]);
+                    strokePartial();
+
+                    ctx.globalAlpha = opacity * 0.42;
+                    ctx.strokeStyle = pal.pin;
+                    ctx.lineWidth = 2.5;
+                    ctx.setLineDash([8, 14]);
+                    ctx.lineDashOffset = elapsed * 22 * speed;
+                    strokePartial();
+                    ctx.setLineDash([]);
+                }
+            }
+            ctx.restore();
+            ctx.globalAlpha = opacity;
+        }
         if (_mapRoutePath && _routeSrc) {
             ctx.save();
             // Build ground-level path through all waypoints in order
@@ -4761,7 +4829,8 @@ class MGRenderer {
         // ── 4. Flight arcs (progressive reveal + traveling dot) ──
         // Only for route/comparison variants — locator/regionHighlight should NOT draw arcs between pins.
         const _arcVariants = new Set(['route', 'comparison']);
-        if (_arcVariants.has(variant) && pinPositions.length >= 2) {
+        const _hasSemanticRoutePath = variant === 'route' && (_mapRoutePath || routePathPositions.length >= 2);
+        if (_arcVariants.has(variant) && pinPositions.length >= 2 && !_hasSemanticRoutePath) {
             for (let i = 0; i < pinPositions.length - 1; i++) {
                 const a = pinPositions[i], b = pinPositions[i + 1];
                 const dist = Math.hypot(b.x - a.x, b.y - a.y);

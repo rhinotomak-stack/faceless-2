@@ -5861,6 +5861,18 @@ async function loadVideoPlan({ freshBuild = false } = {}) {
                     sceneObj._mapIcons = core._mapIcons;
                     if (sceneObj.mgData) sceneObj.mgData._mapIcons = core._mapIcons;
                 }
+                if (core._mapRoutePath) {
+                    sceneObj._mapRoutePath = core._mapRoutePath;
+                    if (sceneObj.mgData) sceneObj.mgData._mapRoutePath = core._mapRoutePath;
+                }
+                if (core._mapRouteGeometry) {
+                    sceneObj._mapRouteGeometry = core._mapRouteGeometry;
+                    if (sceneObj.mgData) sceneObj.mgData._mapRouteGeometry = core._mapRouteGeometry;
+                }
+                if (core._mapAlternateRouteGeometry) {
+                    sceneObj._mapAlternateRouteGeometry = core._mapAlternateRouteGeometry;
+                    if (sceneObj.mgData) sceneObj.mgData._mapAlternateRouteGeometry = core._mapAlternateRouteGeometry;
+                }
                 // Phase B prep: authoritative MapScene (subjects, cameraPlan,
                 // annotationPlan, geometry, renderAssets). Renderer will consume
                 // this directly once the legacy per-field lookups are retired.
@@ -9996,13 +10008,16 @@ const _mapIconImgCache = {};
 function _renderMapTestFrame(ctx, frame, fps, mg, mapImg, anim) {
     // Resolve map data from mgData if not on the scene object directly
     const _mgd = mg.mgData || mg;
+    const _ra = mg._mapScene?.renderAssets || _mgd._mapScene?.renderAssets || null;
     if (!mg._bigMapSize && _mgd._bigMapSize) mg._bigMapSize = _mgd._bigMapSize;
     if (!mg._mapWaypoints && _mgd._mapWaypoints) mg._mapWaypoints = _mgd._mapWaypoints;
     if (!mg._wpCoords && _mgd._wpCoords) mg._wpCoords = _mgd._wpCoords;
     if (!mg._mapBigMap && _mgd._mapBigMap) mg._mapBigMap = _mgd._mapBigMap;
     if (!mg._mapIcons && _mgd._mapIcons) mg._mapIcons = _mgd._mapIcons;
     if (!mg._osmBoundaries && _mgd._osmBoundaries) mg._osmBoundaries = _mgd._osmBoundaries;
-    if (!mg._mapRoutePath && _mgd._mapRoutePath) mg._mapRoutePath = _mgd._mapRoutePath;
+    if (!mg._mapRoutePath && (_mgd._mapRoutePath || _ra?.routePath != null)) mg._mapRoutePath = _mgd._mapRoutePath || !!_ra.routePath;
+    if (!mg._mapRouteGeometry && (_mgd._mapRouteGeometry || _ra?.routeGeometry)) mg._mapRouteGeometry = _mgd._mapRouteGeometry || _ra.routeGeometry;
+    if (!mg._mapAlternateRouteGeometry && (_mgd._mapAlternateRouteGeometry || _ra?.alternateRouteGeometry)) mg._mapAlternateRouteGeometry = _mgd._mapAlternateRouteGeometry || _ra.alternateRouteGeometry;
     if (!mg.subType && _mgd.subType) mg.subType = _mgd.subType;
     if (!mg.mapVariant && _mgd.mapVariant) mg.mapVariant = _mgd.mapVariant;
     const W = 1920, H = 1080;
@@ -10415,6 +10430,87 @@ function _renderMapTestFrame(ctx, frame, fps, mg, mapImg, anim) {
         return m || null;
     };
 
+    const routePathPositions = [];
+    if (Array.isArray(mg._mapRouteGeometry) && mg._mapRouteGeometry.length >= 2) {
+        for (const g of mg._mapRouteGeometry) {
+            if (!g || typeof g.lon !== 'number' || typeof g.lat !== 'number') continue;
+            routePathPositions.push({
+                name: g.name || '',
+                px: toX(g.lon),
+                py: toY(g.lat),
+                startTime: Number.isFinite(g.startTime) ? g.startTime : 0,
+                endTime: Number.isFinite(g.endTime) ? g.endTime : totalDur,
+            });
+        }
+    }
+    const alternateRoutePathPositions = [];
+    if (Array.isArray(mg._mapAlternateRouteGeometry) && mg._mapAlternateRouteGeometry.length >= 2) {
+        for (const g of mg._mapAlternateRouteGeometry) {
+            if (!g || typeof g.lon !== 'number' || typeof g.lat !== 'number') continue;
+            alternateRoutePathPositions.push({
+                name: g.name || '',
+                px: toX(g.lon),
+                py: toY(g.lat),
+                startTime: Number.isFinite(g.startTime) ? g.startTime : 0,
+                endTime: Number.isFinite(g.endTime) ? g.endTime : totalDur,
+            });
+        }
+    }
+
+    const _drawPreviewRoute = (pts, opts = {}) => {
+        const routePts = (pts || []).filter(p => p && p.px != null && p.py != null);
+        if (routePts.length < 2) return;
+        let totalLen = 0;
+        const segments = [];
+        for (let ri = 1; ri < routePts.length; ri++) {
+            const dx = routePts[ri].px - routePts[ri - 1].px;
+            const dy = routePts[ri].py - routePts[ri - 1].py;
+            const len = Math.max(1, Math.sqrt(dx * dx + dy * dy));
+            segments.push({ from: routePts[ri - 1], to: routePts[ri], len });
+            totalLen += len;
+        }
+        const start = Number.isFinite(opts.startTime) ? opts.startTime : Math.min(...routePts.map(p => Number(p.startTime)).filter(Number.isFinite), 0);
+        const dur = Number.isFinite(opts.duration) ? opts.duration : Math.max(1.4, Math.min(3.2, totalDur * 0.55));
+        const t = Math.min(1, Math.max(0, (elapsed - start) / dur));
+        const eased = 1 - Math.pow(1 - t, 2);
+        const drawLen = totalLen * eased;
+        if (drawLen <= 0) return;
+
+        const strokePartial = () => {
+            ctx.beginPath();
+            ctx.moveTo(routePts[0].px, routePts[0].py);
+            let accumulated = 0;
+            for (const seg of segments) {
+                const remain = drawLen - accumulated;
+                if (remain <= 0) break;
+                const frac = Math.min(1, remain / seg.len);
+                ctx.lineTo(seg.from.px + (seg.to.px - seg.from.px) * frac, seg.from.py + (seg.to.py - seg.from.py) * frac);
+                accumulated += seg.len;
+                if (frac < 1) break;
+            }
+            ctx.stroke();
+        };
+
+        ctx.save();
+        ctx.globalAlpha = opacity * (opts.glowAlpha ?? 0.25);
+        ctx.strokeStyle = pal.routeGlow || pal.arcGlow || pal.pin;
+        ctx.lineWidth = opts.glowWidth || 9;
+        ctx.setLineDash([]);
+        strokePartial();
+        ctx.globalAlpha = opacity * (opts.alpha ?? 0.85);
+        ctx.strokeStyle = opts.color || pal.route || pal.arc || pal.pin;
+        ctx.lineWidth = opts.width || 3;
+        ctx.setLineDash(opts.dash || [12, 8]);
+        ctx.lineDashOffset = (opts.reverseDash ? 1 : -1) * elapsed * 28;
+        ctx.shadowColor = pal.pin;
+        ctx.shadowBlur = opts.shadowBlur || 6;
+        strokePartial();
+        ctx.shadowBlur = 0;
+        ctx.setLineDash([]);
+        ctx.restore();
+        ctx.globalAlpha = opacity;
+    };
+
     // ── Per-polygon color cycle for multiple locations ──
     const POLY_CYCLE = [
         { fill: '#00d4ff', fillEdge: '#0088cc', stroke: '#00d4ff', glow: 'rgba(0,212,255,0.6)' },   // cyan
@@ -10576,10 +10672,36 @@ function _renderMapTestFrame(ctx, frame, fps, mg, mapImg, anim) {
         ctx.globalAlpha = opacity;
     }
 
+    if (variant === 'route' && (mg._mapRoutePath || routePathPositions.length >= 2)) {
+        if (alternateRoutePathPositions.length >= 2) {
+            _drawPreviewRoute(alternateRoutePathPositions, {
+                startTime: 0.25,
+                duration: Math.max(1.6, Math.min(3.0, totalDur * 0.45)),
+                alpha: 0.42,
+                glowAlpha: 0.18,
+                width: 2.5,
+                glowWidth: 8,
+                dash: [8, 14],
+                reverseDash: true,
+                shadowBlur: 2,
+            });
+        }
+        _drawPreviewRoute(routePathPositions.length >= 2 ? routePathPositions : wpPositions, {
+            startTime: 0.15,
+            duration: Math.max(1.8, Math.min(3.4, totalDur * 0.55)),
+            alpha: 0.88,
+            glowAlpha: 0.25,
+            width: 3,
+            glowWidth: 10,
+            dash: [12, 8],
+        });
+    }
+
     // ══ 3. FLIGHT ARCS (curved 3D-style arcs between locations) ══
     // Only route/comparison variants get arcs — locator/regionHighlight should NOT connect pins.
     const _arcVariants = new Set(['route', 'comparison']);
-    if (_arcVariants.has(variant) && pins.length >= 2) {
+    const _hasSemanticRoutePath = variant === 'route' && (mg._mapRoutePath || routePathPositions.length >= 2);
+    if (_arcVariants.has(variant) && pins.length >= 2 && !_hasSemanticRoutePath) {
         for (let i = 0; i < pins.length - 1; i++) {
             const a = pins[i], b = pins[i + 1];
             const dist = Math.hypot(b.x - a.x, b.y - a.y);

@@ -111,6 +111,8 @@ const EDITORIAL_EVENT_RE = /\b(conflict|war|crisis|risk|threat|pressure|tension|
 const ABSTRACT_MODIFIER_RE = /\b(geopolitical|strategic|global|international|historical|critical|pivotal|crucial)\b/i;
 // Generic-world single-word names that are not geographies.
 const GENERIC_WORLD_RE = /^(the\s+)?(world|worlds?|globe|earth|international|worldwide|humanity|civilization)(['’]s)?$/i;
+const BROAD_ROUTE_REGION_RE = /^(asia|europe|africa|eurasia|middle east|north africa|east asia|southeast asia|south asia|western europe|eastern europe)$/i;
+const TRADE_CORRIDOR_TEXT_RE = /\b(container|shipping|ship|ships|vessel|vessels|cargo|freight|trade|traffic|supply\s+chains?|maritime|route|routes|corridor|corridors|gateway|flows?|moves?|travels?|traveling)\b/i;
 
 function _slugify(s) {
     return String(s || '')
@@ -293,6 +295,18 @@ function _assignRoles(names, mapMode) {
     });
 }
 
+function _isTradeCorridorBetweenRegions(scene, disposition, names, entityTypes) {
+    if (!Array.isArray(names) || names.length < 2) return false;
+    const verb = String(disposition?.signals?.spatialVerb || '').toLowerCase();
+    const text = `${scene?.text || ''} ${scene?.fullscreenMG || ''} ${disposition?.reason || ''}`;
+    if (!/\bbetween\b/.test(`${verb} ${text.toLowerCase()}`)) return false;
+    if (!TRADE_CORRIDOR_TEXT_RE.test(text)) return false;
+    return names.slice(0, 2).every((name) => {
+        const trimmed = String(name || '').trim();
+        return BROAD_ROUTE_REGION_RE.test(trimmed) || _inferKind(trimmed, entityTypes) === 'region';
+    });
+}
+
 // ── Main compile step ───────────────────────────────────────────────────
 // For each scene with a mapChart fullscreenMG, emit one MapScene.
 // Returns { compiled: MapScene[], skipped: [{sceneIndex, reason}] }
@@ -417,10 +431,15 @@ function compileMapScenes(scenes, scriptContext, dispositions) {
         // mapVariant='locator' on multi-place scenes (e.g. legacy VP output,
         // or must_map upgrades from older builds). The primary fix is in
         // map-assignment.js `_chooseVariantFromSignals`; this is belt-and-braces.
-        if ((mapMode === 'locator' || mapMode === 'comparison') && acceptedNames.length >= 2) {
+        if (acceptedNames.length >= 2) {
             const verb = String(disposition?.signals?.spatialVerb || '').toLowerCase();
             const priorMode = mapMode;
-            if (/\b(from|to|toward|towards|across|through|along|into|heading|sail|mov|travel|advanc)/.test(verb)) {
+            if (_isTradeCorridorBetweenRegions(scene, disposition, acceptedNames, entityTypes)) {
+                if (mapMode !== 'route') {
+                    console.log(`   🧭 Scene ${scene.index}: promoted ${mapMode}->route (trade corridor between broad regions, ${acceptedNames.length} subjects)`);
+                }
+                mapMode = 'route';
+            } else if ((mapMode === 'locator' || mapMode === 'comparison') && /\b(from|to|toward|towards|across|through|along|into|heading|sail|mov|travel|advanc)/.test(verb)) {
                 console.log(`   🧭 Scene ${scene.index}: promoted ${mapMode}→route (spatialVerb="${verb}", ${acceptedNames.length} subjects)`);
                 mapMode = 'route';
             } else if (mapMode === 'locator' && /\b(?:between|border|bordering|among|next to|beside|near|(?:separat|divid|split|flank|connect|link|join)[a-z]*|faces?|meets?)\b/.test(verb)) {

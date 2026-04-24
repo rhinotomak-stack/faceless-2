@@ -35,6 +35,9 @@ const SPATIAL_VERB_PATTERNS = [
     /\b(separat(es|ed|ing)|divid(es|ed|ing)|split(s|ting)|flank(s|ed|ing)|connect(s|ed|ing)|link(s|ed|ing)|join(s|ed|ing)|face(s|d|ing)?|meet(s|ing))\s+(?:the\s+)?[A-Z]/,
 ];
 
+const BROAD_ROUTE_REGION_RE = /^(asia|europe|africa|eurasia|middle east|north africa|east asia|southeast asia|south asia|western europe|eastern europe)$/i;
+const TRADE_CORRIDOR_TEXT_RE = /\b(container|shipping|ship|ships|vessel|vessels|cargo|freight|trade|traffic|supply\s+chains?|maritime|route|routes|corridor|corridors|gateway|flows?|moves?|travels?|traveling)\b/i;
+
 const ABSTRACT_MARKERS = [
     /\b(imagine|what if|suppose|consider|picture this|think about|let's say)\b/i,
     /\b(means?|meaning|metaphor|represent(s|ed|ing)?|symboliz(e|es|ed|ing))\b/i,
@@ -125,8 +128,16 @@ function _hasAbstractMarker(text) {
 function _chooseVariantFromSignals(signals) {
     const verb = String(signals?.spatialVerb || '').toLowerCase();
     const placeCount = Number(signals?.placeCount || 0);
+    const matchedPlaces = Array.isArray(signals?.matchedPlaces) ? signals.matchedPlaces : [];
+    const sceneText = String(signals?.sceneText || '');
     // Single place → locator, regardless of verb.
     if (placeCount < 2) return 'locator';
+    if (/\bbetween\b/.test(verb)
+        && matchedPlaces.length >= 2
+        && matchedPlaces.slice(0, 2).every(p => BROAD_ROUTE_REGION_RE.test(String(p || '').trim()))
+        && TRADE_CORRIDOR_TEXT_RE.test(sceneText)) {
+        return 'route';
+    }
     // from X to Y / across / through / along / into / toward — a journey.
     if (/\b(from|to|toward|towards|across|through|along|into|heading|sail|mov|travel|advanc)/.test(verb)) {
         return 'route';
@@ -192,7 +203,7 @@ function assignMapDispositions(scenes, scriptContext, styleProfile = null, niche
         const matchedPlaces = _findPlacesInText(text, placeEntities);
         const placeCount = matchedPlaces.length;
 
-        const signals = { zone, spatialVerb, abstractMarker, placeCount, matchedPlaces, nicheBaseline: baseline };
+        const signals = { zone, spatialVerb, abstractMarker, placeCount, matchedPlaces, nicheBaseline: baseline, sceneText: text };
 
         // must_not_map wins over everything:
         //   CTA zone, quote-only text, abstract framing, and zero named places

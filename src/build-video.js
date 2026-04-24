@@ -1647,7 +1647,18 @@ async function buildVideo() {
             if (mg._mapBigMap) target._mapBigMap = mg._mapBigMap;
             if (mg._mapIcons) target._mapIcons = mg._mapIcons;
             if (mg._mapSwarms) target._mapSwarms = mg._mapSwarms;
-            if (mg._mapRoutePath) target._mapRoutePath = mg._mapRoutePath;
+            if (mg._mapRoutePath) {
+                target._mapRoutePath = mg._mapRoutePath;
+                if (target.mgData) target.mgData._mapRoutePath = mg._mapRoutePath;
+            }
+            if (mg._mapRouteGeometry) {
+                target._mapRouteGeometry = mg._mapRouteGeometry;
+                if (target.mgData) target.mgData._mapRouteGeometry = mg._mapRouteGeometry;
+            }
+            if (mg._mapAlternateRouteGeometry) {
+                target._mapAlternateRouteGeometry = mg._mapAlternateRouteGeometry;
+                if (target.mgData) target.mgData._mapAlternateRouteGeometry = mg._mapAlternateRouteGeometry;
+            }
             // Phase B prep: the authoritative MapScene (subjects, cameraPlan,
             // annotationPlan, geometry, renderAssets) rides along on the scene
             // so the renderer can consume it directly in the next slice.

@@ -32,7 +32,7 @@ const _tileCache = new Map();
 // "Hapag-Lloyd" → Alberta). When a non-place slips through, OSM fetches wrong
 // country boundaries and the final map is polluted with unrelated regions.
 const NON_PLACE_SUFFIX_RE = /\b(Inc|Inc\.|Ltd|Ltd\.|LLC|PLC|Corp|Corp\.|Corporation|Co\.|Company|Companies|AG|SA|GmbH|BV|NV|Holding|Holdings|Group|Groups?|Shipping|Lines?|Airlines?|Motors?|Industries|Solutions|Technologies|Services|Partners|Ventures|Capital)\b/i;
-const NON_PLACE_WORD_RE  = /\b(forces|militia|militant|militants|rebels|rebel|insurgents?|fighters|battalion|brigade|regiment|corps|coalition|alliance|cartel|faction|syndicate|terrorists?|party|parties|government|governments|administration|administrations|agency|agencies|ministry|ministries|committee|committees|council|councils|union|unions|organization|organizations|association|associations|federation|confederation|conglomerate)\b/i;
+const NON_PLACE_WORD_RE  = /\b(forces|militia|militant|militants|rebels|rebel|insurgents?|fighters|battalion|brigade|regiment|corps|coalition|alliance|cartel|faction|syndicate|terrorists?|party|parties|government|governments|administration|administrations|agency|agencies|ministry|ministries|committee|committees|council|councils|union|unions|organization|organizations|association|associations|federation|confederation|conglomerate|powers|players|actors|stakeholders)\b/i;
 const GENERIC_GLOBAL_RE  = /^(world|global|globe|earth|international|worldwide|everywhere|nowhere|abroad)$/i;
 
 // Known placeholder coordinates used by our various geocoders when they fail
@@ -129,6 +129,7 @@ const GEO_COORDS = {
     'Switzerland': [8.2, 46.8, 7], 'Austria': [14.5, 47.5, 6.5],
     'Czech Republic': [15.5, 49.8, 6.5], 'Romania': [25, 46, 6],
     'Hungary': [19, 47, 6.5], 'Denmark': [10, 56, 6],
+    'Shanghai': [121.47, 31.23, 9], 'Rotterdam': [4.48, 51.92, 9],
     'Cuba': [-79, 22, 6.5], 'Jamaica': [-77, 18, 8],
     'Qatar': [51, 25.3, 8], 'UAE': [54, 24, 6.5], 'Kuwait': [48, 29.5, 8],
     'Oman': [57, 21, 6], 'Yemen': [48, 15.5, 6], 'Jordan': [36, 31, 7],
@@ -149,6 +150,7 @@ const GEO_COORDS = {
     'Central America': [-85, 14, 4.5], 'Caribbean': [-75, 17, 4.5],
     'Latin America': [-70, -10, 2.8], 'Oceania': [145, -25, 2.8],
     'Arabian Peninsula': [46, 23, 4], 'Horn of Africa': [44, 8, 5],
+    'Cape of Good Hope': [18.47, -34.36, 6.5], 'Good Hope': [18.47, -34.36, 6.5],
     'Indian Subcontinent': [78, 22, 3.8],
     // Seas / gulfs / straits — often the BEST establishing frame for coastal stories
     'Red Sea': [38, 20, 4.5], 'Gulf of Aden': [48, 12.5, 5.5],
@@ -166,6 +168,86 @@ const GEO_COORDS = {
     'Indian Ocean': [75, -10, 2.2], 'Arctic Ocean': [0, 85, 2],
     'Southern Ocean': [0, -65, 2],
 };
+
+function _routeDetourAlias(name) {
+    const lower = String(name || '').toLowerCase().trim();
+    if (/^(africa|around africa|african route|cape route|cape of good hope route)$/.test(lower)) {
+        return 'Cape of Good Hope';
+    }
+    return null;
+}
+
+function _routeDetourPoint(pt) {
+    const alias = _routeDetourAlias(pt?.name);
+    const coords = alias ? GEO_COORDS[alias] : null;
+    if (!coords) return pt;
+    return {
+        ...pt,
+        name: alias,
+        lon: coords[0],
+        lat: coords[1],
+        detourFor: pt.name,
+    };
+}
+
+function _withDistributedRouteTimes(points, startTime, endTime) {
+    if (!Array.isArray(points) || points.length === 0) return points || [];
+    const st = Number.isFinite(startTime) ? startTime : Number(points[0]?.startTime) || 0;
+    const et = Number.isFinite(endTime) && endTime > st ? endTime : Math.max(st + 2, Number(points[points.length - 1]?.endTime) || st + 2);
+    const step = points.length > 1 ? (et - st) / (points.length - 1) : et - st;
+    return points.map((p, i) => ({
+        ...p,
+        startTime: st + step * i,
+        endTime: i === points.length - 1 ? et : Math.min(et, st + step * (i + 1)),
+    }));
+}
+
+function _expandKnownMaritimeRoute(points) {
+    if (!Array.isArray(points) || points.length !== 2) return points;
+    const first = points[0];
+    const last = points[1];
+    const firstEast = /\b(shanghai|china|asia|east asia|southeast asia|south asia)\b/i.test(String(first.name || ''));
+    const lastEast = /\b(shanghai|china|asia|east asia|southeast asia|south asia)\b/i.test(String(last.name || ''));
+    const firstEurope = /\b(rotterdam|netherlands|europe|western europe)\b/i.test(String(first.name || ''));
+    const lastEurope = /\b(rotterdam|netherlands|europe|western europe)\b/i.test(String(last.name || ''));
+    if (!((firstEast && lastEurope) || (firstEurope && lastEast))) return points;
+    const suez = GEO_COORDS['Suez Canal'];
+    if (!suez) return points;
+    const start = Math.min(Number(first.startTime) || 0, Number(last.startTime) || 0);
+    const end = Math.max(Number(first.endTime) || start + 2, Number(last.endTime) || start + 2);
+    return _withDistributedRouteTimes([
+        first,
+        { name: 'Suez Canal', lon: suez[0], lat: suez[1], startTime: start, endTime: end },
+        last,
+    ], start, end);
+}
+
+function _routeEntitiesForMapScene(mapScene, entities) {
+    if (!mapScene || mapScene.mapMode !== 'route' || !Array.isArray(entities)) return entities;
+    const subjects = Array.isArray(mapScene.subjects) ? mapScene.subjects : [];
+    const nonRegionCount = subjects.filter(s => s && s.kind !== 'region').length;
+    if (nonRegionCount < 2) return entities;
+    const subjectByName = new Map(subjects.map(s => [String(s.name || '').toLowerCase().trim(), s]));
+    const rewritten = [];
+    const notes = [];
+    const seen = new Set();
+    for (const name of entities) {
+        const key = String(name || '').toLowerCase().trim();
+        const subj = subjectByName.get(key);
+        const alias = subj?.kind === 'region' ? _routeDetourAlias(name) : null;
+        const finalName = alias || name;
+        const finalKey = String(finalName || '').toLowerCase().trim();
+        if (finalKey && !seen.has(finalKey)) {
+            seen.add(finalKey);
+            rewritten.push(finalName);
+        }
+        if (alias) notes.push(`${name} -> ${alias}`);
+    }
+    if (notes.length) {
+        console.log(`      🧭 Route detour resolved: ${notes.join(', ')}`);
+    }
+    return rewritten;
+}
 
 /**
  * Download a file via HTTPS, following redirects. Returns Buffer.
@@ -451,6 +533,38 @@ async function computeMapView(entities, apiKey, opts = {}) {
 
     if (resolved.length === 0) {
         return { lon: 0, lat: 20, zoom: 2, pins: [] };
+    }
+
+    // ── Geocode outlier guard ──
+    // Nominatim occasionally returns a confident-but-wrong match for an
+    // ambiguous phrase (e.g. "Regional Powers" → a Nova Scotia island).
+    // When one point lies far outside the cluster formed by the rest, drop
+    // it so the bbox reflects the actual story. Only triggers when we have
+    // 3+ resolved points AND the cluster is reasonably tight (medDist<30°);
+    // intentional long-haul scenes (Shanghai→Rotterdam, ~100°) are never
+    // affected because medDist is naturally huge there.
+    if (resolved.length >= 3) {
+        const median = (arr) => {
+            const s = arr.slice().sort((a, b) => a - b);
+            return s[Math.floor(s.length / 2)];
+        };
+        const medLon = median(resolved.map(r => r.coords[0]));
+        const medLat = median(resolved.map(r => r.coords[1]));
+        const dists = resolved.map(r => Math.hypot(r.coords[0] - medLon, r.coords[1] - medLat));
+        const medDist = median(dists);
+        if (medDist < 30) {
+            const threshold = Math.max(4 * medDist, 20);
+            const keep = [];
+            const dropped = [];
+            for (let i = 0; i < resolved.length; i++) {
+                if (dists[i] > threshold) dropped.push({ name: resolved[i].name, dist: dists[i] });
+                else keep.push(resolved[i]);
+            }
+            if (dropped.length && keep.length >= 2) {
+                console.log(`      🚫 Dropped ${dropped.length} geocode outlier(s) from framing: ${dropped.map(d => `${d.name} (${d.dist.toFixed(0)}° from cluster)`).join(', ')} [medDist=${medDist.toFixed(1)}°, threshold=${threshold.toFixed(1)}°, kept=${keep.length}/${resolved.length}]`);
+                resolved = keep;
+            }
+        }
     }
 
     // Build pin data for the renderer
@@ -994,9 +1108,16 @@ function _buildCameraPlanStops(mapScene, mg, view) {
             const nonRegionCount = (mapScene.subjects || []).filter(s => s && s.kind !== 'region').length;
             const framingSubjects = [];
             const excludedFromFraming = [];
+            const detourFraming = [];
             for (const subj of (mapScene.subjects || [])) {
                 if (!subj || !subj.name) continue;
                 if (subj.kind === 'region' && nonRegionCount >= 2) {
+                    const alias = _routeDetourAlias(subj.name);
+                    if (alias) {
+                        framingSubjects.push({ ...subj, id: 'cape-of-good-hope', name: alias, kind: 'place' });
+                        detourFraming.push(`${subj.name}->${alias}`);
+                        continue;
+                    }
                     excludedFromFraming.push(subj.name);
                     continue;
                 }
@@ -1024,31 +1145,76 @@ function _buildCameraPlanStops(mapScene, mg, view) {
                 if (wpEnds.length)   corridor.endTime   = Math.max(...wpEnds);
                 corridor.dwellSec = corridor.endTime - corridor.startTime;
 
-                // Route geometry — every valid waypoint coord in order, carrying
-                // the original per-waypoint timing so the renderer can animate
-                // the dashed line progressively through each segment. This is
-                // intentionally decoupled from camera stops: the corridor stop
-                // holds the frame; the geometry drives the path draw.
-                const routeGeom = [];
+                // Route geometry — partition waypoints into the SAME semantic
+                // groups the framing split uses, so the dashed route line tells
+                // the same story the camera does:
+                //   • primary route anchors   → real path (drawn as main dashed line)
+                //   • corridor anchors        → waterways/cities on the path (primary)
+                //   • detour / alternate      → regions mentioned as alt routes
+                //                               ("around Africa") — stored separately
+                //                               in _mapAlternateRouteGeometry for
+                //                               possible future alt-path rendering,
+                //                               NEVER appended to the primary dashed
+                //                               line
+                //   • display-only labels     → pins only (never in route geometry)
+                //
+                // Mirrors the framing rule exactly: region-kind subjects are moved
+                // to the alternate bucket only when ≥2 non-region anchors exist.
+                // That prevents a single city + continent scene from being wrongly
+                // split. If the framing decided to keep regions in (nonRegion<2),
+                // they also stay in the primary path.
+                const primaryRouteGeom = [];
+                const alternateRouteGeom = [];
+                const excludedFromPrimaryRoute = [];
                 for (const wp of waypoints) {
                     const c = findCoord(wp.name);
                     if (!c || _looksLikePlaceholderCoord(c.lon, c.lat)) continue;
                     const st = Number(wp.startTime);
                     const et = Number(wp.endTime);
                     if (!Number.isFinite(st) || !Number.isFinite(et) || et <= st) continue;
-                    routeGeom.push({ name: wp.name, lon: c.lon, lat: c.lat, startTime: st, endTime: et });
+                    const subj = subjectByName.get(String(wp.name || '').toLowerCase().trim()) || null;
+                    const isRegion = !!(subj && subj.kind === 'region');
+                    const pt = { name: wp.name, lon: c.lon, lat: c.lat, startTime: st, endTime: et };
+                    if (isRegion && nonRegionCount >= 2) {
+                        alternateRouteGeom.push(_routeDetourPoint(pt));
+                        excludedFromPrimaryRoute.push(wp.name);
+                    } else {
+                        primaryRouteGeom.push(pt);
+                    }
                 }
-                if (routeGeom.length >= 2) {
-                    mg._mapRouteGeometry = routeGeom;
+                const expandedPrimaryRouteGeom = primaryRouteGeom.length >= 2
+                    ? _expandKnownMaritimeRoute(primaryRouteGeom)
+                    : primaryRouteGeom;
+                if (expandedPrimaryRouteGeom.length >= 2) {
+                    mg._mapRouteGeometry = expandedPrimaryRouteGeom;
+                }
+                if (alternateRouteGeom.length >= 1 && expandedPrimaryRouteGeom.length >= 2) {
+                    const altStart = expandedPrimaryRouteGeom[0];
+                    const altEnd = expandedPrimaryRouteGeom[expandedPrimaryRouteGeom.length - 1];
+                    mg._mapAlternateRouteGeometry = _withDistributedRouteTimes(
+                        [altStart, ...alternateRouteGeom, altEnd],
+                        corridor.startTime,
+                        corridor.endTime
+                    );
                 }
 
                 const excludedLabel = excludedFromFraming.length > 0
                     ? `, excluded-from-framing=[${excludedFromFraming.join(', ')}]`
                     : '';
-                console.log(`      🎥 cameraPlan.stops: scene=${mapScene.sceneIndex} mode=route framing=route-corridor (span=${routeSpan.toFixed(0)}°, ${rValidCount} anchors → 1 corridor stop, center=[${corridor.lon.toFixed(1)},${corridor.lat.toFixed(1)}] zoom=${corridor.zoom.toFixed(2)}${excludedLabel})`);
-                if (routeGeom.length >= 2) {
-                    console.log(`      🎥 cameraPlan.stops: scene=${mapScene.sceneIndex} route geometry retained: ${routeGeom.length} points for dashed path (${routeGeom.map(p => p.name).join(' → ')})`);
+                const detourLabel = detourFraming.length > 0
+                    ? `, detour-framing=[${detourFraming.join(', ')}]`
+                    : '';
+                console.log(`      🎥 cameraPlan.stops: scene=${mapScene.sceneIndex} mode=route framing=route-corridor (span=${routeSpan.toFixed(0)}°, ${rValidCount} anchors → 1 corridor stop, center=[${corridor.lon.toFixed(1)},${corridor.lat.toFixed(1)}] zoom=${corridor.zoom.toFixed(2)}${excludedLabel}${detourLabel})`);
+                if (excludedFromPrimaryRoute.length > 0) {
+                    console.log(`      🎥 cameraPlan.stops: scene=${mapScene.sceneIndex} excluded-from-primary-route=[${excludedFromPrimaryRoute.join(', ')}]`);
                 }
+                if (expandedPrimaryRouteGeom.length >= 2) {
+                    console.log(`      🎥 cameraPlan.stops: scene=${mapScene.sceneIndex} route geometry retained: ${expandedPrimaryRouteGeom.length} points for dashed path (${expandedPrimaryRouteGeom.map(p => p.name).join(' -> ')})`);
+                }
+                if (mg._mapAlternateRouteGeometry?.length > 0) {
+                    console.log(`      🎥 cameraPlan.stops: scene=${mapScene.sceneIndex} alternate-route-candidates=[${alternateRouteGeom.map(p => p.name).join(', ')}] alt-path=(${mg._mapAlternateRouteGeometry.map(p => p.name).join(' -> ')})`);
+                }
+                console.log(`      🎥 cameraPlan.stops: scene=${mapScene.sceneIndex} final stops count=1 (corridor)`);
                 return [corridor];
             }
             console.log(`      🎥 cameraPlan.stops: scene=${mapScene.sceneIndex} mode=route corridor build failed (no valid framing coords) — falling back to null (legacy bbox-fit)`);
@@ -1155,6 +1321,7 @@ function _populateMapSceneAssets(mapScene, mg, view) {
         icons:        mg._mapIcons      || null,
         routePath:    !!mg._mapRoutePath,
         routeGeometry: Array.isArray(mg._mapRouteGeometry) ? mg._mapRouteGeometry : null,
+        alternateRouteGeometry: Array.isArray(mg._mapAlternateRouteGeometry) ? mg._mapAlternateRouteGeometry : null,
         bigMap:       !!mg._mapBigMap,
         stylePackId:  mg.mapStylePack || null,
     };
@@ -1267,6 +1434,7 @@ async function downloadMapForMG(mg, scriptContext, tempDir, scenes) {
     if (mapScene && Array.isArray(mapScene.subjects) && mapScene.subjects.length > 0) {
         // Authoritative path: MapScene subjects are canonicalized + capped per mode.
         entities = mapScene.subjects.map(s => s.name).filter(Boolean);
+        entities = _routeEntitiesForMapScene(mapScene, entities);
         console.log(`      🧭 MapScene (${mapScene.mapMode}, ${mapScene.mapPurpose}): ${entities.join(', ')}`);
     } else {
         // Legacy path: planner waypoints / swarms (removed in slice 4).
@@ -1345,9 +1513,17 @@ async function downloadMapForMG(mg, scriptContext, tempDir, scenes) {
             const _addCoord = (name) => {
                 if (wpCoords.some(c => c.name.toLowerCase() === name.toLowerCase())) return;
                 const lower = name.toLowerCase();
-                const pin = view.pins.find(p => p.name.toLowerCase() === lower)
+                let pin = view.pins.find(p => p.name.toLowerCase() === lower)
                     || view.pins.find(p => p.name.toLowerCase().includes(lower) || lower.includes(p.name.toLowerCase()));
-                if (pin) wpCoords.push({ name, lon: pin.lon, lat: pin.lat });
+                if (!pin) {
+                    const alias = _routeDetourAlias(name);
+                    const aliasLower = alias ? alias.toLowerCase() : '';
+                    if (aliasLower) {
+                        pin = view.pins.find(p => p.name.toLowerCase() === aliasLower)
+                            || view.pins.find(p => p.name.toLowerCase().includes(aliasLower) || aliasLower.includes(p.name.toLowerCase()));
+                    }
+                }
+                if (pin) wpCoords.push({ name, lon: pin.lon, lat: pin.lat, resolvedName: pin.name });
             };
             for (const wp of mg._mapWaypoints) _addCoord(wp.name);
             if (mg._mapSwarms) {
