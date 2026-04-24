@@ -396,12 +396,12 @@ function compileMapScenes(scenes, scriptContext, dispositions) {
         // mapVariant='locator' on multi-place scenes (e.g. legacy VP output,
         // or must_map upgrades from older builds). The primary fix is in
         // map-assignment.js `_chooseVariantFromSignals`; this is belt-and-braces.
-        if (mapMode === 'locator' && acceptedNames.length >= 2) {
+        if ((mapMode === 'locator' || mapMode === 'comparison') && acceptedNames.length >= 2) {
             const verb = String(disposition?.signals?.spatialVerb || '').toLowerCase();
             if (/\b(from|to|toward|towards|across|through|along|into|heading|sail|mov|travel|advanc)/.test(verb)) {
-                console.log(`   🧭 Scene ${scene.index}: promoted locator→route (spatialVerb="${verb}", ${acceptedNames.length} subjects)`);
+                console.log(`   🧭 Scene ${scene.index}: promoted ${mapMode}→route (spatialVerb="${verb}", ${acceptedNames.length} subjects)`);
                 mapMode = 'route';
-            } else if (/\b(between|border|bordering|among|next to|beside|near)\b/.test(verb)) {
+            } else if (mapMode === 'locator' && /\b(between|border|bordering|among|next to|beside|near)\b/.test(verb)) {
                 console.log(`   🧭 Scene ${scene.index}: promoted locator→region (spatialVerb="${verb}", ${acceptedNames.length} subjects)`);
                 mapMode = 'region';
             }

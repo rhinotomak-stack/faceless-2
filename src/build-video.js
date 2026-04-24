@@ -1313,6 +1313,19 @@ async function buildVideo() {
             .sort((a, b) => a.startTime - b.startTime);
         const toRemove = new Set();
         let mergedCount = 0;
+        const _normMapMode = (v) => {
+            const s = String(v || '').toLowerCase();
+            if (s === 'regionhighlight') return 'region';
+            if (s === 'route' || s === 'locator' || s === 'region' || s === 'comparison') return s;
+            return null;
+        };
+        const _mapModeOf = (mg) => {
+            // _mapScene.mapMode is authoritative (reflects compiler promotions);
+            // fall back to MG's own mapVariant/subType when the compiler didn't run.
+            const owner = scenesWithKeywords.find(s => s && s.index === mg.sceneIndex);
+            return _normMapMode(owner?._mapScene?.mapMode)
+                || _normMapMode(mg.mapVariant || mg.subType);
+        };
         for (let i = 0; i < fsList.length; i++) {
             const cur = fsList[i];
             if (toRemove.has(cur)) continue;
@@ -1323,6 +1336,18 @@ async function buildVideo() {
                 const curEnd = cur.startTime + cur.duration;
                 const gap = next.startTime - curEnd;
                 if (gap > MERGE_GAP_THRESHOLD) break;
+                // Policy: never merge adjacent fullscreen mapChart scenes when their
+                // semantic purpose differs (route vs comparison vs locator vs region).
+                // Prevents a route (Shanghai→Rotterdam) absorbing a neighboring locator
+                // (Africa) into a held-wide comparison frame.
+                if (cur.type === 'mapChart' && next.type === 'mapChart') {
+                    const curMode = _mapModeOf(cur);
+                    const nextMode = _mapModeOf(next);
+                    if (curMode && nextMode && curMode !== nextMode) {
+                        log.info(`   🚫 Refused mapChart merge scenes [${cur.sceneIndex}+${next.sceneIndex}]: semantic mismatch (${curMode} vs ${nextMode})`);
+                        break;
+                    }
+                }
                 const nextEnd = next.startTime + next.duration;
                 cur.duration = Math.max(curEnd, nextEnd) - cur.startTime;
                 const curText = (cur.text || '').trim();
