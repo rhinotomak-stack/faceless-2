@@ -330,7 +330,7 @@ function compileMapScenes(scenes, scriptContext, dispositions) {
         // VP-supplied variant wins when recognized; otherwise fall back to the
         // niche's preferredModes[0], then the compiler-level DEFAULT_MODE.
         const variantInput = (scene.mapVariant || '').toLowerCase();
-        const mapMode = VARIANT_TO_MODE[variantInput] || policy.preferredModes[0] || DEFAULT_MODE;
+        let mapMode = VARIANT_TO_MODE[variantInput] || policy.preferredModes[0] || DEFAULT_MODE;
 
         // ── Resolve subjects ──
         // Prefer disposition's matchedPlaces (Slice 1 set these authoritatively
@@ -386,6 +386,25 @@ function compileMapScenes(scenes, scriptContext, dispositions) {
                 `      ✅ Scene ${scene.index} accepted ${acceptedNames.length} geographic subject(s): ` +
                 acceptedNames.map(n => `"${n}"`).join(', ')
             );
+        }
+
+        // ── Mode safety-net ──
+        // If we landed on `locator` but we have ≥2 accepted subjects AND the
+        // disposition signals a relationship between them (between / from-to /
+        // across / through), promote: locator → region (for between/border) or
+        // route (for from-to/across). This catches upstream paths that set
+        // mapVariant='locator' on multi-place scenes (e.g. legacy VP output,
+        // or must_map upgrades from older builds). The primary fix is in
+        // map-assignment.js `_chooseVariantFromSignals`; this is belt-and-braces.
+        if (mapMode === 'locator' && acceptedNames.length >= 2) {
+            const verb = String(disposition?.signals?.spatialVerb || '').toLowerCase();
+            if (/\b(from|to|toward|towards|across|through|along|into|heading|sail|mov|travel|advanc)/.test(verb)) {
+                console.log(`   🧭 Scene ${scene.index}: promoted locator→route (spatialVerb="${verb}", ${acceptedNames.length} subjects)`);
+                mapMode = 'route';
+            } else if (/\b(between|border|bordering|among|next to|beside|near)\b/.test(verb)) {
+                console.log(`   🧭 Scene ${scene.index}: promoted locator→region (spatialVerb="${verb}", ${acceptedNames.length} subjects)`);
+                mapMode = 'region';
+            }
         }
 
         // ── Cap and validate ──

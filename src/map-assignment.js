@@ -111,6 +111,30 @@ function _hasAbstractMarker(text) {
     return null;
 }
 
+// Choose the initial mapVariant for a must_map upgrade from the disposition
+// signals. Previously hardcoded to 'locator' which broke multi-place scenes
+// like "trade moves BETWEEN Asia and Europe" (rendered as a sequential pan
+// instead of both continents visible). The variant names returned here match
+// VP's mapVariant enum: locator | route | regionHighlight | comparison.
+function _chooseVariantFromSignals(signals) {
+    const verb = String(signals?.spatialVerb || '').toLowerCase();
+    const placeCount = Number(signals?.placeCount || 0);
+    // Single place → locator, regardless of verb.
+    if (placeCount < 2) return 'locator';
+    // from X to Y / across / through / along / into / toward — a journey.
+    if (/\b(from|to|toward|towards|across|through|along|into|heading|sail|mov|travel|advanc)/.test(verb)) {
+        return 'route';
+    }
+    // between / border / among / next to — a relationship between places;
+    // both should be visible simultaneously.
+    if (/\b(between|border|bordering|among|next to|beside|near)\b/.test(verb)) {
+        return 'regionHighlight';
+    }
+    // Plain presence of multiple named places → comparison-style held-wide
+    // (safer default than locator for ≥2 subjects — avoids sequential pan).
+    return 'regionHighlight';
+}
+
 function _zoneForScene(scene, scriptContext) {
     const midpoint = (scene.startTime + scene.endTime) / 2;
     const hookEnd = scriptContext.hookEndTime || 0;
@@ -297,8 +321,12 @@ function enforceDispositions(scenes, dispositions) {
             const prev = scene.fullscreenMG || scene.mgHint || 'none';
             scene._mapUpgradedFrom = prev;
             scene.fullscreenMG = payload;
-            scene.mapVariant = 'locator';
-            console.log(`   [VP] Scene ${scene.index} ${prev === 'none' ? 'no MG' : `had "${prev}"`} UPGRADED to "${payload}" (${d.reason})`);
+            // Pick a smart initial variant from the spatial-verb signal + place
+            // count. Hardcoding 'locator' here was wrong for multi-place scenes:
+            // "trade moves BETWEEN Asia and Europe" was being rendered as a
+            // sequential Asia→Europe pan instead of both continents highlighted.
+            scene.mapVariant = _chooseVariantFromSignals(d.signals);
+            console.log(`   [VP] Scene ${scene.index} ${prev === 'none' ? 'no MG' : `had "${prev}"`} UPGRADED to "${payload}" as variant=${scene.mapVariant} (${d.reason})`);
             upgraded++;
         }
     }

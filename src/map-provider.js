@@ -748,6 +748,76 @@ function extractEntities(mg, scriptContext) {
  *                               ?? mapScene.geometry.pins
  *   - subjectId               → mapScene.subjects[].id (name-match)
  */
+// Compute a single "establish" stop for region / comparison modes — a held
+// wide frame centered on the bbox of all valid subject coords. The zoom is
+// chosen from the bbox span so both (or all) subjects fit in view with a
+// small padding. Span → zoom mapping mirrors computeMapView()'s buckets.
+function _buildEstablishStop(mapScene, waypoints, findCoord, subjectByName) {
+    // Collect valid coords for all subjects in the scene (not just waypoints
+    // — we want EVERY subject represented in the wide frame).
+    const coords = [];
+    for (const subj of (mapScene.subjects || [])) {
+        if (!subj || !subj.name) continue;
+        const c = findCoord(subj.name);
+        if (!c) continue;
+        if (_looksLikePlaceholderCoord(c.lon, c.lat)) continue;
+        coords.push({ name: subj.name, lon: c.lon, lat: c.lat, id: subj.id });
+    }
+    if (coords.length < 2) return null;
+
+    // Bounding box.
+    let minLon = Infinity, maxLon = -Infinity, minLat = Infinity, maxLat = -Infinity;
+    for (const c of coords) {
+        if (c.lon < minLon) minLon = c.lon;
+        if (c.lon > maxLon) maxLon = c.lon;
+        if (c.lat < minLat) minLat = c.lat;
+        if (c.lat > maxLat) maxLat = c.lat;
+    }
+    const maxSpan = Math.max(maxLon - minLon, maxLat - minLat);
+    // Span → zoom (renderer-scale, not web-mercator). Smaller zoom = wider view.
+    // Tuned so Asia+Europe (~75° span) sits around z0.9 (true world overview),
+    // regional pairs (~20-40° span) around z1.0, and tight city pairs (<8°)
+    // around z1.3.
+    let zoom;
+    if (maxSpan > 60)      zoom = 0.85;
+    else if (maxSpan > 30) zoom = 1.0;
+    else if (maxSpan > 15) zoom = 1.1;
+    else if (maxSpan > 8)  zoom = 1.2;
+    else                   zoom = 1.3;
+
+    const centerLon = (minLon + maxLon) / 2;
+    const centerLat = (minLat + maxLat) / 2;
+
+    // Scene-level timing: span from the first waypoint's start to the last
+    // waypoint's end so the establish shot holds for the full MG duration.
+    const starts = waypoints.map(w => Number(w.startTime)).filter(Number.isFinite);
+    const ends   = waypoints.map(w => Number(w.endTime)).filter(Number.isFinite);
+    const startTime = starts.length ? Math.min(...starts) : 0;
+    const endTime   = ends.length   ? Math.max(...ends)   : Math.max(2, (mapScene.duration || 6));
+    if (!Number.isFinite(startTime) || !Number.isFinite(endTime) || endTime <= startTime) return null;
+
+    // Primary subject drives the stop's id (if present) — lets the renderer
+    // still know who this frame "belongs to" for label activation.
+    const primarySubj = (mapScene.subjects || []).find(s => s && s.role === 'primary')
+                     || (mapScene.subjects || [])[0]
+                     || null;
+
+    return {
+        subjectId: primarySubj?.id || null,
+        lon: centerLon,
+        lat: centerLat,
+        zoom,
+        tilt: 0,
+        bearing: 0,
+        orbit: 0,
+        startTime,
+        endTime,
+        dwellSec: endTime - startTime,
+        easeIn: 'smooth',
+        label: coords.map(c => c.name).join(' + '),
+    };
+}
+
 function _buildCameraPlanStops(mapScene, mg, view) {
     if (String(process.env.USE_CAMERA_PLAN_STOPS || '').toLowerCase() !== 'true') {
         return null;
@@ -795,6 +865,24 @@ function _buildCameraPlanStops(mapScene, mg, view) {
     const subjectByName = new Map();
     for (const s of mapScene.subjects) {
         if (s && s.name) subjectByName.set(String(s.name).toLowerCase().trim(), s);
+    }
+
+    // ── Region / comparison mode: collapse to ONE bbox-centered establish stop ──
+    // Per-subject sequential stops on a multi-continent region-highlight scene
+    // produces a pan (Asia→Europe) that looks like the map is sliding off-frame.
+    // The editorial intent for "between Asia and Europe" / "compare X and Y" is
+    // a single held-wide frame showing BOTH subjects simultaneously. Collapse.
+    const mode = mapScene.mapMode;
+    if ((mode === 'region' || mode === 'comparison') && waypoints.length >= 2) {
+        const collapsed = _buildEstablishStop(mapScene, waypoints, findCoord, subjectByName);
+        if (collapsed) {
+            const framing = mapScene.cameraPlan?.framing || '?';
+            console.log(`      🎥 cameraPlan.stops: scene=${mapScene.sceneIndex} mode=${mode} stops=1 framing=${framing} (establish-shot, ${waypoints.length} subjects wide, dwell=${collapsed.dwellSec.toFixed(1)}s)`);
+            return [collapsed];
+        }
+        // If the collapse failed (all coords invalid, etc.) fall through to the
+        // per-subject path, which will either produce something or reject.
+        console.log(`      🎥 cameraPlan.stops: scene=${mapScene.sceneIndex} mode=${mode} establish-collapse failed — falling through to per-subject path`);
     }
 
     const stops = [];
@@ -848,7 +936,6 @@ function _buildCameraPlanStops(mapScene, mg, view) {
     // fall back to its bbox-fit safety net (single known-good pin = locator
     // framing anyway). This prevents a broken route-pan between one real
     // subject and a bogus/missing endpoint.
-    const mode = mapScene.mapMode;
     if ((mode === 'route' || mode === 'comparison') && stops.length < 2) {
         console.log(`      🎥 cameraPlan.stops: scene=${mapScene.sceneIndex} REJECTED (mode=${mode} needs ≥2 stops, got ${stops.length}) — falling back to null`);
         return null;
