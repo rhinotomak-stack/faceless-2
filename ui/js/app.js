@@ -9994,6 +9994,9 @@ function _renderMapTestFrame(ctx, frame, fps, mg, mapImg, anim) {
     if (!mg._mapBigMap && _mgd._mapBigMap) mg._mapBigMap = _mgd._mapBigMap;
     if (!mg._mapIcons && _mgd._mapIcons) mg._mapIcons = _mgd._mapIcons;
     if (!mg._osmBoundaries && _mgd._osmBoundaries) mg._osmBoundaries = _mgd._osmBoundaries;
+    if (!mg._mapRoutePath && _mgd._mapRoutePath) mg._mapRoutePath = _mgd._mapRoutePath;
+    if (!mg.subType && _mgd.subType) mg.subType = _mgd.subType;
+    if (!mg.mapVariant && _mgd.mapVariant) mg.mapVariant = _mgd.mapVariant;
     const W = 1920, H = 1080;
     const elapsed = frame / fps;
     const totalDur = (mg._durationFrames || 7 * fps) / fps;
@@ -10145,7 +10148,8 @@ function _renderMapTestFrame(ctx, frame, fps, mg, mapImg, anim) {
 
     // ── Camera ──
     const multiPin = (mg._mapPins || []).length >= 2;
-    const variant = mg.subType || 'standard';
+    const sceneVariant = mg._mapScene?.mapMode === 'region' ? 'regionHighlight' : mg._mapScene?.mapMode;
+    const variant = mg.subType || mg.mapVariant || _mgd.subType || _mgd.mapVariant || sceneVariant || 'standard';
     let camScale, driftX, driftY, tiltAmount;
 
     // Flag for waypoint-on-big-map transform (used below)
@@ -10160,11 +10164,16 @@ function _renderMapTestFrame(ctx, frame, fps, mg, mapImg, anim) {
         const awp = wpPositions[activeWpIdx];
         const hasPerWpZoom = wpPositions.some(wp => wp.zoom != null);
 
+        const isRoute = variant === 'route';
+        const isComparison = variant === 'comparison';
+        const wideCap = isRoute ? 1.1 : (isComparison ? 1.5 : null);
+        const clampWpZoom = (z) => wideCap != null ? Math.min(z, wideCap) : z;
+
         if (hasPerWpZoom && bigMapSize) {
             // Per-waypoint zoom: interpolate between waypoint zoom levels during transitions
-            const curZoom = awp.zoom ?? globalZS;
+            const curZoom = clampWpZoom(awp.zoom ?? globalZS);
             if (prevWpIdx >= 0 && wpTransition < 1) {
-                const prevZoom = wpPositions[prevWpIdx].zoom ?? globalZS;
+                const prevZoom = clampWpZoom(wpPositions[prevWpIdx].zoom ?? globalZS);
                 camScale = prevZoom + (curZoom - prevZoom) * _ease(wpTransition, easingMode);
             } else {
                 // Within a waypoint, apply subtle zoom animation (5% range)
@@ -10174,12 +10183,35 @@ function _renderMapTestFrame(ctx, frame, fps, mg, mapImg, anim) {
             }
         } else {
             camScale = globalZS + (globalZE - globalZS) * kfEased;
+            if (wideCap != null) camScale = Math.min(camScale, wideCap);
         }
 
         if (bigMapSize) {
             wpBigMapCamera = true;
             driftX = 0;
             driftY = 0;
+            if (wideCap != null && wpPositions.length > 1) {
+                const xs = wpPositions.map(p => p.px);
+                const ys = wpPositions.map(p => p.py);
+                const minX = Math.min(...xs), maxX = Math.max(...xs);
+                const minY = Math.min(...ys), maxY = Math.max(...ys);
+                const headroom = isRoute ? 1.6 : 1.4;
+                const rawSpanX = Math.max(1, maxX - minX);
+                const rawSpanY = Math.max(1, maxY - minY);
+                const paddedFit = Math.min(W / (rawSpanX * headroom), H / (rawSpanY * headroom));
+                const endpointFit = Math.min(W / rawSpanX, H / rawSpanY);
+                const fillScale = Math.max(W / IMG_W, H / IMG_H);
+                const fitScale = Math.min(Math.max(paddedFit, fillScale), endpointFit);
+                wpCamX = (minX + maxX) / 2;
+                wpCamY = (minY + maxY) / 2;
+                camScale = isRoute ? fitScale : Math.min(camScale, fitScale);
+                if (!_renderMapTestFrame._bboxFitLogged) _renderMapTestFrame._bboxFitLogged = new Set();
+                const bboxKey = `${mg.sceneIndex ?? mg.startTime ?? 'preview'}:${variant}`;
+                if (!_renderMapTestFrame._bboxFitLogged.has(bboxKey)) {
+                    _renderMapTestFrame._bboxFitLogged.add(bboxKey);
+                    console.log(`[MapPreview] bbox-fit variant=${variant} wp=${wpPositions.length} camScale=${camScale.toFixed(3)} fit=${fitScale.toFixed(3)}`);
+                }
+            }
         } else {
             driftX = (W / 2 - wpCamX);
             driftY = (H / 2 - wpCamY);

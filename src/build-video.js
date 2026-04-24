@@ -1625,6 +1625,15 @@ async function buildVideo() {
             if (mg.type !== 'mapChart') continue;
             const target = mgScenes.find(s => s.type === mg.type && s.startTime === mg.startTime);
             if (!target) continue;
+            const mapSceneMode = mg._mapScene?.mapMode || null;
+            const modeVariant = mapSceneMode === 'region' ? 'regionHighlight' : mapSceneMode;
+            const effectiveVariant = mg.subType || mg.mapVariant || modeVariant || null;
+            if (effectiveVariant && !target.subType) target.subType = effectiveVariant;
+            if ((mg.mapVariant || modeVariant) && !target.mapVariant) target.mapVariant = mg.mapVariant || modeVariant;
+            if (target.mgData) {
+                if (effectiveVariant && !target.mgData.subType) target.mgData.subType = effectiveVariant;
+                if ((mg.mapVariant || modeVariant) && !target.mgData.mapVariant) target.mgData.mapVariant = mg.mapVariant || modeVariant;
+            }
             if (mg.mapImageFile) {
                 target.mapImageFile = mg.mapImageFile;
                 target._mapView = mg._mapView;
@@ -2230,7 +2239,14 @@ async function buildVideo() {
 }
 
 // Run
-buildVideo().catch(error => {
+buildVideo().then(() => {
+    // Force-exit: some providers (Gemini/Vertex SDK, keep-alive HTTP agents,
+    // telegram-sdk sockets) keep the event loop alive after BUILD COMPLETE,
+    // so main.js's child_process 'close' never fires and the UI hangs at
+    // "Build complete!" with the Cancel button still visible. Flush logs and
+    // exit explicitly — this is a CLI, not a server.
+    setImmediate(() => process.exit(0));
+}).catch(error => {
     console.error('\n❌ Build failed:', error.message);
     process.exit(1);
 });

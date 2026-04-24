@@ -2545,7 +2545,11 @@ function getNicheSplitConfig(nicheId) {
 // or unrecognized — a VP-supplied variant (locator | route | regionHighlight
 // | comparison) always wins.
 const DEFAULT_MAP_POLICY = {
-    subjectCaps:    { locator: 3, route: 2, region: 5, comparison: 4 },
+    // route: 3 — lets origin + mid-corridor via + destination survive the
+    // cap. "From Shanghai to Rotterdam around Africa" had Rotterdam dropped
+    // at cap=2 and rendered as a Shanghai-Africa two-waypoint tour instead
+    // of the actual corridor; 3 fixes this for every niche that inherits.
+    subjectCaps:    { locator: 3, route: 3, region: 5, comparison: 4 },
     minSubjects:    { locator: 1, route: 2, region: 1, comparison: 2 },
     preferredModes: ['locator', 'region', 'route', 'comparison'],
 };

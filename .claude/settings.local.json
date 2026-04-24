@@ -16,7 +16,8 @@
       "Bash(node -c src/build-video.js)",
       "Bash(awk 'NR>=3867 && NR<=4770' ui/js/compositor/MGRenderer.js)",
       "Bash(node -c src/build-orchestrator.js)",
-      "Bash(node --check preload.js)"
+      "Bash(node --check preload.js)",
+      "Bash(node --check src/map-provider.js)"
     ]
   }
 }

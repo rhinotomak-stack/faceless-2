@@ -3555,6 +3555,8 @@ class MGRenderer {
         if (!mg._mapIcons && _mgd._mapIcons) mg._mapIcons = _mgd._mapIcons;
         if (!mg._mapSwarms && _mgd._mapSwarms) mg._mapSwarms = _mgd._mapSwarms;
         if (!mg._mapRoutePath && _mgd._mapRoutePath) mg._mapRoutePath = _mgd._mapRoutePath;
+        if (!mg.subType && _mgd.subType) mg.subType = _mgd.subType;
+        if (!mg.mapVariant && _mgd.mapVariant) mg.mapVariant = _mgd.mapVariant;
 
         // ── Unified read surface: prefer MapScene.renderAssets, fall back to mg.* ──
         // These are the ONLY names used for map-data reads below this block. User-
@@ -3696,7 +3698,8 @@ class MGRenderer {
 
         // ── Determine map view (center + zoom) ──
         const cinematicMode = mg._mapCinematic || false;
-        const variant = mg.subType || 'standard';
+        const sceneVariant = _mapScene?.mapMode === 'region' ? 'regionHighlight' : _mapScene?.mapMode;
+        const variant = mg.subType || mg.mapVariant || _mgd.subType || _mgd.mapVariant || sceneVariant || 'standard';
         const multiPin = _mapPins.length >= 2;
 
         // ── Keyframe time (shared by tilt + zoom) ──
@@ -3900,12 +3903,35 @@ class MGRenderer {
                     const ys = wpPositions.map(p => p.py);
                     const minX = Math.min(...xs), maxX = Math.max(...xs);
                     const minY = Math.min(...ys), maxY = Math.max(...ys);
-                    wpCamX = (minX + maxX) / 2;
-                    wpCamY = (minY + maxY) / 2;
-                    const spanX = Math.max(1, maxX - minX) * 1.4;
-                    const spanY = Math.max(1, maxY - minY) * 1.4;
-                    const fitScale = Math.min(W / spanX, H / spanY);
-                    camScale = Math.min(camScale, fitScale);
+                    // Route: wider headroom (1.6) so both endpoints sit well inside
+                    // the frame instead of hugging the edges. Comparison keeps 1.4.
+                    const headroom = isRoute ? 1.6 : 1.4;
+                    const rawSpanX = Math.max(1, maxX - minX);
+                    const rawSpanY = Math.max(1, maxY - minY);
+                    const paddedFit = Math.min(W / (rawSpanX * headroom), H / (rawSpanY * headroom));
+                    const endpointFit = Math.min(W / rawSpanX, H / rawSpanY);
+                    const fillScale = Math.max(W / IMG_W, H / IMG_H);
+                    const fitScale = Math.min(Math.max(paddedFit, fillScale), endpointFit);
+                    // Route: also force-lock wpCamX/Y to bbox-center and camScale
+                    // to fitScale (no clamp — fit exactly). The default interpolation
+                    // at 3835-3842 tracks the active waypoint pixel, which for long
+                    // corridors (Shanghai→Rotterdam) reads as an endpoint tour. A
+                    // held bbox-center hold is the editorial intent for routes.
+                    if (isRoute) {
+                        wpCamX = (minX + maxX) / 2;
+                        wpCamY = (minY + maxY) / 2;
+                        camScale = fitScale;
+                    } else {
+                        wpCamX = (minX + maxX) / 2;
+                        wpCamY = (minY + maxY) / 2;
+                        camScale = Math.min(camScale, fitScale);
+                    }
+                    if (!this._bboxFitLogged) this._bboxFitLogged = new Set();
+                    const _sceneKey = `scene${_mapScene?.sceneIndex ?? mg.sceneIndex ?? '?'}`;
+                    if (!this._bboxFitLogged.has(_sceneKey)) {
+                        this._bboxFitLogged.add(_sceneKey);
+                        console.log(`[MGRenderer] map ${_sceneKey} bbox-fit: variant=${variant} wp=${wpPositions.length} camScale=${camScale.toFixed(3)} wpCam=[${wpCamX.toFixed(0)},${wpCamY.toFixed(0)}] (fit=${fitScale.toFixed(3)})`);
+                    }
                 }
             } else {
                 driftX = (W / 2 - wpCamX);
@@ -4107,11 +4133,16 @@ class MGRenderer {
         // ── 2b. Country polygon fills (Natural Earth land boundaries — no maritime zones) ──
         const preloaded = mg._countryFeatures || [];
         const countryGeo = window._countryGeoJSON;
+        const osmBounds = mg._osmBoundaries || [];
 
         const boundaryFeatures = [];
+        const _boundaryMatched = new Set(); // lowercased names already covered
         if (preloaded.length > 0) {
             for (const b of preloaded) {
-                if (b.feature && b.feature.geometry) boundaryFeatures.push(b);
+                if (b.feature && b.feature.geometry) {
+                    boundaryFeatures.push(b);
+                    if (b.name) _boundaryMatched.add(String(b.name).toLowerCase());
+                }
             }
         }
         // Match pin labels to Natural Earth features
@@ -4133,7 +4164,26 @@ class MGRenderer {
                     f.properties.nameLong?.toLowerCase() === label ||
                     f.properties.sov?.toLowerCase() === label
                 );
-                if (feat && feat.geometry) boundaryFeatures.push({ name: pin.label, feature: feat });
+                if (feat && feat.geometry) {
+                    boundaryFeatures.push({ name: pin.label, feature: feat });
+                    _boundaryMatched.add(label);
+                }
+            }
+        }
+        // ── OSM fallback for continents / seas / straits / regions ──
+        // Natural Earth only carries country polygons, so subjects like "Asia",
+        // "Middle East", "Red Sea", "Bab-el-Mandeb" would leave boundaryFeatures
+        // empty and the region variant would render with only a soft halo. The
+        // pipeline already fetched OSM boundaries for these — merge them in for
+        // any pin (or explicit OSM entry) not already covered by NE. OSM
+        // features share the same { name, feature } shape.
+        if (osmBounds && osmBounds.length > 0) {
+            for (const ob of osmBounds) {
+                if (!ob || !ob.feature || !ob.feature.geometry) continue;
+                const key = String(ob.name || '').toLowerCase();
+                if (_boundaryMatched.has(key)) continue;
+                boundaryFeatures.push({ name: ob.name, feature: ob.feature });
+                _boundaryMatched.add(key);
             }
         }
 

@@ -59,7 +59,10 @@ const MODE_TO_DEFAULT_PURPOSE = {
 // are dropped at this slice; Slice 5 may route overflow to a follow-up scene).
 const MODE_SUBJECT_CAPS = {
     locator:    3,
-    route:      2,
+    // Route frames need origin + destination at minimum; 3 lets us carry a
+    // mid-corridor "via" subject (e.g. "from Shanghai to Rotterdam around
+    // Africa" → Shanghai, Africa, Rotterdam) without dropping an endpoint.
+    route:      3,
     region:     5,
     comparison: 4,
 };
@@ -94,6 +97,14 @@ const EDITORIAL_NOUN_RE = /\b(choke[\s\-]?point|flash[\s\-]?point|spill[\s\-]?ov
 // "Main Route", "Safe Route" and full sentences like "Route Is Safe" / "Route
 // Is Blocked" geocode to literal streets named "Backup" / "Main" / "Safe".
 const EDITORIAL_ROUTE_RE = /^\s*(?:(?:backup|main|alternate|alt|safe|primary|secondary|common|direct|normal|trade|shipping|blocked|open|closed|preferred|recommended|suggested|typical)[\s\-]+routes?|routes?[\s\-]+(?:is|are|was|were|stays?|remains?|looks?|feels?|became?|becomes?|goes?|gets?|turns?|seems?)\b)/i;
+// Generic map-card titles. In payloads like "mapChart: Route Comparison:
+// Shanghai vs Rotterdam", this label can arrive before the actual matched
+// places and steal a route endpoint slot.
+const EDITORIAL_MAP_TITLE_RE = /^\s*(?:(?:route|location|regional|trade|shipping|map)\s+)?comparison(?:\s+(?:map|view|overview|graphic|frame))?\s*$/i;
+// Narrative/event headlines that describe a geopolitical state rather than a
+// place. These often arrive title-cased from VP ("Conflict Spreads") and would
+// otherwise pass the proper-noun fallback, then geocode to arbitrary POIs.
+const EDITORIAL_EVENT_RE = /\b(conflict|war|crisis|risk|threat|pressure|tension|violence|instability|blockade|attack|attacks|danger|escalation|disruption)\s+(spreads?|rises?|grows?|mounts?|escalates?|expands?|intensif(?:y|ies)|deepens?|widens?|erupts?|looms?|returns?|continues?|builds?|fails?|collapses?)\b/i;
 // Abstract modifiers that usually co-occur with editorial nouns ("Geopolitical
 // Flashpoint", "Strategic Chokepoint"). On their own they don't reject — but
 // when combined with an editorial noun or with NO proper-noun content, reject.
@@ -183,6 +194,8 @@ function _isGeographicSubject(name, entities, entityTypes) {
     //    and "Regional Pressure Points" passes via the proper-noun fallback.
     if (EDITORIAL_NOUN_RE.test(trimmed))   return { ok: false, reason: 'editorial-noun' };
     if (EDITORIAL_ROUTE_RE.test(trimmed))  return { ok: false, reason: 'editorial-route' };
+    if (EDITORIAL_MAP_TITLE_RE.test(trimmed)) return { ok: false, reason: 'editorial-map-title' };
+    if (EDITORIAL_EVENT_RE.test(trimmed))  return { ok: false, reason: 'editorial-event' };
     // 2. Hard reject: abstract modifier + editorial-or-unknown head noun with
     //    no capitalized proper-noun content. "Geopolitical Flashpoint",
     //    "Strategic Hotspot", "Global Turmoil" — no real geography.
@@ -406,20 +419,58 @@ function compileMapScenes(scenes, scriptContext, dispositions) {
         // map-assignment.js `_chooseVariantFromSignals`; this is belt-and-braces.
         if ((mapMode === 'locator' || mapMode === 'comparison') && acceptedNames.length >= 2) {
             const verb = String(disposition?.signals?.spatialVerb || '').toLowerCase();
+            const priorMode = mapMode;
             if (/\b(from|to|toward|towards|across|through|along|into|heading|sail|mov|travel|advanc)/.test(verb)) {
                 console.log(`   🧭 Scene ${scene.index}: promoted ${mapMode}→route (spatialVerb="${verb}", ${acceptedNames.length} subjects)`);
                 mapMode = 'route';
-            } else if (mapMode === 'locator' && /\b(between|border|bordering|among|next to|beside|near)\b/.test(verb)) {
+            } else if (mapMode === 'locator' && /\b(?:between|border|bordering|among|next to|beside|near|(?:separat|divid|split|flank|connect|link|join)[a-z]*|faces?|meets?)\b/.test(verb)) {
                 console.log(`   🧭 Scene ${scene.index}: promoted locator→region (spatialVerb="${verb}", ${acceptedNames.length} subjects)`);
                 mapMode = 'region';
+            }
+            // Sync scene.mapVariant so downstream MG generation (ai-motion-graphics)
+            // reads the promoted mode — otherwise mg.subType stays at VP's original
+            // choice ('comparison'/'locator'), renderer picks the wrong wideCap, and
+            // a route renders as an endpoint tour instead of a held corridor.
+            if (mapMode !== priorMode) {
+                const variantForMode = mapMode === 'region' ? 'regionHighlight' : mapMode;
+                scene.mapVariant = variantForMode;
+            }
+        }
+
+        // ── Route-mode narrative reorder ──
+        // For route scenes, the subject order matters: it becomes the waypoint
+        // sequence (origin → via → destination). The merge above puts payload
+        // names first, which can shuffle endpoints out of the cap. Re-sort by
+        // the narrative's text position (disposition.matchedPlaces), using the
+        // original index for any name that wasn't in matchedPlaces.
+        let orderedNames = acceptedNames;
+        if (mapMode === 'route' && disposition?.signals?.matchedPlaces?.length) {
+            const narrativeOrder = new Map();
+            disposition.signals.matchedPlaces.forEach((n, i) => {
+                narrativeOrder.set(n.toLowerCase(), i);
+            });
+            const withIdx = acceptedNames.map((n, i) => ({
+                n,
+                narrIdx: narrativeOrder.has(n.toLowerCase())
+                    ? narrativeOrder.get(n.toLowerCase())
+                    : Number.MAX_SAFE_INTEGER,
+                origIdx: i,
+            }));
+            withIdx.sort((a, b) => (a.narrIdx - b.narrIdx) || (a.origIdx - b.origIdx));
+            orderedNames = withIdx.map(x => x.n);
+            if (orderedNames.some((n, i) => n !== acceptedNames[i])) {
+                console.log(
+                    `      🧭 Scene ${scene.index} reordered route subjects to narrative flow: ` +
+                    orderedNames.map(n => `"${n}"`).join(' → ')
+                );
             }
         }
 
         // ── Cap and validate ──
         // Policy overrides win; compiler-level defaults are the safety net.
         const cap = policy.subjectCaps[mapMode] ?? MODE_SUBJECT_CAPS[mapMode] ?? 4;
-        const capped = acceptedNames.slice(0, cap);
-        const droppedForCap = Math.max(0, acceptedNames.length - capped.length);
+        const capped = orderedNames.slice(0, cap);
+        const droppedForCap = Math.max(0, orderedNames.length - capped.length);
         const min = policy.minSubjects[mapMode] ?? MODE_MIN_SUBJECTS[mapMode] ?? 1;
         if (capped.length < min) {
             const why = rejectedNames.length > 0

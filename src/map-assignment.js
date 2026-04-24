@@ -27,6 +27,12 @@ const SPATIAL_VERB_PATTERNS = [
     /\b(route|corridor|passage|strait|channel|border|frontier|coastline|shoreline)\b/i,
     /\b(north|south|east|west|northern|southern|eastern|western)\s+(of|coast|border|part|region|tip|edge)\b/i,
     /\b(heads?|head(ed|ing)|travell?(ed|ing)?|sail(ed|ing)?|mov(e|ed|ing)|push(ed|ing)?|advanc(e|ed|ing))\s+(into|toward|towards|through|across|along|from)\b/i,
+    // Relational verbs that define a between-relationship: "Bab-el-Mandeb
+    // separates Yemen and Djibouti", "Gibraltar divides Europe from Africa",
+    // "Panama Canal joins the Atlantic and Pacific". These map as region
+    // highlights (held-wide showing all parties), not locator tours — missing
+    // them caused "separates Yemen and Djibouti" to render as a sequential pan.
+    /\b(separat(es|ed|ing)|divid(es|ed|ing)|split(s|ting)|flank(s|ed|ing)|connect(s|ed|ing)|link(s|ed|ing)|join(s|ed|ing)|face(s|d|ing)?|meet(s|ing))\s+(?:the\s+)?[A-Z]/,
 ];
 
 const ABSTRACT_MARKERS = [
@@ -125,9 +131,10 @@ function _chooseVariantFromSignals(signals) {
     if (/\b(from|to|toward|towards|across|through|along|into|heading|sail|mov|travel|advanc)/.test(verb)) {
         return 'route';
     }
-    // between / border / among / next to — a relationship between places;
-    // both should be visible simultaneously.
-    if (/\b(between|border|bordering|among|next to|beside|near)\b/.test(verb)) {
+    // between / border / among / next to / separates / divides / joins /
+    // connects / flanks / faces — a relationship between places; both should
+    // be visible simultaneously in one frame.
+    if (/\b(?:between|border|bordering|among|next to|beside|near|(?:separat|divid|split|flank|connect|link|join)[a-z]*|faces?|meets?)\b/.test(verb)) {
         return 'regionHighlight';
     }
     // Plain presence of multiple named places → comparison-style held-wide

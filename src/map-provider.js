@@ -428,7 +428,7 @@ async function geocodePlaces(placeNames, apiKey) {
  * Uses geocoding for precise coordinates when API key is available.
  * Falls back to hardcoded GEO_COORDS dictionary.
  */
-async function computeMapView(entities, apiKey) {
+async function computeMapView(entities, apiKey, opts = {}) {
     // Try geocoding first if we have an API key
     let resolved = [];
     if (apiKey && entities.length > 0) {
@@ -488,11 +488,14 @@ async function computeMapView(entities, apiKey) {
     else if (maxSpan > 4) zoom = 6;
     else zoom = 7;
 
-    // When entities span the whole globe (zoom <= 2), bias center toward
-    // the primary entity (first in list) so the main subject is prominent
+    // When entities span the whole globe (zoom <= 2), older single-subject
+    // locator maps bias center toward the primary entity. Multi-place route /
+    // region / comparison maps need the true bbox center so the full overview
+    // remains visible if the big-map path falls back to a standard image.
     const primary = resolved[0].coords;
+    const preferBboxCenter = !!opts.preferBboxCenter;
     let centerLon, centerLat;
-    if (zoom <= 2) {
+    if (zoom <= 2 && !preferBboxCenter) {
         const geoLon = (minLon + maxLon) / 2;
         const geoLat = (minLat + maxLat) / 2;
         centerLon = primary[0] * 0.6 + geoLon * 0.4;
@@ -748,10 +751,61 @@ function extractEntities(mg, scriptContext) {
  *                               ?? mapScene.geometry.pins
  *   - subjectId               → mapScene.subjects[].id (name-match)
  */
-// Compute a single "establish" stop for region / comparison modes — a held
-// wide frame centered on the bbox of all valid subject coords. The zoom is
-// chosen from the bbox span so both (or all) subjects fit in view with a
-// small padding. Span → zoom mapping mirrors computeMapView()'s buckets.
+// Project provider coords exactly like MGRenderer's big-map camera path so
+// generated overview stops fit the actual downloaded image, not rough degrees.
+function _projectCoordToMapPixel(lon, lat, mapView, bigMapSize) {
+    if (!mapView || !bigMapSize) return null;
+    const imgW = Number(bigMapSize.w);
+    const imgH = Number(bigMapSize.h);
+    if (!Number.isFinite(imgW) || !Number.isFinite(imgH) || imgW <= 0 || imgH <= 0) return null;
+
+    const z = Math.max(2, Math.floor(Number(mapView.zoom) || 2));
+    const n = Math.pow(2, z);
+    const projectX = (xLon) => ((xLon + 180) / 360) * n * TILE_SIZE;
+    const projectY = (yLat) => {
+        const latRad = yLat * Math.PI / 180;
+        return (1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2 * n * TILE_SIZE;
+    };
+
+    const originX = projectX(Number(mapView.lon)) - imgW / 2;
+    const originY = projectY(Number(mapView.lat)) - imgH / 2;
+    return { x: projectX(lon) - originX, y: projectY(lat) - originY };
+}
+
+function _fitEstablishZoomFromPixels(coords, opts = {}) {
+    if (!Array.isArray(coords) || coords.length < 2) return null;
+    const bigMapSize = opts.bigMapSize || null;
+    const mapView = opts.mapView || null;
+    const imgW = Number(bigMapSize?.w);
+    const imgH = Number(bigMapSize?.h);
+    if (!Number.isFinite(imgW) || !Number.isFinite(imgH) || imgW <= 0 || imgH <= 0) return null;
+
+    const pixels = coords
+        .map(c => _projectCoordToMapPixel(c.lon, c.lat, mapView, bigMapSize))
+        .filter(Boolean);
+    if (pixels.length < 2) return null;
+
+    const xs = pixels.map(p => p.x);
+    const ys = pixels.map(p => p.y);
+    const spanX = Math.max(1, Math.max(...xs) - Math.min(...xs));
+    const spanY = Math.max(1, Math.max(...ys) - Math.min(...ys));
+
+    const frameW = Number(opts.frameW) || OUT_W;
+    const frameH = Number(opts.frameH) || OUT_H;
+    const headroom = opts.mode === 'route' ? 1.6 : 1.5;
+    const paddedFit = Math.min(frameW / (spanX * headroom), frameH / (spanY * headroom));
+    const endpointFit = Math.min(frameW / spanX, frameH / spanY);
+    const fillFrame = Math.max(frameW / imgW, frameH / imgH);
+
+    // Prefer padding, but keep the image filling the frame when possible.
+    let zoom = Math.max(paddedFit, fillFrame);
+    if (zoom > endpointFit) zoom = endpointFit;
+    if (!Number.isFinite(zoom) || zoom <= 0) return null;
+    return Math.max(0.25, Math.min(1.3, zoom));
+}
+
+// Compute a single "establish" stop for region / comparison modes: a held
+// wide frame centered on the bbox of all valid subject coords.
 function _buildEstablishStop(mapScene, waypoints, findCoord, subjectByName, opts = {}) {
     // Collect valid coords for all subjects in the scene (not just waypoints
     // — we want EVERY subject represented in the wide frame).
@@ -774,10 +828,8 @@ function _buildEstablishStop(mapScene, waypoints, findCoord, subjectByName, opts
         if (c.lat > maxLat) maxLat = c.lat;
     }
     const maxSpan = Math.max(maxLon - minLon, maxLat - minLat);
-    // Span → zoom (renderer-scale, not web-mercator). Smaller zoom = wider view.
-    // Tuned so Asia+Europe (~75° span) sits around z0.9 (true world overview),
-    // regional pairs (~20-40° span) around z1.0, and tight city pairs (<8°)
-    // around z1.3.
+    // Fallback span-to-zoom buckets. Big-map renders override this below with
+    // pixel-fit zoom so wide regions do not crop off endpoints.
     const isRoute = opts.mode === 'route';
     // Routes widen by one step so the arc/corridor has breathing room and the
     // viewer can read the full journey — not just the endpoints.
@@ -787,6 +839,7 @@ function _buildEstablishStop(mapScene, waypoints, findCoord, subjectByName, opts
     else if (maxSpan > 15) zoom = isRoute ? 1.0  : 1.1;
     else if (maxSpan > 8)  zoom = isRoute ? 1.1  : 1.2;
     else                   zoom = isRoute ? 1.2  : 1.3;
+    zoom = _fitEstablishZoomFromPixels(coords, opts) ?? zoom;
 
     const centerLon = (minLon + maxLon) / 2;
     const centerLat = (minLat + maxLat) / 2;
@@ -877,10 +930,16 @@ function _buildCameraPlanStops(mapScene, mg, view) {
     // a single held-wide frame showing BOTH subjects simultaneously. Collapse.
     const mode = mapScene.mapMode;
     if ((mode === 'region' || mode === 'comparison') && waypoints.length >= 2) {
-        const collapsed = _buildEstablishStop(mapScene, waypoints, findCoord, subjectByName);
+        const collapsed = _buildEstablishStop(mapScene, waypoints, findCoord, subjectByName, {
+            mode,
+            mapView: view,
+            bigMapSize: mg._bigMapSize || null,
+            frameW: OUT_W,
+            frameH: OUT_H,
+        });
         if (collapsed) {
             const framing = mapScene.cameraPlan?.framing || '?';
-            console.log(`      🎥 cameraPlan.stops: scene=${mapScene.sceneIndex} mode=${mode} stops=1 framing=${framing} (establish-shot, ${waypoints.length} subjects wide, dwell=${collapsed.dwellSec.toFixed(1)}s)`);
+            console.log(`      🎥 cameraPlan.stops: scene=${mapScene.sceneIndex} mode=${mode} stops=1 framing=${framing} (establish-shot, ${waypoints.length} subjects wide, zoom=${collapsed.zoom.toFixed(2)}, dwell=${collapsed.dwellSec.toFixed(1)}s)`);
             return [collapsed];
         }
         // If the collapse failed (all coords invalid, etc.) fall through to the
@@ -1158,7 +1217,8 @@ async function downloadMapForMG(mg, scriptContext, tempDir, scenes) {
     }
 
     // Use geocoding for precise coordinates (async — MapTiler free tier)
-    const view = await computeMapView(entities, maptilerKey);
+    const preferBboxCenter = !!(mapScene && ['route', 'region', 'comparison'].includes(mapScene.mapMode));
+    const view = await computeMapView(entities, maptilerKey, { preferBboxCenter });
     const mapStyle = mg.mapStyle || 'dark';
     const filename = `map-${mapStyle}-${Date.now()}.png`;
     const filePath = path.join(tempDir, filename);
