@@ -34,6 +34,23 @@ const NON_PLACE_SUFFIX_RE = /\b(Inc|Inc\.|Ltd|Ltd\.|LLC|PLC|Corp|Corp\.|Corporat
 const NON_PLACE_WORD_RE  = /\b(forces|militia|militant|militants|rebels|rebel|insurgents?|fighters|battalion|brigade|regiment|corps|coalition|alliance|cartel|faction|syndicate|terrorists?|party|parties|government|governments|administration|administrations|agency|agencies|ministry|ministries|committee|committees|council|councils|union|unions|organization|organizations|association|associations|federation|confederation|conglomerate)\b/i;
 const GENERIC_GLOBAL_RE  = /^(world|global|globe|earth|international|worldwide|everywhere|nowhere|abroad)$/i;
 
+// Known placeholder coordinates used by our various geocoders when they fail
+// to find a real match. (0,0) is the classic null-island. (0,20) has appeared
+// as a mid-Atlantic fallback in the MapTiler path. Anything exact-match to
+// these is never a real intended location — we treat it as a bogus stop.
+const PLACEHOLDER_COORDS = [
+    { lon: 0,    lat: 0 },
+    { lon: 0,    lat: 20 },
+    { lon: 20,   lat: 0 },
+];
+function _looksLikePlaceholderCoord(lon, lat) {
+    if (!Number.isFinite(lon) || !Number.isFinite(lat)) return true;
+    for (const p of PLACEHOLDER_COORDS) {
+        if (Math.abs(lon - p.lon) < 0.01 && Math.abs(lat - p.lat) < 0.01) return true;
+    }
+    return false;
+}
+
 function isLikelyPlace(name, entityTypes) {
     if (!name || typeof name !== 'string') return false;
     const trimmed = name.trim();
@@ -781,24 +798,30 @@ function _buildCameraPlanStops(mapScene, mg, view) {
     }
 
     const stops = [];
-    let rejectReason = null;
+    const dropped = [];    // per-waypoint reasons, logged at the end
     for (const wp of waypoints) {
+        // Defense-in-depth: the compiler filters editorial labels from
+        // mapScene.subjects, but a bogus wp.name could still arrive via
+        // legacy _mapWaypoints. Require the waypoint name to match an
+        // authoritative subject (case-insensitive) — unknown names drop.
+        const subj = subjectByName.get(String(wp.name || '').toLowerCase().trim()) || null;
+        if (!subj) { dropped.push(`"${wp.name}" (not in mapScene.subjects)`); continue; }
+
         const coord = findCoord(wp.name);
-        if (!coord) { rejectReason = `no coord for "${wp.name}"`; break; }
+        if (!coord)                                             { dropped.push(`"${wp.name}" (no coord)`); continue; }
+        if (_looksLikePlaceholderCoord(coord.lon, coord.lat))   { dropped.push(`"${wp.name}" (placeholder coord [${coord.lon},${coord.lat}])`); continue; }
 
         const zoom = Number(wp.zoom);
-        if (!Number.isFinite(zoom) || zoom <= 0) { rejectReason = `bad zoom for "${wp.name}"`; break; }
+        if (!Number.isFinite(zoom) || zoom <= 0) { dropped.push(`"${wp.name}" (bad zoom)`); continue; }
 
         const startTime = Number(wp.startTime);
         const endTime   = Number(wp.endTime);
         if (!Number.isFinite(startTime) || !Number.isFinite(endTime) || endTime <= startTime) {
-            rejectReason = `bad timing for "${wp.name}"`; break;
+            dropped.push(`"${wp.name}" (bad timing)`); continue;
         }
 
-        const subj = subjectByName.get(String(wp.name).toLowerCase().trim()) || null;
-
         stops.push({
-            subjectId: subj?.id || null,
+            subjectId: subj.id || null,
             lon: coord.lon,
             lat: coord.lat,
             zoom,
@@ -813,8 +836,21 @@ function _buildCameraPlanStops(mapScene, mg, view) {
         });
     }
 
-    if (rejectReason || stops.length === 0) {
-        console.log(`      🎥 cameraPlan.stops: scene=${mapScene.sceneIndex} REJECTED (${rejectReason || 'no valid stops'}) — falling back to null`);
+    if (dropped.length > 0) {
+        console.log(`      🎥 cameraPlan.stops: scene=${mapScene.sceneIndex} dropped ${dropped.length} waypoint(s): ${dropped.join(', ')}`);
+    }
+    if (stops.length === 0) {
+        console.log(`      🎥 cameraPlan.stops: scene=${mapScene.sceneIndex} REJECTED (no valid stops survived) — falling back to null`);
+        return null;
+    }
+    // Mode-specific sanity: route + comparison need ≥2 real endpoints. If the
+    // filter stripped us below that, drop stops entirely and let the renderer
+    // fall back to its bbox-fit safety net (single known-good pin = locator
+    // framing anyway). This prevents a broken route-pan between one real
+    // subject and a bogus/missing endpoint.
+    const mode = mapScene.mapMode;
+    if ((mode === 'route' || mode === 'comparison') && stops.length < 2) {
+        console.log(`      🎥 cameraPlan.stops: scene=${mapScene.sceneIndex} REJECTED (mode=${mode} needs ≥2 stops, got ${stops.length}) — falling back to null`);
         return null;
     }
 
