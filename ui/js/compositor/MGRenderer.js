@@ -4290,6 +4290,47 @@ class MGRenderer {
             ctx.globalAlpha = opacity;
         }
 
+        // ── 2c. Region halo fallback ──
+        // regionHighlight variant with no Natural Earth polygon match (Middle
+        // East, Asia, Horn of Africa, Balkans — regional labels larger than a
+        // single country) would otherwise show only pin dots on a basemap. Draw
+        // a soft translucent halo around the bbox of pins so the region reads
+        // as one coherent editorial area, not isolated pins.
+        if (variant === 'regionHighlight' && boundaryFeatures.length === 0 && pinPositions.length >= 1) {
+            const xs = pinPositions.map(p => p.x);
+            const ys = pinPositions.map(p => p.y);
+            const minX = Math.min(...xs), maxX = Math.max(...xs);
+            const minY = Math.min(...ys), maxY = Math.max(...ys);
+            const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+            const span = Math.max(maxX - minX, maxY - minY);
+            const haloR = Math.max(90, span * 0.75 + 60);
+            const haloDelay = 0.3;
+            const haloT = Math.min(1, Math.max(0, (elapsed - haloDelay) / 0.9));
+            if (haloT > 0) {
+                const haloE = 1 - Math.pow(1 - haloT, 2);
+                ctx.save();
+                ctx.globalCompositeOperation = 'source-over';
+                // Soft translucent fill
+                ctx.globalAlpha = opacity * haloE * 0.16;
+                const haloGrad = ctx.createRadialGradient(cx, cy, haloR * 0.2, cx, cy, haloR);
+                haloGrad.addColorStop(0, pal.highlight);
+                haloGrad.addColorStop(0.6, pal.highlight);
+                haloGrad.addColorStop(1, 'transparent');
+                ctx.fillStyle = haloGrad;
+                ctx.beginPath(); ctx.arc(cx, cy, haloR, 0, Math.PI * 2); ctx.fill();
+                // Outline ring
+                ctx.globalAlpha = opacity * haloE * 0.55;
+                ctx.strokeStyle = pal.highlightRing || pal.highlight;
+                ctx.lineWidth = 2;
+                ctx.setLineDash([6, 6]);
+                ctx.lineDashOffset = -elapsed * 10;
+                ctx.beginPath(); ctx.arc(cx, cy, haloR, 0, Math.PI * 2); ctx.stroke();
+                ctx.setLineDash([]);
+                ctx.restore();
+                ctx.globalAlpha = opacity;
+            }
+        }
+
         // ── 3. Radius / impact circles (expanding radar rings + glow) ──
         for (const pin of pinPositions) {
             if (pin.pinType === 'unknown') continue;

@@ -89,7 +89,11 @@ const KIND_HEURISTICS = [
 // etc.) and poison cameraPlan.stops. Reject them at compile time regardless
 // of any `place` tag the Director may have attached — title-phrase mis-tagging
 // is exactly how these slip through.
-const EDITORIAL_NOUN_RE = /\b(choke[\s\-]?point|flash[\s\-]?point|spill[\s\-]?over|crossroads?|gateway|hot[\s\-]?spot|battleground|front[\s\-]?line|epicenter|heartland|backbone|lifeline|bottleneck|powder[\s\-]?keg|tinderbox|standoff|showdown|buildup|aftermath|fallout|turmoil|uprising|showcase)\b/i;
+const EDITORIAL_NOUN_RE = /\b(choke[\s\-]?point|flash[\s\-]?point|spill[\s\-]?over|crossroads?|gateway|hot[\s\-]?spot|battleground|front[\s\-]?line|epicenter|heartland|backbone|lifeline|bottleneck|powder[\s\-]?keg|tinderbox|standoff|showdown|buildup|aftermath|fallout|turmoil|uprising|showcase|pressure[\s\-]?points?|conflict[\s\-]?zones?|war[\s\-]?zones?|safe[\s\-]?zones?|danger[\s\-]?zones?|kill[\s\-]?zones?|no[\s\-]?go[\s\-]?zones?|target[\s\-]?zones?|impact[\s\-]?zones?|exclusion[\s\-]?zones?)\b/i;
+// Editorial "route" phrases — narrative labels, not geography. "Backup Route",
+// "Main Route", "Safe Route" and full sentences like "Route Is Safe" / "Route
+// Is Blocked" geocode to literal streets named "Backup" / "Main" / "Safe".
+const EDITORIAL_ROUTE_RE = /^\s*(?:(?:backup|main|alternate|alt|safe|primary|secondary|common|direct|normal|trade|shipping|blocked|open|closed|preferred|recommended|suggested|typical)[\s\-]+routes?|routes?[\s\-]+(?:is|are|was|were|stays?|remains?|looks?|feels?|became?|becomes?|goes?|gets?|turns?|seems?)\b)/i;
 // Abstract modifiers that usually co-occur with editorial nouns ("Geopolitical
 // Flashpoint", "Strategic Chokepoint"). On their own they don't reject — but
 // when combined with an editorial noun or with NO proper-noun content, reject.
@@ -174,7 +178,11 @@ function _isGeographicSubject(name, entities, entityTypes) {
     const lower = trimmed.toLowerCase();
 
     // 1. Hard reject: editorial/metaphorical nouns regardless of Director tag.
+    //    Runs BEFORE any geo-heuristic / entity-list accept — otherwise
+    //    "Middle East Conflict Zones" passes via the `middle east` heuristic
+    //    and "Regional Pressure Points" passes via the proper-noun fallback.
     if (EDITORIAL_NOUN_RE.test(trimmed))   return { ok: false, reason: 'editorial-noun' };
+    if (EDITORIAL_ROUTE_RE.test(trimmed))  return { ok: false, reason: 'editorial-route' };
     // 2. Hard reject: abstract modifier + editorial-or-unknown head noun with
     //    no capitalized proper-noun content. "Geopolitical Flashpoint",
     //    "Strategic Hotspot", "Global Turmoil" — no real geography.

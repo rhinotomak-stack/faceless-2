@@ -752,7 +752,7 @@ function extractEntities(mg, scriptContext) {
 // wide frame centered on the bbox of all valid subject coords. The zoom is
 // chosen from the bbox span so both (or all) subjects fit in view with a
 // small padding. Span → zoom mapping mirrors computeMapView()'s buckets.
-function _buildEstablishStop(mapScene, waypoints, findCoord, subjectByName) {
+function _buildEstablishStop(mapScene, waypoints, findCoord, subjectByName, opts = {}) {
     // Collect valid coords for all subjects in the scene (not just waypoints
     // — we want EVERY subject represented in the wide frame).
     const coords = [];
@@ -778,12 +778,15 @@ function _buildEstablishStop(mapScene, waypoints, findCoord, subjectByName) {
     // Tuned so Asia+Europe (~75° span) sits around z0.9 (true world overview),
     // regional pairs (~20-40° span) around z1.0, and tight city pairs (<8°)
     // around z1.3.
+    const isRoute = opts.mode === 'route';
+    // Routes widen by one step so the arc/corridor has breathing room and the
+    // viewer can read the full journey — not just the endpoints.
     let zoom;
-    if (maxSpan > 60)      zoom = 0.85;
-    else if (maxSpan > 30) zoom = 1.0;
-    else if (maxSpan > 15) zoom = 1.1;
-    else if (maxSpan > 8)  zoom = 1.2;
-    else                   zoom = 1.3;
+    if (maxSpan > 60)      zoom = isRoute ? 0.75 : 0.85;
+    else if (maxSpan > 30) zoom = isRoute ? 0.9  : 1.0;
+    else if (maxSpan > 15) zoom = isRoute ? 1.0  : 1.1;
+    else if (maxSpan > 8)  zoom = isRoute ? 1.1  : 1.2;
+    else                   zoom = isRoute ? 1.2  : 1.3;
 
     const centerLon = (minLon + maxLon) / 2;
     const centerLat = (minLat + maxLat) / 2;
@@ -883,6 +886,39 @@ function _buildCameraPlanStops(mapScene, mg, view) {
         // If the collapse failed (all coords invalid, etc.) fall through to the
         // per-subject path, which will either produce something or reject.
         console.log(`      🎥 cameraPlan.stops: scene=${mapScene.sceneIndex} mode=${mode} establish-collapse failed — falling through to per-subject path`);
+    }
+
+    // ── Route mode: long-range routes yield to legacy bbox-fit camera ──
+    // For cross-continent routes (Shanghai→Rotterdam ~116° span) we want a
+    // held corridor overview WITH a visible route line animating between
+    // endpoint pins. The renderer's legacy bbox-fit at MGRenderer.js:3898
+    // already produces exactly that: camera locks to bbox-center, zoom fits
+    // bbox under wideCap=1.1, and per-subject wpPositions still drive the
+    // dashed route-path draw-on. Emitting stops here would set
+    // _stopsDrivenCamera=true, which SKIPS that bbox-fit. So for long-range
+    // routes we return null — the legacy path is the right path.
+    // Short/local routes (≤15° span) keep per-subject stops because a camera
+    // pan between nearby cities is editorially correct (troop advance, etc.).
+    const ROUTE_CORRIDOR_SPAN_DEG = 15;
+    if (mode === 'route' && waypoints.length >= 2) {
+        let rMinLon = Infinity, rMaxLon = -Infinity, rMinLat = Infinity, rMaxLat = -Infinity;
+        let rValidCount = 0;
+        for (const wp of waypoints) {
+            const c = findCoord(wp.name);
+            if (!c || _looksLikePlaceholderCoord(c.lon, c.lat)) continue;
+            if (c.lon < rMinLon) rMinLon = c.lon;
+            if (c.lon > rMaxLon) rMaxLon = c.lon;
+            if (c.lat < rMinLat) rMinLat = c.lat;
+            if (c.lat > rMaxLat) rMaxLat = c.lat;
+            rValidCount++;
+        }
+        const routeSpan = rValidCount >= 2 ? Math.max(rMaxLon - rMinLon, rMaxLat - rMinLat) : 0;
+        if (routeSpan > ROUTE_CORRIDOR_SPAN_DEG) {
+            console.log(`      🎥 cameraPlan.stops: scene=${mapScene.sceneIndex} mode=route framing=route-corridor (span=${routeSpan.toFixed(0)}°, ${rValidCount} anchors) — yielding to legacy bbox-fit + routePath line`);
+            return null;
+        } else if (rValidCount >= 2) {
+            console.log(`      🎥 cameraPlan.stops: scene=${mapScene.sceneIndex} mode=route framing=local-route (span=${routeSpan.toFixed(0)}° ≤${ROUTE_CORRIDOR_SPAN_DEG}°) — per-subject stops`);
+        }
     }
 
     const stops = [];
