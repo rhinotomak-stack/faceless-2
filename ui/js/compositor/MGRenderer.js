@@ -3237,17 +3237,17 @@ class MGRenderer {
         if (words.length === 0) return null;
 
         const { hasAttr = false, variant = 'centered' } = options || {};
-        const maxWidth = 1920 * 0.9;
-        const maxHeight = hasAttr ? 1080 * 0.58 : 1080 * 0.68;
+        const maxWidth = 1920 * 0.74;
+        const maxHeight = hasAttr ? 1080 * 0.38 : 1080 * 0.42;
         const maxRows = words.length <= 3 ? 2 : words.length <= 8 ? 3 : 4;
         const maxFontSize = variant === 'punch'
-            ? 192
+            ? 122
             : words.length <= 3
-                ? 176
+                ? 108
                 : words.length <= 6
-                    ? 156
-                    : 136;
-        const minFontSize = 60;
+                    ? 96
+                    : 82;
+        const minFontSize = 50;
 
         let best = null;
         for (let fontSize = maxFontSize; fontSize >= minFontSize; fontSize -= 4) {
@@ -3340,7 +3340,7 @@ class MGRenderer {
             const easedAlpha = easeOut(t);
             const easedPos = easeOutBack(t);
 
-            let sx = 0, sy = 0, scale = 1, blur = 0;
+            let sx = 0, sy = 0, scale = 1, blur = 0, rot = 0, jitterAmp = 0;
 
             if (animation === 'fadeIn') {
                 scale = interpolate(easedPos, [0, 1], [0.92, 1]);
@@ -3365,13 +3365,61 @@ class MGRenderer {
             } else if (variant === 'punch') {
                 scale = interpolate(easedPos, [0, 1], [1.6, 1]);
                 blur = interpolate(t, [0, 0.45], [6, 0], { extrapolateRight: 'clamp' });
+            } else if (variant === 'stamp') {
+                // Ink-stamp slam: rotate-overshoot + scale-down impact
+                scale = interpolate(easedPos, [0, 1], [1.45, 1]);
+                rot = interpolate(easedPos, [0, 1], [-0.18, 0]);
+                blur = interpolate(t, [0, 0.4], [5, 0], { extrapolateRight: 'clamp' });
+            } else if (variant === 'wave') {
+                // Sin-curve Y offset across words — they ride in like a wave
+                const phase = (ci + ri * 2) * 0.6;
+                sy = interpolate(easedPos, [0, 1], [60 + Math.sin(phase) * 30, 0]);
+                sx = interpolate(easedPos, [0, 1], [Math.cos(phase) * 12, 0]);
+            } else if (variant === 'pop') {
+                // Bouncy scale per word with strong overshoot
+                scale = interpolate(easedPos, [0, 1], [0.35, 1]);
+                sy = interpolate(easedPos, [0, 1], [12, 0]);
             }
 
             // Idle micro-float on long-running scenes (very gentle, no flicker)
             const idle = Math.sin((frame / fps + entryIdx * 0.17) * 2.0) * 1.5;
             sy += idle * easedAlpha;
 
-            return { sx, sy, scale, alpha: easedAlpha, blur };
+            // Glitch variant — hard frame-stepped reveal + chromatic aberration.
+            // Overrides smooth values above with digital-corruption motion.
+            if (variant === 'glitch') {
+                const stepFrames = 3;                          // change every 3 frames
+                const stepIdx   = Math.floor(local / stepFrames);
+                const totalSteps = Math.max(1, Math.ceil(revealFrames / stepFrames));
+                const stepT     = Math.min(1, stepIdx / totalSteps);
+
+                const seed = (entryIdx * 9301 + stepIdx * 49297) >>> 0;
+                const r1 = (((seed * 1103515245 + 12345) >>> 0) % 100000) / 100000;
+                const r2 = (((seed * 1664525   +  1013904223) >>> 0) % 100000) / 100000;
+                const r3 = (((seed * 22695477  +  1) >>> 0) % 100000) / 100000;
+
+                const jitter = interpolate(stepT, [0, 0.75], [18, 0], { extrapolateRight: 'clamp' });
+                const baseSx = (r1 - 0.5) * jitter * 2;
+                const baseSy = (r2 - 0.5) * jitter;
+
+                // 1-in-8 chance of a hard horizontal slice cut during entry
+                const sliceChance = (stepT < 0.7 && r3 > 0.875) ? 1 : 0;
+                const sliceShift  = sliceChance ? (r2 - 0.5) * 80 : 0;
+
+                const chromaAmount = interpolate(stepT, [0, 0.9], [1, 0], { extrapolateRight: 'clamp' });
+
+                return {
+                    sx: baseSx + sliceShift,
+                    sy: baseSy,
+                    scale: 1 + (r3 - 0.5) * 0.05,
+                    alpha: stepT,                              // hard stepped reveal
+                    blur: 0,
+                    rot: (r3 - 0.5) * 0.035,
+                    chroma: chromaAmount,
+                };
+            }
+
+            return { sx, sy, scale, alpha: easedAlpha, blur, rot };
         };
 
         // Exit fade (smooth)
@@ -3385,10 +3433,35 @@ class MGRenderer {
                 if (m.alpha <= 0.001) { rx += entry.width + gap; return; }
 
                 ctx.save();
-                ctx.globalAlpha = Math.min(1, opacity) * m.alpha * exitAlpha;
+                const baseAlpha = Math.min(1, opacity) * m.alpha * exitAlpha;
+                ctx.globalAlpha = baseAlpha;
                 ctx.translate(rx + entry.width / 2 + m.sx, startY + ri * rowHeight + m.sy);
+                if (m.rot) ctx.rotate(m.rot);
                 if (m.scale !== 1) ctx.scale(m.scale, m.scale);
                 if (m.blur > 0.4) ctx.filter = `blur(${m.blur.toFixed(1)}px)`;
+
+                // Glitch chromatic-aberration: red + cyan offset copies under main fill
+                if (m.chroma > 0.01) {
+                    const cx = m.chroma * 16;
+                    const cy = m.chroma * 3;
+                    const prevComp = ctx.globalCompositeOperation;
+                    ctx.globalCompositeOperation = 'lighter';
+
+                    ctx.save();
+                    ctx.translate(-cx, -cy);
+                    ctx.globalAlpha = baseAlpha * 0.85;
+                    this._drawKineticWordTinted(ctx, entry.word, 'rgb(255,40,80)', fontSize, fontFamily, ks.weight);
+                    ctx.restore();
+
+                    ctx.save();
+                    ctx.translate(cx, cy);
+                    ctx.globalAlpha = baseAlpha * 0.85;
+                    this._drawKineticWordTinted(ctx, entry.word, 'rgb(40,220,255)', fontSize, fontFamily, ks.weight);
+                    ctx.restore();
+
+                    ctx.globalCompositeOperation = prevComp;
+                    ctx.globalAlpha = baseAlpha;
+                }
 
                 this._drawKineticWord(ctx, entry.word, ks, fontSize, fontFamily);
 
@@ -3421,6 +3494,20 @@ class MGRenderer {
         }
 
         ctx.restore();
+    }
+
+    // Solid-fill tinted copy used by the glitch variant for RGB-split passes.
+    // No shadow, no outline — just the silhouette in a single channel color.
+    _drawKineticWordTinted(ctx, word, fillColor, fontSize, fontFamily, weight) {
+        MGRenderer._setFont(ctx, weight || '700', fontSize, fontFamily);
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.shadowColor = 'transparent';
+        ctx.shadowBlur = 0;
+        ctx.shadowOffsetX = 0;
+        ctx.shadowOffsetY = 0;
+        ctx.fillStyle = fillColor;
+        ctx.fillText(word, 0, 0);
     }
 
     _drawKineticWord(ctx, word, ks, fontSize, fontFamily) {

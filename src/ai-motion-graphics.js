@@ -157,8 +157,9 @@ function sanitizeMGText(text) {
 
 // Classification: full-screen MGs go on V3, overlay MGs stay on MG track
 const FULLSCREEN_MG_TYPES = new Set([
-    'barChart', 'donutChart', 'rankingList', 'timeline', 'comparisonCard', 'bulletList', 'mapChart', 'kineticText'
+    'barChart', 'donutChart', 'rankingList', 'timeline', 'comparisonCard', 'bulletList', 'mapChart'
     // NOTE: listicleGrid removed — now handled by ai-templates.js
+    // NOTE: kineticText moved to overlay-only (Apr 25) — typography overlay paired with footage/template background
 ]);
 
 // Default positions by type

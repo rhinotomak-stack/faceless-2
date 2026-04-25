@@ -194,12 +194,16 @@ const MG_REGISTRY = {
 
     kineticText: {
         label: 'Kinetic Text',
-        group: 'fullscreen',
+        group: 'overlay',
         types: {
             centered: { label: 'Centered',  animation: 'springStagger' },
             rise:     { label: 'Rise Up',   animation: 'slideUp' },
             cascade:  { label: 'Cascade',   animation: 'springStagger' },
             punch:    { label: 'Punch',     animation: 'springStagger' },
+            stamp:    { label: 'Stamp',     animation: 'springStagger' },
+            glitch:   { label: 'Glitch',    animation: 'fadeIn' },
+            wave:     { label: 'Wave',      animation: 'springStagger' },
+            pop:      { label: 'Pop',       animation: 'springStagger' },
         },
         animations: ['springStagger', 'slideUp', 'fadeIn'],
         defaultType: 'centered',

@@ -75,7 +75,7 @@ function _filterTypeDropdownByGroup(mgType) {
 }
 
 // Types with actual variant renderers implemented in MGRenderer._variantRenderers
-const MG_TYPES_WITH_VARIANTS = new Set(['headline', 'lowerThird', 'callout', 'statCounter', 'typewriter', 'listicleCounter', 'progressTracker', 'listicleGrid']);
+const MG_TYPES_WITH_VARIANTS = new Set(['headline', 'lowerThird', 'callout', 'statCounter', 'typewriter', 'kineticText', 'explainer', 'listicleCounter', 'progressTracker', 'listicleGrid']);
 
 // Listicle item types (overlay counters on LI track)
 const LISTICLE_TYPES = new Set(['listicleCounter']);
@@ -1914,7 +1914,7 @@ function updateClipProperties() {
     // MG selected?
     if (state.selectedMgIndex >= 0 && state.motionGraphics[state.selectedMgIndex]) {
         if (emptyState) emptyState.classList.add('hidden');
-        const mgTypeLabels = { headline: 'Headline', lowerThird: 'Lower Third', statCounter: 'Stat Counter', callout: 'Callout', bulletList: 'Bullet List', focusWord: 'Focus Word', progressBar: 'Progress Bar', listicleCounter: 'Listicle Item' };
+        const mgTypeLabels = { headline: 'Headline', lowerThird: 'Lower Third', statCounter: 'Stat Counter', callout: 'Callout', bulletList: 'Bullet List', focusWord: 'Focus Word', progressBar: 'Progress Bar', kineticText: 'Kinetic Text', explainer: 'Explainer', typewriter: 'Typewriter', listicleCounter: 'Listicle Item' };
         const mg = state.motionGraphics[state.selectedMgIndex];
         const mgType = mg.type;
         if (titleEl) titleEl.textContent = mgTypeLabels[mgType] || 'Motion Graphic';

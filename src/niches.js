@@ -171,9 +171,18 @@ const NICHES = {
 
         preferredMediaType: 'mixed',   // business: real product footage (video) + generic office/charts (stock)
 
-        keywords: ['business', 'corporate', 'professional', 'company', 'startup', 'market',
-                   'finance', 'economy', 'stock', 'revenue', 'profit', 'investment',
-                   'ceo', 'quarterly', 'earnings', 'ipo', 'merger', 'acquisition'],
+        // Keywords are scored as anchors. Generic single-words like "market", "stock",
+        // "economy" matched too liberally on geopolitical scripts ("global stock market",
+        // "world economy") — they're now multi-word phrases that demand a clearly
+        // business context. Strong identity terms (ipo, earnings, merger, ceo, quarterly)
+        // remain single-word because they only appear in real business content.
+        keywords: ['corporate', 'startup', 'company earnings', 'company stock', 'stock price',
+                   'stock split', 'stock market crash', 'stock market rally', 'bull market', 'bear market',
+                   'profit margin', 'revenue growth', 'venture capital', 'private equity', 'hedge fund',
+                   'wall street', 'boardroom', 'trading floor', 'quarterly earnings', 'annual report',
+                   'ceo', 'cfo', 'cto', 'ipo', 'merger', 'acquisition', 'shareholder',
+                   'startup funding', 'business model', 'market cap', 'balance sheet',
+                   'consumer brand', 'product launch', 'corporate strategy', 'fintech'],
 
         searchPolicy: {
             contextTerms: ['business', 'corporate', 'finance'],
@@ -1053,7 +1062,14 @@ const NICHES = {
                    'superpower', 'global power', 'strategic', 'defense system', 'missile defense',
                    'drone technology', 'drone warfare', 'cyber warfare', 'arms deal',
                    'military aid', 'defense budget', 'military base', 'nuclear',
-                   'nato', 'indo-pacific', 'deterrence', 'escalation'],
+                   'nato', 'indo-pacific', 'deterrence', 'escalation',
+                   // Maritime / chokepoint conflict terms (Bab el-Mandeb, Hormuz, Red Sea analyses)
+                   'naval power', 'naval blockade', 'naval forces', 'fleet deployment',
+                   'warship', 'destroyer', 'aircraft carrier', 'submarine', 'patrol boat',
+                   'houthi', 'iran navy', 'irgc', 'pentagon', 'central command',
+                   'shipping disruption', 'maritime conflict', 'maritime security',
+                   'chokepoint', 'strait', 'tanker attack', 'missile strike',
+                   'red sea', 'bab el-mandeb', 'hormuz', 'persian gulf', 'south china sea'],
 
         searchPolicy: {
             contextTerms: ['military', 'documentary', 'geopolitical', 'analysis'],
@@ -1180,8 +1196,11 @@ const NICHES = {
         keywords: ['policy analysis', 'political analysis', 'geopolitical analysis', 'policy explainer',
                    'think tank', 'diplomacy history', 'sanctions regime', 'trade policy',
                    'foreign policy', 'international relations', 'policy deep dive',
-                   'strategic chokepoint', 'trade route', 'shipping lane', 'energy policy',
-                   'oil route', 'pipeline politics', 'strait', 'canal geopolitics',
+                   'strategic chokepoint', 'trade route', 'shipping lane', 'shipping route',
+                   'energy policy', 'energy security', 'oil route', 'pipeline politics',
+                   'strait', 'canal geopolitics', 'maritime', 'tanker', 'cargo ship',
+                   'blockade', 'embargo', 'suez', 'hormuz', 'bab el-mandeb', 'red sea',
+                   'south china sea', 'persian gulf', 'shipping disruption',
                    'alliance history', 'treaty analysis', 'doctrine', 'hegemony',
                    'realpolitik', 'balance of power', 'grand strategy', 'statecraft',
                    'constitutional', 'supreme court history', 'political history',
@@ -1883,18 +1902,74 @@ function _detectSubNiche(parentId, text, aiTheme, opts = {}) {
 
     // Tiebreaker: when multiple sub-niches tie, prefer the one that matches AI theme.
     // If AI theme doesn't match any tied niche, pick based on content domain priority.
+    //
+    // DOMAIN_PRIORITY = "if these strong identity terms appear 2+ times, this niche
+    // wins the tie even if AI theme pointed elsewhere". Lists are intentionally narrow:
+    // each term must be a clearly-anchored signal of that domain (not a weak metaphor).
+    // Maritime/chokepoint terms (strait, shipping lane, blockade, tanker, suez, hormuz,
+    // bab el-mandeb, houthi, red sea) are added because long-form geopolitical analyses
+    // about shipping disruption tie 1-1-1 between business/military/politics — without
+    // these anchors, business wins via AI theme="finance" and the script gets routed
+    // to corporate stock-footage instead of geopolitical maps + maritime footage.
+    const DOMAIN_PRIORITY = {
+        [`${parentId}.military`]: [
+            'war', 'conflict', 'defense', 'weapon', 'army', 'drone', 'missile', 'combat', 'troops',
+            'naval', 'navy', 'fleet', 'warship', 'destroyer', 'aircraft carrier',
+            'houthi', 'iran navy', 'irgc', 'pentagon', 'airstrike', 'missile strike',
+        ],
+        [`${parentId}.politics`]: [
+            'election', 'government', 'president', 'parliament', 'sanction', 'diplomacy', 'geopolit',
+            'strait', 'chokepoint', 'shipping lane', 'shipping route', 'trade route', 'blockade',
+            'embargo', 'oil route', 'energy security', 'maritime', 'tanker', 'cargo ship',
+            'suez', 'hormuz', 'bab el-mandeb', 'bab-el-mandeb', 'red sea', 'south china sea',
+            'pipeline', 'foreign policy', 'treaty', 'alliance',
+        ],
+    };
+
+    // Geopolitical-anchor disqualifier for business: when 3+ chokepoint/maritime/
+    // conflict terms appear AND the AI theme landed on business (because the script
+    // mentions "stock market" or "global economy" once or twice), business is removed
+    // from the tie pool. This prevents Strait of Hormuz / Bab el-Mandeb shipping
+    // explainers from being routed to corporate b-roll just because they mention
+    // economic impact.
+    const GEOPOLITICAL_ANCHORS = [
+        'strait', 'chokepoint', 'shipping lane', 'shipping route', 'trade route',
+        'blockade', 'embargo', 'oil route', 'maritime', 'tanker', 'cargo ship',
+        'suez', 'hormuz', 'bab el-mandeb', 'bab-el-mandeb', 'red sea', 'persian gulf',
+        'south china sea', 'pipeline', 'naval', 'fleet', 'houthi', 'iran navy',
+        'geopolit', 'sanction', 'foreign policy',
+    ];
+    const businessId = `${parentId}.business`;
+    const geoHits = GEOPOLITICAL_ANCHORS.filter(t => text.includes(t)).length;
+
     if (bestSub && bestScore > 0) {
         const tied = Object.entries(subScores).filter(([_, s]) => s === bestScore);
+
+        // Step 1: business disqualifier — geopolitical content masquerading as finance.
+        if (
+            geoHits >= 3 &&
+            subScores[businessId] === bestScore &&
+            (subScores[`${parentId}.military`] === bestScore || subScores[`${parentId}.politics`] === bestScore)
+        ) {
+            const newBest = subScores[`${parentId}.politics`] === bestScore
+                ? `${parentId}.politics`
+                : `${parentId}.military`;
+            console.log(`      [Sub-niche disqualifier]: ${businessId} dropped — ${geoHits} geopolitical anchor terms found in script (chokepoint/maritime/sanction/etc.) → ${newBest} wins`);
+            bestSub = newBest;
+            // Recompute tied after disqualifier
+            tied.length = 0;
+            for (const [k, s] of Object.entries(subScores)) {
+                if (s === bestScore && k !== businessId) tied.push([k, s]);
+            }
+        }
+
+        // Step 2: standard DOMAIN_PRIORITY tiebreak for remaining ties.
         if (tied.length > 1) {
             // Check if directSub (AI theme match) is among the tied — if so, it's a valid tiebreaker
             if (directSub && subScores[directSub] === bestScore) {
                 // AI theme is one of the tied — but check if another sub-niche is more domain-specific
                 // military/politics content talking about "technology" is still military, not tech
                 // War/conflict/defense terms are stronger identity signals than "technology"
-                const DOMAIN_PRIORITY = {
-                    [`${parentId}.military`]: ['war', 'conflict', 'defense', 'weapon', 'army', 'drone', 'missile', 'combat', 'troops'],
-                    [`${parentId}.politics`]: ['election', 'government', 'president', 'parliament', 'sanction', 'diplomacy', 'geopolit'],
-                };
                 for (const [domainNiche, domainTerms] of Object.entries(DOMAIN_PRIORITY)) {
                     if (subScores[domainNiche] === bestScore && domainNiche !== directSub) {
                         const domainHits = domainTerms.filter(t => text.includes(t)).length;

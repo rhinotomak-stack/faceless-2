@@ -181,6 +181,34 @@ const _FULLSCREEN_TYPE_ALIASES = {
     articleHighlight:[/\barticle[\s-]*highlights?\b/, /\bheadline[\s-]*cards?\b/],
 };
 
+// Canonical set of MG types that can occupy the fullscreenMG slot.
+// Sourced from ai-motion-graphics.FULLSCREEN_MG_TYPES — duplicated as a literal
+// here to avoid a require cycle with ai-motion-graphics.js (which loads VP).
+// Every other MG type (focusWord, headline, callout, statCounter, lowerThird,
+// dataBar, percentageCircle, typographyReveal, kineticText, locationCard,
+// broadcastLogo, progressBar, etc.) is OVERLAY-ONLY and must live in
+// scene.mgHint paired with a background lane (footage or templateHint),
+// never in scene.fullscreenMG.
+const _FULLSCREEN_ELIGIBLE_MGS = new Set([
+    'barChart', 'donutChart', 'rankingList', 'timeline',
+    'comparisonCard', 'bulletList', 'mapChart'
+]);
+
+function _isFullscreenEligibleMG(type) {
+    if (!type) return false;
+    return _FULLSCREEN_ELIGIBLE_MGS.has(String(type).trim());
+}
+
+function _filterFullscreenEligible(types) {
+    if (!Array.isArray(types)) return [];
+    return types.filter(_isFullscreenEligibleMG);
+}
+
+function _filterOverlayOnly(types) {
+    if (!Array.isArray(types)) return [];
+    return types.filter(t => t && !_isFullscreenEligibleMG(t));
+}
+
 function _parseVisualInstructionPrefs(rawInstructions = '') {
     const raw = String(rawInstructions || '').trim();
     const lower = raw.toLowerCase();
@@ -1202,7 +1230,7 @@ function _finalizeVisualPlan(enrichedScenes, scriptContext, directorsBrief, plan
     // When the Scene Classifier attached sceneClass + treatmentHint, rewrite
     // any scene whose chosen lane conflicts with its class rules.
     // No-op when classes weren't attached (flag off or classifier failed).
-    const classFixes = _enforceClassTreatment(enrichedScenes);
+    const classFixes = _enforceClassTreatment(enrichedScenes, scriptContext);
     if (classFixes.length > 0) {
         console.log(`   🏷️  Class compliance: rewrote ${classFixes.length} scene(s) to match class treatment:`);
         for (const f of classFixes) {
@@ -1440,6 +1468,24 @@ function buildBatchPrompt(scenes, scriptContext, directorsBrief, options = {}) {
             const t = scene.treatmentHint;
             const ladder = Array.isArray(scene.fallbackLadder) ? scene.fallbackLadder.join(' → ') : t.primary;
             sceneList += `   CLASS=${scene.sceneClass} | PRIMARY=${t.primary} | LADDER=${ladder} | SOURCE=${t.preferredSource} | RETRIEVE=${scene.retrievability || 'medium'}\n`;
+            // Surface the class-specific MG/template allowlists so the AI doesn't pick
+            // a type that's niche-allowed but class-blocked. Class is stricter than niche.
+            // CRITICAL: split allowedMGs into fullscreen-eligible vs overlay-only — they
+            // live in DIFFERENT scene fields. Overlay types in fullscreenMG are dropped
+            // downstream; overlay types belong in mgHint paired with a background.
+            const allowedMgList = Array.isArray(t.allowedMGs) ? t.allowedMGs.filter(Boolean) : [];
+            const allowedTplList = Array.isArray(t.allowedTemplates) ? t.allowedTemplates.filter(Boolean) : [];
+            const fsEligible = _filterFullscreenEligible(allowedMgList);
+            const overlayOnly = _filterOverlayOnly(allowedMgList);
+            if (fsEligible.length > 0) {
+                sceneList += `   FULLSCREEN-MGS=${fsEligible.join(',')}   (valid for fullscreenMG field)\n`;
+            }
+            if (overlayOnly.length > 0) {
+                sceneList += `   OVERLAY-MGS=${overlayOnly.join(',')}   (valid for mgHint field — pair with footage or templateHint background)\n`;
+            }
+            if (allowedTplList.length > 0) {
+                sceneList += `   ALLOWED-TEMPLATES=${allowedTplList.join(',')}\n`;
+            }
             if (t.blocked && t.blocked.length) {
                 sceneList += `   BLOCKED=${t.blocked.join(',')}\n`;
             }
@@ -1459,7 +1505,10 @@ Each scene carries CLASS (editorial role) and PRIMARY (visual lane to use first)
 BLOCKED lists lanes you MUST NOT pick for that scene.
 RETRIEVE=internal-only means the scene has NO external visual referent — do NOT set keyword or webQuery; use PRIMARY only.
 LADDER is the fallback order if PRIMARY is unavailable. Stay on PRIMARY unless clearly wrong.
-SOURCE is the concrete footage provider to prefer when PRIMARY=footage (e.g. telegram for news actors, web-image for history).` : '';
+SOURCE is the concrete footage provider to prefer when PRIMARY=footage (e.g. telegram for news actors, web-image for history).
+FULLSCREEN-MGS = the only types you may set as fullscreenMG on this scene. ONLY 7 types are fullscreen-eligible globally: barChart, donutChart, rankingList, timeline, comparisonCard, bulletList, mapChart. If FULLSCREEN-MGS is missing or empty, this scene's class does NOT support a fullscreen MG — leave fullscreenMG=null and use OVERLAY-MGS instead.
+OVERLAY-MGS = types valid only for the mgHint field. focusWord, kineticText, headline, callout, statCounter, lowerThird, dataBar, percentageCircle, locationCard, broadcastLogo, typographyReveal etc. are OVERLAY-ONLY: they MUST sit on top of a real background — pair the mgHint with either (a) keyword + sourceHint to fetch footage, or (b) templateHint to draw a template background. Putting an overlay type in fullscreenMG will be silently moved to mgHint and a template/footage background will be invented for you.
+ALLOWED-TEMPLATES lists the specific templateHint types valid for that scene's class. STRICTER than niche, picking outside the list will be rewritten.` : '';
 
     const constraintsLegend = `
 
@@ -1471,7 +1520,7 @@ Each scene now carries a deterministic CONSTRAINTS line derived from the narrati
     quote-beat      → direct quote → quoteCard / callout; never raw stock B-roll alone
     stat-beat       → ≥2 numbers in narration → statCard / barChart / donutChart / rankingList preferred
     escalation-news → state actor + military/political verb → real footage (telegram/youtube), NEVER stock
-    abstract-breathing-room → mood / metaphor → focusWord / kineticText / mood B-roll
+    abstract-breathing-room → mood / metaphor → focusWord / kineticText (overlay) / mood B-roll
     concept-explainer → no concrete subject → typography or template, AVOID forced footage searches
     product-demo    → tech reveal/launch → real footage of the product/event
     generic         → no signal — pick the most editorial choice
@@ -1654,8 +1703,8 @@ ALLOWED MOTION GRAPHICS FOR THIS NICHE (${niche.name}):
 ${nicheAllowedMGs.join(', ')}
 - Suggest an MG only when the scene content clearly benefits from one.
 - NOT every scene needs an MG — use "none" for scenes that work best as pure footage.
-- Fullscreen MGs (focusWord, kineticText) replace the footage entirely — use sparingly for impact.
-- Overlay MGs (lowerThird, headline, statCounter, barChart, etc.) appear ON TOP of footage.
+- Fullscreen MGs (barChart, donutChart, rankingList, timeline, comparisonCard, bulletList, mapChart) replace the footage entirely — use sparingly for impact.
+- Overlay MGs (focusWord, kineticText, lowerThird, headline, statCounter, callout, etc.) appear ON TOP of footage or a templateHint background — they MUST sit on a real background, never in fullscreenMG.
 ${mapAvailabilityRule}
 
 SCENES TO PLAN (${scenes.length} total):
@@ -1905,10 +1954,12 @@ ${_buildBackgroundList(theme)}
        ("the network is breaking apart", "side-by-side comparison", "inflation is squeezing families",
         "the mechanism that drives this", "a montage of chaos", "the system's grid is collapsing")
        → DO NOT write a keyword. Set keyword="none", sourceHint="none".
-       → Go STRAIGHT to fullscreenMG:
-          • "focusWord: <1-3 word punch>" for single-concept beats (e.g. "focusWord: Collapse")
-          • "kineticText: <short phrase>" for rhythmic/impactful prose (e.g. "kineticText: Breaking Apart")
-          • templateHint="keyTakeaway: <line>" if the metaphor IS a conclusion sentence
+       → Go STRAIGHT to a typography lane:
+          • templateHint="keyTakeaway: <line>" if the metaphor IS a conclusion sentence (preferred — gives the typography its own background)
+          • OR pair an overlay mgHint with a templateHint background:
+              - mgHint="focusWord: <1-3 word punch>" + templateHint="keyTakeaway" / "statCard" — single-concept beats
+              - mgHint="kineticText: <short phrase>" + templateHint="keyTakeaway" / "statCard" — rhythmic/impactful prose
+          • Typography MGs (focusWord, kineticText) are OVERLAY-ONLY — never put them in fullscreenMG.
        → This is not a fallback — it's the CORRECT primary choice for metaphor scenes.
 
    (C) DATA / NUMBERS — narration states ≥2 numbers, percentages, or ranked items.
@@ -1922,8 +1973,8 @@ ${_buildBackgroundList(theme)}
        → NEVER sourceHint="stock" on actor scenes. Stock libraries have zero matches.
 
    ADJACENT-SCENE DIVERSITY RULE:
-   - If the PREVIOUS scene you just planned used fullscreenMG="focusWord", this scene must NOT also use focusWord. Alternate with kineticText, or go back to footage/template.
-   - If 3 scenes in a row would all be typography (focusWord/kineticText), break the run: force one of them to templateHint (keyTakeaway/statCard/imageShowcase) or concrete footage.
+   - If the PREVIOUS scene you just planned used mgHint="focusWord", this scene must NOT also use focusWord. Alternate with kineticText, or go back to footage/template.
+   - If 3 scenes in a row would all be typography overlays (focusWord/kineticText/typographyReveal), break the run: force one of them to templateHint (keyTakeaway/statCard/imageShowcase) or concrete footage.
 
    The keyword field must be SHORT (3-6 words) and directly searchable.
    Strategy for this niche (${niche.name}): "${(() => {
@@ -1966,9 +2017,10 @@ ${(() => {
      side-by-side comparison, juxtaposition, interplay
    - If you want to write any of these words → STOP. Pick one of these instead:
      (a) a CONCRETE physical shot (what a camera would literally capture in that moment), OR
-     (b) fullscreenMG "kineticText" / "focusWord" / "statCounter" — abstract ideas belong on typography, not footage.
-   - BAD: "container ship and oil tanker montage" → GOOD: "oil tanker at sea" + set mgHint="kineticText: Oil + Shipping"
-   - BAD: "digital network grid breaking apart" → GOOD: fullscreenMG="focusWord: Collapse" (no footage keyword)
+     (b) templateHint="keyTakeaway: <line>" for a typography-focused background, OR
+     (c) footage keyword + overlay mgHint (focusWord/kineticText/callout/headline) — abstract ideas belong on typography overlays, not on the keyword itself.
+   - BAD: "container ship and oil tanker montage" → GOOD: "oil tanker at sea" + mgHint="focusWord: Oil + Shipping"
+   - BAD: "digital network grid breaking apart" → GOOD: templateHint="keyTakeaway: The Network Collapses" + mgHint="kineticText: Collapse" (typography on a template background, no footage keyword)
    - BAD: "grocery store checkout inflation" → GOOD: "grocery store shelves" + mgHint="statCounter: +8.2% Food Prices"
    - BAD: "complex gear system mechanism close-up" → GOOD: "industrial gears turning" (one concrete object)
    - BAD: "large container ship and small freighter side-by-side" → GOOD: "container ship aerial" (pick ONE subject, not a comparison)
@@ -2140,6 +2192,10 @@ ${outputMapContractRules}
   • If FS-MG=forbidden → fullscreenMG MUST be "none" (hook/CTA scenes).
   • If STOCK=disallowed → sourceHint MUST NOT be "stock"/"pexels"/"pixabay". Use the niche's top real-source instead.
 - Niche allowlist is law: fullscreenMG type MUST be one of [${nicheAllowedMGs.join(', ')}] (or "none"). Anything else will be rewritten downstream.
+- Class allowlist is STRICTER than niche allowlist. The class line splits its MG allowlist into TWO buckets:
+  • FULLSCREEN-MGS — the only types valid for the fullscreenMG field. The global fullscreen-eligible set is exactly: barChart, donutChart, rankingList, timeline, comparisonCard, bulletList, mapChart. Anything else placed in fullscreenMG is dropped downstream as an "Unknown type". If a scene has no FULLSCREEN-MGS line, that class cannot use fullscreenMG at all — leave it null.
+  • OVERLAY-MGS — overlay types (focusWord, kineticText, headline, callout, statCounter, lowerThird, dataBar, percentageCircle, locationCard, broadcastLogo, typographyReveal, etc.). These belong ONLY in the mgHint field and MUST be paired with a real background: either footage (set keyword + sourceHint) or templateHint. Never set an overlay type as fullscreenMG.
+- Same strictness for ALLOWED-TEMPLATES vs templateHint. Class is editorial truth: "concept-metaphor" routes through focusWord-as-overlay on a templateHint background, "data-claim" through statCounter-as-overlay on a statCard template, "actor-event" through lowerThird-as-overlay on real footage. Picking outside the class allowlist or misplacing overlay→fullscreen will be silently rewritten.
 - Data MGs require real numbers: barChart/donutChart/rankingList/timeline/comparisonCard demand ≥2 numeric pairs from the actual narration. If the narration has no numbers/dates/items, do NOT pick a data MG — pick a template, typography, or footage.
 ${mapPayloadContractRule}
 - ROLE alignment: a person-intro scene must NOT route to stock; a quote-beat scene must NOT route to a barChart; a stat-beat scene with 2+ numbers MUST surface a stat lane (statCard | barChart | donutChart | statCounter).
@@ -2697,34 +2753,41 @@ function _enforceKeywordCompliance(scenes, scriptContext) {
 }
 
 /**
- * Break long runs of adjacent typography fullscreenMGs (focusWord/kineticText).
+ * Break long runs of adjacent typography overlays (mgHint=focusWord/kineticText/typographyReveal).
  * Rule:
- *   - 2 adjacent scenes with same typography type → flip the 2nd to the other type.
- *   - 3 adjacent typography scenes (any mix) → flip the middle one to keyTakeaway
- *     template if the scene has narrative weight, otherwise alternate types.
- * Only touches scenes whose fullscreenMG starts with focusWord/kineticText — leaves
- * data MGs (barChart, timeline, mapChart) alone.
+ *   - 2 adjacent scenes with same typography type → flip the 2nd to a different typography type.
+ *   - 3 adjacent typography scenes (any mix) → promote the middle one to a keyTakeaway
+ *     template (clearing its typography mgHint) when it has narrative weight.
+ * Only touches scenes whose mgHint starts with focusWord/kineticText/typographyReveal —
+ * leaves data overlays (statCounter, dataBar, etc.) and fullscreen MGs alone.
  */
 function _dedupTypographyRuns(scenes) {
     const fixes = [];
+    const TYPO_ROTATION = ['focusWord', 'kineticText', 'typographyReveal'];
     const typoType = (s) => {
-        if (!s.fullscreenMG) return null;
-        const m = String(s.fullscreenMG).match(/^(focusWord|kineticText)\s*:/i);
-        return m ? m[1].toLowerCase() : null;
+        if (!s.mgHint) return null;
+        const m = String(s.mgHint).match(/^(focusWord|kineticText|typographyReveal)\s*:/i);
+        if (!m) return null;
+        // Normalize back to canonical casing
+        const lower = m[1].toLowerCase();
+        if (lower === 'focusword') return 'focusWord';
+        if (lower === 'kinetictext') return 'kineticText';
+        if (lower === 'typographyreveal') return 'typographyReveal';
+        return null;
     };
 
     for (let i = 0; i < scenes.length; i++) {
         const curr = typoType(scenes[i]);
         if (!curr) continue;
 
-        // Case 1: same type as previous scene → swap the CURRENT one to the other
+        // Case 1: same type as previous scene → swap the CURRENT one to a different typography type
         const prev = i > 0 ? typoType(scenes[i - 1]) : null;
         if (prev && prev === curr) {
-            const other = curr === 'focusword' ? 'kineticText' : 'focusWord';
-            const body = String(scenes[i].fullscreenMG).replace(/^[^:]+:/, '').trim();
-            const before = scenes[i].fullscreenMG;
-            scenes[i].fullscreenMG = `${other}: ${body}`;
-            fixes.push({ index: scenes[i].index, before, after: scenes[i].fullscreenMG });
+            const other = TYPO_ROTATION.find(t => t !== curr) || 'focusWord';
+            const body = String(scenes[i].mgHint).replace(/^[^:]+:/, '').trim();
+            const before = scenes[i].mgHint;
+            scenes[i].mgHint = `${other}: ${body}`;
+            fixes.push({ index: scenes[i].index, before, after: scenes[i].mgHint });
             continue;
         }
 
@@ -2735,9 +2798,9 @@ function _dedupTypographyRuns(scenes) {
             if (!mid.templateHint) {
                 const line = String(mid.text || '').split(/[.!?]/)[0].trim().slice(0, 90);
                 if (line.length >= 8) {
-                    const beforeMg = mid.fullscreenMG;
+                    const beforeMg = mid.mgHint;
                     mid.templateHint = `keyTakeaway: ${line}`;
-                    mid.fullscreenMG = null;
+                    mid.mgHint = null;
                     mid.keyword = mid.keyword || null;
                     fixes.push({ index: mid.index, before: beforeMg, after: `→ templateHint ${mid.templateHint}` });
                 }
@@ -2758,7 +2821,7 @@ function _dedupTypographyRuns(scenes) {
  *
  * Returns array of { index, reason, before, after } for logging.
  */
-function _enforceClassTreatment(scenes) {
+function _enforceClassTreatment(scenes, scriptContext) {
     const fixes = [];
     for (const scene of scenes) {
         if (!scene.sceneClass || !scene.treatmentHint) continue;
@@ -2776,43 +2839,121 @@ function _enforceClassTreatment(scenes) {
             currentLane = 'footage';
         }
 
-        // Rule 1: internal-only classes must not hit external providers
+        // Rule 1: internal-only classes must not hit external providers.
+        // Use the shared coercion helper so overlay-only allowedMGs are routed
+        // through templateHint (with mgHint overlay) instead of being shoved
+        // into fullscreenMG (where the renderer would reject them).
         if (scene.retrievability === 'internal-only' && currentLane === 'footage') {
             const before = `keyword=${scene.keyword} source=${scene.sourceHint}`;
+            const targetLane = (t.primary === 'template' && t.allowedTemplates.length)
+                ? 'template'
+                : 'graphics';
+            _coerceSceneToLane(scene, targetLane, t, scriptContext);
+            // _coerceSceneToLane(graphics) may itself fall to template/footage when
+            // overlay-only — but we explicitly forbid footage on internal-only, so
+            // strip any footage fields it set in that fallback path.
             scene.keyword    = null;
             scene.stockQuery = null;
             scene.webQuery   = null;
             scene.sourceHint = null;
-            if (t.primary === 'template' && t.allowedTemplates.length) {
-                const line = String(scene.text || '').split(/[.!?]/)[0].trim().slice(0, 80);
-                scene.templateHint = `${t.allowedTemplates[0]}: ${line}`;
-                currentLane = 'template';
-            } else {
-                const mg = (t.allowedMGs && t.allowedMGs[0]) || 'focusWord';
-                const word = _pickFocusWord(scene.text);
-                scene.fullscreenMG = `${mg}: ${word}`;
-                currentLane = 'graphics';
+            if (!scene.templateHint && !scene.fullscreenMG) {
+                // Last-resort: there were no allowed templates AND no fullscreen
+                // MGs available. Force a keyTakeaway template + typography overlay
+                // so the scene still has a real background paired with the overlay.
+                const line = String(scene.text || '').split(/[.!?]/)[0].trim().slice(0, 90) || _pickFocusWord(scene.text, scriptContext);
+                scene.templateHint = `keyTakeaway: ${line}`;
+                if (!scene.mgHint) {
+                    scene.mgHint = `kineticText: ${_pickFocusWord(scene.text, scriptContext)}`;
+                }
             }
-            fixes.push({ index: scene.index, reason: 'internal-only → strip footage', before, after: scene.fullscreenMG || scene.templateHint });
+            currentLane = scene.templateHint ? 'template'
+                        : scene.fullscreenMG ? 'graphics'
+                        : 'graphics';
+            fixes.push({
+                index: scene.index,
+                reason: 'internal-only → strip footage',
+                before,
+                after: scene.fullscreenMG || scene.templateHint || scene.mgHint
+            });
             continue;
         }
 
         // Rule 2: chose a blocked lane → swap to primary lane
         if (currentLane && blocked.has(currentLane)) {
             const before = `${currentLane}:${scene.fullscreenMG || scene.templateHint || scene.keyword}`;
-            _coerceSceneToLane(scene, t.primary, t);
+            _coerceSceneToLane(scene, t.primary, t, scriptContext);
             fixes.push({ index: scene.index, reason: `blocked-lane ${currentLane} → primary ${t.primary}`, before, after: scene.fullscreenMG || scene.templateHint || scene.keyword });
             continue;
         }
 
-        // Rule 3: MG type outside allowedMGs
+        // Rule 3: scene.fullscreenMG must be (a) a fullscreen-eligible type AND
+        // (b) inside the class allowlist. Three failure modes, in priority order:
+        //   3a. The class has NO fullscreen-eligible types in its allowlist —
+        //       this class wasn't designed to carry a fullscreen at all (e.g.
+        //       concept-metaphor wants focusWord-as-overlay, actor-event wants
+        //       lowerThird-on-footage). Move whatever the AI put in fullscreenMG
+        //       to mgHint (using the class's first overlay type when the AI's
+        //       pick is itself a fullscreen type that wouldn't read as overlay)
+        //       and paint a real background.
+        //   3b. AI placed an overlay-only type (focusWord/headline/...) in the
+        //       fullscreen slot — same relocation, but keep AI's overlay choice.
+        //   3c. AI picked a fullscreen-eligible type that the class blocks —
+        //       swap to the first fullscreen-eligible entry in allowedMGs.
+        //       If the class has no fullscreen-eligible alternatives, relocate
+        //       the type to mgHint with a paired background instead.
         if (scene.fullscreenMG && t.allowedMGs && t.allowedMGs.length) {
             const fsType = String(scene.fullscreenMG).split(':')[0].trim();
-            if (!t.allowedMGs.includes(fsType)) {
+            const rest   = String(scene.fullscreenMG).split(':').slice(1).join(':').trim() || _pickFocusWord(scene.text, scriptContext);
+            const inAllow = t.allowedMGs.includes(fsType);
+            const isFsEligible = _isFullscreenEligibleMG(fsType);
+            const classHasFsEligible = _filterFullscreenEligible(t.allowedMGs).length > 0;
+            const overlayChoices = _filterOverlayOnly(t.allowedMGs);
+
+            if (!classHasFsEligible) {
+                // 3a: Class never wanted a fullscreen MG. The AI's pick is either
+                // an overlay type (use it directly as the overlay) or a fullscreen
+                // type that doesn't translate (substitute the class's first overlay).
                 const before = scene.fullscreenMG;
-                const rest = String(scene.fullscreenMG).split(':').slice(1).join(':').trim() || _pickFocusWord(scene.text);
-                scene.fullscreenMG = `${t.allowedMGs[0]}: ${rest}`;
-                fixes.push({ index: scene.index, reason: `MG type not allowed for ${scene.sceneClass}`, before, after: scene.fullscreenMG });
+                const overlayPick = isFsEligible
+                    ? (overlayChoices[0] || 'focusWord')
+                    : fsType;
+                _relocateFullscreenToOverlay(scene, t, overlayPick, rest, scriptContext);
+                fixes.push({
+                    index: scene.index,
+                    reason: isFsEligible
+                        ? `class ${scene.sceneClass} has no fullscreen-eligible types — "${fsType}" → mgHint as "${overlayPick}"`
+                        : `overlay-only "${fsType}" misplaced as fullscreenMG → moved to mgHint`,
+                    before,
+                    after: scene.mgHint
+                });
+            } else if (!isFsEligible) {
+                // 3b: Class has fullscreen-eligible options, but AI still picked
+                // an overlay type for fullscreenMG. Move it to mgHint and paint
+                // a background. (Keeps AI's overlay intent rather than overwriting.)
+                const before = scene.fullscreenMG;
+                _relocateFullscreenToOverlay(scene, t, fsType, rest, scriptContext);
+                fixes.push({
+                    index: scene.index,
+                    reason: `overlay-only "${fsType}" misplaced as fullscreenMG → moved to mgHint`,
+                    before,
+                    after: scene.mgHint
+                });
+            } else if (!inAllow) {
+                // 3c: fullscreen-eligible but blocked by class allowlist.
+                const before = scene.fullscreenMG;
+                const fsAllowed = _filterFullscreenEligible(t.allowedMGs);
+                if (fsAllowed.length === 0) {
+                    // No fullscreen-eligible options for this class — relocate the
+                    // type to mgHint and paint a real background.
+                    _relocateFullscreenToOverlay(scene, t, fsType, rest, scriptContext);
+                    fixes.push({ index: scene.index, reason: `MG type not allowed for ${scene.sceneClass} (no fs alternatives) → mgHint`, before, after: scene.mgHint });
+                } else {
+                    const replacement = fsAllowed[0];
+                    if (replacement !== fsType) {
+                        scene.fullscreenMG = `${replacement}: ${rest}`;
+                        fixes.push({ index: scene.index, reason: `MG type not allowed for ${scene.sceneClass}`, before, after: scene.fullscreenMG });
+                    }
+                }
             }
         }
 
@@ -2840,16 +2981,125 @@ function _enforceClassTreatment(scenes) {
     return fixes;
 }
 
-function _pickFocusWord(text) {
-    const t = String(text || '');
-    const words = t.match(/\b[A-Za-z]{4,}\b/g) || [];
-    for (const w of words) {
-        if (!_isAbstractKeyword(w)) return w.toLowerCase();
-    }
-    return (words[0] || 'focus').toLowerCase();
+// Words that read as filler when shown as a typography card. Pronouns,
+// determiners, aux/light verbs, discourse markers, vague nouns. Anything that
+// appearing solo on a card looks like the splitter dropped a fragment.
+const _FOCUS_WORD_STOPLIST = new Set([
+    // pronouns / determiners
+    'there', 'their', 'they', 'them', 'this', 'that', 'these', 'those',
+    'these', 'whose', 'which', 'what', 'when', 'where', 'while', 'whom',
+    // aux / modals / light verbs
+    'have', 'having', 'been', 'being', 'were', 'will', 'would', 'could',
+    'should', 'shall', 'might', 'must', 'does', 'doing', 'done', 'make',
+    'made', 'making', 'take', 'took', 'taken', 'taking', 'give', 'gave',
+    'given', 'giving', 'come', 'came', 'going', 'gets', 'getting', 'puts',
+    'said', 'says', 'tell', 'told', 'feel', 'felt', 'know', 'knew', 'known',
+    // discourse / fillers
+    'well', 'okay', 'just', 'very', 'really', 'maybe', 'pretty', 'quite',
+    'somehow', 'anyway', 'actually', 'basically', 'literally', 'honestly',
+    'hopefully', 'probably', 'whether', 'about', 'because', 'although',
+    'however', 'meanwhile', 'instead', 'though', 'unless', 'until', 'within',
+    'across', 'among', 'between', 'before', 'after', 'around',
+    // vague nouns
+    'thing', 'things', 'stuff', 'people', 'someone', 'anyone', 'everyone',
+    'something', 'anything', 'everything', 'nothing', 'somewhere', 'place',
+    'places', 'years', 'days', 'time', 'times', 'side', 'sides', 'idea',
+    'ideas', 'kind', 'kinds', 'form', 'forms',
+    // generic verbs that look weak as a card
+    'starts', 'started', 'began', 'begun', 'turns', 'turned', 'looks',
+    'looked', 'seems', 'seemed', 'opens', 'opened', 'shows', 'showed',
+]);
+
+function _isFocusWordStop(w) {
+    if (!w) return true;
+    return _FOCUS_WORD_STOPLIST.has(w.toLowerCase());
 }
 
-function _coerceSceneToLane(scene, lane, treatment) {
+// Pick a content-bearing word for use as a focusWord overlay payload.
+// Priority ladder:
+//   1. Entity from scriptContext.entities that appears in scene text
+//   2. Numeric / year / percentage token
+//   3. Proper-noun-cased word (capital letter mid-sentence)
+//   4. First non-stop, non-abstract content word
+//   5. Literal 'focus' fallback
+function _pickFocusWord(text, scriptContext) {
+    const t = String(text || '');
+    if (!t) return 'focus';
+
+    // 1. Entity match — pick the longest entity that appears in this scene text.
+    const entities = (scriptContext && Array.isArray(scriptContext.entities)) ? scriptContext.entities : [];
+    if (entities.length > 0) {
+        const lower = t.toLowerCase();
+        const matched = entities
+            .filter(e => e && lower.includes(String(e).toLowerCase()))
+            .sort((a, b) => String(b).length - String(a).length); // prefer most specific
+        if (matched.length > 0) return String(matched[0]);
+    }
+
+    // 2. Numeric / year / percent / dollar token (e.g. "150", "12%", "$10B", "1869")
+    const numMatch = t.match(/\$?\d[\d,.]*%?|\b(?:19|20)\d{2}\b/);
+    if (numMatch) return numMatch[0];
+
+    // 3. Proper-noun-cased word mid-sentence (skip first word which is sentence-cap noise)
+    //    Strip leading sentence — only check after first word boundary.
+    const properRe = /\b[A-Z][a-z]{2,}\b/g;
+    const words = t.split(/\s+/);
+    for (let i = 1; i < words.length; i++) {
+        const m = words[i].match(/^[A-Z][a-z]{2,}$/);
+        if (m && !_isFocusWordStop(m[0]) && !_isAbstractKeyword(m[0])) {
+            return m[0];
+        }
+    }
+    // First-word fallback: only allow proper nouns (length > 3) — avoids "There"/"When".
+    if (words[0]) {
+        const first = words[0].replace(/[^A-Za-z]/g, '');
+        if (/^[A-Z][a-z]{3,}$/.test(first) && !_isFocusWordStop(first) && !_isAbstractKeyword(first)) {
+            return first;
+        }
+    }
+
+    // 4. First content word — 4+ letters, not stop, not abstract.
+    const tokens = t.match(/\b[A-Za-z]{4,}\b/g) || [];
+    for (const w of tokens) {
+        if (!_isFocusWordStop(w) && !_isAbstractKeyword(w)) return w.toLowerCase();
+    }
+
+    // 5. Literal fallback — never return a known stopword.
+    return 'focus';
+}
+
+// Move a misplaced fullscreenMG into the overlay (mgHint) slot, then paint a
+// real background. Pick the background lane that matches editorial intent:
+// classes with primary=footage want real footage under the overlay; classes
+// with primary=graphics/template prefer a template background. Used by Rule
+// 3a + 3b in _enforceClassTreatment.
+function _relocateFullscreenToOverlay(scene, treatment, overlayType, payload, scriptContext) {
+    scene.fullscreenMG = null;
+    scene.mgHint = `${overlayType}: ${payload}`;
+
+    const preferFootage = treatment.primary === 'footage';
+    const hasTemplates  = treatment.allowedTemplates && treatment.allowedTemplates.length;
+
+    if (preferFootage || !hasTemplates) {
+        // Footage background — overlay rides on real video.
+        scene.keyword    = scene.keyword || _pickFocusWord(scene.text, scriptContext);
+        scene.sourceHint = treatment.preferredSource || scene.sourceHint || 'stock';
+        scene.mediaType  = scene.mediaType || 'video';
+        scene.templateHint = null;
+    } else {
+        // Template background — drawn underneath the overlay.
+        if (!scene.templateHint) {
+            const line = String(scene.text || '').split(/[.!?]/)[0].trim().slice(0, 80);
+            scene.templateHint = `${treatment.allowedTemplates[0]}: ${line}`;
+        }
+        scene.keyword    = null;
+        scene.stockQuery = null;
+        scene.webQuery   = null;
+        scene.sourceHint = null;
+    }
+}
+
+function _coerceSceneToLane(scene, lane, treatment, scriptContext) {
     // Clear existing lane markers
     if (lane !== 'footage')  { scene.keyword = null; scene.stockQuery = null; scene.webQuery = null; }
     if (lane !== 'graphics' && lane !== 'map') scene.fullscreenMG = null;
@@ -2857,19 +3107,64 @@ function _coerceSceneToLane(scene, lane, treatment) {
 
     const line = String(scene.text || '').split(/[.!?]/)[0].trim().slice(0, 80);
     if (lane === 'footage') {
-        scene.keyword    = scene.keyword || _pickFocusWord(scene.text);
+        scene.keyword    = scene.keyword || _pickFocusWord(scene.text, scriptContext);
         scene.sourceHint = treatment.preferredSource || scene.sourceHint || 'stock';
         scene.mediaType  = scene.mediaType || 'video';
     } else if (lane === 'map') {
         if (treatment.allowedMGs && treatment.allowedMGs.includes('mapChart')) {
             scene.fullscreenMG = scene.fullscreenMG || 'mapChart: locator';
         } else {
-            const mg = (treatment.allowedMGs && treatment.allowedMGs[0]) || 'focusWord';
-            scene.fullscreenMG = `${mg}: ${_pickFocusWord(scene.text)}`;
+            // Map lane chosen but no map type allowed → fall back to graphics handling.
+            _coerceSceneToLane(scene, 'graphics', treatment, scriptContext);
+            return;
         }
     } else if (lane === 'graphics') {
-        const mg = (treatment.allowedMGs && treatment.allowedMGs[0]) || 'focusWord';
-        scene.fullscreenMG = `${mg}: ${_pickFocusWord(scene.text)}`;
+        // Graphics lane: only fullscreen-eligible types belong in fullscreenMG.
+        // Overlay types (focusWord/callout/headline/statCounter/...) need a
+        // background, so route them to mgHint and pick a lane that paints one.
+        const allowed = Array.isArray(treatment.allowedMGs) ? treatment.allowedMGs : [];
+        const fsEligible = _filterFullscreenEligible(allowed);
+        const overlayTypes = _filterOverlayOnly(allowed);
+
+        if (fsEligible.length > 0) {
+            scene.fullscreenMG = `${fsEligible[0]}: ${_pickFocusWord(scene.text, scriptContext)}`;
+            scene.mgHint = null;
+            return;
+        }
+
+        // No fullscreen-eligible MG → graphics lane can't actually fullscreen here.
+        // Fall down the ladder: prefer template (it has its own background), else
+        // stock-mood footage. In both cases attach the overlay via mgHint.
+        scene.fullscreenMG = null;
+
+        // Preserve AI's existing mgHint when it's already a class-allowed overlay.
+        // The AI usually picks better payloads (e.g. "lowerThird: Suez Canal, 1869")
+        // than _pickFocusWord can synthesize. Only overwrite when AI gave nothing
+        // or gave an out-of-class type.
+        let overlayPayload = null;
+        if (scene.mgHint) {
+            const existingType = String(scene.mgHint).split(':')[0].trim();
+            if (allowed.includes(existingType)) {
+                overlayPayload = scene.mgHint;
+            }
+        }
+        if (!overlayPayload) {
+            const overlayPick = overlayTypes[0] || 'focusWord';
+            overlayPayload = `${overlayPick}: ${_pickFocusWord(scene.text, scriptContext)}`;
+        }
+
+        if (treatment.allowedTemplates && treatment.allowedTemplates.length) {
+            scene.templateHint = `${treatment.allowedTemplates[0]}: ${line}`;
+            scene.keyword = null;
+            scene.stockQuery = null;
+            scene.webQuery = null;
+            scene.sourceHint = null;
+        } else {
+            scene.keyword    = scene.keyword || _pickFocusWord(scene.text, scriptContext);
+            scene.sourceHint = 'stock';
+            scene.mediaType  = scene.mediaType || 'video';
+        }
+        scene.mgHint = overlayPayload;
     } else if (lane === 'template') {
         const tpl = (treatment.allowedTemplates && treatment.allowedTemplates[0]) || 'factCard';
         scene.templateHint = `${tpl}: ${line}`;
