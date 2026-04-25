@@ -120,8 +120,13 @@ function extractSceneEnhancements(sceneInfo) {
 
     const lines = [];
 
-    if (sceneInfo._mapWaypoints && Array.isArray(sceneInfo._mapWaypoints)) {
-        const wps = sceneInfo._mapWaypoints;
+    // Slice 6B: map data now lives on sceneInfo._mapScene.renderAssets (single
+    // source of truth). The old side-channel _map* fields were removed from
+    // the build-video merge-back.
+    const _ra = sceneInfo._mapScene?.renderAssets || null;
+
+    const wps = Array.isArray(_ra?.waypoints) ? _ra.waypoints : null;
+    if (wps && wps.length > 0) {
         const hasIcons = wps.some(wp => wp.icon);
         const hasOrbit = wps.some(wp => wp.orbit || wp.o);
         const hasTilt = wps.some(wp => wp.tilt || wp.t);
@@ -133,35 +138,30 @@ function extractSceneEnhancements(sceneInfo) {
         lines.push('  EXPECT: camera panning/zooming between locations, pin markers, possible icon badges on pins');
     }
 
-    if (sceneInfo._mapIcons && typeof sceneInfo._mapIcons === 'object') {
-        const count = Object.keys(sceneInfo._mapIcons).length;
-        lines.push(`MAP ICONS: ${count} contextual icon badge(s) on map pins — verify they are visible as small circular badges near pins`);
+    if (_ra?.icons && typeof _ra.icons === 'object') {
+        const count = Object.keys(_ra.icons).length;
+        if (count > 0) {
+            lines.push(`MAP ICONS: ${count} contextual icon badge(s) on map pins — verify they are visible as small circular badges near pins`);
+        }
     }
 
-    if (sceneInfo._bigMapSize) {
+    if (_ra?.bigMapSize) {
         lines.push('BIG MAP: single high-res map tile covering all waypoints (not per-location tiles)');
     }
 
-    if (sceneInfo._osmBoundaries && Array.isArray(sceneInfo._osmBoundaries)) {
-        lines.push(`BOUNDARIES: ${sceneInfo._osmBoundaries.length} region polygon(s) drawn on map`);
+    if (Array.isArray(_ra?.osmBoundaries) && _ra.osmBoundaries.length > 0) {
+        lines.push(`BOUNDARIES: ${_ra.osmBoundaries.length} region polygon(s) drawn on map`);
     }
 
-    if (sceneInfo._mapPins && Array.isArray(sceneInfo._mapPins)) {
-        lines.push(`MAP PINS: ${sceneInfo._mapPins.length} location pin(s) with labels`);
+    const pins = _ra?.mapView?.pins;
+    if (Array.isArray(pins) && pins.length > 0) {
+        lines.push(`MAP PINS: ${pins.length} location pin(s) with labels`);
     }
 
-    if (sceneInfo.mapVariant) {
-        lines.push(`MAP VARIANT: ${sceneInfo.mapVariant} (locator=spotlight, route=path, regionHighlight=area, comparison=side-by-side)`);
-    }
-
-    // Auto-detect unknown _ fields (future-proofing)
-    for (const key of Object.keys(sceneInfo)) {
-        if (!key.startsWith('_')) continue;
-        if (['_mapWaypoints', '_mapIcons', '_bigMapSize', '_osmBoundaries', '_mapPins',
-             '_mapView', '_wpCoords', '_mapIconsPreloaded', '_iconFile'].includes(key)) continue;
-        const val = sceneInfo[key];
-        const type = Array.isArray(val) ? `array(${val.length})` : typeof val;
-        lines.push(`${key}: ${type}${type === 'string' ? ` = "${String(val).substring(0, 60)}"` : ''}`);
+    const mapMode = sceneInfo._mapScene?.mapMode || null;
+    const mapVariant = sceneInfo.mapVariant || (mapMode === 'region' ? 'regionHighlight' : mapMode);
+    if (mapVariant) {
+        lines.push(`MAP VARIANT: ${mapVariant} (locator=spotlight, route=path, regionHighlight=area, comparison=side-by-side)`);
     }
 
     return lines.length > 0 ? lines.join('\n') : '';

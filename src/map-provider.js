@@ -1384,10 +1384,11 @@ function _materializeWaypointsFromMapScene(mg, mapScene) {
  * Tries MapTiler (tile stitching) first, then Geoapify (static API).
  * Now with geocoding: resolves city/landmark names → exact coordinates.
  *
- * Slice 3 entity resolution priority:
+ * Slice 6B entity resolution:
  *   1. scene._mapScene.subjects (from src/map-compiler.js) — authoritative.
- *   2. mg._mapWaypoints / mg._mapSwarms (legacy planner — removed in slice 4).
- *   3. extractEntities(mg, scriptContext) — narrow payload-only fallback.
+ *   2. extractEntities(mg, scriptContext) — narrow payload-only fallback when
+ *      the compiler didn't produce subjects (e.g. a raw mapChart MG with no
+ *      compiled MapScene).
  *
  * The `scenes` argument (optional) is the list of compiled scenes; we look up
  * the owning scene by mg.sceneIndex to find its attached MapScene.
@@ -1437,30 +1438,10 @@ async function downloadMapForMG(mg, scriptContext, tempDir, scenes) {
         entities = _routeEntitiesForMapScene(mapScene, entities);
         console.log(`      🧭 MapScene (${mapScene.mapMode}, ${mapScene.mapPurpose}): ${entities.join(', ')}`);
     } else {
-        // Legacy path: planner waypoints / swarms (removed in slice 4).
-        const plannerNames = [];
-        const seen = new Set();
-        if (Array.isArray(mg._mapWaypoints) && mg._mapWaypoints.length > 0) {
-            for (const wp of mg._mapWaypoints) {
-                if (wp.name && !seen.has(wp.name)) { plannerNames.push(wp.name); seen.add(wp.name); }
-            }
-        }
-        if (Array.isArray(mg._mapSwarms)) {
-            for (const sw of mg._mapSwarms) {
-                for (const loc of (sw.locations || [])) {
-                    if (loc.name && !seen.has(loc.name)) { plannerNames.push(loc.name); seen.add(loc.name); }
-                }
-            }
-        }
-        if (plannerNames.length > 0) {
-            entities = filterPlaces(plannerNames, entityTypes, 'planner waypoints');
-            console.log(`      🎯 Planner waypoints (no MapScene): ${entities.join(', ')}`);
-        } else {
-            // Ultimate fallback — narrow, payload-only (no dict scan, no entities dump).
-            entities = extractEntities(mg, scriptContext);
-            if (entities.length > 0) {
-                console.log(`      📝 Payload fallback: ${entities.join(', ')}`);
-            }
+        // Compiler produced no subjects — narrow payload-only fallback.
+        entities = extractEntities(mg, scriptContext);
+        if (entities.length > 0) {
+            console.log(`      📝 Payload fallback (no MapScene subjects): ${entities.join(', ')}`);
         }
     }
 

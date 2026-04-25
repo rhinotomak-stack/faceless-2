@@ -191,13 +191,14 @@ class MGRenderer {
      * when called from the actual draw path (`warn: true`). Preload helpers stay
      * silent so the warning can't race ahead of render and mislead debugging.
      */
-    _resolveMapData(mg, { warn = false } = {}) {
+    _resolveMapData(mg) {
+        // Slice 6B: MapScene.renderAssets is the sole source of truth.
+        // mg.mgData?._mapScene covers plans loaded from disk where mg was
+        // reconstructed from mgData (subType/styling live on mg, map data on
+        // mgData._mapScene). A missing _mapScene / _ra at render time is a
+        // real error — _renderMapChart logs and bails to fallback bg.
         const ms = mg._mapScene || mg.mgData?._mapScene || null;
         const ra = ms?.renderAssets || null;
-        if (warn && !ms && !this._mapLegacyWarned) {
-            this._mapLegacyWarned = true;
-            console.warn('[MGRenderer] Map scene has no _mapScene — using legacy side-channel fields. This fallback will be removed after Phase C.');
-        }
         return { ms, ra };
     }
 
@@ -209,7 +210,7 @@ class MGRenderer {
         const { ra } = this._resolveMapData(mg);
         // Phase B: filename comes from MapScene.renderAssets when present; the
         // browser-resolved URL still rides on mg (runtime, not build-time data).
-        const file = (ra && ra.mapImageFile) || mg.mapImageFile;
+        const file = ra?.mapImageFile;
         const url = mg._mapImageUrl;
         if (!file || this._mapImages[file] || this._mapImageLoading[file]) return;
         if (!url) return; // URL not yet resolved by app.js
@@ -248,7 +249,7 @@ class MGRenderer {
      */
     _ensureMapIcons(mg) {
         const { ra } = this._resolveMapData(mg);
-        const icons = (ra && ra.icons) || mg._mapIcons;
+        const icons = ra?.icons;
         if (!icons || typeof icons !== 'object') return;
         for (const [name, iconPath] of Object.entries(icons)) {
             const key = `__mapicon_${name}`;
@@ -3536,44 +3537,40 @@ class MGRenderer {
     // ========================================================================
 
     _renderMapChart(ctx, frame, fps, mg, s, anim, scriptContext) {
-        // ── Phase B: resolve the authoritative MapScene + renderAssets once ──
-        // All downstream reads below pull from these locals (not mg._map* / mg.mapImageFile).
-        // When _mapScene is present (new builds), renderAssets is the source of truth.
-        // When it's missing (old plans loaded from disk), the legacy hydration bridge
-        // below still promotes mgData fields onto mg so the fallbacks resolve.
-        const { ms: _mapScene, ra: _ra } = this._resolveMapData(mg, { warn: true });
+        // ── Slice 6B: MapScene.renderAssets is the single source of truth ──
+        // The old hydration bridge + mg._map* side-channel fallbacks are gone.
+        // If _mapScene / renderAssets is missing we log once and render the
+        // fallback-bg path (never crash). Build pipeline is responsible for
+        // attaching the MapScene before render.
+        const { ms: _mapScene, ra: _ra } = this._resolveMapData(mg);
 
-        // Legacy hydration bridge — only useful when _mapScene is missing. Kept
-        // verbatim so old video-plan.json files render identically while the
-        // migration is in flight. Safe to remove after Phase C.
-        const _mgd = mg.mgData || mg;
-        if (!mg._bigMapSize && _mgd._bigMapSize) mg._bigMapSize = _mgd._bigMapSize;
-        if (!mg._mapWaypoints && _mgd._mapWaypoints) mg._mapWaypoints = _mgd._mapWaypoints;
-        if (!mg._wpCoords && _mgd._wpCoords) mg._wpCoords = _mgd._wpCoords;
-        if (!mg._mapBigMap && _mgd._mapBigMap) mg._mapBigMap = _mgd._mapBigMap;
-        if (!mg._osmBoundaries && _mgd._osmBoundaries) mg._osmBoundaries = _mgd._osmBoundaries;
-        if (!mg._mapIcons && _mgd._mapIcons) mg._mapIcons = _mgd._mapIcons;
-        if (!mg._mapSwarms && _mgd._mapSwarms) mg._mapSwarms = _mgd._mapSwarms;
-        if (!mg._mapRoutePath && _mgd._mapRoutePath) mg._mapRoutePath = _mgd._mapRoutePath;
-        if (!mg._mapRouteGeometry && _mgd._mapRouteGeometry) mg._mapRouteGeometry = _mgd._mapRouteGeometry;
-        if (!mg._mapAlternateRouteGeometry && _mgd._mapAlternateRouteGeometry) mg._mapAlternateRouteGeometry = _mgd._mapAlternateRouteGeometry;
-        if (!mg.subType && _mgd.subType) mg.subType = _mgd.subType;
-        if (!mg.mapVariant && _mgd.mapVariant) mg.mapVariant = _mgd.mapVariant;
+        if (!_ra) {
+            if (!this._mapRaMissingLogged) this._mapRaMissingLogged = new Set();
+            const _missingKey = `scene${_mapScene?.sceneIndex ?? mg.sceneIndex ?? '?'}`;
+            if (!this._mapRaMissingLogged.has(_missingKey)) {
+                this._mapRaMissingLogged.add(_missingKey);
+                console.error(`[MGRenderer] map scene=${_mapScene?.sceneIndex ?? mg.sceneIndex ?? '?'} MISSING _mapScene.renderAssets — rendering fallback bg. Build pipeline did not populate MapScene.`);
+            }
+            const { opacity: _opFb, enterProgress: _epFb } = anim;
+            // pal arg is unused inside _renderMapChartFallbackBg (it reads mg.mapStyle directly).
+            this._renderMapChartFallbackBg(ctx, mg, 1920, 1080, _opFb, _epFb, null);
+            return;
+        }
 
-        // ── Unified read surface: prefer MapScene.renderAssets, fall back to mg.* ──
-        // These are the ONLY names used for map-data reads below this block. User-
-        // tunable UI keyframes (mg._mapZoomSpeed, mg._mapPanXStart, etc.) are NOT
-        // MapScene data and continue to read from mg directly.
-        const _mapImageFile  = (_ra && _ra.mapImageFile) || mg.mapImageFile  || null;
-        const _mapView       = (_ra && _ra.mapView)      || mg._mapView      || null;
-        const _mapPins       = (_ra && _ra.mapView && _ra.mapView.pins) || mg._mapPins || [];
-        const _bigMapSize    = (_ra && _ra.bigMapSize)   || mg._bigMapSize   || null;
-        const _mapWaypoints  = (_ra && _ra.waypoints)    || mg._mapWaypoints || null;
-        const _wpCoords      = (_ra && _ra.wpCoords)     || mg._wpCoords     || [];
-        const _mapSwarms     = (_ra && _ra.swarms)       || mg._mapSwarms    || null;
-        const _mapRoutePath  = (_ra && _ra.routePath != null) ? !!_ra.routePath : !!mg._mapRoutePath;
-        const _mapRouteGeometry = (_ra && _ra.routeGeometry) || mg._mapRouteGeometry || null;
-        const _mapAlternateRouteGeometry = (_ra && _ra.alternateRouteGeometry) || mg._mapAlternateRouteGeometry || null;
+        // ── Read surface: all map data comes from renderAssets. User-tunable UI
+        // keyframes (mg._mapZoomSpeed, mg._mapPanXStart, etc.) are NOT MapScene
+        // data and continue to read from mg directly.
+        const _mapImageFile              = _ra.mapImageFile || null;
+        const _mapView                   = _ra.mapView      || null;
+        const _mapPins                   = (_ra.mapView && _ra.mapView.pins) || [];
+        const _bigMapSize                = _ra.bigMapSize   || null;
+        const _mapWaypoints              = _ra.waypoints    || null;
+        const _wpCoords                  = _ra.wpCoords     || [];
+        const _mapSwarms                 = _ra.swarms       || null;
+        const _mapRoutePath              = !!_ra.routePath;
+        const _mapRouteGeometry          = _ra.routeGeometry || null;
+        const _mapAlternateRouteGeometry = _ra.alternateRouteGeometry || null;
+        const _osmBoundaries             = _ra.osmBoundaries || null;
         const { opacity, enterProgress } = anim;
         const W = 1920, H = 1080;
         const elapsed = frame / fps;
@@ -3750,7 +3747,7 @@ class MGRenderer {
         // ── Determine map view (center + zoom) ──
         const cinematicMode = mg._mapCinematic || false;
         const sceneVariant = _mapScene?.mapMode === 'region' ? 'regionHighlight' : _mapScene?.mapMode;
-        const variant = mg.subType || mg.mapVariant || _mgd.subType || _mgd.mapVariant || sceneVariant || 'standard';
+        const variant = mg.subType || mg.mapVariant || sceneVariant || 'standard';
         const multiPin = _mapPins.length >= 2;
 
         // ── Keyframe time (shared by tilt + zoom) ──
@@ -3820,21 +3817,63 @@ class MGRenderer {
                         endTime: st.endTime,
                         icon: null,
                     }));
+                if (!this._stopsLogged) this._stopsLogged = new Set();
+                const _sceneKey = `scene${_mapScene.sceneIndex ?? mg.sceneIndex ?? '?'}`;
                 if (_wpsFromStops.length > 0) {
                     _waypoints = _wpsFromStops;
                     _stopsDrivenCamera = true;
-                    if (!this._stopsLogged) this._stopsLogged = new Set();
                     // Dedupe by compiler-set sceneIndex on _mapScene, not mg.sceneIndex
                     // — mg.sceneIndex is preview-undefined, which collapses every map
                     // scene into a single `scene?` key and suppresses subsequent logs.
-                    const _sceneKey = `scene${_mapScene.sceneIndex ?? mg.sceneIndex ?? '?'}`;
                     if (!this._stopsLogged.has(_sceneKey)) {
                         this._stopsLogged.add(_sceneKey);
                         console.log(`[MGRenderer] map scene=${_mapScene.sceneIndex ?? mg.sceneIndex ?? '?'} using cameraPlan.stops (${_wpsFromStops.length} stops, mode=${_mapScene.mapMode || '?'})`);
                     }
+                } else {
+                    // Stops array was present but every entry failed validation.
+                    // Log once so Slice 6 cleanup can spot silent rejections.
+                    const _rejectKey = `reject-${_sceneKey}`;
+                    if (!this._stopsLogged.has(_rejectKey)) {
+                        this._stopsLogged.add(_rejectKey);
+                        console.log(`[MGRenderer] map scene=${_mapScene.sceneIndex ?? mg.sceneIndex ?? '?'} cameraPlan.stops REJECTED (${_stops.length} raw stops, 0 passed validation) — falling back to legacy bbox-fit`);
+                    }
+                }
+            } else if (_mapScene && _mapScene.cameraPlan && _mapScene.cameraPlan.stops === null) {
+                // Provider explicitly set stops=null (e.g. establish-collapse failed).
+                // Not an error — legacy path was always the intended fallback — but log
+                // once per scene so Slice 6 cleanup can confirm every map scene's path.
+                if (!this._stopsLogged) this._stopsLogged = new Set();
+                const _sceneKey = `scene${_mapScene.sceneIndex ?? mg.sceneIndex ?? '?'}`;
+                const _nullKey = `null-${_sceneKey}`;
+                if (!this._stopsLogged.has(_nullKey)) {
+                    this._stopsLogged.add(_nullKey);
+                    console.log(`[MGRenderer] map scene=${_mapScene.sceneIndex ?? mg.sceneIndex ?? '?'} cameraPlan.stops=null (provider opted out) — using legacy bbox-fit (mode=${_mapScene.mapMode || '?'})`);
                 }
             }
-        } catch (_) { /* fall through to legacy _waypoints */ }
+        } catch (err) {
+            // Log so we know if a render-time exception silently downgraded to legacy.
+            console.log(`[MGRenderer] map scene=${_mapScene?.sceneIndex ?? mg.sceneIndex ?? '?'} cameraPlan.stops threw: ${err?.message || err} — falling back to legacy bbox-fit`);
+        }
+
+        // ── Slice 6A: one-shot per-scene summary log ──
+        // Confirms for every fullscreen map scene: did renderAssets exist, did stops
+        // drive the camera, raw stop count, compiler mode, and whether the legacy
+        // side-channel fallback path was used. Deduped by sceneIndex so replay doesn't
+        // flood the log. Only emitted for fullscreen map MGs (subType === 'mapChart').
+        try {
+            if (!this._mapSceneSummaryLogged) this._mapSceneSummaryLogged = new Set();
+            const _summaryIdx = _mapScene?.sceneIndex ?? mg.sceneIndex ?? null;
+            const _summaryKey = `summary-scene${_summaryIdx ?? '?'}`;
+            if (_summaryIdx != null && !this._mapSceneSummaryLogged.has(_summaryKey)) {
+                this._mapSceneSummaryLogged.add(_summaryKey);
+                const _rawStopCount = Array.isArray(_mapScene?.cameraPlan?.stops)
+                    ? _mapScene.cameraPlan.stops.length : 0;
+                const _usedRA = !!_ra;
+                const _fellBack = !_ra;
+                console.log(`[MGRenderer] map scene=${_summaryIdx} summary: usedRenderAssets=${_usedRA} usedStops=${_stopsDrivenCamera} stopCount=${_rawStopCount} mode=${_mapScene?.mapMode || '?'} fellBackToSideChannel=${_fellBack}`);
+            }
+        } catch (_summaryErr) { /* never let logging break render */ }
+
         // `_wpCoords` is already resolved at the top — no redeclaration.
         let activeWpIdx = -1, wpTransition = 0, wpCamX = IMG_W / 2, wpCamY = IMG_H / 2;
         let prevWpIdx = -1;
@@ -4255,7 +4294,7 @@ class MGRenderer {
         // ── 2b. Country polygon fills (Natural Earth land boundaries — no maritime zones) ──
         const preloaded = mg._countryFeatures || [];
         const countryGeo = window._countryGeoJSON;
-        const osmBounds = mg._osmBoundaries || [];
+        const osmBounds = _osmBoundaries || [];
 
         const boundaryFeatures = [];
         const _boundaryMatched = new Set(); // lowercased names already covered

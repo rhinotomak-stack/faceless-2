@@ -76,6 +76,21 @@ function _getNicheBaseline(nicheId) {
     return NICHE_BASELINE[nicheId] || { baseline: 'can_map', budget: 3 };
 }
 
+function _nicheAllowsMapChart(scriptContext, nicheCfg = null) {
+    const nicheId = scriptContext?.nicheId || 'general';
+    const cfg = nicheCfg || (() => {
+        try {
+            const { getNiche } = require('./niches');
+            return getNiche(nicheId);
+        } catch (err) {
+            return null;
+        }
+    })();
+    const allowedMGs = Array.isArray(cfg?.allowedMGs) ? cfg.allowedMGs : [];
+    if (allowedMGs.length === 0) return true;
+    return allowedMGs.includes('mapChart');
+}
+
 // Return the place entities that actually appear in the scene text, in
 // document order of the text (so the first-mentioned place is first). Keeps
 // the original casing from the entity list so downstream map parsers can
@@ -193,6 +208,8 @@ function assignMapDispositions(scenes, scriptContext, styleProfile = null, niche
     if (!Array.isArray(scenes)) return [];
     const nicheId = scriptContext?.nicheId || 'general';
     const { baseline, budget } = _getNicheBaseline(nicheId);
+    const mapChartAllowed = _nicheAllowsMapChart(scriptContext, nicheCfg);
+    const effectiveBudget = mapChartAllowed ? budget : 0;
     const placeEntities = _placeLikeEntities(scriptContext || {});
 
     const dispositions = scenes.map(scene => {
@@ -204,6 +221,14 @@ function assignMapDispositions(scenes, scriptContext, styleProfile = null, niche
         const placeCount = matchedPlaces.length;
 
         const signals = { zone, spatialVerb, abstractMarker, placeCount, matchedPlaces, nicheBaseline: baseline, sceneText: text };
+
+        // The niche allowlist is the top-level authority. If mapChart is not in
+        // allowedMGs, do not let geography, user map preferences, or route text
+        // create a must_map/can_map disposition. The planner can still use
+        // footage, web-image route references, overlays, or templates.
+        if (!mapChartAllowed) {
+            return { sceneIndex: scene.index, disposition: 'must_not_map', reason: `niche allowlist (${nicheId}) excludes mapChart`, signals };
+        }
 
         // must_not_map wins over everything:
         //   CTA zone, quote-only text, abstract framing, and zero named places
@@ -243,7 +268,7 @@ function assignMapDispositions(scenes, scriptContext, styleProfile = null, niche
     // named places + no spatial verb.
     const mustMapCount = dispositions.filter(d => d.disposition === 'must_map').length;
     const canMapCount = dispositions.filter(d => d.disposition === 'can_map').length;
-    const remainingBudget = Math.max(0, budget - mustMapCount);
+    const remainingBudget = Math.max(0, effectiveBudget - mustMapCount);
     if (canMapCount > remainingBudget) {
         const canMapRanked = dispositions
             .filter(d => d.disposition === 'can_map')
@@ -255,7 +280,7 @@ function assignMapDispositions(scenes, scriptContext, styleProfile = null, niche
         const toDowngrade = canMapRanked.slice(0, canMapCount - remainingBudget);
         for (const d of toDowngrade) {
             d.disposition = 'must_not_map';
-            d.reason = `downgraded — niche budget ${budget} exceeded`;
+            d.reason = `downgraded — niche budget ${effectiveBudget} exceeded`;
         }
     }
 
@@ -269,13 +294,15 @@ function assignMapDispositions(scenes, scriptContext, styleProfile = null, niche
 function logDispositions(dispositions, scriptContext) {
     const nicheId = scriptContext?.nicheId || 'general';
     const { baseline, budget } = _getNicheBaseline(nicheId);
+    const mapChartAllowed = _nicheAllowsMapChart(scriptContext);
+    const effectiveBudget = mapChartAllowed ? budget : 0;
     const counts = { must_map: 0, can_map: 0, must_not_map: 0 };
     for (const d of dispositions) counts[d.disposition]++;
 
     console.log('\n════════════════════════════════════════════════════════════');
     console.log('🗺️  Map Assignment (deterministic)');
     console.log('════════════════════════════════════════════════════════════');
-    console.log(`   Niche policy: ${nicheId}  baseline=${baseline}  budget=${budget}`);
+    console.log(`   Niche policy: ${nicheId}  baseline=${baseline}  budget=${effectiveBudget}  mapChart=${mapChartAllowed ? 'allowed' : 'forbidden-by-allowedMGs'}`);
     console.log(`   ${dispositions.length} scenes analyzed → must_map=${counts.must_map}  can_map=${counts.can_map}  must_not_map=${counts.must_not_map}`);
     console.log('');
     for (const d of dispositions) {

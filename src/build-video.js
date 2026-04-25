@@ -1620,7 +1620,12 @@ async function buildVideo() {
             log.br();
         }
 
-        // Propagate map data from allMGs to mgScenes (mgScenes are copies)
+        // Slice 6B: propagate MapScene from allMGs to mgScenes. MapScene.renderAssets
+        // is the single source of truth — all legacy side-channel writes (_mapWaypoints,
+        // _mapView, _osmBoundaries, etc.) were dropped; the renderer + QA context both
+        // read from _mapScene.renderAssets now. We still copy mapImageFile + subType +
+        // mapVariant onto the target because those are plan-level fields consumed by
+        // the preview and app.js outside the map data contract.
         for (const mg of fullscreenMGs) {
             if (mg.type !== 'mapChart') continue;
             const target = mgScenes.find(s => s.type === mg.type && s.startTime === mg.startTime);
@@ -1634,34 +1639,7 @@ async function buildVideo() {
                 if (effectiveVariant && !target.mgData.subType) target.mgData.subType = effectiveVariant;
                 if ((mg.mapVariant || modeVariant) && !target.mgData.mapVariant) target.mgData.mapVariant = mg.mapVariant || modeVariant;
             }
-            if (mg.mapImageFile) {
-                target.mapImageFile = mg.mapImageFile;
-                target._mapView = mg._mapView;
-                if (mg._mapPins) target._mapPins = mg._mapPins;
-                if (mg._osmBoundaries) target._osmBoundaries = mg._osmBoundaries;
-            }
-            // Waypoint animation data (materialized from MapScene in map-provider.js)
-            if (mg._mapWaypoints) target._mapWaypoints = mg._mapWaypoints;
-            if (mg._bigMapSize) target._bigMapSize = mg._bigMapSize;
-            if (mg._wpCoords) target._wpCoords = mg._wpCoords;
-            if (mg._mapBigMap) target._mapBigMap = mg._mapBigMap;
-            if (mg._mapIcons) target._mapIcons = mg._mapIcons;
-            if (mg._mapSwarms) target._mapSwarms = mg._mapSwarms;
-            if (mg._mapRoutePath) {
-                target._mapRoutePath = mg._mapRoutePath;
-                if (target.mgData) target.mgData._mapRoutePath = mg._mapRoutePath;
-            }
-            if (mg._mapRouteGeometry) {
-                target._mapRouteGeometry = mg._mapRouteGeometry;
-                if (target.mgData) target.mgData._mapRouteGeometry = mg._mapRouteGeometry;
-            }
-            if (mg._mapAlternateRouteGeometry) {
-                target._mapAlternateRouteGeometry = mg._mapAlternateRouteGeometry;
-                if (target.mgData) target.mgData._mapAlternateRouteGeometry = mg._mapAlternateRouteGeometry;
-            }
-            // Phase B prep: the authoritative MapScene (subjects, cameraPlan,
-            // annotationPlan, geometry, renderAssets) rides along on the scene
-            // so the renderer can consume it directly in the next slice.
+            if (mg.mapImageFile) target.mapImageFile = mg.mapImageFile;
             if (mg._mapScene) target._mapScene = mg._mapScene;
         }
     }

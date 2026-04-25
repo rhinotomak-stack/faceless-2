@@ -593,7 +593,7 @@ async function createWindow() {
     // Forward renderer console messages to main process log (critical for diagnostics)
     mainWindow.webContents.on('console-message', (event, level, message, line, sourceId) => {
         // level: 0=verbose, 1=info, 2=warning, 3=error
-        if (level >= 2 || message.includes('✅') || message.includes('❌') || message.includes('Restored project') || message.includes('No saved project') || message.includes('[PreCache]')) {
+        if (level >= 2 || message.includes('✅') || message.includes('❌') || message.includes('Restored project') || message.includes('No saved project') || message.includes('[PreCache]') || message.includes('[MGRenderer]')) {
             const prefix = level >= 3 ? '[RENDERER ERROR]' : level >= 2 ? '[RENDERER WARN]' : '[RENDERER]';
             console.log(`${prefix} ${message}`);
         }

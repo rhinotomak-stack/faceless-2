@@ -352,15 +352,238 @@ function _sceneTagString(scene, scenes, scriptContext) {
     return tags.join(', ');
 }
 
+// Deterministic scene-role classifier. Returns a primary editorial role plus
+// hard structural flags the planner prompt can show as CONSTRAINTS — so the
+// AI doesn't have to re-derive them and we don't have to fix bad lane picks
+// downstream. Logic only uses already-derived signals + niche/mapPolicy +
+// scene class — no extra AI cost.
+const _NEWS_ACTOR_RE = /\b(iran|russia|houthi|hamas|idf|nato|ukraine|israel|china|north korea|hezbollah|taliban|isis|kremlin|pentagon|cia|fbi|saudi|riyadh|tehran|moscow|beijing|kyiv|gaza|west bank)\b/i;
+const _NEWS_VERB_RE  = /\b(navy|forces|strike|patrol|attack|invasion|missile|drone|blockade|sanctions?|airstrike|offensive|deploy|launches?|launch(?:ed|ing)?|deploy(?:ed|ing|ment)?|fired|incursion|ceasefire|treaty|summit)\b/i;
+const _ROUTE_RE      = /\b(route|corridor|pipeline|shipping|trade|strait|canal|advance|march|movement|expansion|invasion path|push toward|drove from|sailed from|traveled from|from\s+\w+\s+to\s+\w+)\b/i;
+const _REGION_RE     = /\b(region|territory|empire|throughout|across the|all over|continent|peninsula|eastern|western|northern|southern)\b/i;
+const _COMPARISON_RE = /\b(versus|vs\.?|compared to|side by side|contrast|in contrast|while .* by contrast)\b/i;
+const _PRODUCT_DEMO_RE = /\b(launch|unveil|release|reveal|demo|new model|ces|keynote|reveal event|showcase)\b/i;
+
+function _deriveSceneRoles(scene, signals, scriptContext, niche, mapPolicy) {
+    const text = String(scene.text || '');
+    const lower = text.toLowerCase();
+    const allowedMGs = (niche && Array.isArray(niche.allowedMGs)) ? niche.allowedMGs : [];
+    const nicheAllowsMap = allowedMGs.includes('mapChart');
+    const nicheAllowsTimeline = allowedMGs.includes('timeline');
+    const nicheAllowsBars = allowedMGs.includes('barChart') || allowedMGs.includes('donutChart') || allowedMGs.includes('rankingList');
+    const nicheAllowsStatOverlay = allowedMGs.includes('statCounter');
+    const nicheAllowsAnyStat = nicheAllowsBars || nicheAllowsStatOverlay;
+    const nicheAllowsTypography = allowedMGs.includes('focusWord') || allowedMGs.includes('kineticText');
+    const isNewsActor = _NEWS_ACTOR_RE.test(lower) && _NEWS_VERB_RE.test(lower);
+    const phase = signals.phase;
+
+    // Map mode resolution (only meaningful when hasMapCandidate)
+    let mapMode = null;
+    if (signals.hasMapCandidate) {
+        if (_COMPARISON_RE.test(lower) && signals.places.length >= 2) {
+            mapMode = 'comparison';
+        } else if (_ROUTE_RE.test(lower) && signals.places.length >= 1) {
+            mapMode = 'route';
+        } else if (_REGION_RE.test(lower) || (signals.places.length === 1 && /\b(across|through|within|inside)\b/.test(lower))) {
+            mapMode = 'region';
+        } else {
+            mapMode = 'locator';
+        }
+        if (mapPolicy && Array.isArray(mapPolicy.preferredModes) && mapPolicy.preferredModes.length > 0) {
+            // Tie-break ambiguous → niche's preferred mode
+            const ambiguous = (mapMode === 'locator' && signals.places.length >= 2 && !_ROUTE_RE.test(lower) && !_COMPARISON_RE.test(lower));
+            if (ambiguous) mapMode = mapPolicy.preferredModes[0];
+        }
+    }
+
+    // Hard map flags. Hook + CTA scenes always block fullscreen map graphics —
+    // hooks need real grabby visuals, CTAs need closing footage. Niche allowlist
+    // also gates this. mapAllowed and mapForbidden must stay mutually exclusive.
+    const mapForbidden = !nicheAllowsMap || phase === 'cta' || phase === 'hook';
+    const mapAllowed = signals.hasMapCandidate && !mapForbidden;
+    const mapPreferred = mapAllowed && (
+        signals.places.length >= 2 ||
+        _ROUTE_RE.test(lower) ||
+        (isNewsActor && signals.places.length >= 1)
+    );
+
+    // Class block of map: scene class may explicitly block 'map'
+    const classBlocked = new Set(scene.treatmentHint?.blocked || []);
+    const mapBlockedByClass = classBlocked.has('map');
+
+    // Stock appropriateness
+    const stockInappropriate = (
+        isNewsActor ||
+        (signals.primaryPerson != null) ||
+        signals.hasMapCandidate ||
+        (niche?.id?.startsWith?.('news')) ||
+        (signals.hasNumeric && signals.likelyDataImage)
+    ) && !signals.isAbstractMood;
+
+    // Fullscreen MG framing
+    const fullscreenAllowed = phase !== 'hook' && phase !== 'cta';
+    const fullscreenDiscouraged = phase === 'hook' || phase === 'cta' || (signals.likelyAction && !signals.hasNumeric);
+
+    // Allowed MG families this scene can SUPPORT (not what to USE — what is editorial-fit)
+    const allowedMGFamilies = [];
+    if (mapAllowed && !mapBlockedByClass) allowedMGFamilies.push('map');
+    if (signals.hasNumeric && nicheAllowsAnyStat) allowedMGFamilies.push('data');
+    if (signals.hasQuote) allowedMGFamilies.push('callout');
+    if (signals.firstPersonIntro) allowedMGFamilies.push('intro');
+    if (signals.isAbstractMood && nicheAllowsTypography && phase !== 'hook' && phase !== 'cta') allowedMGFamilies.push('typography');
+    if (allowedMGFamilies.length === 0 && fullscreenAllowed) allowedMGFamilies.push('overlay-only');
+
+    // Preferred source family
+    let preferredSourceFamily = null;
+    if (signals.firstPersonIntro || signals.primaryPerson) preferredSourceFamily = 'web-image-portrait';
+    else if (signals.likelyDataImage && !signals.hasMapCandidate) preferredSourceFamily = 'web-image-data';
+    else if (signals.hasMapCandidate && mapAllowed) preferredSourceFamily = 'mapChart';
+    else if (isNewsActor) preferredSourceFamily = 'real-footage';
+    else if (signals.likelyAction) preferredSourceFamily = 'real-footage';
+    else if (signals.isAbstractMood) preferredSourceFamily = 'stock-mood';
+
+    // Primary role
+    let role = 'generic';
+    if (mapPreferred && !mapBlockedByClass) {
+        if (mapMode === 'route') role = 'geo-route';
+        else if (mapMode === 'region') role = 'geo-region';
+        else if (mapMode === 'comparison') role = 'geo-compare';
+        else role = 'geo-establish';
+    } else if (signals.firstPersonIntro) {
+        role = 'person-intro';
+    } else if (signals.hasQuote) {
+        role = 'quote-beat';
+    } else if (signals.hasNumeric && signals.numericTokens.length >= 2) {
+        role = 'stat-beat';
+    } else if (isNewsActor) {
+        role = 'escalation-news';
+    } else if (_PRODUCT_DEMO_RE.test(lower) && (niche?.id?.startsWith?.('news.tech') || niche?.id?.startsWith?.('explainer.tech'))) {
+        role = 'product-demo';
+    } else if (signals.isAbstractMood) {
+        role = 'abstract-breathing-room';
+    } else if (!signals.likelyAction && !signals.likelyDataImage && !signals.hasMapCandidate && signals.matchedEntities.length === 0) {
+        role = 'concept-explainer';
+    }
+
+    return {
+        role,
+        mapMode,
+        mapAllowed: mapAllowed && !mapBlockedByClass,
+        mapForbidden: mapForbidden || mapBlockedByClass,
+        mapPreferred: mapPreferred && !mapBlockedByClass,
+        fullscreenAllowed,
+        fullscreenDiscouraged,
+        stockInappropriate,
+        preferredSourceFamily,
+        allowedMGFamilies,
+        isNewsActor,
+    };
+}
+
+function _renderSceneConstraintLine(scene, scenes, scriptContext, niche, mapPolicy) {
+    const signals = _deriveSceneSignals(scene, scenes, scriptContext);
+    const roles = _deriveSceneRoles(scene, signals, scriptContext, niche, mapPolicy);
+    const parts = [`ROLE=${roles.role}`];
+    if (roles.mapForbidden) {
+        parts.push('MAP=forbidden');
+    } else if (roles.mapPreferred) {
+        parts.push(`MAP=preferred:${roles.mapMode}`);
+    } else if (roles.mapAllowed) {
+        parts.push(`MAP=allowed:${roles.mapMode || 'locator'}`);
+    } else {
+        parts.push('MAP=n/a');
+    }
+    parts.push(`FS-MG=${roles.fullscreenDiscouraged ? 'discouraged' : (roles.fullscreenAllowed ? 'allowed' : 'forbidden')}`);
+    parts.push(`STOCK=${roles.stockInappropriate ? 'disallowed' : 'ok'}`);
+    if (roles.preferredSourceFamily) parts.push(`SRC=${roles.preferredSourceFamily}`);
+    if (roles.allowedMGFamilies.length > 0) parts.push(`MG-FAMILIES=${roles.allowedMGFamilies.join('+')}`);
+    return parts.join(' | ');
+}
+
+function _getNicheAllowedMGs(nicheId) {
+    try {
+        const { getNiche } = require('./niches');
+        const niche = getNiche(nicheId || 'general');
+        return Array.isArray(niche?.allowedMGs) ? niche.allowedMGs : [];
+    } catch (err) {
+        return [];
+    }
+}
+
+function _nicheAllowsMapChartById(nicheId) {
+    const allowedMGs = _getNicheAllowedMGs(nicheId);
+    if (allowedMGs.length === 0) return true;
+    return allowedMGs.some(type => String(type).toLowerCase() === 'mapchart');
+}
+
+function _fullscreenMGType(value) {
+    if (!value || typeof value !== 'string') return null;
+    const raw = value.split(':')[0].trim();
+    return raw || null;
+}
+
+function _snapshotRawAIChoice(scene) {
+    if (scene._aiChose) return;
+    scene._aiChose = {
+        templateHint: scene.templateHint ? String(scene.templateHint).split(':')[0].trim() : null,
+        fullscreenMG: scene.fullscreenMG ? String(scene.fullscreenMG).split(':')[0].trim() : null,
+        mgHint: scene.mgHint ? String(scene.mgHint).split(':')[0].trim() : null,
+        sourceHint: scene.sourceHint || null,
+        mediaType: scene.mediaType || null,
+        framing: scene.framing || null,
+    };
+}
+
+function _restoreFootageAfterFullscreenDrop(scene, nicheId, plannerDirectives = null) {
+    if (!scene.keyword || scene.keyword === 'none') {
+        scene.keyword = extractFallbackKeyword(scene.text || '');
+    }
+    scene.mediaType = scene.mediaType || 'video';
+    scene.sourceHint = scene.sourceHint || _pickPreferredVideoSource(nicheId || 'general', plannerDirectives, 'stock');
+    scene.stockQuery = scene.stockQuery || _autoStockQuery(scene.keyword);
+    scene.webQuery = scene.webQuery || _autoWebQuery(scene.keyword, scene.sourceHint);
+    scene.visualIntent = scene.visualIntent || scene.keyword;
+}
+
+function _dropForbiddenMapChart(scene, nicheId, plannerDirectives = null, restoreFootage = false) {
+    const fsType = _fullscreenMGType(scene.fullscreenMG);
+    if (!fsType || !fsType.toLowerCase().startsWith('map')) return null;
+    if (_nicheAllowsMapChartById(nicheId)) return null;
+
+    const before = scene.fullscreenMG;
+    scene.fullscreenMG = null;
+    scene.mapVariant = null;
+    scene._nicheMapDrop = { before, reason: `niche ${nicheId || 'general'} excludes mapChart` };
+    if (restoreFootage) {
+        _restoreFootageAfterFullscreenDrop(scene, nicheId, plannerDirectives);
+    }
+    return { index: scene.index, before, after: scene.keyword || 'footage fallback', reason: scene._nicheMapDrop.reason };
+}
+
+function _enforceNicheMapChartBan(scenes, nicheId, plannerDirectives = null) {
+    if (_nicheAllowsMapChartById(nicheId)) return [];
+    const fixes = [];
+    for (const scene of scenes || []) {
+        const fix = _dropForbiddenMapChart(scene, nicheId, plannerDirectives, true);
+        if (fix) fixes.push(fix);
+    }
+    return fixes;
+}
+
 function _renderPlannerDirectiveBlock(plannerDirectives, scriptContext) {
     const lines = [];
     const { user, style } = plannerDirectives;
+    const nicheAllowsMapChart = _nicheAllowsMapChartById(scriptContext?.nicheId || 'general');
 
     if (user.hasUserDirectives) {
         lines.push('VISUAL COMPLIANCE RULES (deterministic, must respect these):');
         if (user.avoidStock) lines.push('- Avoid stock unless the scene is pure abstract mood with no real entity/event.');
         if (user.preferRealFootage) lines.push('- Favor real footage sources over generic stock whenever the scene allows it.');
-        if (user.preferMaps) lines.push('- For geographic / route / chokepoint scenes, prefer maps or route visuals over generic footage.');
+        if (user.preferMaps) {
+            lines.push(nicheAllowsMapChart
+                ? '- For geographic / route / chokepoint scenes, prefer maps or route visuals over generic footage.'
+                : '- User asked for map/route visuals, but this niche forbids mapChart; use web-image route references, real footage, templates, or overlays instead. Never output fullscreenMG=mapChart.');
+        }
         if (user.preferredSources.length > 0) lines.push(`- Preferred sources when they fit: ${user.preferredSources.join(', ')}.`);
         if (user.bannedSources.size > 0) lines.push(`- Avoid these sources when alternatives exist: ${[...user.bannedSources].join(', ')}.`);
         if (user.preferredFraming) lines.push(`- Preferred framing bias: ${user.preferredFraming}.`);
@@ -409,6 +632,7 @@ function buildGlobalOutlinePrompt(scenes, scriptContext, directorsBrief, planner
     const nicheId = scriptContext.nicheId || 'general';
     const { getNiche } = require('./niches');
     const niche = getNiche(nicheId);
+    const nicheAllowsMapChart = _nicheAllowsMapChartById(nicheId);
     const { user, style } = plannerDirectives;
 
     const sceneList = scenes.map(scene => {
@@ -420,7 +644,11 @@ function buildGlobalOutlinePrompt(scenes, scriptContext, directorsBrief, planner
     const directiveLines = [];
     if (user.hasUserDirectives) {
         directiveLines.push(`- User instructions: ${user.raw}`);
-        if (user.preferMaps) directiveLines.push('- User wants maps / route visuals when they fit.');
+        if (user.preferMaps) {
+            directiveLines.push(nicheAllowsMapChart
+                ? '- User wants maps / route visuals when they fit.'
+                : '- User asked for map/route visuals, but mapChart is forbidden by this niche; use route footage, web-image references, templates, or overlays instead.');
+        }
         if (user.preferTemplates) directiveLines.push('- User wants more template/card usage when editorially justified.');
         if (user.preferGraphics) directiveLines.push('- User is open to more graphics when the narration benefits.');
         if (user.avoidFullscreenMG) directiveLines.push('- User prefers fewer fullscreen graphics.');
@@ -604,6 +832,12 @@ function _buildMapKeyword(scene, signals, scriptContext) {
 }
 
 function _pickPreferredVideoSource(nicheId, plannerDirectives, fallback = 'youtube') {
+    plannerDirectives = plannerDirectives || {};
+    plannerDirectives.user = plannerDirectives.user || {};
+    plannerDirectives.user.preferredSources = plannerDirectives.user.preferredSources || [];
+    if (!(plannerDirectives.user.bannedSources instanceof Set)) {
+        plannerDirectives.user.bannedSources = new Set(plannerDirectives.user.bannedSources || []);
+    }
     const { getNiche } = require('./niches');
     const niche = getNiche(nicheId || 'general');
     const videoPriority = niche.footagePriority?.video || [fallback];
@@ -851,6 +1085,7 @@ function _applyPlannerCompliance(scenes, scriptContext, directorsBrief, plannerD
     if (changeParts.length > 0) {
         console.log(`   🧭 Planner compliance: ${changeParts.join(' | ')}`);
     }
+    return stats;
 }
 
 function _finalizeVisualPlan(enrichedScenes, scriptContext, directorsBrief, plannerDirectives) {
@@ -876,7 +1111,7 @@ function _finalizeVisualPlan(enrichedScenes, scriptContext, directorsBrief, plan
         }
     }
 
-    _applyPlannerCompliance(enrichedScenes, scriptContext, directorsBrief, plannerDirectives);
+    const complianceStats = _applyPlannerCompliance(enrichedScenes, scriptContext, directorsBrief, plannerDirectives) || {};
 
     _enforceVideoRatio(enrichedScenes, scriptContext.nicheId);
 
@@ -975,6 +1210,18 @@ function _finalizeVisualPlan(enrichedScenes, scriptContext, directorsBrief, plan
         }
     }
 
+    // Final niche map gate. Parser-time stripping catches raw AI output; this
+    // pass catches later compliance/class rewrites that might reintroduce a
+    // map lane after the parse step.
+    const nicheMapFixes = _enforceNicheMapChartBan(enrichedScenes, scriptContext.nicheId, plannerDirectives);
+    if (nicheMapFixes.length > 0) {
+        console.log(`   Niche map compliance: stripped ${nicheMapFixes.length} forbidden mapChart scene(s):`);
+        for (const f of nicheMapFixes) {
+            console.log(`      Scene ${f.index}: "${f.before}" -> "${f.after}" (${f.reason})`);
+        }
+    }
+    const nicheMapDrops = enrichedScenes.filter(s => s._nicheMapDrop).length;
+
     // ── Global Source Diversity ──
     // Run ONCE across the full scene list (was per-batch, which missed
     // cross-chunk skew: e.g. 3 batches each 50% youtube = 50% youtube globally
@@ -984,17 +1231,51 @@ function _finalizeVisualPlan(enrichedScenes, scriptContext, directorsBrief, plan
     // ── Planner compliance summary ──
     // Distinguish "AI chose this" from "we corrected it" so it's visible whether
     // the model is actually planning, or the guardrails are doing the work.
-    const summary = _buildPlannerSummary(enrichedScenes, ctaGuardStripped);
+    // Loss counters surface every place an AI choice was overridden — high values
+    // mean the prompt isn't landing and the guardrails are doing the planning.
+    const summary = _buildPlannerSummary(enrichedScenes, {
+        ctaGuardStripped,
+        kwViolations: kwViolations.length,
+        typoFixes: typoFixes.length,
+        classFixes: classFixes.length,
+        nicheMapDrops,
+        sourceOverrides: complianceStats.sourceOverrides || 0,
+        mapOverrides: complianceStats.mapOverrides || 0,
+        framingOverrides: complianceStats.framingOverrides || 0,
+        styleMixAdjusted: complianceStats.styleMixAdjusted || 0,
+        graphicsInjected: complianceStats.graphicsInjected || 0,
+        graphicsTrimmed: complianceStats.graphicsTrimmed || 0,
+    });
     console.log(summary);
 
     return enrichedScenes;
 }
 
-function _buildPlannerSummary(scenes, ctaGuardStripped = 0) {
+function _buildPlannerSummary(scenes, lossBag = {}) {
+    // Backward-compat: previous callers passed (scenes, ctaGuardStripped:number).
+    // Normalize that into the lossBag shape used below.
+    if (typeof lossBag === 'number') lossBag = { ctaGuardStripped: lossBag };
+    const {
+        ctaGuardStripped = 0,
+        kwViolations = 0,
+        typoFixes = 0,
+        classFixes = 0,
+        nicheMapDrops = 0,
+        sourceOverrides = 0,
+        mapOverrides = 0,
+        framingOverrides = 0,
+        styleMixAdjusted = 0,
+        graphicsInjected = 0,
+        graphicsTrimmed = 0,
+    } = lossBag;
+
     const total = scenes.length;
     let aiTpl = 0, aiFS = 0, aiMg = 0;
     let finalTpl = 0, finalFS = 0, finalMg = 0;
     let sourceChanges = 0, mediaChanges = 0, framingChanges = 0;
+    let aiMapProposed = 0, mapDropped = 0, mapAdded = 0;
+    let templateAdded = 0, templateDropped = 0;
+    let fullscreenAdded = 0, fullscreenDropped = 0;
     const sourceCounts = {};
     for (const s of scenes) {
         const ai = s._aiChose || {};
@@ -1004,6 +1285,19 @@ function _buildPlannerSummary(scenes, ctaGuardStripped = 0) {
         if (s.templateHint) finalTpl++;
         if (s.fullscreenMG) finalFS++;
         if (s.mgHint) finalMg++;
+
+        // Lane-specific loss accounting.
+        const finalFsType = s.fullscreenMG ? String(s.fullscreenMG).split(':')[0].trim() : null;
+        const aiIsMap     = typeof ai.fullscreenMG === 'string' && ai.fullscreenMG.toLowerCase().startsWith('map');
+        const finalIsMap  = finalFsType && finalFsType.toLowerCase().startsWith('map');
+        if (aiIsMap) aiMapProposed++;
+        if (aiIsMap && !finalIsMap) mapDropped++;
+        if (!aiIsMap && finalIsMap) mapAdded++;
+        if (ai.templateHint && !s.templateHint) templateDropped++;
+        if (!ai.templateHint && s.templateHint) templateAdded++;
+        if (ai.fullscreenMG && !s.fullscreenMG) fullscreenDropped++;
+        if (!ai.fullscreenMG && s.fullscreenMG) fullscreenAdded++;
+
         if (ai.sourceHint && s.sourceHint && ai.sourceHint !== s.sourceHint) sourceChanges++;
         if (ai.mediaType && s.mediaType && ai.mediaType !== s.mediaType) mediaChanges++;
         if (ai.framing && s.framing && ai.framing !== s.framing) framingChanges++;
@@ -1014,8 +1308,36 @@ function _buildPlannerSummary(scenes, ctaGuardStripped = 0) {
         .sort((a, b) => b[1] - a[1])
         .map(([k, v]) => `${k}:${v}`)
         .join(', ');
-    const corr = sourceChanges + mediaChanges + framingChanges + ctaGuardStripped;
-    return `   📊 [Planner Summary] ${total} scenes — AI-chose: tpl=${aiTpl} fs-mg=${aiFS} ov-mg=${aiMg} | final: tpl=${finalTpl} fs-mg=${finalFS} ov-mg=${finalMg} | corrections=${corr} (src=${sourceChanges} media=${mediaChanges} framing=${framingChanges} cta-guard=${ctaGuardStripped}) | sources: {${dist}}`;
+    const corr = sourceChanges + mediaChanges + framingChanges + ctaGuardStripped + kwViolations + typoFixes + classFixes + nicheMapDrops;
+
+    // Loss bag — counts every place an AI choice was rewritten, dropped, or
+    // injected by a guard. High totals here mean the prompt isn't landing and
+    // the guardrails are silently authoring the plan.
+    const lossParts = [];
+    if (mapDropped > 0)        lossParts.push(`map-dropped=${mapDropped}`);
+    if (mapAdded > 0)          lossParts.push(`map-added=${mapAdded}`);
+    if (templateDropped > 0)   lossParts.push(`tpl-dropped=${templateDropped}`);
+    if (templateAdded > 0)     lossParts.push(`tpl-added=${templateAdded}`);
+    if (fullscreenDropped > 0) lossParts.push(`fs-dropped=${fullscreenDropped}`);
+    if (fullscreenAdded > 0)   lossParts.push(`fs-added=${fullscreenAdded}`);
+    if (ctaGuardStripped > 0)  lossParts.push(`cta-guard=${ctaGuardStripped}`);
+    if (kwViolations > 0)      lossParts.push(`kw-violations=${kwViolations}`);
+    if (classFixes > 0)        lossParts.push(`class-rewrites=${classFixes}`);
+    if (nicheMapDrops > 0)     lossParts.push(`niche-map-drop=${nicheMapDrops}`);
+    if (typoFixes > 0)         lossParts.push(`typo-dedup=${typoFixes}`);
+    if (sourceOverrides > 0)   lossParts.push(`src-overrides=${sourceOverrides}`);
+    if (mapOverrides > 0)      lossParts.push(`map-overrides=${mapOverrides}`);
+    if (framingOverrides > 0)  lossParts.push(`framing-overrides=${framingOverrides}`);
+    if (styleMixAdjusted > 0)  lossParts.push(`style-mix=${styleMixAdjusted}`);
+    if (graphicsInjected > 0)  lossParts.push(`gfx+${graphicsInjected}`);
+    if (graphicsTrimmed > 0)   lossParts.push(`gfx-${graphicsTrimmed}`);
+    const lossBlock = lossParts.length > 0 ? ` | losses: {${lossParts.join(' ')}}` : '';
+
+    return [
+        `   📊 [Planner Summary] ${total} scenes — AI-chose: tpl=${aiTpl} fs-mg=${aiFS} ov-mg=${aiMg} (mapProposed=${aiMapProposed}) | final: tpl=${finalTpl} fs-mg=${finalFS} ov-mg=${finalMg}`,
+        `   📊 [Planner Summary] corrections=${corr} (src=${sourceChanges} media=${mediaChanges} framing=${framingChanges} cta-guard=${ctaGuardStripped} kw=${kwViolations} class=${classFixes} niche-map=${nicheMapDrops} typo=${typoFixes})${lossBlock}`,
+        `   📊 [Planner Summary] sources: {${dist}}`,
+    ].join('\n');
 }
 
 // ============================================================
@@ -1032,6 +1354,60 @@ function buildBatchPrompt(scenes, scriptContext, directorsBrief, options = {}) {
     const nicheId = scriptContext.nicheId || 'general';
     const { getNiche, getSearchPolicy, getKeywordRules } = require('./niches');
     const niche = getNiche(nicheId);
+    const nicheAllowedMGs = Array.isArray(niche.allowedMGs) ? niche.allowedMGs : [];
+    const nicheAllowsMapChart = nicheAllowedMGs.includes('mapChart');
+    const fullscreenMGTypes = [
+        'articleHighlight',
+        'timeline',
+        'bulletList',
+        'barChart',
+        'donutChart',
+        'comparisonCard',
+        'rankingList',
+        ...(nicheAllowsMapChart ? ['mapChart'] : []),
+    ].join(', ');
+    const mapAvailabilityRule = nicheAllowsMapChart
+        ? '- mapChart IS AVAILABLE for this niche. When the narration discusses geographic regions, borders, straits, trade routes, military positions, or mentions 2+ countries/locations, use fullscreenMG: "mapChart: Location1: label, Location2: label". Maps are more impactful than generic footage for geographic content. Pick the best scene for it, usually the one introducing locations.'
+        : '- mapChart is FORBIDDEN for this niche because it is not in allowedMGs. Geographic narration must use real footage, web-image route references, templates, or overlay MGs instead. Do not output fullscreenMG="mapChart: ..." under any condition.';
+    const mapFullscreenRules = nicheAllowsMapChart
+        ? `     - Scene mentions GEOGRAPHIC LOCATIONS, borders, routes, or geopolitical regions -> "mapChart: Location1: label, Location2: label"
+     - Scene describes a SPECIFIC LOCATION being introduced -> "mapChart: Atlanta, Georgia - 1915"
+     - IMPORTANT: For narration about straits, trade routes, military positions, borders, or multiple countries, mapChart is STRONGLY preferred over footage. Use it when 2+ locations are mentioned.
+     - When using mapChart, also pick a mapVariant based on scene intent:
+       - locator -> single place being introduced/spotlit ("the Strait of Hormuz is...")
+       - route -> travel/trade/flight path between >=2 points ("ships travel from Shanghai to Rotterdam...")
+       - regionHighlight -> one country/region being discussed as a whole ("throughout the Middle East...")
+       - comparison -> two or more places contrasted side-by-side ("oil from Saudi Arabia vs Iran...")`
+        : `     - Geographic scenes: mapChart is forbidden by this niche allowlist. Do NOT write mapChart in fullscreenMG.
+     - For routes, chokepoints, regions, and multi-country scenes, use one of these instead: web-image route/map reference, real documentary/news footage, locationCard/comparisonCard/statCard template, or overlay mgHint.`;
+    const mapPlanningRules = nicheAllowsMapChart
+        ? `       - MAP=preferred:<m>  -> output fullscreenMG="mapChart: <subjects>" with mapVariant=<m>. Skip other lane choices for this scene.
+       - MAP=allowed:<m>    -> if the narration is fundamentally about geography, pick mapChart with mapVariant=<m>. If the narration is mostly about a person/quote/stat that happens to mention a place, do NOT pick mapChart.
+       - MAP=forbidden      -> never output mapChart, even if you spot place names. Niche policy or scene class blocks it.
+       - MAP=n/a            -> skip map entirely.`
+        : `       - MAP=preferred/allowed should not appear in this niche; if it does, treat it as MAP=forbidden because mapChart is outside allowedMGs.
+       - MAP=forbidden or MAP=n/a -> never output mapChart. Use footage, web-image references, templates, or overlays instead.`;
+    const outputMapContractRules = nicheAllowsMapChart
+        ? `  - If MAP=preferred -> fullscreenMG MUST be a mapChart with the indicated mapVariant.
+  - If MAP=forbidden -> fullscreenMG MUST NOT be mapChart.`
+        : `  - This niche forbids mapChart. Treat every MAP token as forbidden for fullscreenMG output.`;
+    const mapPayloadContractRule = nicheAllowsMapChart
+        ? '- mapChart payload contract: must list >=1 concrete place name (locator/region) or >=2 places (route/comparison). "mapChart: this region" with no place names is invalid.'
+        : '- mapChart is outside this niche allowlist: never output it. Geographic scenes should become footage, web-image references, templates, or overlays.';
+    const mapLegendRules = nicheAllowsMapChart
+        ? `    forbidden       -> DO NOT output mapChart even if 2+ places appear
+    preferred:<m>   -> output fullscreenMG="mapChart: ..." with mapVariant=<m>; do NOT pick another lane
+    allowed:<m>     -> mapChart is permitted with that variant; choose it if narration is geographic
+    n/a             -> no map signal; choose other lanes`
+        : `    forbidden       -> DO NOT output mapChart even if 2+ places appear
+    preferred/allowed -> treat as forbidden in this niche because mapChart is outside allowedMGs
+    n/a             -> no map signal; choose other lanes`;
+    const sourceFamiliesLegend = nicheAllowsMapChart
+        ? 'web-image-portrait | web-image-data | mapChart | real-footage | stock-mood'
+        : 'web-image-portrait | web-image-data | real-footage | stock-mood';
+    const mgFamiliesLegend = nicheAllowsMapChart
+        ? 'map | data | callout | intro | typography | overlay-only'
+        : 'data | callout | intro | typography | overlay-only';
     const searchPolicy = getSearchPolicy(nicheId);
     const plannerDirectives = options.plannerDirectives || _buildPlannerDirectives(scenes, scriptContext, directorsBrief);
 
@@ -1048,6 +1424,11 @@ function buildBatchPrompt(scenes, scriptContext, directorsBrief, options = {}) {
     // Build scene list with timing info
     // If Scene Classes pass (USE_SCENE_CLASSES=true) attached class/treatment to scenes,
     // inject them per-line so the planner picks strategy deterministically.
+    // The CONSTRAINTS line is ALWAYS rendered — derived from existing signals + niche
+    // surface + mapPolicy. It tells the planner the structural envelope for each scene
+    // BEFORE it picks a lane, so we don't have to fix bad lane picks after the fact.
+    const { getNicheMapPolicy: _getMapPolicy } = require('./niches');
+    const _nicheMapPolicy = _getMapPolicy(nicheId);
     const anyClassTagged = scenes.some(s => s.sceneClass);
     let sceneList = '';
     for (const scene of scenes) {
@@ -1063,6 +1444,7 @@ function buildBatchPrompt(scenes, scriptContext, directorsBrief, options = {}) {
                 sceneList += `   BLOCKED=${t.blocked.join(',')}\n`;
             }
         }
+        sceneList += `   CONSTRAINTS: ${_renderSceneConstraintLine(scene, scenes, scriptContext, niche, _nicheMapPolicy)}\n`;
         sceneList += `   "${scene.text}"\n\n`;
     }
 
@@ -1078,6 +1460,49 @@ BLOCKED lists lanes you MUST NOT pick for that scene.
 RETRIEVE=internal-only means the scene has NO external visual referent — do NOT set keyword or webQuery; use PRIMARY only.
 LADDER is the fallback order if PRIMARY is unavailable. Stay on PRIMARY unless clearly wrong.
 SOURCE is the concrete footage provider to prefer when PRIMARY=footage (e.g. telegram for news actors, web-image for history).` : '';
+
+    const constraintsLegend = `
+
+PER-SCENE CONSTRAINTS LEGEND (read before planning each scene):
+Each scene now carries a deterministic CONSTRAINTS line derived from the narration + niche map policy + niche allowlist + scene class. THESE ARE HARD STRUCTURAL RULES — not suggestions:
+  ROLE — primary editorial role of the scene:
+    geo-establish | geo-route | geo-region | geo-compare → MAP scene (see MAP DECISION FIRST below)
+    person-intro    → first-time named person → portrait or personIntro template; NEVER fullscreenMG
+    quote-beat      → direct quote → quoteCard / callout; never raw stock B-roll alone
+    stat-beat       → ≥2 numbers in narration → statCard / barChart / donutChart / rankingList preferred
+    escalation-news → state actor + military/political verb → real footage (telegram/youtube), NEVER stock
+    abstract-breathing-room → mood / metaphor → focusWord / kineticText / mood B-roll
+    concept-explainer → no concrete subject → typography or template, AVOID forced footage searches
+    product-demo    → tech reveal/launch → real footage of the product/event
+    generic         → no signal — pick the most editorial choice
+  MAP — map intent for THIS scene:
+${mapLegendRules}
+  FS-MG — fullscreen MG framing budget:
+    allowed         → fullscreenMG (map/graphics/data) is editorially valid here
+    discouraged     → prefer overlay mgHint or templateHint instead of replacing the footage
+    forbidden       → never set fullscreenMG (hook/CTA scenes)
+  STOCK — stock library suitability:
+    ok              → pexels/pixabay are valid IF the narration is genuinely abstract
+    disallowed      → narration names entities/actors/people — stock libraries have NO matches; pick a real-source family or graphics
+  SRC — preferred source family (informational, not a hard override):
+    ${sourceFamiliesLegend}
+  MG-FAMILIES — which MG types are editorial-fit for this scene:
+    ${mgFamiliesLegend}
+
+PLANNING ORDER (FOLLOW STRICTLY — do not collapse maps into the generic fullscreen lane):
+  1. MAP DECISION FIRST — for every scene check the MAP token:
+${mapPlanningRules}
+  2. After locking the map decision, choose the lane for the remaining scenes using ROLE + MG-FAMILIES + STOCK:
+       • person-intro       → portrait (web-image) or templateHint=personIntro; sourceHint=web-image; mediaType=image.
+       • quote-beat         → templateHint=quoteCard or mgHint=callout. Footage allowed only as backdrop with the overlay.
+       • stat-beat          → templateHint=statCard / fullscreenMG=barChart|donutChart|rankingList. Use real numbers from narration.
+       • escalation-news    → real footage from the niche's top source (NEVER stock).
+       • abstract-breathing-room → typography (focusWord / kineticText) or stock-mood B-roll.
+       • concept-explainer  → typography or template. Do NOT force a footage keyword that has no concrete referent.
+  3. Respect FS-MG=discouraged by preferring overlay/template instead of replacing the footage.
+  4. Respect STOCK=disallowed by routing to the niche's top non-stock source family.
+
+These rules are deterministic. If you ignore them, downstream guards will rewrite your output and the scene loses your editorial framing.`;
 
     // Build topic anchor from summary + web context
     const summary = scriptContext.summary || '';
@@ -1226,15 +1651,15 @@ ${(() => {
 - HOOK scenes benefit from subtle effects for visual impact
 
 ALLOWED MOTION GRAPHICS FOR THIS NICHE (${niche.name}):
-${niche.allowedMGs.join(', ')}
+${nicheAllowedMGs.join(', ')}
 - Suggest an MG only when the scene content clearly benefits from one.
 - NOT every scene needs an MG — use "none" for scenes that work best as pure footage.
 - Fullscreen MGs (focusWord, kineticText) replace the footage entirely — use sparingly for impact.
 - Overlay MGs (lowerThird, headline, statCounter, barChart, etc.) appear ON TOP of footage.
-${niche.allowedMGs.includes('mapChart') ? `- ⚠️ mapChart IS AVAILABLE for this niche. When the narration discusses geographic regions, borders, straits, trade routes, military positions, or mentions 2+ countries/locations — use fullscreenMG: "mapChart: Location1: label, Location2: label". Maps are MORE impactful than generic footage for geographic content. Pick the BEST scene for it (usually the one introducing locations).` : ''}
+${mapAvailabilityRule}
 
 SCENES TO PLAN (${scenes.length} total):
-${classLegend}
+${classLegend}${constraintsLegend}
 ${sceneList}
 
 PLANNING RULES:
@@ -1493,7 +1918,7 @@ ${_buildBackgroundList(theme)}
 
    (D) NEWS ACTOR — narration names a state/military actor + military/political verb.
        ("Iran navy patrol", "Houthi forces strike", "Russian missile")
-       → Write a keyword AND force sourceHint="telegram" (or fullscreenMG="mapChart" if ≥2 locations).
+       → Write a keyword AND force sourceHint="telegram"${nicheAllowsMapChart ? ' (or fullscreenMG="mapChart" if >=2 locations).' : ' (mapChart is forbidden for this niche; use real footage or web-image references for geography).'}
        → NEVER sourceHint="stock" on actor scenes. Stock libraries have zero matches.
 
    ADJACENT-SCENE DIVERSITY RULE:
@@ -1557,9 +1982,9 @@ ${(() => {
    - Brand/class names (HMM Algeciras, USS Gerald Ford, F-35) are OK on youtube/telegram/web-image, NEVER on stock.
 
    ⚠️ NEWS-ACTOR HARD RULE (no exceptions):
-   - If the scene text mentions a state/military actor (Iran, Russia, Houthi, Hamas, IDF, NATO, Ukraine, Israel, China, North Korea, Hezbollah, Taliban, ISIS) combined with a military/political verb (navy, forces, strike, patrol, attack, invasion, missile, drone, blockade, sanctions) → sourceHint MUST be "telegram" OR fullscreenMG="mapChart". NEVER "stock". NEVER "pexels".
+   - If the scene text mentions a state/military actor (Iran, Russia, Houthi, Hamas, IDF, NATO, Ukraine, Israel, China, North Korea, Hezbollah, Taliban, ISIS) combined with a military/political verb (navy, forces, strike, patrol, attack, invasion, missile, drone, blockade, sanctions) → ${nicheAllowsMapChart ? 'sourceHint MUST be "telegram" OR fullscreenMG="mapChart".' : 'sourceHint MUST be "telegram"; mapChart is forbidden for this niche.'} NEVER "stock". NEVER "pexels".
    - These events do not exist on stock footage libraries. Routing them to stock guarantees failure.
-   - If telegram also feels wrong for the scene, use a map fullscreenMG instead of forcing footage.
+   - If telegram also feels wrong for the scene, ${nicheAllowsMapChart ? 'use a map fullscreenMG instead of forcing footage.' : 'use youtube/web-image route references, a template, or an overlay instead of stock.'}
 
    ⚠️ TOPIC ANCHORING (CRITICAL FOR NEWS/POLITICS/MILITARY NICHES):
    - Every keyword MUST be grounded in the SPECIFIC topic of this video.
@@ -1647,14 +2072,7 @@ ${(() => {
      • Scene lists ≥2 short points/items (no numbers needed) → bulletList
      • Scene makes an explicit COMPARISON — the word "vs", "versus", "compared to" → comparisonCard
      • Scene discusses an article/document/book → "articleHighlight: Title of Article"
-     • Scene mentions GEOGRAPHIC LOCATIONS, borders, routes, or geopolitical regions → "mapChart: Location1: label, Location2: label"
-     • Scene describes a SPECIFIC LOCATION being introduced → "mapChart: Atlanta, Georgia — 1915"
-     • IMPORTANT: For narration about straits, trade routes, military positions, borders, or multiple countries — mapChart is STRONGLY preferred over footage. Use it when 2+ locations are mentioned.
-     • When using mapChart, also pick a mapVariant based on scene intent:
-       – locator → single place being introduced/spotlit ("the Strait of Hormuz is...")
-       – route → travel/trade/flight path between ≥2 points ("ships travel from Shanghai to Rotterdam...")
-       – regionHighlight → one country/region being discussed as a whole ("throughout the Middle East...")
-       – comparison → two or more places contrasted side-by-side ("oil from Saudi Arabia vs Iran...")
+${mapFullscreenRules}
 
    - DO NOT USE data MG WHEN:
      • The narration only names a topic without numbers (e.g. "Bab-el-Mandeb Transit Volume" alone is NOT enough — there are no numbers)
@@ -1662,7 +2080,7 @@ ${(() => {
      • The scene has only one data point (charts need ≥2 to make sense)
      → In those cases, use mgHint (overlay), templateHint, or footage instead.
 
-   - Fullscreen MG types: articleHighlight, timeline, bulletList, barChart, donutChart, comparisonCard, rankingList, mapChart
+   - Fullscreen MG types: ${fullscreenMGTypes || 'none from this niche allowlist'}
    - When fullscreenMG is set, keyword/stockQuery/webQuery are IGNORED (set to "none")
    - Do NOT overuse — max ~15% of scenes. Most scenes should be footage.
    - NEVER use on HOOK or CTA scenes — those need strong visual footage.
@@ -1713,6 +2131,18 @@ Each keyword must be UNIQUE, SEARCHABLE, and SHORT (3-6 words). When a person is
 When fullscreenMG is set, keyword/stockQuery/webQuery can be "none" (footage won't be downloaded).
 Do NOT put cinematic shot descriptions in keyword — that goes in visualIntent.
 stockQuery and webQuery must BOTH be provided for every footage scene.
+
+OUTPUT CONTRACT (HARD RULES — non-negotiable):
+- Mutual exclusivity: NEVER set BOTH fullscreenMG AND templateHint on the same scene. Pick ONE lane.
+- mgHint may co-exist with footage; mgHint may NOT co-exist with fullscreenMG (the fullscreen replaces everything).
+- Per-scene CONSTRAINTS line is law:
+${outputMapContractRules}
+  • If FS-MG=forbidden → fullscreenMG MUST be "none" (hook/CTA scenes).
+  • If STOCK=disallowed → sourceHint MUST NOT be "stock"/"pexels"/"pixabay". Use the niche's top real-source instead.
+- Niche allowlist is law: fullscreenMG type MUST be one of [${nicheAllowedMGs.join(', ')}] (or "none"). Anything else will be rewritten downstream.
+- Data MGs require real numbers: barChart/donutChart/rankingList/timeline/comparisonCard demand ≥2 numeric pairs from the actual narration. If the narration has no numbers/dates/items, do NOT pick a data MG — pick a template, typography, or footage.
+${mapPayloadContractRule}
+- ROLE alignment: a person-intro scene must NOT route to stock; a quote-beat scene must NOT route to a barChart; a stat-beat scene with 2+ numbers MUST surface a stat lane (statCard | barChart | donutChart | statCounter).
 
 ⚠️ MANDATORY — DO NOT SKIP mgHint AND templateHint FIELDS:
 You MUST evaluate EVERY scene for mgHint and templateHint. Do NOT default everything to "none".
@@ -1943,6 +2373,12 @@ function parseBatchResponse(rawText, scenes, nicheId, themeId, scriptContext, pl
             if (scene.visualIntent) scene.visualIntent = stripQuotes(scene.visualIntent);
             if (scene.templateHint) scene.templateHint = stripQuotes(scene.templateHint);
 
+            // Snapshot the raw AI lane before guardrails rewrite it. This makes
+            // map-dropped visible in the Planner Summary when the model ignores
+            // a niche that forbids mapChart.
+            _snapshotRawAIChoice(scene);
+            _dropForbiddenMapChart(scene, nicheId, plannerDirectives, false);
+
             // templateHint and fullscreenMG are mutually exclusive — fullscreenMG wins
             if (scene.templateHint && scene.fullscreenMG) {
                 scene.templateHint = null;
@@ -2058,16 +2494,7 @@ function parseBatchResponse(rawText, scenes, nicheId, themeId, scriptContext, pl
         if (!scene.effects) scene.effects = [];
         if (scene.mgHint === undefined) scene.mgHint = null;
 
-        // Snapshot AI's raw choices BEFORE any downstream correction so we can
-        // report "AI chose vs we corrected" in the Planner Summary.
-        scene._aiChose = {
-            templateHint: !!scene.templateHint,
-            fullscreenMG: !!scene.fullscreenMG,
-            mgHint: !!scene.mgHint,
-            sourceHint: scene.sourceHint || null,
-            mediaType: scene.mediaType || null,
-            framing: scene.framing || null,
-        };
+        _snapshotRawAIChoice(scene);
 
         enrichedScenes.push(scene);
     }
@@ -2381,7 +2808,7 @@ function _enforceClassTreatment(scenes) {
         // Rule 3: MG type outside allowedMGs
         if (scene.fullscreenMG && t.allowedMGs && t.allowedMGs.length) {
             const fsType = String(scene.fullscreenMG).split(':')[0].trim();
-            if (!t.allowedMGs.includes(fsType) && !fsType.startsWith('map')) {
+            if (!t.allowedMGs.includes(fsType)) {
                 const before = scene.fullscreenMG;
                 const rest = String(scene.fullscreenMG).split(':').slice(1).join(':').trim() || _pickFocusWord(scene.text);
                 scene.fullscreenMG = `${t.allowedMGs[0]}: ${rest}`;
@@ -2434,7 +2861,12 @@ function _coerceSceneToLane(scene, lane, treatment) {
         scene.sourceHint = treatment.preferredSource || scene.sourceHint || 'stock';
         scene.mediaType  = scene.mediaType || 'video';
     } else if (lane === 'map') {
-        scene.fullscreenMG = scene.fullscreenMG || 'mapChart: locator';
+        if (treatment.allowedMGs && treatment.allowedMGs.includes('mapChart')) {
+            scene.fullscreenMG = scene.fullscreenMG || 'mapChart: locator';
+        } else {
+            const mg = (treatment.allowedMGs && treatment.allowedMGs[0]) || 'focusWord';
+            scene.fullscreenMG = `${mg}: ${_pickFocusWord(scene.text)}`;
+        }
     } else if (lane === 'graphics') {
         const mg = (treatment.allowedMGs && treatment.allowedMGs[0]) || 'focusWord';
         scene.fullscreenMG = `${mg}: ${_pickFocusWord(scene.text)}`;
