@@ -1750,6 +1750,7 @@ function setupEventListeners() {
     if (elements.veoBackend) elements.veoBackend.addEventListener('change', saveSettings);
     _syncVeoRow();
     _syncPresenterRow();
+    _initSettingsTabs();
     // Vision backend dropdown — persist immediately to .env (main process) so the choice
     // survives restart AND the live build/retry pick it up, then save UI settings.
     if (elements.buildVisionBackend) {
@@ -12772,6 +12773,24 @@ function _syncVeoRow() {
     if (elements.veoAiVideoOpts && elements.veoAiVideoEnabled) {
         elements.veoAiVideoOpts.style.display = elements.veoAiVideoEnabled.checked ? 'block' : 'none';
     }
+}
+
+// Settings tabs — click a tab to show its group (no long scroll). Active tab persists.
+function _initSettingsTabs() {
+    const bar = document.getElementById('settings-tabs');
+    if (!bar) return;
+    const btns = Array.from(bar.querySelectorAll('.stab-btn'));
+    const panels = Array.from(document.querySelectorAll('.stab-panel'));
+    const show = (name) => {
+        btns.forEach(b => b.classList.toggle('active', b.dataset.stab === name));
+        panels.forEach(p => p.classList.toggle('active', p.dataset.stab === name));
+        try { localStorage.setItem('faceless-settings-tab', name); } catch (_) {}
+    };
+    btns.forEach(b => b.addEventListener('click', () => show(b.dataset.stab)));
+    let saved = 'setup';
+    try { saved = localStorage.getItem('faceless-settings-tab') || 'setup'; } catch (_) {}
+    if (!btns.some(b => b.dataset.stab === saved)) saved = 'setup';
+    show(saved);
 }
 
 function saveSettings() {

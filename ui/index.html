@@ -95,8 +95,16 @@
                     </div>
                 </div>
 
-                <div class="panel-section">
-                    <h3>🤖 AI Settings</h3>
+                <!-- Settings — tabbed so there's no long scroll -->
+                <div class="panel-section settings-tabbed">
+                    <div class="settings-tabs" id="settings-tabs">
+                        <button type="button" class="stab-btn active" data-stab="setup">Setup</button>
+                        <button type="button" class="stab-btn" data-stab="ai">AI</button>
+                        <button type="button" class="stab-btn" data-stab="content">Content</button>
+                        <button type="button" class="stab-btn" data-stab="media">Media</button>
+                        <button type="button" class="stab-btn" data-stab="advanced">Advanced</button>
+                    </div>
+                    <div class="stab-panel" data-stab="ai">
                     <label class="toggle-row">
                         <input type="checkbox" id="smart-ai-toggle" checked>
                         <span class="toggle-label">Smart AI (uses API credits)</span>
@@ -148,10 +156,8 @@
                     <label style="margin-top:8px">AI Instructions <span style="opacity:0.6;font-weight:normal">(steers the whole pipeline)</span>:</label>
                     <textarea id="ai-instructions" rows="3" placeholder="Plain-English rules for THIS video — they override the defaults everywhere. e.g. &quot;95% footage, almost no templates&quot; · &quot;no text cards at all&quot; · &quot;keep it under 10 minutes&quot; · &quot;cinematic, no glitchy effects&quot; · &quot;use maps heavily early on&quot;"></textarea>
                     <small class="ai-instructions-hint">Sent to every decision brain — Director, Visual Planner, templates, motion graphics, effects. Highest priority: overrides the system defaults.</small>
-                </div>
-
-                <div class="panel-section">
-                    <h3>⚙️ Build Settings</h3>
+                    </div><!-- /ai panel -->
+                    <div class="stab-panel active" data-stab="setup">
                     <label>Quality Tier:</label>
                     <select id="build-quality">
                         <option value="standard" selected>Standard (Balanced)</option>
@@ -230,6 +236,8 @@
                         </div>
                     </div>
 
+                    </div><!-- /setup panel -->
+                    <div class="stab-panel" data-stab="content">
                     <label style="margin-top:12px">Niche Preset:</label>
                     <select id="build-niche">
                         <option value="auto" selected>🤖 Auto-Detect</option>
@@ -283,6 +291,8 @@
                     </select>
                     <small style="display:block; margin-top:4px; color:#888">Visual overlay style for map scenes (polygons, route, pins, labels, basemap filter)</small>
 
+                    </div><!-- /content panel -->
+                    <div class="stab-panel" data-stab="media">
                     <label style="margin-top:12px">Vision Backend (image scoring):</label>
                     <select id="build-vision-backend">
                         <option value="aws">🟦 AWS GPU box — auto-starts during build</option>
@@ -348,6 +358,8 @@
                         <pre id="style-comparison-text" style="margin-top:6px;font-size:10px;color:#bbb;white-space:pre-wrap;max-height:300px;overflow-y:auto;line-height:1.5;"></pre>
                     </div>
 
+                    </div><!-- /media panel -->
+                    <div class="stab-panel" data-stab="advanced">
                     <!-- Map Test Panel (dev tool) -->
                     <div style="margin-top:12px;padding:10px;background:#0f1a1a;border:1px solid #1a3a3a;border-radius:6px;">
                         <div style="font-size:12px;color:#00d4ff;margin-bottom:8px;cursor:pointer;" onclick="document.getElementById('map-test-body').style.display=document.getElementById('map-test-body').style.display==='none'?'block':'none'">🗺️ Map Preview Test ▾</div>
@@ -467,7 +479,8 @@
                         <span id="mg-global-shadow-val" style="color:#aaa;font-size:12px;min-width:36px">55%</span>
                     </div>
                     <small style="display:block; margin-top:4px; color:#888">Soft shadow strength for all overlay MGs (0=off, 1=strong)</small>
-                </div>
+                    </div><!-- /advanced panel -->
+                </div><!-- /settings-tabbed -->
 
                 <div class="panel-section footage-resource-compact">
                     <h3>Resource Control</h3>

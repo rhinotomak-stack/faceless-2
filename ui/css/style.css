@@ -5583,3 +5583,15 @@ select:focus {
 #media-log-panel .ml-line.ml-hdr { color: #8ab4ff; font-weight: 600; }
 #media-log-panel .ml-link { color: #6db3ff; text-decoration: underline; cursor: pointer; }
 #media-log-panel .ml-link:hover { color: #9fd0ff; }
+
+/* ── Tabbed settings panel (P2/UX — no long scroll) ── */
+.settings-tabs { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 12px; }
+.stab-btn {
+    flex: 1 1 auto; min-width: 0; padding: 6px 8px; font-size: 11px; font-weight: 600;
+    background: #17171f; color: #9a9aa8; border: 1px solid #2a2a35; border-radius: 7px;
+    cursor: pointer; transition: background .12s, color .12s, border-color .12s;
+}
+.stab-btn:hover { background: #20202b; color: #d4d4e0; }
+.stab-btn.active { background: #3a2a5e; color: #fff; border-color: #5a48a0; }
+.stab-panel { display: none; }
+.stab-panel.active { display: block; }
