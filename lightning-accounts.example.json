@@ -1,0 +1,27 @@
+[
+  {
+    "_comment": "Copy this file to lightning-accounts.json (gitignored) and fill one block per Lightning account. id = any unique slug. userId/apiKey from lightning.ai → Settings → Keys → Programmatic login. studioName/teamspace/user come from the Studio URL: lightning.ai/<user>/<teamspace>/studios/<studioName>. machine defaults to L4. monthlyBudgetHours = GPU-hours to spend before rotating (keep under ~21 that $15 buys; 18 leaves a buffer). cycleAnchorDay = day-of-month the free credit resets (your signup day).",
+    "id": "acct1",
+    "label": "my-first-account",
+    "userId": "00000000-0000-0000-0000-000000000000",
+    "apiKey": "your-api-key-here",
+    "studioName": "my-first-one",
+    "teamspace": "vision-model",
+    "user": "your-lightning-username",
+    "machine": "L4",
+    "monthlyBudgetHours": 18,
+    "cycleAnchorDay": 1
+  },
+  {
+    "id": "acct2",
+    "label": "second-account",
+    "userId": "...",
+    "apiKey": "...",
+    "studioName": "vision-studio",
+    "teamspace": "vision",
+    "user": "second-username",
+    "machine": "L4",
+    "monthlyBudgetHours": 18,
+    "cycleAnchorDay": 1
+  }
+]

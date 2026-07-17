@@ -35,6 +35,10 @@ class MGRenderer {
         // Cache for listicle grid thumbnails (mediaFile → HTMLCanvasElement with extracted frame)
         this._gridThumbs = {};
         this._gridThumbLoading = {};
+        this._templateBgFrameCache = {};
+        this._templateMedia = {};
+        this._templateMediaLoading = {};
+        this._templateMediaPromises = {};
         // Underlying V1 media element (video/image) — set by Compositor before renderMG for templates
         this._underlyingMedia = null;
 
@@ -65,7 +69,7 @@ class MGRenderer {
             listicleGrid:    (ctx, f, fps, mg, s, a, sc) => { this._ensureGridThumbnails(mg); this._renderListicleGrid(ctx, f, fps, mg, s, a); },
             // Template types (from ai-templates.js)
             // _ensureTemplateMedia loads the scene's video/image for template background (universal)
-            // _ensureTemplateBgImage loads the static downloaded bg image (fallback)
+            // _ensureTemplateBgImage loads the downloaded bg media (video/image fallback)
             chapterCard:     (ctx, f, fps, mg, s, a, sc) => { this._ensureTemplateMedia(mg); this._ensureTemplateBgImage(mg); this._renderChapterCard(ctx, f, fps, mg, s, a); },
             locationCard:    (ctx, f, fps, mg, s, a, sc) => { this._ensureTemplateMedia(mg); this._ensureTemplateBgImage(mg); this._renderLocationCard(ctx, f, fps, mg, s, a); },
             quoteCard:       (ctx, f, fps, mg, s, a, sc) => { this._ensureTemplateMedia(mg); this._renderQuoteCard(ctx, f, fps, mg, s, a); },
@@ -295,7 +299,7 @@ class MGRenderer {
     }
 
     /**
-     * Lazily load a template background image. Non-blocking.
+     * Lazily load template background media. Non-blocking.
      */
     _ensureTemplateBgImage(mg) {
         const file = mg.templateBgFile;
@@ -305,31 +309,6 @@ class MGRenderer {
         if (!this._templateBgLoading) this._templateBgLoading = {};
         if (this._templateBgImages[file] || this._templateBgLoading[file]) return;
         this._templateBgLoading[file] = true;
-        const img = new Image();
-        img.onload = () => {
-            this._templateBgImages[file] = img;
-            delete this._templateBgLoading[file];
-            console.log(`[MGRenderer] Template bg loaded: ${file}`);
-        };
-        img.onerror = () => {
-            delete this._templateBgLoading[file];
-            console.warn(`[MGRenderer] Failed to load template bg: ${file}`);
-        };
-        img.src = url;
-    }
-
-    /**
-     * Lazily load a template's scene media (video or image). Non-blocking.
-     * This is the footage clip that was downloaded for the scene before it was carved for the template.
-     */
-    _ensureTemplateMedia(mg) {
-        const file = mg.templateMediaFile;
-        const url = mg._templateMediaUrl;
-        if (!file || !url) return;
-        if (!this._templateMedia) this._templateMedia = {};
-        if (!this._templateMediaLoading) this._templateMediaLoading = {};
-        if (this._templateMedia[file] || this._templateMediaLoading[file]) return;
-        this._templateMediaLoading[file] = true;
 
         const isVideo = /\.(mp4|webm|mov|mkv)$/i.test(file);
         if (isVideo) {
@@ -341,13 +320,13 @@ class MGRenderer {
             video.style.display = 'none';
             document.body.appendChild(video);
             video.onloadeddata = () => {
-                this._templateMedia[file] = video;
-                delete this._templateMediaLoading[file];
-                console.log(`[MGRenderer] Template media loaded (video): ${file.split(/[/\\]/).pop()}`);
+                this._templateBgImages[file] = video;
+                delete this._templateBgLoading[file];
+                console.log(`[MGRenderer] Template bg loaded (video): ${file}`);
             };
             video.onerror = () => {
-                delete this._templateMediaLoading[file];
-                console.warn(`[MGRenderer] Failed to load template media: ${file.split(/[/\\]/).pop()}`);
+                delete this._templateBgLoading[file];
+                console.warn(`[MGRenderer] Failed to load template bg: ${file}`);
                 if (video.parentNode) video.parentNode.removeChild(video);
             };
             video.src = url;
@@ -355,16 +334,131 @@ class MGRenderer {
             const img = new Image();
             img.crossOrigin = 'anonymous';
             img.onload = () => {
-                this._templateMedia[file] = img;
-                delete this._templateMediaLoading[file];
-                console.log(`[MGRenderer] Template media loaded (image): ${file.split(/[/\\]/).pop()}`);
+                this._templateBgImages[file] = img;
+                delete this._templateBgLoading[file];
+                console.log(`[MGRenderer] Template bg loaded (image): ${file}`);
             };
             img.onerror = () => {
-                delete this._templateMediaLoading[file];
-                console.warn(`[MGRenderer] Failed to load template media: ${file.split(/[/\\]/).pop()}`);
+                delete this._templateBgLoading[file];
+                console.warn(`[MGRenderer] Failed to load template bg: ${file}`);
             };
             img.src = url;
         }
+    }
+
+    /**
+     * Lazily load a template's scene media (video or image). Non-blocking.
+     * This is the footage clip that was downloaded for the scene before it was carved for the template.
+     */
+    _loadTemplateMedia(mg) {
+        const file = mg.templateMediaFile;
+        const url = mg._templateMediaUrl;
+        if (!file || !url) return Promise.resolve(null);
+        if (this._templateMedia[file]) return Promise.resolve(this._templateMedia[file]);
+        if (this._templateMediaPromises[file]) return this._templateMediaPromises[file];
+        this._templateMediaLoading[file] = true;
+
+        const isVideo = /\.(mp4|webm|mov|mkv)$/i.test(file);
+        if (isVideo) {
+            const video = document.createElement('video');
+            video.crossOrigin = 'anonymous';
+            video.muted = true;
+            video.playsInline = true;
+            video.preload = 'auto';
+            video.style.display = 'none';
+            document.body.appendChild(video);
+            this._templateMediaPromises[file] = new Promise(resolve => {
+                let resolved = false;
+                const done = (ok) => {
+                    if (resolved) return;
+                    resolved = true;
+                    video.removeEventListener('canplaythrough', onReady);
+                    video.removeEventListener('loadeddata', onLoadedData);
+                    video.removeEventListener('seeked', onSeeked);
+                    video.removeEventListener('error', onError);
+                    clearTimeout(timer);
+                    delete this._templateMediaLoading[file];
+                    delete this._templateMediaPromises[file];
+                    if (ok) {
+                        this._templateMedia[file] = video;
+                        console.log(`[MGRenderer] Template media loaded (video): ${file.split(/[/\\]/).pop()}`);
+                        resolve(video);
+                    } else {
+                        console.warn(`[MGRenderer] Failed to load template media: ${file.split(/[/\\]/).pop()}`);
+                        if (video.parentNode) video.parentNode.removeChild(video);
+                        resolve(null);
+                    }
+                };
+                const warmToOffset = () => {
+                    const warmTime = Math.max(0, Number(mg.templateMediaOffset) || 0);
+                    if (video.readyState >= 2 && Math.abs((video.currentTime || 0) - warmTime) <= 0.08) {
+                        done(true);
+                        return;
+                    }
+                    try {
+                        video.currentTime = Math.min(warmTime, video.duration || warmTime);
+                    } catch (e) {
+                        done(true);
+                    }
+                };
+                const onReady = warmToOffset;
+                const onLoadedData = warmToOffset;
+                const onSeeked = () => done(true);
+                const onError = () => done(false);
+                video.addEventListener('canplaythrough', onReady);
+                video.addEventListener('loadeddata', onLoadedData);
+                video.addEventListener('seeked', onSeeked);
+                video.addEventListener('error', onError);
+                const timer = setTimeout(() => {
+                    if (video.readyState >= 2 && video.videoWidth > 0) done(true);
+                    else done(false);
+                }, 15000);
+                video.src = url;
+                video.load();
+            });
+            return this._templateMediaPromises[file];
+        } else {
+            const img = new Image();
+            img.crossOrigin = 'anonymous';
+            this._templateMediaPromises[file] = new Promise(resolve => {
+                img.onload = () => {
+                    this._templateMedia[file] = img;
+                    delete this._templateMediaLoading[file];
+                    delete this._templateMediaPromises[file];
+                    console.log(`[MGRenderer] Template media loaded (image): ${file.split(/[/\\]/).pop()}`);
+                    resolve(img);
+                };
+                img.onerror = () => {
+                    delete this._templateMediaLoading[file];
+                    delete this._templateMediaPromises[file];
+                    console.warn(`[MGRenderer] Failed to load template media: ${file.split(/[/\\]/).pop()}`);
+                    resolve(null);
+                };
+                img.src = url;
+            });
+            return this._templateMediaPromises[file];
+        }
+    }
+
+    _ensureTemplateMedia(mg) {
+        this._loadTemplateMedia(mg);
+    }
+
+    async preloadTemplateMedia(templateScenes = [], mediaFileResolver = null) {
+        const targets = (templateScenes || []).filter(mg => mg && mg.templateType && mg.templateMediaFile);
+        if (targets.length === 0) return 0;
+
+        const jobs = targets.map(async mg => {
+            if (!mg._templateMediaUrl && mediaFileResolver) {
+                try {
+                    mg._templateMediaUrl = await mediaFileResolver(mg.templateMediaFile);
+                } catch (e) {}
+            }
+            if (!mg._templateMediaUrl) return null;
+            return this._loadTemplateMedia(mg);
+        });
+        const loaded = await Promise.all(jobs);
+        return loaded.filter(Boolean).length;
     }
 
     /**
@@ -372,10 +466,37 @@ class MGRenderer {
      * Priority: underlying V1 video/image → static template bg image → false.
      * Returns true if drawn, false if no source available.
      */
-    _drawTemplateBg(ctx, mg, W, H, alpha) {
+    _drawTemplateBg(ctx, mg, W, H, alpha, options = {}) {
+        // Explicit transparent template backgrounds intentionally draw nothing.
+        // Return true so template renderers do not paint their solid/grid fallbacks.
+        if (this._isTransparentTemplateBackground(mg)) return true;
+
         // Source priority: template scene media (video/image) → downloaded static bg → false
         let source = null;
         let srcW = 0, srcH = 0;
+        let sourceIsSeeking = false;
+        let cacheKey = mg.templateMediaFile || mg.templateBgFile || `template-${mg.id || mg._startFrame || 'bg'}`;
+        const scrimAlpha = options.scrimAlpha == null ? 1 : options.scrimAlpha;
+        const bgAlpha = mg.templateContentStartTime != null ? 1 : alpha;
+        const drawScrim = () => {
+            if (scrimAlpha <= 0) return;
+            const scrim = ctx.createRadialGradient(W / 2, H / 2, W * 0.2, W / 2, H / 2, W * 0.75);
+            scrim.addColorStop(0, 'rgba(0,0,0,0.3)');
+            scrim.addColorStop(1, 'rgba(0,0,0,0.65)');
+            ctx.globalAlpha = scrimAlpha;
+            ctx.fillStyle = scrim;
+            ctx.fillRect(0, 0, W, H);
+        };
+        const drawCached = () => {
+            const cached = this._templateBgFrameCache && this._templateBgFrameCache[cacheKey];
+            if (!cached) return false;
+            ctx.save();
+            ctx.globalAlpha = bgAlpha;
+            ctx.drawImage(cached, 0, 0, W, H);
+            drawScrim();
+            ctx.restore();
+            return true;
+        };
 
         // 1. Try template's own scene media (video clip or image downloaded for this scene)
         if (this._templateMedia && mg.templateMediaFile) {
@@ -389,6 +510,7 @@ class MGRenderer {
                 if (!media.seeking && Math.abs(media.currentTime - targetTime) > 0.15) {
                     media.currentTime = Math.min(targetTime, media.duration || targetTime);
                 }
+                sourceIsSeeking = media.seeking;
                 // Use video as source even while seeking (shows last decoded frame)
                 source = media;
                 srcW = media.videoWidth;
@@ -400,32 +522,39 @@ class MGRenderer {
             }
         }
 
-        // 2. Fallback: downloaded static template bg image
+        // 2. Fallback: downloaded template bg media
         if (!source && this._templateBgImages) {
-            const img = this._templateBgImages[mg.templateBgFile];
-            if (img) {
-                source = img;
-                srcW = img.naturalWidth || img.width;
-                srcH = img.naturalHeight || img.height;
+            const bg = this._templateBgImages[mg.templateBgFile];
+            if (bg instanceof HTMLVideoElement && bg.videoWidth > 0) {
+                cacheKey = mg.templateBgFile || cacheKey;
+                const localTime = (this._currentRenderFrame || 0) / this.fps;
+                const duration = bg.duration || 0;
+                const targetTime = duration > 0.25
+                    ? (localTime % Math.max(0.25, duration - 0.1))
+                    : localTime;
+                if (!bg.seeking && Math.abs(bg.currentTime - targetTime) > 0.15) {
+                    bg.currentTime = Math.min(targetTime, duration || targetTime);
+                }
+                sourceIsSeeking = bg.seeking;
+                source = bg;
+                srcW = bg.videoWidth;
+                srcH = bg.videoHeight;
+            } else if (bg instanceof HTMLImageElement && bg.complete && bg.naturalWidth > 0) {
+                cacheKey = mg.templateBgFile || cacheKey;
+                source = bg;
+                srcW = bg.naturalWidth || bg.width;
+                srcH = bg.naturalHeight || bg.height;
             }
         }
 
         if (!source) {
-            // If templateMediaFile exists but isn't loaded yet, fill with neutral dark
-            // to avoid a harsh flash from the caller's solid fill
-            if (mg.templateMediaFile) {
-                ctx.save();
-                ctx.globalAlpha = alpha;
-                ctx.fillStyle = '#1a1a1a';
-                ctx.fillRect(0, 0, W, H);
-                ctx.restore();
-                return true; // tell caller we handled the bg
-            }
+            if (drawCached()) return true;
             return false;
         }
+        if (sourceIsSeeking && drawCached()) return true;
 
         ctx.save();
-        ctx.globalAlpha = alpha;
+        ctx.globalAlpha = bgAlpha;
 
         // Cover-fit
         const scale = Math.max(W / srcW, H / srcH);
@@ -435,13 +564,30 @@ class MGRenderer {
         const sy = (srcH - sh) / 2;
         ctx.drawImage(source, sx, sy, sw, sh, 0, 0, W, H);
 
-        // Cinematic scrim overlay for text readability
-        const scrim = ctx.createRadialGradient(W / 2, H / 2, W * 0.2, W / 2, H / 2, W * 0.75);
-        scrim.addColorStop(0, 'rgba(0,0,0,0.3)');
-        scrim.addColorStop(1, 'rgba(0,0,0,0.65)');
-        ctx.globalAlpha = 1;
-        ctx.fillStyle = scrim;
-        ctx.fillRect(0, 0, W, H);
+        if (!sourceIsSeeking && cacheKey) {
+            let cached = this._templateBgFrameCache[cacheKey];
+            if (!cached) {
+                cached = document.createElement('canvas');
+                cached.width = W;
+                cached.height = H;
+                this._templateBgFrameCache[cacheKey] = cached;
+            }
+            const cctx = cached.getContext('2d');
+            cctx.clearRect(0, 0, W, H);
+            cctx.drawImage(source, sx, sy, sw, sh, 0, 0, W, H);
+        }
+
+        // Cinematic scrim overlay for text readability.
+        // Timed-reveal templates can render raw scene media outside the content
+        // window so the clip stays visually continuous.
+        if (scrimAlpha > 0) {
+            const scrim = ctx.createRadialGradient(W / 2, H / 2, W * 0.2, W / 2, H / 2, W * 0.75);
+            scrim.addColorStop(0, 'rgba(0,0,0,0.3)');
+            scrim.addColorStop(1, 'rgba(0,0,0,0.65)');
+            ctx.globalAlpha = scrimAlpha;
+            ctx.fillStyle = scrim;
+            ctx.fillRect(0, 0, W, H);
+        }
 
         ctx.restore();
         return true;
@@ -537,6 +683,30 @@ class MGRenderer {
         img.src = url;
     }
 
+    _getTemplateContentWindow(mg, localFrame) {
+        if (!mg || !mg.templateType) return null;
+        const offsetSec = Number(mg.templateContentOffset);
+        const durationSec = Number(mg.templateContentDuration);
+        if (!Number.isFinite(offsetSec) || !Number.isFinite(durationSec) || durationSec <= 0) return null;
+
+        const startFrame = Math.max(0, Math.round(offsetSec * this.fps));
+        const durationFrames = Math.max(1, Math.round(durationSec * this.fps));
+        const endFrame = startFrame + durationFrames;
+
+        return {
+            active: localFrame >= startFrame && localFrame < endFrame,
+            localFrame: Math.max(0, localFrame - startFrame),
+            durationSec,
+        };
+    }
+
+    _renderTemplateBackgroundOnly(ctx, mg, anim) {
+        this._ensureTemplateMedia(mg);
+        this._ensureTemplateBgImage(mg);
+        const W = 1920, H = 1080;
+        return this._drawTemplateBg(ctx, mg, W, H, anim.opacity, { scrimAlpha: 0 });
+    }
+
     /**
      * Render a motion graphic for the given local frame.
      * Returns a TextureManager entry { texture, width, height } or null.
@@ -550,10 +720,19 @@ class MGRenderer {
         ctx.clearRect(0, 0, 1920, 1080);
 
         const s = this._getStyle(mg, scriptContext);
+        const templateWindow = this._getTemplateContentWindow(mg, localFrame);
         const anim = AnimationUtils.computeAnimationState(localFrame, this.fps, {
             ...mg,
             _animationSpeed: mg._animationSpeed || 1.0,
         });
+
+        if (templateWindow && !templateWindow.active) {
+            const texId = `mg-${mg.type}-${mg._startFrame || 0}`;
+            if (!this._renderTemplateBackgroundOnly(ctx, mg, anim)) {
+                return null;
+            }
+            return this.textureManager.createOrUpdate(texId, this._canvas);
+        }
 
         // Draw MG background if set
         this._renderMGBackground(ctx, mg, anim);
@@ -562,7 +741,15 @@ class MGRenderer {
         const renderer = this._categoryRenderers[mg.type];
         let rendered = false;
         if (renderer) {
-            renderer(ctx, localFrame, this.fps, mg, s, anim, scriptContext);
+            const renderFrame = templateWindow ? templateWindow.localFrame : localFrame;
+            const renderMg = templateWindow ? { ...mg, duration: templateWindow.durationSec } : mg;
+            const renderAnim = templateWindow
+                ? AnimationUtils.computeAnimationState(renderFrame, this.fps, {
+                    ...renderMg,
+                    _animationSpeed: mg._animationSpeed || 1.0,
+                })
+                : anim;
+            renderer(ctx, renderFrame, this.fps, renderMg, s, renderAnim, scriptContext);
             rendered = true;
         } else if (mg.text) {
             // Fallback: render unknown MG types as a headline so text is visible
@@ -750,6 +937,28 @@ class MGRenderer {
         }
 
         ctx.restore();
+    }
+
+    _isTransparentTemplateBackground(mg = {}) {
+        const fields = [
+            mg.mgBackground,
+            mg.background,
+            mg.templateBackground,
+            mg.templateBg,
+            mg.backgroundMode,
+            mg.mgData?.mgBackground,
+            mg.mgData?.background,
+            mg.mgData?.templateBackground,
+            mg.mgData?.templateBg,
+            mg.mgData?.backgroundMode,
+        ];
+        return fields.some(value => {
+            if (typeof value !== 'string') return false;
+            const mode = value.trim().toLowerCase();
+            return mode === 'none'
+                || mode === 'transparent'
+                || (mode.includes('transparent') && !mode.startsWith('gradient:') && !mode.startsWith('image:'));
+        });
     }
 
     /**
@@ -1026,7 +1235,7 @@ class MGRenderer {
         const variant = this._resolveVariant(mg, s, 'headline');
         const animType = this._resolveAnimation(mg, s, 'headline');
         const colors = this._resolveColors(s, 'headline', mg);
-        const ls = this._getHeadlineStyle(mg);
+        const ls = this._getHeadlineStyle(mg, s);
 
         // Shared position computation
         const position = mg.position || 'center';
@@ -1238,27 +1447,60 @@ class MGRenderer {
     }
 
     // ── Resolve variant for any category ──
-    // Priority: manual/user variant > theme override > style preset > registry default
+    // Two-knob model: theme has a `variantAvoid` filter list; variant is picked
+    // by rotating mg.sceneIndex through (allVariants - variantAvoid). User
+    // mg.subType always wins. AI hint (mg._aiVariant) is honored if it's not
+    // on the avoid list. Falls back to legacy ov.style if no variantAvoid set.
     _resolveVariant(mg, s, category) {
         const ov = this._getCategoryOverride(mg, s, category);
-        if (mg.subType && !this._shouldIgnoreThemeVariant(mg, ov)) return mg.subType;
-        if (!mg.styleManual && ov?.style) return ov.style;
-        // Category-specific style preset fallback (lowerThird has lowerThirdStyle)
-        if (category === 'lowerThird' && s.lowerThirdStyle) return s.lowerThirdStyle;
-        // Registry default
         const reg = window._mgRegistry?.registry?.[category];
+
+        // 1. User-set in UI props panel wins
+        if (mg.subType && !this._shouldIgnoreThemeVariant(mg, ov)) return mg.subType;
+
+        // 2. New Option-C path: variantAvoid + scene-index rotation
+        const allVariants = reg?.types ? Object.keys(reg.types) : [];
+        if (allVariants.length > 0 && Array.isArray(ov?.variantAvoid)) {
+            const pool = allVariants.filter(v => !ov.variantAvoid.includes(v));
+            const finalPool = pool.length > 0 ? pool : allVariants;
+            // AI hint takes precedence if it survived the avoid filter
+            if (mg._aiVariant && finalPool.includes(mg._aiVariant)) return mg._aiVariant;
+            // Deterministic per-scene rotation for variety
+            const idx = (typeof mg.sceneIndex === 'number' ? mg.sceneIndex : 0);
+            return finalPool[Math.abs(idx) % finalPool.length];
+        }
+
+        // 3. Legacy back-compat: themeOverride.style (variant lock — pre-refactor)
+        if (!mg.styleManual && ov?.style && reg?.types?.[ov.style]) return ov.style;
+
+        // 4. Category-specific style preset fallback (lowerThird)
+        if (category === 'lowerThird' && s.lowerThirdStyle) return s.lowerThirdStyle;
+
+        // 5. Registry default
         return reg?.defaultType || 'standard';
     }
 
     // ── Resolve animation for any category ──
+    // Animation is NOT theme-controlled (May 2026 refactor). Source order:
+    //   1. mg.animation (user-set in UI)
+    //   2. variant's default from registry (types[variant].animation)
+    //   3. legacy ov.anim if present (back-compat)
+    //   4. style-preset fallback for lowerThird
+    //   5. first animation in registry's animations[]
     _resolveAnimation(mg, s, category) {
         const ov = this._getCategoryOverride(mg, s, category);
         if (mg.animation && !this._shouldIgnoreThemeAnimation(mg, ov)) return mg.animation;
-        if (!mg.styleManual && ov?.anim) return ov.anim;
-        if (category === 'lowerThird' && s.lowerThirdAnimation) return s.lowerThirdAnimation;
+
         const reg = window._mgRegistry?.registry?.[category];
         const subType = this._resolveVariant(mg, s, category);
-        return reg?.types?.[subType]?.animation || reg?.animations?.[0] || 'slideLeft';
+        const variantDefault = reg?.types?.[subType]?.animation;
+        if (variantDefault) return variantDefault;
+
+        // Legacy back-compat (pre-refactor themes set ov.anim explicitly)
+        if (!mg.styleManual && ov?.anim) return ov.anim;
+        if (category === 'lowerThird' && s.lowerThirdAnimation) return s.lowerThirdAnimation;
+
+        return reg?.animations?.[0] || 'slideLeft';
     }
 
     // ── Resolve colors for any category ──
@@ -1271,7 +1513,7 @@ class MGRenderer {
     _renderLowerThird(ctx, frame, fps, mg, s, anim) {
         const variant = this._resolveVariant(mg, s, 'lowerThird');
         const animType = this._resolveAnimation(mg, s, 'lowerThird');
-        const ls = this._getLowerThirdStyle(mg);
+        const ls = this._getLowerThirdStyle(mg, s);
 
         // Measure text to compute dynamic box width
         const padding = 48;
@@ -1792,6 +2034,7 @@ class MGRenderer {
 
         const variant = this._resolveVariant(mg, s, 'statCounter');
         const colors = this._resolveColors(s, 'statCounter', mg);
+        const sc = this._getStatCounterStyle(mg, s);
 
         // Parse number, prefix, suffix from text
         const numberMatch = (mg.text || '').match(/[\d,.]+/);
@@ -1859,7 +2102,7 @@ class MGRenderer {
         ctx.globalAlpha = Math.min(1, isExiting ? exitProgress : opacity);
 
         this._dispatchVariant(ctx, 'statCounter', variant, mg, s, anim, null, {
-            bx: pos.x, by: pos.y, bw: boxW, bh: boxH, colors,
+            bx: pos.x, by: pos.y, bw: boxW, bh: boxH, colors, sc,
             currentNumber, prefix, suffix, scaleSuffix, countProgress, targetNumber, isPercent,
             scale, entSlideY, entBlur, labelSpring, idleScale,
             label: suffix || mg.subtext || '',
@@ -1870,12 +2113,13 @@ class MGRenderer {
 
     // ── StatCounter variant: Standard (big centered number + label below) ──
     _renderSC_Standard(ctx, mg, s, anim, _a, setup) {
-        const { bx, by, bw, bh, colors, currentNumber, prefix, label, scaleSuffix,
+        const { bx, by, bw, bh, colors, sc, currentNumber, prefix, label, scaleSuffix,
                 scale, entSlideY, entBlur, labelSpring, idleScale } = setup;
         const { opacity } = anim;
 
-        const accentFill = colors?.accentFill || s.accent;
-        const textFill = colors?.textFill || s.text;
+        const accentFill = colors?.accentFill || sc.accentFill;
+        const textFill = colors?.textFill || sc.textFill;
+        const numberFill = sc.numberFill || accentFill;
 
         const cx = bx + bw / 2;
         const cy = by + bh / 2;
@@ -1884,14 +2128,20 @@ class MGRenderer {
         ctx.scale(scale * idleScale, scale * idleScale);
         if (entBlur > 0.5) ctx.filter = `blur(${entBlur.toFixed(1)}px)`;
 
-        // Number
-        MGRenderer._setFont(ctx, '900', 96, s.fontHeading);
-        ctx.fillStyle = accentFill;
+        // Number — optional glow pass for neon/elegant
+        MGRenderer._setFont(ctx, sc.numberWeight, 96, s.fontHeading);
+        ctx.fillStyle = numberFill;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.shadowColor = 'rgba(0,0,0,0.85)';
-        ctx.shadowBlur = 12;
-        ctx.shadowOffsetY = 4;
+        if (sc.glow) {
+            ctx.shadowColor = accentFill;
+            ctx.shadowBlur = 28;
+            ctx.shadowOffsetY = 0;
+            ctx.fillText(`${prefix}${currentNumber}${scaleSuffix || ''}`, 0, -10);
+        }
+        ctx.shadowColor = sc.shadowColor;
+        ctx.shadowBlur = sc.shadowBlur;
+        ctx.shadowOffsetY = sc.shadowY;
         ctx.fillText(`${prefix}${currentNumber}${scaleSuffix || ''}`, 0, -10);
         ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
 
@@ -1900,10 +2150,10 @@ class MGRenderer {
         // Label
         if (label) {
             ctx.globalAlpha = Math.min(1, opacity) * labelSpring;
-            MGRenderer._setFont(ctx, '600', 28, s.fontBody);
+            MGRenderer._setFont(ctx, sc.labelWeight, 28, s.fontBody);
             ctx.fillStyle = textFill;
-            ctx.shadowColor = 'rgba(0,0,0,0.7)';
-            ctx.shadowBlur = 4;
+            ctx.shadowColor = sc.labelShadowColor;
+            ctx.shadowBlur = sc.labelShadowBlur;
             ctx.fillText(label, 0, 50);
             ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
         }
@@ -1911,13 +2161,14 @@ class MGRenderer {
 
     // ── StatCounter variant: Ticker (horizontal card — number left, label right) ──
     _renderSC_Ticker(ctx, mg, s, anim, _a, setup) {
-        const { bx, by, bw, bh, colors, currentNumber, prefix, label, scaleSuffix,
+        const { bx, by, bw, bh, colors, sc, currentNumber, prefix, label, scaleSuffix,
                 scale, entSlideY, entBlur, labelSpring, idleScale } = setup;
         const { opacity } = anim;
 
-        const bgFill = colors?.bgFill || s.bg;
-        const accentFill = colors?.accentFill || s.accent;
-        const textFill = colors?.textFill || s.text;
+        const bgFill = colors?.bgFill || sc.bgFill;
+        const accentFill = colors?.accentFill || sc.accentFill;
+        const textFill = colors?.textFill || sc.textFill;
+        const numberFill = sc.numberFill || accentFill;
 
         const cx = bx + bw / 2;
         const cy = by + bh / 2;
@@ -1927,10 +2178,10 @@ class MGRenderer {
         if (entBlur > 0.5) ctx.filter = `blur(${entBlur.toFixed(1)}px)`;
 
         // Card background
-        ctx.shadowColor = 'rgba(0,0,0,0.5)';
-        ctx.shadowBlur = 14;
-        ctx.shadowOffsetY = 3;
-        MGRenderer._roundRect(ctx, -bw / 2, -bh / 2, bw, bh, 10);
+        ctx.shadowColor = sc.shadowColor;
+        ctx.shadowBlur = sc.shadowBlur + 2;
+        ctx.shadowOffsetY = Math.max(2, sc.shadowY - 1);
+        MGRenderer._roundRect(ctx, -bw / 2, -bh / 2, bw, bh, sc.radius);
         ctx.fillStyle = bgFill;
         ctx.fill();
         ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
@@ -1943,19 +2194,23 @@ class MGRenderer {
         ctx.filter = 'none';
 
         // Ticker layout: big number on left, context label on right
-        // Short prefix (1-2 chars like "$", "~") stays with the number; long prefix goes to label
         const shortPrefix = prefix.length <= 3 ? prefix : '';
         const numDisplay = `${shortPrefix}${currentNumber}${scaleSuffix || ''}`;
-        // Build label: long prefix + suffix/subtext
         const extraLabel = prefix.length > 3 ? prefix.trim() : '';
         const baseLabel = label || '';
         const tickerLabel = extraLabel ? (baseLabel ? `${extraLabel} ${baseLabel}` : extraLabel) : baseLabel;
 
         // Number on left
-        MGRenderer._setFont(ctx, '900', 72, s.fontHeading);
-        ctx.fillStyle = accentFill;
+        MGRenderer._setFont(ctx, sc.numberWeight, 72, s.fontHeading);
+        ctx.fillStyle = numberFill;
         ctx.textAlign = 'left';
         ctx.textBaseline = 'middle';
+        if (sc.glow) {
+            ctx.shadowColor = accentFill;
+            ctx.shadowBlur = 18;
+            ctx.fillText(numDisplay, -bw / 2 + 24, 0);
+            ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+        }
         ctx.fillText(numDisplay, -bw / 2 + 24, 0);
 
         // Vertical separator
@@ -1971,7 +2226,7 @@ class MGRenderer {
         // Label on right — truncate if too long for remaining space
         if (tickerLabel) {
             ctx.globalAlpha = Math.min(1, opacity) * labelSpring;
-            MGRenderer._setFont(ctx, '600', 26, s.fontBody);
+            MGRenderer._setFont(ctx, sc.labelWeight, 26, s.fontBody);
             ctx.fillStyle = textFill;
             ctx.textAlign = 'left';
             ctx.textBaseline = 'middle';
@@ -1989,12 +2244,13 @@ class MGRenderer {
 
     // ── StatCounter variant: Ring (circular progress arc around number) ──
     _renderSC_Ring(ctx, mg, s, anim, _a, setup) {
-        const { bx, by, bw, bh, colors, currentNumber, prefix, label, scaleSuffix, countProgress,
+        const { bx, by, bw, bh, colors, sc, currentNumber, prefix, label, scaleSuffix, countProgress,
                 targetNumber, isPercent, scale, entSlideY, entBlur, labelSpring, idleScale } = setup;
         const { opacity } = anim;
 
-        const accentFill = colors?.accentFill || s.accent;
-        const textFill = colors?.textFill || s.text;
+        const accentFill = colors?.accentFill || sc.accentFill;
+        const textFill = colors?.textFill || sc.textFill;
+        const numberFill = sc.numberFill || accentFill;
 
         const cx = bx + bw / 2;
         const cy = by + bh / 2 - 20;
@@ -2011,7 +2267,7 @@ class MGRenderer {
         // Background ring (track)
         ctx.beginPath();
         ctx.arc(0, 0, ringR, 0, Math.PI * 2);
-        ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+        ctx.strokeStyle = sc.ringTrackColor;
         ctx.lineWidth = ringW;
         ctx.stroke();
 
@@ -2021,31 +2277,36 @@ class MGRenderer {
             const endAngle = startAngle + (Math.PI * 2 * Math.min(1, arcFill));
             ctx.beginPath();
             ctx.arc(0, 0, ringR, startAngle, endAngle);
+            if (sc.glow) {
+                ctx.shadowColor = accentFill;
+                ctx.shadowBlur = 22;
+            }
             ctx.strokeStyle = accentFill;
             ctx.lineWidth = ringW;
             ctx.lineCap = 'round';
             ctx.stroke();
+            ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
         }
 
         ctx.filter = 'none';
 
         // Number inside ring
-        MGRenderer._setFont(ctx, '900', 64, s.fontHeading);
-        ctx.fillStyle = accentFill;
+        MGRenderer._setFont(ctx, sc.numberWeight, 64, s.fontHeading);
+        ctx.fillStyle = numberFill;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.shadowColor = 'rgba(0,0,0,0.7)';
-        ctx.shadowBlur = 8;
+        ctx.shadowColor = sc.shadowColor;
+        ctx.shadowBlur = Math.max(6, sc.shadowBlur - 4);
         ctx.fillText(`${prefix}${currentNumber}${scaleSuffix || ''}`, 0, 0);
         ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
 
         // Label below ring
         if (label) {
             ctx.globalAlpha = Math.min(1, opacity) * labelSpring;
-            MGRenderer._setFont(ctx, '600', 26, s.fontBody);
+            MGRenderer._setFont(ctx, sc.labelWeight, 26, s.fontBody);
             ctx.fillStyle = textFill;
-            ctx.shadowColor = 'rgba(0,0,0,0.7)';
-            ctx.shadowBlur = 4;
+            ctx.shadowColor = sc.labelShadowColor;
+            ctx.shadowBlur = sc.labelShadowBlur;
             ctx.fillText(label, 0, ringR + 36);
             ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
         }
@@ -2060,9 +2321,10 @@ class MGRenderer {
         const variant = this._resolveVariant(mg, s, 'callout');
         const animType = this._resolveAnimation(mg, s, 'callout');
         const colors = this._resolveColors(s, 'callout', mg);
+        const cs = this._getCalloutStyle(mg, s);
 
-        // Measure text for dynamic box sizing
-        MGRenderer._setFont(ctx, 'italic 600', 34, s.fontHeading);
+        // Measure text for dynamic box sizing (style-aware font)
+        MGRenderer._setFont(ctx, cs.titleStyle, cs.titleSize, s.fontHeading);
         const textWidth = Math.min(ctx.measureText(mg.text || '').width + 80, 1920 * 0.7);
         const boxW = Math.max(400, textWidth);
         const boxH = mg.subtext ? 160 : 120;
@@ -2074,21 +2336,21 @@ class MGRenderer {
         ctx.globalAlpha = Math.min(1, anim.isExiting ? anim.exitProgress : anim.opacity);
 
         this._dispatchVariant(ctx, 'callout', variant, mg, s, anim, a,
-            { bx: pos.x, by: pos.y, bw: boxW, bh: boxH, colors });
+            { bx: pos.x, by: pos.y, bw: boxW, bh: boxH, colors, cs });
 
         ctx.restore();
     }
 
     // ── Callout variant: Standard (quote box with decorative quote mark) ──
     _renderCO_Standard(ctx, mg, s, anim, a, setup) {
-        const { bx, by, bw, bh, colors } = setup;
+        const { bx, by, bw, bh, colors, cs } = setup;
         const { interpolate } = AnimationUtils;
         const { isExiting, exitProgress, opacity, idleScale } = anim;
 
-        const bgFill = colors?.bgFill || s.bg;
-        const textFill = colors?.textFill || s.text;
-        const accentFill = colors?.accentFill || s.primary;
-        const subFill = colors?.textFill || s.textSub || 'rgba(255,255,255,0.75)';
+        const bgFill = colors?.bgFill || cs.bgFill;
+        const textFill = colors?.textFill || cs.textFill;
+        const accentFill = colors?.accentFill || cs.accentFill;
+        const subFill = cs.subFill;
 
         const scale = (a.scale || 1) * (isExiting ? interpolate(exitProgress, [0, 1], [0.97, 1]) : 1);
 
@@ -2096,34 +2358,34 @@ class MGRenderer {
         ctx.scale(scale * idleScale, scale * idleScale);
         if (a.blur > 0.5) ctx.filter = `blur(${a.blur.toFixed(1)}px)`;
 
-        if (s.glow) {
-            ctx.shadowColor = accentFill + '30';
-            ctx.shadowBlur = 10;
+        if (cs.glow) {
+            ctx.shadowColor = cs.shadowColor;
+            ctx.shadowBlur = cs.shadowBlur;
         } else {
-            ctx.shadowColor = 'rgba(0,0,0,0.4)';
-            ctx.shadowBlur = 16;
-            ctx.shadowOffsetY = 4;
+            ctx.shadowColor = cs.shadowColor;
+            ctx.shadowBlur = cs.shadowBlur;
+            ctx.shadowOffsetY = cs.shadowY;
         }
-        MGRenderer._roundRect(ctx, -bw / 2, -bh / 2, bw, bh, 12);
+        MGRenderer._roundRect(ctx, -bw / 2, -bh / 2, bw, bh, cs.radius);
         ctx.fillStyle = bgFill;
         ctx.fill();
         ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
-        ctx.strokeStyle = accentFill;
-        ctx.lineWidth = 2;
+        ctx.strokeStyle = cs.borderColor || accentFill;
+        ctx.lineWidth = cs.borderWidth;
         ctx.stroke();
 
         ctx.filter = 'none';
 
         // Quote mark with staggered entrance
-        ctx.globalAlpha = Math.min(1, opacity) * (a.subSpring || 1) * 0.6;
-        MGRenderer._setFont(ctx, '900', 64, s.fontHeading);
-        ctx.fillStyle = accentFill;
+        ctx.globalAlpha = Math.min(1, opacity) * (a.subSpring || 1) * cs.quoteOpacity;
+        MGRenderer._setFont(ctx, '900', cs.quoteSize, s.fontHeading);
+        ctx.fillStyle = cs.quoteFill || accentFill;
         ctx.textAlign = 'left';
         ctx.textBaseline = 'top';
         ctx.fillText('\u201C', -bw / 2 + 20, -bh / 2 - 24);
 
         ctx.globalAlpha = Math.min(1, isExiting ? exitProgress : opacity);
-        MGRenderer._setFont(ctx, 'italic 600', 34, s.fontHeading);
+        MGRenderer._setFont(ctx, cs.titleStyle, cs.titleSize, s.fontHeading);
         ctx.fillStyle = textFill;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
@@ -2134,7 +2396,7 @@ class MGRenderer {
 
         if (mg.subtext) {
             ctx.globalAlpha = Math.min(1, opacity) * (a.subSpring || 1);
-            MGRenderer._setFont(ctx, '500', 20, s.fontBody);
+            MGRenderer._setFont(ctx, cs.subWeight, cs.subSize, s.fontBody);
             ctx.fillStyle = subFill;
             ctx.fillText(`\u2014 ${mg.subtext}`, 0, bh / 2 - 30);
         }
@@ -2142,12 +2404,12 @@ class MGRenderer {
 
     // ── Callout variant: Minimal (clean text, thin bottom line, no quote mark) ──
     _renderCO_Minimal(ctx, mg, s, anim, a, setup) {
-        const { bx, by, bw, bh, colors } = setup;
+        const { bx, by, bw, bh, colors, cs } = setup;
         const { isExiting, exitProgress, opacity, idleScale } = anim;
 
-        const textFill = colors?.textFill || s.text;
-        const accentFill = colors?.accentFill || s.primary;
-        const subFill = colors?.textFill || s.textSub || 'rgba(255,255,255,0.75)';
+        const textFill = colors?.textFill || cs.textFill;
+        const accentFill = colors?.accentFill || cs.accentFill;
+        const subFill = cs.subFill;
 
         const scale = (a.scale || 1) * (isExiting ? 0.97 + exitProgress * 0.03 : 1);
 
@@ -2157,14 +2419,16 @@ class MGRenderer {
 
         // Subtle frosted background — barely there
         ctx.fillStyle = 'rgba(0,0,0,0.3)';
-        MGRenderer._roundRect(ctx, -bw / 2, -bh / 2, bw, bh, 6);
+        MGRenderer._roundRect(ctx, -bw / 2, -bh / 2, bw, bh, cs.radius);
         ctx.fill();
 
         ctx.filter = 'none';
 
-        // Main text — clean, no italic
+        // Main text — clean, no italic forced (style controls font style)
         ctx.globalAlpha = Math.min(1, isExiting ? exitProgress : opacity);
-        MGRenderer._setFont(ctx, '600', 34, s.fontHeading);
+        // Strip "italic " prefix for minimal — minimal styles read cleaner upright
+        const cleanWeight = (cs.titleStyle || '600').replace(/^italic\s+/, '');
+        MGRenderer._setFont(ctx, cleanWeight, cs.titleSize, s.fontHeading);
         ctx.fillStyle = textFill;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
@@ -2184,7 +2448,7 @@ class MGRenderer {
 
         if (mg.subtext) {
             ctx.globalAlpha = Math.min(1, opacity) * (a.subSpring || 1);
-            MGRenderer._setFont(ctx, '400', 20, s.fontBody);
+            MGRenderer._setFont(ctx, cs.subWeight, cs.subSize, s.fontBody);
             ctx.fillStyle = subFill;
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
@@ -2194,14 +2458,14 @@ class MGRenderer {
 
     // ── Callout variant: Accent (left accent bar, blockquote style) ──
     _renderCO_Accent(ctx, mg, s, anim, a, setup) {
-        const { bx, by, bw, bh, colors } = setup;
+        const { bx, by, bw, bh, colors, cs } = setup;
         const { interpolate } = AnimationUtils;
         const { isExiting, exitProgress, opacity, idleScale } = anim;
 
-        const bgFill = colors?.bgFill || s.bg;
-        const textFill = colors?.textFill || s.text;
-        const accentFill = colors?.accentFill || s.primary;
-        const subFill = colors?.textFill || s.textSub || 'rgba(255,255,255,0.75)';
+        const bgFill = colors?.bgFill || cs.bgFill;
+        const textFill = colors?.textFill || cs.textFill;
+        const accentFill = colors?.accentFill || cs.accentFill;
+        const subFill = cs.subFill;
 
         const scale = (a.scale || 1) * (isExiting ? interpolate(exitProgress, [0, 1], [0.97, 1]) : 1);
 
@@ -2210,10 +2474,10 @@ class MGRenderer {
         if (a.blur > 0.5) ctx.filter = `blur(${a.blur.toFixed(1)}px)`;
 
         // Dark background card
-        ctx.shadowColor = 'rgba(0,0,0,0.5)';
-        ctx.shadowBlur = 12;
-        ctx.shadowOffsetY = 3;
-        MGRenderer._roundRect(ctx, -bw / 2, -bh / 2, bw, bh, 8);
+        ctx.shadowColor = cs.shadowColor;
+        ctx.shadowBlur = cs.shadowBlur;
+        ctx.shadowOffsetY = cs.shadowY;
+        MGRenderer._roundRect(ctx, -bw / 2, -bh / 2, bw, bh, cs.radius);
         ctx.fillStyle = bgFill;
         ctx.fill();
         ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
@@ -2230,7 +2494,7 @@ class MGRenderer {
         // Main text — left-aligned, offset from accent bar
         const textX = -bw / 2 + 28;
         ctx.globalAlpha = Math.min(1, isExiting ? exitProgress : opacity);
-        MGRenderer._setFont(ctx, 'italic 600', 34, s.fontHeading);
+        MGRenderer._setFont(ctx, cs.titleStyle, cs.titleSize, s.fontHeading);
         ctx.fillStyle = textFill;
         ctx.textAlign = 'left';
         ctx.textBaseline = 'middle';
@@ -2241,7 +2505,7 @@ class MGRenderer {
 
         if (mg.subtext) {
             ctx.globalAlpha = Math.min(1, opacity) * (a.subSpring || 1);
-            MGRenderer._setFont(ctx, '500', 20, s.fontBody);
+            MGRenderer._setFont(ctx, cs.subWeight, cs.subSize, s.fontBody);
             ctx.fillStyle = subFill;
             ctx.textAlign = 'left';
             ctx.fillText(`\u2014 ${mg.subtext}`, textX, bh / 2 - 30);
@@ -2938,6 +3202,7 @@ class MGRenderer {
         const variant = this._resolveVariant(mg, s, 'typewriter');
         const animType = this._resolveAnimation(mg, s, 'typewriter');
         const colors = this._resolveColors(s, 'typewriter', mg);
+        const tw = this._getTypewriterStyle(mg, s);
 
         const a = this._computeAnimation(animType, frame, fps, anim, mg);
 
@@ -2946,8 +3211,8 @@ class MGRenderer {
         const charCount = Math.floor(fullText.length * Math.min(1, revealPct));
         const visibleText = fullText.substring(0, charCount);
 
-        // Box sizing
-        MGRenderer._setFont(ctx, '700', 42, s.fontHeading);
+        // Box sizing — style-driven font weight
+        MGRenderer._setFont(ctx, tw.textWeight, 42, s.fontHeading);
         const fullW = Math.min(ctx.measureText(fullText).width + 60, 1920 * 0.75);
         const boxW = Math.max(350, fullW);
         const boxH = mg.subtext ? 130 : 90;
@@ -2957,7 +3222,7 @@ class MGRenderer {
         ctx.globalAlpha = Math.min(1, anim.isExiting ? anim.exitProgress : anim.opacity);
 
         this._dispatchVariant(ctx, 'typewriter', variant, mg, s, anim, a, {
-            bx: pos.x, by: pos.y, bw: boxW, bh: boxH, colors,
+            bx: pos.x, by: pos.y, bw: boxW, bh: boxH, colors, tw,
             visibleText, fullText, revealPct, charCount,
         });
 
@@ -2966,81 +3231,45 @@ class MGRenderer {
 
     // ── Typewriter variant: Standard (dark backdrop + text + cursor) ──
     _renderTW_Standard(ctx, mg, s, anim, a, setup) {
-        const { bx, by, bw, bh, colors, visibleText, revealPct } = setup;
+        const { bx, by, bw, bh, colors, tw, visibleText, revealPct } = setup;
         const { interpolate } = AnimationUtils;
         const { opacity, idleScale } = anim;
 
-        const bgFill = colors?.bgFill || s.bg || 'rgba(0,0,0,0.65)';
-        const textFill = colors?.textFill || s.text;
-        const accentFill = colors?.accentFill || s.primary;
-        const subFill = colors?.textFill || s.textSub || 'rgba(255,255,255,0.7)';
+        const bgFill = colors?.bgFill || tw.bgFill;
+        const textFill = colors?.textFill || tw.textFill;
+        const accentFill = colors?.accentFill || tw.accentFill;
+        const subFill = tw.subFill;
 
         const cx = bx + bw / 2;
         const cy = by + bh / 2 + (a.slideY || 0);
         ctx.translate(cx, cy);
         ctx.scale(idleScale, idleScale);
 
-        // Dark backdrop
-        ctx.shadowColor = 'rgba(0,0,0,0.4)';
-        ctx.shadowBlur = 12;
+        // Card backdrop — style-driven shadow + glow
+        if (tw.glow) {
+            ctx.shadowColor = accentFill;
+            ctx.shadowBlur = tw.cardShadowBlur;
+        } else {
+            ctx.shadowColor = tw.cardShadowColor;
+            ctx.shadowBlur = tw.cardShadowBlur;
+        }
         ctx.fillStyle = bgFill;
-        MGRenderer._roundRect(ctx, -bw / 2, -bh / 2, bw, bh, 8);
+        MGRenderer._roundRect(ctx, -bw / 2, -bh / 2, bw, bh, tw.radius);
         ctx.fill();
         ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
 
         // Accent bottom line
         ctx.fillStyle = accentFill;
-        ctx.fillRect(-bw / 2, bh / 2 - 3, bw, 3);
+        ctx.fillRect(-bw / 2, bh / 2 - tw.accentLineH, bw, tw.accentLineH);
 
         // Main text
-        MGRenderer._setFont(ctx, '700', 42, s.fontHeading);
+        MGRenderer._setFont(ctx, tw.textWeight, 42, s.fontHeading);
         ctx.fillStyle = textFill;
         ctx.textAlign = 'left';
         ctx.textBaseline = 'middle';
-        ctx.shadowColor = 'rgba(0,0,0,0.6)';
-        ctx.shadowBlur = 4;
-        const textX = -bw / 2 + 28;
-        const textY = mg.subtext ? -12 : 0;
-        ctx.fillText(visibleText, textX, textY);
-        ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
-
-        // Blinking cursor
-        this._drawTW_Cursor(ctx, textX, textY, visibleText, accentFill, revealPct, a);
-
-        // Subtext
-        if (mg.subtext) {
-            const subAlpha = interpolate(revealPct, [0.7, 1], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' });
-            ctx.globalAlpha = Math.min(1, opacity) * subAlpha;
-            MGRenderer._setFont(ctx, '500', 22, s.fontBody);
-            ctx.fillStyle = subFill;
-            ctx.textAlign = 'left';
-            ctx.fillText(mg.subtext, textX, bh / 2 - 24);
-        }
-    }
-
-    // ── Typewriter variant: Naked (no background, just text + cursor + shadow) ──
-    _renderTW_Naked(ctx, mg, s, anim, a, setup) {
-        const { bx, by, bw, bh, colors, visibleText, revealPct } = setup;
-        const { interpolate } = AnimationUtils;
-        const { opacity, idleScale } = anim;
-
-        const textFill = colors?.textFill || s.text;
-        const accentFill = colors?.accentFill || s.primary;
-        const subFill = colors?.textFill || s.textSub || 'rgba(255,255,255,0.7)';
-
-        const cx = bx + bw / 2;
-        const cy = by + bh / 2 + (a.slideY || 0);
-        ctx.translate(cx, cy);
-        ctx.scale(idleScale, idleScale);
-
-        // Main text — no background, stronger shadow for readability
-        MGRenderer._setFont(ctx, '700', 46, s.fontHeading);
-        ctx.fillStyle = textFill;
-        ctx.textAlign = 'left';
-        ctx.textBaseline = 'middle';
-        ctx.shadowColor = 'rgba(0,0,0,0.85)';
-        ctx.shadowBlur = 10;
-        ctx.shadowOffsetY = 3;
+        ctx.shadowColor = tw.shadowColor;
+        ctx.shadowBlur = tw.shadowBlur;
+        ctx.shadowOffsetY = tw.shadowY;
         const textX = -bw / 2 + 28;
         const textY = mg.subtext ? -12 : 0;
         ctx.fillText(visibleText, textX, textY);
@@ -3053,11 +3282,61 @@ class MGRenderer {
         if (mg.subtext) {
             const subAlpha = interpolate(revealPct, [0.7, 1], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' });
             ctx.globalAlpha = Math.min(1, opacity) * subAlpha;
-            MGRenderer._setFont(ctx, '500', 24, s.fontBody);
+            MGRenderer._setFont(ctx, tw.subWeight, 22, s.fontBody);
             ctx.fillStyle = subFill;
             ctx.textAlign = 'left';
-            ctx.shadowColor = 'rgba(0,0,0,0.7)';
-            ctx.shadowBlur = 6;
+            ctx.fillText(mg.subtext, textX, bh / 2 - 24);
+        }
+    }
+
+    // ── Typewriter variant: Naked (no background, just text + cursor + shadow) ──
+    _renderTW_Naked(ctx, mg, s, anim, a, setup) {
+        const { bx, by, bw, bh, colors, tw, visibleText, revealPct } = setup;
+        const { interpolate } = AnimationUtils;
+        const { opacity, idleScale } = anim;
+
+        const textFill = colors?.textFill || tw.textFill;
+        const accentFill = colors?.accentFill || tw.accentFill;
+        const subFill = tw.subFill;
+
+        const cx = bx + bw / 2;
+        const cy = by + bh / 2 + (a.slideY || 0);
+        ctx.translate(cx, cy);
+        ctx.scale(idleScale, idleScale);
+
+        // Main text — no background, stronger shadow for readability
+        MGRenderer._setFont(ctx, tw.textWeight, 46, s.fontHeading);
+        ctx.fillStyle = textFill;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        // Naked variant needs stronger shadow for readability — double the blur
+        ctx.shadowColor = tw.shadowColor;
+        ctx.shadowBlur = Math.max(8, tw.shadowBlur * 2);
+        ctx.shadowOffsetY = Math.max(2, tw.shadowY + 1);
+        const textX = -bw / 2 + 28;
+        const textY = mg.subtext ? -12 : 0;
+        if (tw.glow) {
+            ctx.shadowColor = accentFill;
+            ctx.shadowBlur = 18;
+            ctx.fillText(visibleText, textX, textY);
+            ctx.shadowColor = tw.shadowColor;
+            ctx.shadowBlur = Math.max(8, tw.shadowBlur * 2);
+        }
+        ctx.fillText(visibleText, textX, textY);
+        ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+
+        // Blinking cursor
+        this._drawTW_Cursor(ctx, textX, textY, visibleText, accentFill, revealPct, a);
+
+        // Subtext
+        if (mg.subtext) {
+            const subAlpha = interpolate(revealPct, [0.7, 1], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' });
+            ctx.globalAlpha = Math.min(1, opacity) * subAlpha;
+            MGRenderer._setFont(ctx, tw.subWeight, 24, s.fontBody);
+            ctx.fillStyle = subFill;
+            ctx.textAlign = 'left';
+            ctx.shadowColor = tw.shadowColor;
+            ctx.shadowBlur = Math.max(4, tw.shadowBlur);
             ctx.fillText(mg.subtext, textX, bh / 2 - 24);
             ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
         }
@@ -3223,8 +3502,10 @@ class MGRenderer {
         },
     };
 
-    _getKineticTextStyle(mg) {
-        const name = mg.style || 'clean';
+    _getKineticTextStyle(mg, s) {
+        // Priority: mg.style (user-set) > theme's styleName > 'clean'
+        const themeStyle = s?._mgOverrides?.kineticText?.styleName;
+        const name = mg.style || themeStyle || 'clean';
         return MGRenderer._KINETIC_TEXT_STYLES[name] || MGRenderer._KINETIC_TEXT_STYLES.clean;
     }
 
@@ -3307,9 +3588,9 @@ class MGRenderer {
         const { interpolate } = AnimationUtils;
         const { isExiting, exitProgress, opacity } = anim;
 
-        const ks = this._getKineticTextStyle(mg);
-        const variant = mg.subType || 'centered';
-        const animation = mg.animation || 'springStagger';
+        const ks = this._getKineticTextStyle(mg, s);
+        const variant = this._resolveVariant(mg, s, 'kineticText');
+        const animation = this._resolveAnimation(mg, s, 'kineticText');
         const fontFamily = s.fontHeading;
         const hasAttr = !!(mg.subtext && mg.subtext !== 'none');
         const layout = this._layoutKineticText(ctx, mg.text, ks, fontFamily, { hasAttr, variant });
@@ -4022,6 +4303,12 @@ class MGRenderer {
                 }
             }
         }
+        const routeHeldWideFromStops = !!(
+            _stopsDrivenCamera
+            && _mapScene?.mapMode === 'route'
+            && String(_mapScene?.cameraPlan?.framing || '').toLowerCase() === 'held-wide'
+            && wpPositions.length >= 2
+        );
 
         // ── Route geometry (decoupled from camera stops) ──
         // Long-route scenes use a single authored corridor camera stop, so
@@ -4123,6 +4410,28 @@ class MGRenderer {
                         wpCamY = IMG_H / 2;
                     }
                 }
+                if (routeHeldWideFromStops) {
+                    const xs = wpPositions.map(p => p.px);
+                    const ys = wpPositions.map(p => p.py);
+                    const minX = Math.min(...xs), maxX = Math.max(...xs);
+                    const minY = Math.min(...ys), maxY = Math.max(...ys);
+                    const spanX = Math.max(1, maxX - minX);
+                    const spanY = Math.max(1, maxY - minY);
+                    const paddedFit = Math.min(W / (spanX * 1.6), H / (spanY * 1.6));
+                    const endpointFit = Math.min(W / spanX, H / spanY);
+                    const fillScale = Math.max(W / IMG_W, H / IMG_H);
+                    let fitScale = Math.max(paddedFit, fillScale);
+                    if (fitScale > endpointFit && endpointFit >= fillScale) fitScale = endpointFit;
+                    wpCamX = (minX + maxX) / 2;
+                    wpCamY = (minY + maxY) / 2;
+                    camScale = Math.max(0.25, Math.min(1.3, fitScale));
+                    if (!this._heldWideRouteLogged) this._heldWideRouteLogged = new Set();
+                    const _sceneKey = `scene${_mapScene?.sceneIndex ?? mg.sceneIndex ?? '?'}`;
+                    if (!this._heldWideRouteLogged.has(_sceneKey)) {
+                        this._heldWideRouteLogged.add(_sceneKey);
+                        console.log(`[MGRenderer] map ${_sceneKey} held-wide route lock: stops=${wpPositions.length} camScale=${camScale.toFixed(3)} wpCam=[${wpCamX.toFixed(0)},${wpCamY.toFixed(0)}]`);
+                    }
+                }
                 // Route + comparison: lock camera to bbox-center of all waypoints
                 // and scale to fit. A per-waypoint pan at scale 1.1 clips off the
                 // bigmap edges (black bars) because each waypoint sits near the
@@ -4134,7 +4443,7 @@ class MGRenderer {
                 // bbox-fit override so stops' lon/lat pan and per-stop zoom
                 // actually show up on screen. Stops absent → this block runs as
                 // before (legacy fallback, unchanged behavior).
-                if (wideCap != null && wpPositions.length > 1 && !_stopsDrivenCamera) {
+                else if (wideCap != null && wpPositions.length > 1 && !_stopsDrivenCamera) {
                     const xs = wpPositions.map(p => p.px);
                     const ys = wpPositions.map(p => p.py);
                     const minX = Math.min(...xs), maxX = Math.max(...xs);
@@ -5461,6 +5770,7 @@ class MGRenderer {
         // ── Resolve variant & animation ──
         const variant = this._resolveVariant(mg, s, 'explainer') || 'standard';
         const animType = this._resolveAnimation(mg, s, 'explainer') || 'fadeSlide';
+        const ex = this._getExplainerStyle(mg, s);
 
         // Explainer is always an overlay card on top of video.
         // center = larger card centered, corner positions = smaller card in corner.
@@ -5468,12 +5778,14 @@ class MGRenderer {
 
         // ── Read custom properties ──
         const imgScaleMult = (mg.explainerImgScale != null ? mg.explainerImgScale : 100) / 100;
-        const shadowStyle = mg.explainerShadow || 'medium';
+        // Theme styleName drives shadow preset; mg.explainerShadow (user) still wins.
+        const shadowStyle = mg.explainerShadow || ex.shadowPreset || 'medium';
 
         ctx.save();
         ctx.globalAlpha = opacity;
 
-        const primary = s.primary || '#3b82f6';
+        // Theme styleName drives accent; falls back to scene theme primary/accent.
+        const primary = ex.accentFill || s.primary || '#3b82f6';
         const accent = s.accent || '#f59e0b';
 
         // ── Compute card positioning ──
@@ -5575,7 +5887,7 @@ class MGRenderer {
         const imgFile = mg.explainerImageFile;
         const loadedImg = imgFile ? this._explainerImages[imgFile] : null;
 
-        // Shadow presets
+        // Shadow presets — `glow` uses the theme's accent color
         const SHADOW_PRESETS = {
             none:   { color: 'transparent', blur: 0, offY: 0 },
             soft:   { color: 'rgba(0,0,0,0.25)', blur: 20, offY: 6 },
@@ -5584,6 +5896,11 @@ class MGRenderer {
             glow:   { color: this._hexToRgba(primary, 0.5), blur: 40, offY: 0 },
         };
         const shadow = SHADOW_PRESETS[shadowStyle] || SHADOW_PRESETS.medium;
+        // Style-driven glow on the image when style.glow is true
+        if (ex.glow && shadowStyle === ex.shadowPreset && shadowStyle !== 'glow') {
+            shadow.color = this._hexToRgba(primary, 0.35);
+            shadow.blur = Math.max(shadow.blur, 30);
+        }
 
         if (loadedImg) {
             const natW = loadedImg.naturalWidth || loadedImg.width;
@@ -5626,19 +5943,19 @@ class MGRenderer {
             ctx.globalAlpha = labelAlpha;
             const labelY = labelY_base + labelOffsetY;
 
-            MGRenderer._setFont(ctx, '700', fontSize, s.fontHeading);
+            MGRenderer._setFont(ctx, ex.titleWeight, fontSize, s.fontHeading);
             ctx.textAlign = 'center';
             const titleW = ctx.measureText(labelText).width;
-            MGRenderer._setFont(ctx, '400', subFontSize, s.fontBody);
+            MGRenderer._setFont(ctx, ex.subWeight, subFontSize, s.fontBody);
             const subW = subText ? ctx.measureText(subText).width : 0;
             const pillW = Math.max(titleW, subW) + (isCorner ? 40 : 60);
             const pillH = subText ? (isCorner ? 70 : 90) : (isCorner ? 45 : 60);
             const pillX = labelCenterX - pillW / 2;
             const pillY = labelY - pillH / 2;
 
-            // Semi-transparent pill bg
-            ctx.fillStyle = 'rgba(0,0,0,0.65)';
-            const pillR = 12;
+            // Style-driven pill bg + radius
+            ctx.fillStyle = ex.pillBg;
+            const pillR = ex.pillRadius;
             ctx.beginPath();
             ctx.moveTo(pillX + pillR, pillY);
             ctx.lineTo(pillX + pillW - pillR, pillY);
@@ -5652,21 +5969,21 @@ class MGRenderer {
             ctx.closePath();
             ctx.fill();
 
-            // Accent line
+            // Accent line — style-driven height
             ctx.fillStyle = primary;
-            ctx.fillRect(pillX + 12, pillY, pillW - 24, 3);
+            ctx.fillRect(pillX + 12, pillY, pillW - 24, ex.accentLineH);
 
             // Title
-            MGRenderer._setFont(ctx, '700', fontSize, s.fontHeading);
-            ctx.fillStyle = s.text || '#ffffff';
+            MGRenderer._setFont(ctx, ex.titleWeight, fontSize, s.fontHeading);
+            ctx.fillStyle = ex.textFill || s.text || '#ffffff';
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
             const titleY = subText ? pillY + pillH * 0.38 : pillY + pillH / 2;
             ctx.fillText(labelText, labelCenterX, titleY);
 
             if (subText) {
-                MGRenderer._setFont(ctx, '400', subFontSize, s.fontBody);
-                ctx.fillStyle = s.textSub || 'rgba(255,255,255,0.75)';
+                MGRenderer._setFont(ctx, ex.subWeight, subFontSize, s.fontBody);
+                ctx.fillStyle = ex.subFill || s.textSub || 'rgba(255,255,255,0.75)';
                 ctx.fillText(subText, labelCenterX, pillY + pillH * 0.7);
             }
         }
@@ -5933,7 +6250,7 @@ class MGRenderer {
 
         const variant = this._resolveVariant(mg, s, 'listicleCounter');
         const colors = this._resolveColors(s, 'listicleCounter', mg);
-        const cs = this._getCounterStyle(mg);
+        const cs = this._getCounterStyle(mg, s);
 
         // Parse "#3 Title" → number="3", title="Title"
         const match = (mg.text || '').match(/^#?(\d+)\s*(.*)/);
@@ -6518,8 +6835,10 @@ class MGRenderer {
         },
     };
 
-    _getLowerThirdStyle(mg) {
-        const styleName = mg.style || 'clean';
+    _getLowerThirdStyle(mg, s) {
+        // Priority: mg.style (user-set) > theme's styleName > 'clean'
+        const themeStyle = s?._mgOverrides?.lowerThird?.styleName;
+        const styleName = mg.style || themeStyle || 'clean';
         return MGRenderer._LOWER_THIRD_STYLES[styleName] || MGRenderer._LOWER_THIRD_STYLES.clean;
     }
 
@@ -6578,8 +6897,10 @@ class MGRenderer {
         },
     };
 
-    _getHeadlineStyle(mg) {
-        const styleName = mg.style || 'clean';
+    _getHeadlineStyle(mg, s) {
+        // Priority: mg.style (user-set) > theme's styleName > 'clean'
+        const themeStyle = s?._mgOverrides?.headline?.styleName;
+        const styleName = mg.style || themeStyle || 'clean';
         return MGRenderer._HEADLINE_STYLES[styleName] || MGRenderer._HEADLINE_STYLES.clean;
     }
 
@@ -6668,8 +6989,10 @@ class MGRenderer {
     };
 
     /** Resolve counter style tokens — counter-only, never touches MG or template styles */
-    _getCounterStyle(mg) {
-        const styleName = mg.style || 'clean';
+    _getCounterStyle(mg, s) {
+        // Priority: mg.style (user-set) > theme's styleName > 'clean'
+        const themeStyle = s?._mgOverrides?.listicleCounter?.styleName;
+        const styleName = mg.style || themeStyle || 'clean';
         return MGRenderer._COUNTER_STYLES[styleName] || MGRenderer._COUNTER_STYLES.clean;
     }
 
@@ -6722,9 +7045,11 @@ class MGRenderer {
         },
     };
 
-    /** Resolve template style tokens — template-only, never touches MG styles */
-    _getTemplateStyle(mg, s) {
-        const styleName = mg.style || 'clean';
+    /** Resolve template style tokens — template-only, never touches MG styles.
+     *  Optional `category` lets the theme override apply (e.g. listicleGrid). */
+    _getTemplateStyle(mg, s, category) {
+        const themeStyle = category && s?._mgOverrides?.[category]?.styleName;
+        const styleName = mg.style || themeStyle || 'clean';
         const ts = MGRenderer._TEMPLATE_STYLES[styleName] || MGRenderer._TEMPLATE_STYLES.clean;
         return {
             ...ts,
@@ -6735,12 +7060,256 @@ class MGRenderer {
         };
     }
 
+    // ========================================================================
+    // CALLOUT STYLE TOKENS — quote-box look. Drives text color, accent stripe,
+    // shadow/glow, italic-vs-roman, decorative quote-mark opacity.
+    // ========================================================================
+    static _CALLOUT_STYLES = {
+        clean: {
+            bgFill: 'rgba(12,20,40,0.82)', textFill: '#ffffff', accentFill: '#3b82f6',
+            subFill: 'rgba(255,255,255,0.75)', borderColor: 'rgba(59,130,246,0.25)', borderWidth: 2,
+            shadowColor: 'rgba(0,0,0,0.4)', shadowBlur: 16, shadowY: 4, radius: 12,
+            titleStyle: 'italic 600', titleSize: 34, subWeight: '500', subSize: 20,
+            quoteFill: null, quoteSize: 64, quoteOpacity: 0.6,
+            glow: false,
+        },
+        bold: {
+            bgFill: 'rgba(40,8,8,0.88)', textFill: '#ffffff', accentFill: '#ef4444',
+            subFill: '#fca5a5', borderColor: 'rgba(239,68,68,0.35)', borderWidth: 3,
+            shadowColor: 'rgba(239,68,68,0.28)', shadowBlur: 18, shadowY: 5, radius: 6,
+            titleStyle: '900', titleSize: 36, subWeight: '700', subSize: 22,
+            quoteFill: null, quoteSize: 68, quoteOpacity: 0.75,
+            glow: false,
+        },
+        minimal: {
+            bgFill: 'rgba(0,0,0,0.35)', textFill: 'rgba(255,255,255,0.94)', accentFill: '#94a3b8',
+            subFill: 'rgba(255,255,255,0.6)', borderColor: 'rgba(255,255,255,0.08)', borderWidth: 1,
+            shadowColor: 'none', shadowBlur: 0, shadowY: 0, radius: 6,
+            titleStyle: '500', titleSize: 32, subWeight: '400', subSize: 19,
+            quoteFill: null, quoteSize: 56, quoteOpacity: 0.35,
+            glow: false,
+        },
+        neon: {
+            bgFill: 'rgba(0,8,16,0.86)', textFill: '#ffffff', accentFill: '#00ff88',
+            subFill: '#66ffbb', borderColor: 'rgba(0,255,136,0.3)', borderWidth: 2,
+            shadowColor: 'rgba(0,255,136,0.35)', shadowBlur: 24, shadowY: 0, radius: 10,
+            titleStyle: 'italic 700', titleSize: 34, subWeight: '600', subSize: 20,
+            quoteFill: null, quoteSize: 64, quoteOpacity: 0.8,
+            glow: true,
+        },
+        cinematic: {
+            bgFill: 'rgba(15,10,2,0.86)', textFill: '#f5ecd0', accentFill: '#d4af37',
+            subFill: '#c8a944', borderColor: 'rgba(212,175,55,0.22)', borderWidth: 1.5,
+            shadowColor: 'rgba(0,0,0,0.6)', shadowBlur: 18, shadowY: 4, radius: 4,
+            titleStyle: 'italic 600', titleSize: 32, subWeight: '400', subSize: 20,
+            quoteFill: null, quoteSize: 70, quoteOpacity: 0.55,
+            glow: false,
+        },
+        elegant: {
+            bgFill: 'rgba(12,4,24,0.82)', textFill: '#ffffff', accentFill: '#8b5cf6',
+            subFill: '#c4b5fd', borderColor: 'rgba(139,92,246,0.22)', borderWidth: 1.5,
+            shadowColor: 'rgba(139,92,246,0.2)', shadowBlur: 22, shadowY: 3, radius: 18,
+            titleStyle: 'italic 500', titleSize: 32, subWeight: '300', subSize: 20,
+            quoteFill: null, quoteSize: 64, quoteOpacity: 0.55,
+            glow: true,
+        },
+    };
+
+    _getCalloutStyle(mg, s) {
+        const themeStyle = s?._mgOverrides?.callout?.styleName;
+        const styleName = mg.style || themeStyle || 'clean';
+        return MGRenderer._CALLOUT_STYLES[styleName] || MGRenderer._CALLOUT_STYLES.clean;
+    }
+
+    // ========================================================================
+    // STAT COUNTER STYLE TOKENS — drives big-number weight, accent, shadow/glow,
+    // ticker card chrome (bg + accent stripe). Sizes stay variant-driven.
+    // ========================================================================
+    static _STATCOUNTER_STYLES = {
+        clean: {
+            bgFill: 'rgba(15,23,42,0.85)', textFill: '#ffffff', accentFill: '#3b82f6',
+            numberFill: null, subFill: 'rgba(255,255,255,0.78)',
+            numberWeight: '900', labelWeight: '600',
+            shadowColor: 'rgba(0,0,0,0.85)', shadowBlur: 12, shadowY: 4,
+            labelShadowColor: 'rgba(0,0,0,0.7)', labelShadowBlur: 4,
+            stripeColor: null, ringTrackColor: 'rgba(255,255,255,0.1)',
+            radius: 10, glow: false,
+        },
+        bold: {
+            bgFill: 'rgba(40,8,8,0.9)', textFill: '#ffffff', accentFill: '#ef4444',
+            numberFill: null, subFill: '#fca5a5',
+            numberWeight: '900', labelWeight: '800',
+            shadowColor: 'rgba(0,0,0,0.9)', shadowBlur: 14, shadowY: 6,
+            labelShadowColor: 'rgba(0,0,0,0.8)', labelShadowBlur: 5,
+            stripeColor: null, ringTrackColor: 'rgba(255,255,255,0.12)',
+            radius: 6, glow: false,
+        },
+        minimal: {
+            bgFill: 'rgba(0,0,0,0.4)', textFill: 'rgba(255,255,255,0.94)', accentFill: '#94a3b8',
+            numberFill: '#ffffff', subFill: 'rgba(255,255,255,0.6)',
+            numberWeight: '600', labelWeight: '400',
+            shadowColor: 'rgba(0,0,0,0.4)', shadowBlur: 6, shadowY: 1,
+            labelShadowColor: 'rgba(0,0,0,0.3)', labelShadowBlur: 2,
+            stripeColor: null, ringTrackColor: 'rgba(255,255,255,0.08)',
+            radius: 8, glow: false,
+        },
+        neon: {
+            bgFill: 'rgba(0,8,16,0.88)', textFill: '#ffffff', accentFill: '#00ff88',
+            numberFill: null, subFill: '#66ffbb',
+            numberWeight: '900', labelWeight: '700',
+            shadowColor: 'rgba(0,0,0,0.7)', shadowBlur: 10, shadowY: 2,
+            labelShadowColor: 'rgba(0,0,0,0.5)', labelShadowBlur: 4,
+            stripeColor: null, ringTrackColor: 'rgba(0,255,136,0.12)',
+            radius: 10, glow: true,
+        },
+        cinematic: {
+            bgFill: 'rgba(15,10,2,0.88)', textFill: '#f5ecd0', accentFill: '#d4af37',
+            numberFill: null, subFill: '#c8a944',
+            numberWeight: '800', labelWeight: '600',
+            shadowColor: 'rgba(0,0,0,0.85)', shadowBlur: 18, shadowY: 4,
+            labelShadowColor: 'rgba(0,0,0,0.7)', labelShadowBlur: 6,
+            stripeColor: null, ringTrackColor: 'rgba(212,175,55,0.12)',
+            radius: 4, glow: false,
+        },
+        elegant: {
+            bgFill: 'rgba(12,4,24,0.85)', textFill: '#ffffff', accentFill: '#8b5cf6',
+            numberFill: null, subFill: '#c4b5fd',
+            numberWeight: '700', labelWeight: '400',
+            shadowColor: 'rgba(80,40,140,0.45)', shadowBlur: 16, shadowY: 3,
+            labelShadowColor: 'rgba(80,40,140,0.3)', labelShadowBlur: 6,
+            stripeColor: null, ringTrackColor: 'rgba(139,92,246,0.12)',
+            radius: 16, glow: true,
+        },
+    };
+
+    _getStatCounterStyle(mg, s) {
+        const themeStyle = s?._mgOverrides?.statCounter?.styleName;
+        const styleName = mg.style || themeStyle || 'clean';
+        return MGRenderer._STATCOUNTER_STYLES[styleName] || MGRenderer._STATCOUNTER_STYLES.clean;
+    }
+
+    // ========================================================================
+    // TYPEWRITER STYLE TOKENS — drives backdrop, text color, accent line/cursor,
+    // shadow weight. Naked variant ignores bgFill (no backdrop).
+    // ========================================================================
+    static _TYPEWRITER_STYLES = {
+        clean: {
+            bgFill: 'rgba(0,0,0,0.65)', textFill: '#ffffff', accentFill: '#3b82f6',
+            subFill: 'rgba(255,255,255,0.78)',
+            textWeight: '700', subWeight: '500',
+            shadowColor: 'rgba(0,0,0,0.6)', shadowBlur: 4, shadowY: 0,
+            cardShadowColor: 'rgba(0,0,0,0.4)', cardShadowBlur: 12,
+            accentLineH: 3, radius: 8, glow: false,
+        },
+        bold: {
+            bgFill: 'rgba(40,8,8,0.9)', textFill: '#ffffff', accentFill: '#ef4444',
+            subFill: '#fca5a5',
+            textWeight: '900', subWeight: '700',
+            shadowColor: 'rgba(0,0,0,0.85)', shadowBlur: 6, shadowY: 2,
+            cardShadowColor: 'rgba(239,68,68,0.25)', cardShadowBlur: 14,
+            accentLineH: 5, radius: 4, glow: false,
+        },
+        minimal: {
+            bgFill: 'rgba(0,0,0,0.35)', textFill: 'rgba(255,255,255,0.94)', accentFill: '#94a3b8',
+            subFill: 'rgba(255,255,255,0.6)',
+            textWeight: '500', subWeight: '400',
+            shadowColor: 'rgba(0,0,0,0.3)', shadowBlur: 2, shadowY: 0,
+            cardShadowColor: 'none', cardShadowBlur: 0,
+            accentLineH: 2, radius: 6, glow: false,
+        },
+        neon: {
+            bgFill: 'rgba(0,8,16,0.86)', textFill: '#ffffff', accentFill: '#00ff88',
+            subFill: '#66ffbb',
+            textWeight: '800', subWeight: '600',
+            shadowColor: 'rgba(0,0,0,0.7)', shadowBlur: 4, shadowY: 0,
+            cardShadowColor: 'rgba(0,255,136,0.3)', cardShadowBlur: 18,
+            accentLineH: 3, radius: 8, glow: true,
+        },
+        cinematic: {
+            bgFill: 'rgba(15,10,2,0.85)', textFill: '#f5ecd0', accentFill: '#d4af37',
+            subFill: '#c8a944',
+            textWeight: '600', subWeight: '400',
+            shadowColor: 'rgba(0,0,0,0.7)', shadowBlur: 6, shadowY: 2,
+            cardShadowColor: 'rgba(0,0,0,0.5)', cardShadowBlur: 14,
+            accentLineH: 2, radius: 4, glow: false,
+        },
+        elegant: {
+            bgFill: 'rgba(12,4,24,0.82)', textFill: '#ffffff', accentFill: '#8b5cf6',
+            subFill: '#c4b5fd',
+            textWeight: '500', subWeight: '300',
+            shadowColor: 'rgba(80,40,140,0.4)', shadowBlur: 6, shadowY: 2,
+            cardShadowColor: 'rgba(139,92,246,0.2)', cardShadowBlur: 18,
+            accentLineH: 2, radius: 14, glow: true,
+        },
+    };
+
+    _getTypewriterStyle(mg, s) {
+        const themeStyle = s?._mgOverrides?.typewriter?.styleName;
+        const styleName = mg.style || themeStyle || 'clean';
+        return MGRenderer._TYPEWRITER_STYLES[styleName] || MGRenderer._TYPEWRITER_STYLES.clean;
+    }
+
+    // ========================================================================
+    // EXPLAINER STYLE TOKENS — drives pill backdrop, accent line, text color,
+    // shadow preset key (resolves into SHADOW_PRESETS inside renderer).
+    // ========================================================================
+    static _EXPLAINER_STYLES = {
+        clean: {
+            pillBg: 'rgba(0,0,0,0.65)', textFill: '#ffffff', accentFill: '#3b82f6',
+            subFill: 'rgba(255,255,255,0.78)',
+            titleWeight: '700', subWeight: '400',
+            pillRadius: 12, accentLineH: 3,
+            shadowPreset: 'medium', glow: false,
+        },
+        bold: {
+            pillBg: 'rgba(40,8,8,0.88)', textFill: '#ffffff', accentFill: '#ef4444',
+            subFill: '#fca5a5',
+            titleWeight: '900', subWeight: '700',
+            pillRadius: 6, accentLineH: 5,
+            shadowPreset: 'heavy', glow: false,
+        },
+        minimal: {
+            pillBg: 'rgba(0,0,0,0.4)', textFill: 'rgba(255,255,255,0.94)', accentFill: '#94a3b8',
+            subFill: 'rgba(255,255,255,0.6)',
+            titleWeight: '500', subWeight: '400',
+            pillRadius: 8, accentLineH: 1,
+            shadowPreset: 'soft', glow: false,
+        },
+        neon: {
+            pillBg: 'rgba(0,8,16,0.86)', textFill: '#ffffff', accentFill: '#00ff88',
+            subFill: '#66ffbb',
+            titleWeight: '800', subWeight: '600',
+            pillRadius: 10, accentLineH: 3,
+            shadowPreset: 'glow', glow: true,
+        },
+        cinematic: {
+            pillBg: 'rgba(15,10,2,0.85)', textFill: '#f5ecd0', accentFill: '#d4af37',
+            subFill: '#c8a944',
+            titleWeight: '600', subWeight: '400',
+            pillRadius: 4, accentLineH: 2,
+            shadowPreset: 'heavy', glow: false,
+        },
+        elegant: {
+            pillBg: 'rgba(12,4,24,0.82)', textFill: '#ffffff', accentFill: '#8b5cf6',
+            subFill: '#c4b5fd',
+            titleWeight: '500', subWeight: '300',
+            pillRadius: 16, accentLineH: 2,
+            shadowPreset: 'glow', glow: true,
+        },
+    };
+
+    _getExplainerStyle(mg, s) {
+        const themeStyle = s?._mgOverrides?.explainer?.styleName;
+        const styleName = mg.style || themeStyle || 'clean';
+        return MGRenderer._EXPLAINER_STYLES[styleName] || MGRenderer._EXPLAINER_STYLES.clean;
+    }
+
     _renderListicleGrid(ctx, frame, fps, mg, s, anim) {
         const { springValue, interpolate } = AnimationUtils;
         const { enterFrames, isExiting, exitProgress, opacity, idleScale } = anim;
 
         const variant = this._resolveVariant(mg, s, 'listicleGrid');
-        const ts = this._getTemplateStyle(mg, s);
+        const ts = this._getTemplateStyle(mg, s, 'listicleGrid');
 
         // Parse items: prioritize _listicleItems (most reliable), then subtext, then text
         let items = [];
@@ -7533,6 +8102,7 @@ class MGRenderer {
         const exitDur = Math.round(fps * 0.5);
         const isExiting = frame > totalFrames - exitDur;
         const exitAlpha = isExiting ? interpolate(frame - (totalFrames - exitDur), [0, exitDur], [1, 0]) : 1;
+        const transparentBg = this._isTransparentTemplateBackground(mg);
 
         // Background: template media (video/image) → static bg → solid fill
         if (!this._drawTemplateBg(ctx, mg, W, H, Math.min(anim.opacity, exitAlpha))) {
@@ -7645,17 +8215,20 @@ class MGRenderer {
         ctx.save();
         ctx.translate(0, cardSlide);
 
-        // Card shadow + fill
-        if (ts.cardShadow !== 'none') {
-            ctx.shadowColor = ts.cardShadow;
-            ctx.shadowBlur = ts.cardShadowBlur + 5;
+        // Card shadow + fill. Transparent template backgrounds are pure overlays:
+        // text/accent only, no dark backing rectangle.
+        if (!transparentBg) {
+            if (ts.cardShadow !== 'none') {
+                ctx.shadowColor = ts.cardShadow;
+                ctx.shadowBlur = ts.cardShadowBlur + 5;
+            }
+            ctx.fillStyle = ts.cardBg;
+            ctx.beginPath();
+            MGRenderer._roundRect(ctx, cardX, cardY, cardW, cardH, ts.cardRadius);
+            ctx.fill();
+            ctx.shadowColor = 'transparent';
+            ctx.shadowBlur = 0;
         }
-        ctx.fillStyle = ts.cardBg;
-        ctx.beginPath();
-        MGRenderer._roundRect(ctx, cardX, cardY, cardW, cardH, ts.cardRadius);
-        ctx.fill();
-        ctx.shadowColor = 'transparent';
-        ctx.shadowBlur = 0;
 
         // Accent left edge
         ctx.fillStyle = ts.accent;
@@ -7664,11 +8237,13 @@ class MGRenderer {
         ctx.fill();
 
         // Card border
-        ctx.strokeStyle = ts.cardBorder;
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        MGRenderer._roundRect(ctx, cardX, cardY, cardW, cardH, ts.cardRadius);
-        ctx.stroke();
+        if (!transparentBg) {
+            ctx.strokeStyle = ts.cardBorder;
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            MGRenderer._roundRect(ctx, cardX, cardY, cardW, cardH, ts.cardRadius);
+            ctx.stroke();
+        }
 
         // Star/key icon
         const iconX = cardX + 60;

@@ -3,11 +3,20 @@
  * This file creates the desktop app window and bridges the UI to Node.js
  */
 
-const { app, BrowserWindow, ipcMain, dialog, shell, Menu, Notification, protocol, net } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu, Notification, protocol, net, clipboard } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const { pathToFileURL } = require('url');
 const { execSync, spawn, exec } = require('child_process');
+
+// Remote-debugging port for the verify workflow: lets tooling attach to the
+// LIVE app via DevTools protocol (seek the preview, screenshot the renderer,
+// read console) instead of only window-surface captures. Localhost-only.
+// Disable with YTA_REMOTE_DEBUG=0.
+if (!/^(0|false|off)$/i.test(String(process.env.YTA_REMOTE_DEBUG || '').trim())) {
+    app.commandLine.appendSwitch('remote-debugging-port', '9223');
+}
 
 // ========================================
 // Project Directory Resolution
@@ -296,7 +305,7 @@ function applyProjectDir(projectDir) {
     // doesn't leak into the new one. The on-disk session stays intact — when the
     // user switches back, Style Studio restores from disk (like ChatGPT projects).
     try {
-        const studio = require('./src/style-studio-agent');
+        const studio = require('./src/studio/style-studio-agent');
         studio.clearChatHistory(path.join(PROJECT_DIR, 'styles'));
     } catch (e) {
         console.warn(`[project-switch] Failed to detach studio session: ${e.message}`);
@@ -465,6 +474,77 @@ function ensureIcoFromPng() {
 ensureIcoFromPng();
 
 let mainWindow;
+let footageResourcesWindow = null;
+let footageResourceState = {
+    clipAnalyzer: true,
+    footageSources: {
+        storyblocks: false,
+        pexels: true,
+        pixabay: true,
+        youtube: true,
+        reddit: true,
+        bing: true,
+        brave: true,
+    },
+};
+
+function normalizeFootageResourceState(input = {}) {
+    const sources = input.footageSources || input.sources || {};
+    return {
+        clipAnalyzer: input.clipAnalyzer !== false,
+        footageSources: {
+            storyblocks: sources.storyblocks === true,
+            pexels: sources.pexels !== false,
+            pixabay: sources.pixabay !== false,
+            youtube: sources.youtube !== false,
+            reddit: sources.reddit !== false,
+            bing: sources.bing !== false,
+            brave: sources.brave !== false,
+        },
+    };
+}
+
+function broadcastFootageResourceState() {
+    const payload = { ...footageResourceState, updatedAt: new Date().toISOString() };
+    if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('footage-resources-updated', payload);
+    }
+    if (footageResourcesWindow && !footageResourcesWindow.isDestroyed()) {
+        footageResourcesWindow.webContents.send('footage-resources-updated', payload);
+    }
+}
+
+function createFootageResourcesWindow() {
+    const htmlFile = path.join(__dirname, 'ui', 'footage-resources.html');
+    if (footageResourcesWindow && !footageResourcesWindow.isDestroyed()) {
+        footageResourcesWindow.focus();
+        return footageResourcesWindow;
+    }
+    footageResourcesWindow = new BrowserWindow({
+        width: 980,
+        height: 820,
+        minWidth: 760,
+        minHeight: 620,
+        backgroundColor: '#0a0a0a',
+        title: 'Resource Control Center',
+        webPreferences: {
+            nodeIntegration: false,
+            contextIsolation: false,
+            sandbox: false,
+            preload: path.join(__dirname, 'preload.js'),
+        },
+        icon: getWindowIconPath() || undefined,
+        parent: mainWindow || undefined,
+    });
+    footageResourcesWindow.loadFile(htmlFile);
+    footageResourcesWindow.on('closed', () => { footageResourcesWindow = null; });
+    footageResourcesWindow.webContents.once('did-finish-load', () => {
+        if (footageResourcesWindow && !footageResourcesWindow.isDestroyed()) {
+            footageResourcesWindow.webContents.send('footage-resources-updated', footageResourceState);
+        }
+    });
+    return footageResourcesWindow;
+}
 
 // ========================================
 // Create Window
@@ -638,6 +718,9 @@ app.whenReady().then(async () => {
     protocol.handle('asset', (request) => {
         // Strip scheme prefix: "asset:///C:/path" or "asset://C:/path" → "C:/path"
         let filePath = request.url.replace(/^asset:\/{2,3}/, '');
+        // Strip any cache-bust query/hash (?cb=… added after a scene Retry so the browser
+        // re-fetches the swapped file) before resolving the real path on disk.
+        filePath = filePath.replace(/[?#].*$/, '');
         filePath = decodeURIComponent(filePath);
         // Restore drive colon if URL parser stripped it (C/path → C:/path)
         if (/^[A-Za-z]\//.test(filePath)) {
@@ -753,7 +836,19 @@ ipcMain.handle('copy-file', async (event, sourcePath, destFolder) => {
             return { success: true, path: destination };
         }
 
-        // Clear existing audio files in input
+        // Validate the source BEFORE touching the destination. A stale source path (e.g.
+        // a public/ copy wiped by a prior build) must never cause us to delete the good
+        // copy already sitting in the destination. If the destination already holds this
+        // file, treat it as already-present and reuse it instead of failing.
+        if (!fs.existsSync(sourcePath)) {
+            if (fs.existsSync(destination)) {
+                console.log(`⚠️ Source missing (${sourcePath}) but ${fileName} already in ${destFolder} — reusing existing copy`);
+                return { success: true, path: destination };
+            }
+            return { success: false, error: `Source audio not found: ${sourcePath}` };
+        }
+
+        // Clear existing audio files in input (source is confirmed to exist)
         const existingFiles = fs.readdirSync(destPath);
         existingFiles.forEach(file => {
             if (file.endsWith('.mp3') || file.endsWith('.wav')) {
@@ -772,10 +867,32 @@ ipcMain.handle('copy-file', async (event, sourcePath, destFolder) => {
     }
 });
 
+// Copy a chosen presenter image into the ACTIVE project's assets/ folder (talking-head
+// mode). Unlike copy-file('input'), this never clears audio and always targets the
+// project dir, so the image is project-local and Step 8 can find it. Returns absolute path.
+ipcMain.handle('copy-presenter-image', async (event, sourcePath) => {
+    try {
+        if (!sourcePath || typeof sourcePath !== 'string' || !fs.existsSync(sourcePath)) {
+            return { success: false, error: 'Presenter image not found' };
+        }
+        const assetsDir = path.join(PROJECT_DIR, 'assets');
+        if (!fs.existsSync(assetsDir)) fs.mkdirSync(assetsDir, { recursive: true });
+        const ext = (path.extname(sourcePath) || '.png').toLowerCase();
+        const destination = path.join(assetsDir, `presenter-source${ext}`);
+        fs.copyFileSync(sourcePath, destination);
+        console.log(`✅ Copied presenter image to ${destination}`);
+        return { success: true, path: destination };
+    } catch (error) {
+        console.error('❌ Presenter image copy failed:', error);
+        return { success: false, error: error.message };
+    }
+});
+
 // Active child process tracking for cancellation
 let activeProcess = null;
 let activeProcessType = null; // 'build' or 'render'
 let processCancelled = false;
+let activeRenderCancelled = false;
 
 ipcMain.handle('cancel-process', async () => {
 
@@ -784,6 +901,7 @@ ipcMain.handle('cancel-process', async () => {
         const pid = activeProcess.pid;
         console.log(`⛔ Cancelling ${type} (PID: ${pid})...`);
         processCancelled = true;
+        if (type === 'render') activeRenderCancelled = true;
         try {
             // Kill entire process tree on Windows
             if (process.platform === 'win32') {
@@ -814,6 +932,22 @@ ipcMain.handle('cancel-process', async () => {
     return { success: true, message: 'No active main-process export (direct-spawn mode)' };
 });
 
+// Apply the chosen vision backend before the build spawns, so the build child inherits it.
+// The GPU MACHINE itself is no longer booted here — it is started JUST-IN-TIME inside the
+// build pipeline (src/build-video.js, right before media scoring) and stopped once vision is
+// done (src/vision-gpu.js). That keeps the rented GPU off during transcribe/Director/Planner
+// (before scoring) and rendering (after) — the model the user asked for, for ALL GPU backends.
+async function _prepareVisionForBuild(options) {
+    if (options && options.visionBackend) {
+        const vb = String(options.visionBackend).toLowerCase();
+        if (String(process.env.VISION_BACKEND || 'aws').toLowerCase() !== vb) {
+            process.env.VISION_BACKEND = vb;
+            try { updateEnvFile('VISION_BACKEND', vb); } catch (_) {}
+            try { require('./src/settings/config').resolveVisionBackend(); } catch (_) {}
+        }
+    }
+}
+
 // Run the build pipeline
 ipcMain.handle('run-build', async (event, options) => {
     try {
@@ -821,7 +955,7 @@ ipcMain.handle('run-build', async (event, options) => {
 
         // Update .env with AI provider and Ollama model settings
         if (options.aiProvider) {
-            updateEnvFile('AI_PROVIDER', options.aiProvider);
+            applyBrainProvider(options.aiProvider);
         }
         if (options.ollamaModel) {
             updateEnvFile('OLLAMA_MODEL', options.ollamaModel);
@@ -837,12 +971,13 @@ ipcMain.handle('run-build', async (event, options) => {
             }
         };
 
-        sendProgress(5, '🔑 Checking API tokens...');
+        sendProgress(5, '🔑 Preparing build...');
 
-        // Pre-flight: check VK token before build starts
-        await checkVKToken(sendProgress);
+        // Apply the chosen vision backend so the build child inherits it. The GPU machine is
+        // started just-in-time inside the pipeline (right before scoring), not here.
+        try { await _prepareVisionForBuild(options); } catch (e) { console.warn('vision prep failed:', e.message); }
 
-        sendProgress(10, '🎙️ Transcribing audio...');
+        sendProgress(8, '⚙️ Starting build pipeline...');
 
         // Run the build script
         return new Promise((resolve, reject) => {
@@ -856,13 +991,9 @@ ipcMain.handle('run-build', async (event, options) => {
                 buildEnv.FOOTAGE_SOURCES = JSON.stringify(options.footageSources);
             }
             // Pass video title for AI guidance (niche detection, keyword gen, visual planning)
-            if (options.videoTitle) {
-                buildEnv.VIDEO_TITLE = options.videoTitle;
-            }
+            buildEnv.VIDEO_TITLE = String(options.videoTitle || '').trim();
             // Pass AI instructions for prompt guidance
-            if (options.aiInstructions) {
-                buildEnv.AI_INSTRUCTIONS = options.aiInstructions;
-            }
+            buildEnv.AI_INSTRUCTIONS = String(options.aiInstructions || '').trim();
             // Pass build settings (quality, format, theme)
             if (options.buildQuality) {
                 buildEnv.BUILD_QUALITY_TIER = options.buildQuality;
@@ -879,6 +1010,43 @@ ipcMain.handle('run-build', async (event, options) => {
             if (options.buildMapStylePack) {
                 buildEnv.BUILD_MAP_STYLE_PACK = options.buildMapStylePack;
             }
+            // Production mode (faceless vs talkingHead) + presenter image (talking-head only).
+            if (options.buildProductionMode) {
+                buildEnv.BUILD_PRODUCTION_MODE = options.buildProductionMode;
+            }
+            if (options.presenterImage) {
+                buildEnv.BUILD_PRESENTER_IMAGE = options.presenterImage;
+            }
+            // Kling avatar bridge (talking-head): animate the presenter photo into a
+            // lip-synced clip per hold via the Kling web UI (uses the account's credits).
+            if (options.klingAvatar) {
+                buildEnv.KLING_AVATAR = '1';
+                buildEnv.KLING_RESOLUTION = options.klingResolution || '1080p';
+                if (options.klingAvatarPrompt) buildEnv.KLING_AVATAR_PROMPT = options.klingAvatarPrompt;
+            }
+            // AI-video — opt-in generated B-roll. Generator = Kling browser bridge
+            // (default, no key, spends the account's credits) or Veo API (needs a
+            // VEO_API_KEY in the app-root .env, inherited via buildEnv above; the UI
+            // never collects the key). VEO_SCOPE controls breadth (shared by both).
+            if (options.veoAiVideo) {
+                buildEnv.VEO_AI_VIDEO = '1';                        // master enable (feature-wide)
+                buildEnv.VEO_SCOPE = options.veoScope || 'directives';
+                const gen = String(options.veoBackend || 'kling').toLowerCase();
+                if (gen === 'veo-fal') { buildEnv.AI_VIDEO_BACKEND = 'veo'; buildEnv.VEO_BACKEND = 'fal'; }
+                else if (gen === 'veo-gemini') { buildEnv.AI_VIDEO_BACKEND = 'veo'; buildEnv.VEO_BACKEND = 'gemini'; }
+                else { buildEnv.AI_VIDEO_BACKEND = 'kling'; }
+                if (options.veoResolution) {
+                    buildEnv.VEO_RESOLUTION = options.veoResolution;        // Veo backend
+                    buildEnv.KLING_VIDEO_RESOLUTION = options.veoResolution; // Kling backend
+                }
+            }
+            // Fast test mode: random stock media instead of the slow per-scene footage gauntlet.
+            if (options.fastMedia) {
+                buildEnv.BUILD_FAST_MEDIA = 'true';
+            }
+            // NOTE: vision backend selection + auto-start happens in _prepareVisionForBuild()
+            // BEFORE this Promise (so process.env — and thus buildEnv above — already carry the
+            // resolved QWEN_* for the chosen backend, including Lightning's captured tunnel URL).
             // Multi-language support: 'auto' = Whisper auto-detects from audio,
             // or a language code ('en','es','de','fr','it','ko') to force it.
             // build-video.js reads BUILD_LANGUAGE + resolves via src/language-helper.js.
@@ -899,7 +1067,26 @@ ipcMain.handle('run-build', async (event, options) => {
             // Build Resume toggle — when OFF (default), wipe checkpoint + scene cache for a fresh run
             const resumeOn = options.buildResume === true || options.buildResume === 'true';
             buildEnv.BUILD_RESUME = resumeOn ? 'true' : 'false';
-            console.log(`   ♻️  Resume Build: ${resumeOn ? 'ON (skip completed steps, keep scene cache)' : 'OFF (fresh build)'}`);
+            // Repeat-from-step can force resume ON, so resolve it BEFORE logging
+            // the effective resume state (logging first showed "OFF" even when
+            // "Media Download" had just turned resume on — looked like a bug).
+            const repeatFromStep = String(options.repeatFromStep || '').trim();
+            if (repeatFromStep) {
+                buildEnv.BUILD_REPEAT_FROM = repeatFromStep;
+                if (['media', 'download-media', 'footage', 'step5', 'step-5'].includes(repeatFromStep.toLowerCase())) {
+                    buildEnv.BUILD_RESUME = 'true';
+                    // Force-fresh footage: reuse the Director/VP checkpoint but re-download
+                    // all clips instead of preserving cached scene media (only honored on
+                    // repeat-from-media; the cleanFolder resume guard reads this env).
+                    if (options.forceFreshFootage) {
+                        buildEnv.BUILD_FORCE_FRESH_FOOTAGE = 'true';
+                        console.log(`   🆕 Force fresh footage: ON (re-downloading clips, keeping VP plan)`);
+                    }
+                }
+                console.log(`   🔁 Repeat From Step: ${repeatFromStep}`);
+            }
+            const resumeEffective = buildEnv.BUILD_RESUME === 'true';
+            console.log(`   ♻️  Resume Build: ${resumeEffective ? `ON (skip completed steps${repeatFromStep ? ` — repeat from ${repeatFromStep}` : ''})` : 'OFF (fresh build)'}`);
             // AI thinking mode (Gemini, Qwen, DeepSeek)
             const thinkMode = options.aiThinking || options.geminiThinking || 'off';
             buildEnv.AI_THINKING = thinkMode;
@@ -909,11 +1096,11 @@ ipcMain.handle('run-build', async (event, options) => {
             // Also pass DOTENV_PATH so build pipeline loads the project-local .env
             buildEnv.DOTENV_PATH = path.join(PROJECT_DIR, '.env');
             // Pass --smart-ai flag as CLI arg for reliability (env vars can be lost on Windows)
-            const buildArgs = ['src/build-video.js'];
+            const buildArgs = ['src/pipeline/build-video.js'];
             if (!isSmartAI) buildArgs.push('--dumb');
-            const buildProcess = spawn('node', buildArgs, {
+            const buildProcess = spawn(process.execPath, buildArgs, {
                 cwd: APP_ROOT,
-                shell: true,
+                shell: false,
                 env: buildEnv
             });
             activeProcess = buildProcess;
@@ -923,22 +1110,137 @@ ipcMain.handle('run-build', async (event, options) => {
             let output = '';
             let errorOutput = '';
 
-            buildProcess.stdout.on('data', (data) => {
-                const text = data.toString();
-                output += text;
-                console.log(text);
+            // ── Clean build-summary log ──
+            // Mirrors the in-app Build Log panel to disk: a readable,
+            // phase-grouped, per-scene file written ALONGSIDE the verbose
+            // app-*.log. Same logs/ folder; built from the structured events.
+            let cleanLogFile = null;
+            try {
+                const logsDir = ensureLogsDir(PROJECT_DIR);
+                cleanLogFile = path.join(logsDir, `build-summary-${nowStamp()}.log`);
+                fs.writeFileSync(cleanLogFile, `Build summary — ${new Date().toLocaleString()}\n${'='.repeat(56)}\n`, 'utf8');
+                console.log(`📋 Clean build summary → ${cleanLogFile}`);
+            } catch (_) { cleanLogFile = null; }
+            const _hms = () => new Date().toTimeString().slice(0, 8);
+            const _evtIcon = { ok: '✅', fail: '❌', warn: '⚠️', timeout: '⏱️', start: '·', info: '·', done: '✅' };
+            // Authoritative phase → progress% map (phase slugs from src/logger.js
+            // _phaseId). The on-screen status is driven by these real phase events
+            // so it ALWAYS reflects the current step (never stuck on a stale label).
+            const PHASE_PROGRESS = {
+                clean: 6, audio: 9, preflight: 12, transcribe: 15,
+                director: 24, mapassign: 30, visualplanner: 36, orchestrator: 44,
+                scout: 46, pool: 48, download: 58,
+                framing: 66, mg: 72, 'explainer-images': 74, 'map-images': 75,
+                templates: 78, transitions: 80, overlays: 76, sfx: 82,
+                plan: 85, 'composition-author': 90, copy: 95,
+            };
+            let _lastPhasePct = 8;
+            const appendCleanEvent = (evt) => {
+                if (!cleanLogFile || !evt || typeof evt !== 'object') return;
+                try {
+                    let line = '';
+                    if (evt.t === 'phase') {
+                        line = `\n[${_hms()}] ═══ ${evt.label || evt.phase} ═══`;
+                    } else if (evt.t === 'scene') {
+                        if (evt.status === 'start') return; // keep file to terminal outcomes only
+                        const icon = _evtIcon[evt.status] || '·';
+                        line = `[${_hms()}]   S${evt.scene} ${icon} ${evt.msg || ''}${evt.detail ? `  (${evt.detail})` : ''}`;
+                    } else if (evt.t === 'note') {
+                        const icon = _evtIcon[evt.status] || '·';
+                        line = `[${_hms()}]   ${icon} ${evt.msg || ''}${evt.scene != null ? ` [S${evt.scene}]` : ''}`;
+                    }
+                    if (line) fs.appendFileSync(cleanLogFile, line + '\n', 'utf8');
+                } catch (_) { /* best-effort */ }
+            };
 
-                // Parse progress from output (matches console.log in build-video.js)
-                if (text.includes('Transcribing')) sendProgress(15, '🎙️ Transcribing audio...');
-                if (text.includes('Creating scenes')) sendProgress(25, '📝 Creating scenes...');
-                if (text.includes('Analyzing script context')) sendProgress(30, '🧠 Understanding script context...');
-                if (text.includes('AI selecting') || text.includes('AI is analyzing')) sendProgress(40, '🤖 AI selecting keywords...');
-                if (text.includes('Downloading')) sendProgress(55, '🎥 Downloading stock footage...');
-                if (text.includes('Analyzing downloaded') || text.includes('Vision AI')) sendProgress(65, '👁️ Analyzing footage visuals...');
-                if (text.includes('motion graphics')) sendProgress(75, '✨ Placing motion graphics...');
-                if (text.includes('Creating video plan')) sendProgress(85, '📋 Creating video plan...');
-                if (text.includes('Copying files')) sendProgress(90, '📂 Preparing files...');
+            buildProcess.stdout.on('data', (data) => {
+                let text = data.toString();
+
+                // ── Structured Build Log events ──
+                // The pipeline emits compact `@@EVT@@<json>` lines (see
+                // src/logger.js). Pull them out, forward each to the renderer's
+                // in-app Build Log panel, and STRIP them from the text before it
+                // hits the terminal/.log echo so the file stays clean.
+                if (text.includes('@@EVT@@')) {
+                    const keptLines = [];
+                    for (const line of text.split('\n')) {
+                        const i = line.indexOf('@@EVT@@');
+                        if (i === -1) { keptLines.push(line); continue; }
+                        // Anything before the sentinel on the same line is real output.
+                        const before = line.slice(0, i);
+                        if (before.trim()) keptLines.push(before);
+                        const jsonStr = line.slice(i + '@@EVT@@'.length).trim();
+                        try {
+                            const evt = JSON.parse(jsonStr);
+                            appendCleanEvent(evt); // mirror to the clean build-summary file
+                            // Drive the on-screen status from the REAL current phase so it
+                            // never sticks on a stale label. Monotonic (never goes backward).
+                            if (evt.t === 'phase' && evt.status === 'start' && evt.label) {
+                                const mapped = PHASE_PROGRESS[evt.phase];
+                                const pct = Math.max(_lastPhasePct, Number.isFinite(mapped) ? mapped : _lastPhasePct);
+                                _lastPhasePct = pct;
+                                sendProgress(pct, evt.label);
+                            }
+                            if (mainWindow && !mainWindow.isDestroyed()) {
+                                mainWindow.webContents.send('build-event', evt);
+                            }
+                        } catch (_) { /* malformed event line — drop it */ }
+                    }
+                    text = keptLines.join('\n');
+                }
+
+                output += text;
+                if (text.trim()) console.log(text);
+
+                // Progress + status are now driven AUTHORITATIVELY by the @@EVT@@
+                // phase events above (so the label always tracks the real step and
+                // never sticks on "Transcribing"). Only the completion sentinel and
+                // a couple of long-phase sub-status hints remain here.
                 if (text.includes('BUILD COMPLETE')) sendProgress(100, '✅ Build complete!');
+                else if (/Rendering frame\s+\d+\s*\/\s*\d+/.test(text)) { const m = text.match(/Rendering frame\s+(\d+)\s*\/\s*(\d+)/); if (m) sendProgress(Math.max(_lastPhasePct, 96), `🎬 Rendering frame ${m[1]}/${m[2]}...`); }
+
+                // Qwen key fully vision-exhausted alert — sentinel emitted by
+                // src/ai-provider.js when every model in QWEN_VL_POOL is
+                // permanently dead on a specific key. Surface as OS notification
+                // + in-app toast so the user knows to swap the key in .env.
+                const qwenAlertRe = /QWEN_KEY_VISION_EXHAUSTED\|key=(\d+)(?:\|tail=([A-Za-z0-9_-]+))?\|pool=(\d+)/g;
+                let qwenMatch;
+                while ((qwenMatch = qwenAlertRe.exec(text)) !== null) {
+                    const [, keyIdx, tail, pool] = qwenMatch;
+                    const title = 'Qwen Vision Key Exhausted';
+                    const tailText = tail ? ` (...${tail})` : '';
+                    const body  = `Key ${keyIdx}${tailText} — all ${pool} vision models permanently exhausted. Swap with a fresh key in .env.`;
+                    if (Notification.isSupported()) {
+                        try { new Notification({ title, body, silent: false }).show(); } catch (_) {}
+                    }
+                    if (mainWindow && !mainWindow.isDestroyed()) {
+                        mainWindow.webContents.send('build-progress', {
+                            percent: -1, // sticky alert, don't move progress bar
+                            message: `⚠️ ${body}`
+                        });
+                    }
+                }
+
+                const qwenDegradedRe = /QWEN_KEY_VISION_DEGRADED\|key=(\d+)\|tail=([A-Za-z0-9_-]+)\|image=(\d+\/\d+)\|omni=(\d+\/\d+)/g;
+                let qwenDegradedMatch;
+                while ((qwenDegradedMatch = qwenDegradedRe.exec(text)) !== null) {
+                    const [, keyIdx, tail, image, omni] = qwenDegradedMatch;
+                    const title = 'Qwen Vision Key Degraded';
+                    const body = `Key ${keyIdx} (...${tail}) image ${image}, omni ${omni}. Build can continue, but this key may slow scoring.`;
+                    if (Notification.isSupported()) {
+                        try { new Notification({ title, body, silent: true }).show(); } catch (_) {}
+                    }
+                    if (mainWindow && !mainWindow.isDestroyed()) {
+                        mainWindow.webContents.send('build-progress', {
+                            percent: -1,
+                            message: `⚠️ ${body}`
+                        });
+                    }
+                }
+
+                // QWEN_KEY_TEXT_EXHAUSTED handler removed — Qwen is now
+                // vision-only, so the text-side sentinel is never emitted.
+
             });
 
             buildProcess.stderr.on('data', (data) => {
@@ -1046,6 +1348,351 @@ ipcMain.handle('save-video-plan', async (event, plan) => {
         console.error('❌ Failed to save plan:', error);
         return { success: false, error: error.message };
     }
+});
+
+// ── Per-scene timeline actions (Retry footage / CEO edit) ───────────────────
+// Runs in the MAIN process (Node) — the SAME context as the real build — so the
+// footage-download pipeline behaves identically (no renderer CSP / Accept-Encoding /
+// AbortSignal mismatches). Streams progress to the renderer via 'scene-action-progress'.
+function _resolveSceneMediaPathMain(scene) {
+    const candidates = [];
+    if (scene && scene.mediaFile) {
+        if (path.isAbsolute(scene.mediaFile)) candidates.push(scene.mediaFile);
+        candidates.push(path.join(PUBLIC_PATH, scene.mediaFile), path.join(TEMP_PATH, scene.mediaFile));
+    }
+    const exts = ['.mp4', '.jpg', '.jpeg', '.png', '.webp'];
+    const idx = scene?.index;
+    for (const ext of exts) {
+        candidates.push(path.join(PUBLIC_PATH, `scene-${idx}-asset${ext}`));
+        candidates.push(path.join(PUBLIC_PATH, `scene-${idx}${ext}`));
+        candidates.push(path.join(TEMP_PATH, `scene-${idx}${ext}`));
+    }
+    for (const p of candidates) { try { if (p && fs.existsSync(p)) return p; } catch (_) {} }
+    return null;
+}
+
+ipcMain.handle('scene-action', async (event, payload = {}) => {
+    const { kind, sceneIndices = [], action = '', instruction = '' } = payload;
+    const send = (sceneIndex, message) => { try { event.sender.send('scene-action-progress', { sceneIndex, message }); } catch (_) {} };
+    const result = { success: false, ok: 0, fail: 0, scenes: [], errors: [] };
+    let visionBox = null;
+    let weStarted = false;
+    // Retry vision routing (RETRY_VISION): 'auto' (default) = use the GPU box ONLY if it's
+    // already running, else Bedrock — NEVER boots the box for a retry. 'box' = always wake
+    // the box. 'bedrock' = always Bedrock. The box is otherwise for the real build only.
+    const retryVisionMode = String(process.env.RETRY_VISION || 'auto').toLowerCase();
+    const _savedVisionEnv = {};
+    const _restoreVisionEnv = () => {
+        for (const k of Object.keys(_savedVisionEnv)) {
+            if (_savedVisionEnv[k] === undefined) delete process.env[k];
+            else process.env[k] = _savedVisionEnv[k];
+        }
+    };
+    try {
+        const sceneActions = require('./src/agents/scene-actions');
+        visionBox = null;
+        try { visionBox = require('./src/vision/vision-box'); } catch (_) {}
+
+        const planPath = [path.join(PUBLIC_PATH, 'video-plan.json'), path.join(TEMP_PATH, 'video-plan.json')].find(p => fs.existsSync(p));
+        if (!planPath) return { success: false, error: 'no video-plan.json found' };
+        const plan = JSON.parse(fs.readFileSync(planPath, 'utf8'));
+        const scenes = plan.scenes || [];
+        const scriptContext = plan.scriptContext || {};
+
+        // Retry vision routing — see retryVisionMode above. Decide whether to use the box
+        // (only if already running, unless forced) or route to Bedrock. Never boots the box
+        // in 'auto' mode.
+        weStarted = false;
+        let useBoxForRetry = false;
+        if (kind === 'retry') {
+            if (retryVisionMode === 'box' && visionBox?.isConfigured?.()) {
+                send(-1, 'Vision box: starting (RETRY_VISION=box)…');
+                const r = await visionBox.ensureReady({ onProgress: (m) => send(-1, `Vision box: ${m}`) });
+                if (r.ok) { useBoxForRetry = true; weStarted = !r.alreadyReady; }
+                else send(-1, `Vision box not ready (${r.reason}) — using Bedrock`);
+            } else if (retryVisionMode !== 'bedrock' && visionBox?.isVisionReady) {
+                // 'auto': use the box ONLY if it's already up (free + fast). Never boot it.
+                const ready = await visionBox.isVisionReady().catch(() => false);
+                if (ready) { useBoxForRetry = true; send(-1, 'Vision: box already running — using it for retry'); }
+            }
+        }
+        if (kind === 'retry' && !useBoxForRetry) {
+            // Route the vision chain straight to Bedrock (skip the box) for this retry only.
+            for (const k of ['VISION_PROVIDER', 'VISION_FALLBACK_ORDER', 'VISION_EXCLUDE_QWEN']) _savedVisionEnv[k] = process.env[k];
+            process.env.VISION_PROVIDER = process.env.RETRY_VISION_PROVIDER || 'bedrock-claude';
+            process.env.VISION_FALLBACK_ORDER = 'bedrock-nova,bedrock-qwen-vl';
+            process.env.VISION_EXCLUDE_QWEN = '1';
+            send(-1, `Vision: using Bedrock (${process.env.VISION_PROVIDER}) for retry — no GPU-box boot needed`);
+        }
+
+        for (const si of sceneIndices) {
+            const scene = scenes.find((s) => Number(s.index) === Number(si)) || scenes[si];
+            if (!scene) { result.fail++; result.errors.push({ si, error: 'scene not found' }); continue; }
+            const onProgress = (m) => send(si, m);
+            try {
+                if (kind === 'retry') {
+                    const mediaFilePath = _resolveSceneMediaPathMain(scene);
+                    const r = await sceneActions.retrySceneMedia(scene, scriptContext, { mediaFilePath, onProgress });
+                    if (r.success) { result.ok++; result.scenes.push({ si, reload: true, keyword: r.keyword, sourceHint: r.sourceHint }); }
+                    else { result.fail++; result.errors.push({ si, error: r.error }); send(si, `❌ ${r.error}`); }
+                } else if (kind === 'ceo') {
+                    const arrIdx = scenes.indexOf(scene);
+                    const r = await sceneActions.ceoEditScene(action, scene, scriptContext, arrIdx, scenes, { instruction, onProgress });
+                    if (r.success) { result.ok++; result.scenes.push({ si, scene: r.scene, change: r.change }); }
+                    else { result.fail++; result.errors.push({ si, error: r.error }); send(si, `❌ ${r.error}`); }
+                }
+            } catch (e) { result.fail++; result.errors.push({ si, error: e.message }); send(si, `❌ ${e.message}`); }
+        }
+
+        // Persist scene changes (framing etc.) back to the plan.
+        plan.scenes = scenes;
+        [path.join(PUBLIC_PATH, 'video-plan.json'), path.join(TEMP_PATH, 'video-plan.json')].forEach((p) => {
+            try { if (fs.existsSync(path.dirname(p))) fs.writeFileSync(p, JSON.stringify(plan, null, 2)); } catch (_) {}
+        });
+
+        if (kind === 'retry' && weStarted && visionBox?.stop) {
+            send(-1, 'Vision box: stopping (mission done)…');
+            await visionBox.stop({ onProgress: (m) => send(-1, `Vision box: ${m}`) }).catch(() => {});
+        }
+        _restoreVisionEnv();
+
+        result.success = result.ok > 0 || result.fail === 0;
+        return result;
+    } catch (err) {
+        if (kind === 'retry' && weStarted && visionBox?.stop) {
+            send(-1, 'Vision box: stopping after error…');
+            await visionBox.stop({ onProgress: (m) => send(-1, `Vision box: ${m}`) }).catch(() => {});
+            weStarted = false;
+        }
+        _restoreVisionEnv();
+        return { success: false, error: err.message, ...result };
+    }
+});
+
+// ── Agentic ACTING agent: apply a free-text ORDER to the already-built plan ──
+// Compiles the order (directive-compiler) → applies per-scene writes + the
+// compliance fixers to the loaded plan (directive-actuator, the same enforcement
+// path the build uses) → routes footage changes through the REAL media system →
+// persists to both plan copies → refreshes the preview via 'qa-plan-updated'.
+ipcMain.handle('qa-preview-order', async (event, payload = {}) => {
+    try {
+        const { previewOrder } = require('./src/directives/directive-actuator');
+        const planPath = [path.join(PUBLIC_PATH, 'video-plan.json'), path.join(TEMP_PATH, 'video-plan.json')].find(p => fs.existsSync(p));
+        const sc = planPath ? (JSON.parse(fs.readFileSync(planPath, 'utf8')).scriptContext || {}) : {};
+        const prev = await previewOrder(payload.text || '', { themeId: sc.themeId, nicheId: sc.nicheId, productionMode: sc.productionMode });
+        return { ok: true, summary: prev.summary, hasActions: prev.hasActions };
+    } catch (e) { return { ok: false, error: e.message }; }
+});
+
+ipcMain.handle('qa-apply-order', async (event, payload = {}) => {
+    const send = (message) => { try { event.sender.send('scene-action-progress', { sceneIndex: -1, message }); } catch (_) {} };
+    try {
+        const { previewOrder, applyOrderToPlan } = require('./src/directives/directive-actuator');
+        const sceneActions = require('./src/agents/scene-actions');
+        const planPath = [path.join(PUBLIC_PATH, 'video-plan.json'), path.join(TEMP_PATH, 'video-plan.json')].find(p => fs.existsSync(p));
+        if (!planPath) return { success: false, error: 'no video-plan.json found' };
+        const plan = JSON.parse(fs.readFileSync(planPath, 'utf8'));
+
+        // Undo snapshot before any mutation.
+        try { fs.writeFileSync(path.join(PUBLIC_PATH, '.qa-undo.json'), JSON.stringify(plan)); } catch (_) {}
+
+        send('Interpreting your order…');
+        const sc = plan.scriptContext || {};
+        const prev = await previewOrder(payload.text || '', { themeId: sc.themeId, nicheId: sc.nicheId, productionMode: sc.productionMode }, { log: send });
+        if (!prev.directives || !prev.hasActions) {
+            return { success: false, error: 'no actionable order detected', summary: prev.summary };
+        }
+        send(`Applying: ${prev.summary}`);
+        const res = await applyOrderToPlan(plan, prev.directives, { log: send });
+
+        // Route footage changes through the REAL media system (re-download in place).
+        let footageRedownloaded = 0;
+        for (const nf of (res.needsFootage || [])) {
+            const scene = (plan.scenes || []).find(s => Number(s.index) === Number(nf.index));
+            if (!scene) continue;
+            const mediaFilePath = _resolveSceneMediaPathMain(scene);
+            if (nf.keyword) { scene.keyword = nf.keyword; scene.searchKeyword = nf.keyword; }
+            if (nf.sourceHint) scene.sourceHint = nf.sourceHint;
+            if (nf.mediaType) scene.mediaType = nf.mediaType;
+            send(`Re-downloading footage for scene ${nf.index}…`);
+            try {
+                const r = await sceneActions.retrySceneMedia(scene, sc, { mediaFilePath, onProgress: send });
+                if (r && r.success) footageRedownloaded++;
+            } catch (e) { send(`Scene ${nf.index} footage retry failed: ${e.message}`); }
+        }
+
+        // Persist to both plan copies + refresh preview.
+        [path.join(PUBLIC_PATH, 'video-plan.json'), path.join(TEMP_PATH, 'video-plan.json')].forEach((p) => {
+            try { if (fs.existsSync(path.dirname(p))) fs.writeFileSync(p, JSON.stringify(plan, null, 2)); } catch (_) {}
+        });
+        try { if (mainWindow) mainWindow.webContents.send('qa-plan-updated', plan); } catch (_) {}
+
+        const rep = res.report || {};
+        return {
+            success: true,
+            summary: prev.summary,
+            perSceneChanged: res.changed,
+            fixed: (rep.fixed || []).length,
+            flagged: (rep.unfixable || []).length,
+            footageRedownloaded,
+            report: rep,
+        };
+    } catch (err) { return { success: false, error: err.message }; }
+});
+
+ipcMain.handle('qa-undo', async () => {
+    try {
+        const snap = path.join(PUBLIC_PATH, '.qa-undo.json');
+        if (!fs.existsSync(snap)) return { success: false, error: 'nothing to undo' };
+        const plan = JSON.parse(fs.readFileSync(snap, 'utf8'));
+        [path.join(PUBLIC_PATH, 'video-plan.json'), path.join(TEMP_PATH, 'video-plan.json')].forEach((p) => {
+            try { if (fs.existsSync(path.dirname(p))) fs.writeFileSync(p, JSON.stringify(plan, null, 2)); } catch (_) {}
+        });
+        try { if (mainWindow) mainWindow.webContents.send('qa-plan-updated', plan); } catch (_) {}
+        return { success: true };
+    } catch (e) { return { success: false, error: e.message }; }
+});
+
+ipcMain.handle('vision-box-status', async () => {
+    try { return await require('./src/vision/vision-box').status(); }
+    catch (e) { return { configured: false, ready: false, reason: e.message }; }
+});
+
+// Vision backend selector (dropdown): which backend scores B-roll images.
+//   aws — self-hosted GPU box (auto-starts during a build)
+//   lightning — Lightning.ai vLLM (you start the Studio + tunnel manually)
+//   bedrock — AWS Bedrock vision (always on, no box)
+ipcMain.handle('get-vision-backend', async () => {
+    return String(process.env.VISION_BACKEND || 'aws').toLowerCase();
+});
+ipcMain.handle('set-vision-backend', async (event, backend) => {
+    const b = String(backend || 'aws').toLowerCase();
+    const allowed = ['aws', 'lightning', 'bedrock', 'dashscope'];
+    if (!allowed.includes(b)) return { ok: false, error: `unknown vision backend: ${b}` };
+    try {
+        updateEnvFile('VISION_BACKEND', b);          // persist so it survives restart
+        process.env.VISION_BACKEND = b;
+        // Re-resolve QWEN_* live so the main process (retries) uses the new backend now.
+        try { require('./src/settings/config').resolveVisionBackend(); } catch (_) {}
+        let note = '';
+        if (b === 'aws') note = '🟦 AWS GPU box — it will auto-start when a build needs vision.';
+        else if (b === 'lightning') note = process.env.LIGHTNING_API_KEY
+            ? '🟨 Lightning — auto-starts the Studio when a build needs vision.'
+            : '🟨 Lightning — manual: start the Studio + tunnel, paste the URL into .env (add LIGHTNING_API_KEY to auto-start).';
+        else if (b === 'bedrock') note = '☁️ Bedrock — always on, no box to manage.';
+        console.log(`👁️  Vision backend switched to: ${b}`);
+        return { ok: true, backend: b, note };
+    } catch (e) {
+        return { ok: false, error: e.message };
+    }
+});
+
+// ── Lightning account pool (multi-account rotation) — no-code management ──
+ipcMain.handle('lightning-pool-list', async () => {
+    try { return { ok: true, accounts: require('./src/vision/lightning-rotation').poolDetails() }; }
+    catch (e) { return { ok: false, error: e.message, accounts: [] }; }
+});
+ipcMain.handle('lightning-pool-add', async (event, account) => {
+    try { return require('./src/vision/lightning-rotation').addAccount(account || {}); }
+    catch (e) { return { ok: false, error: e.message }; }
+});
+ipcMain.handle('lightning-pool-remove', async (event, id) => {
+    try { return require('./src/vision/lightning-rotation').removeAccount(String(id || '')); }
+    catch (e) { return { ok: false, error: e.message }; }
+});
+ipcMain.handle('lightning-pool-reset', async (event, id) => {
+    try { return require('./src/vision/lightning-rotation').resetCycle(String(id || '')); }
+    catch (e) { return { ok: false, error: e.message }; }
+});
+ipcMain.handle('lightning-pool-update', async (event, payload) => {
+    try { return require('./src/vision/lightning-rotation').updateAccount(String(payload?.id || ''), payload?.patch || {}); }
+    catch (e) { return { ok: false, error: e.message }; }
+});
+ipcMain.handle('lightning-pool-get-active', async () => {
+    try { return { ok: true, id: require('./src/vision/lightning-rotation').getForcedAccount() }; }
+    catch (e) { return { ok: false, error: e.message }; }
+});
+ipcMain.handle('lightning-pool-set-active', async (event, id) => {
+    try {
+        const v = (!id || id === 'auto') ? null : String(id);
+        return require('./src/vision/lightning-rotation').setForcedAccount(v);
+    } catch (e) { return { ok: false, error: e.message }; }
+});
+// Provision a Studio from the UI (install vLLM+ninja+serve script + warm model) by running
+// tools/provision-lightning-studio.py in the MAIN process and streaming its output to the UI.
+ipcMain.handle('lightning-provision', async (event, id) => {
+    return new Promise((resolve) => {
+        const acctId = String(id || '');
+        if (!acctId) return resolve({ ok: false, error: 'no account id' });
+        const send = (line) => { try { event.sender.send('lightning-provision-progress', { id: acctId, line }); } catch (_) {} };
+        let proc;
+        try {
+            proc = spawn(process.env.LIGHTNING_PYTHON || 'python', ['tools/provision-lightning-studio.py', acctId], { cwd: APP_ROOT, env: { ...process.env, PYTHONIOENCODING: 'utf-8' } });
+        } catch (e) { return resolve({ ok: false, error: 'spawn failed: ' + e.message }); }
+        const emit = (buf) => buf.toString().split(/\r?\n/).forEach((l) => { if (l.trim()) send(l.trim()); });
+        proc.stdout.on('data', emit);
+        proc.stderr.on('data', emit);
+        proc.on('error', (e) => resolve({ ok: false, error: e.message }));
+        proc.on('close', (code) => { send(code === 0 ? '✅ Provisioning finished.' : `⚠️ Exited with code ${code}.`); resolve({ ok: code === 0, code }); });
+    });
+});
+// Health-check a Studio: boot on L4 → vision test → stop → report. Streams progress on the
+// same channel as provisioning; returns the parsed JSON verdict.
+ipcMain.handle('lightning-check', async (event, id) => {
+    return new Promise((resolve) => {
+        const acctId = String(id || '');
+        if (!acctId) return resolve({ ok: false, error: 'no account id' });
+        const send = (line) => { try { event.sender.send('lightning-provision-progress', { id: acctId, line }); } catch (_) {} };
+        let proc, stdout = '';
+        try {
+            proc = spawn(process.env.LIGHTNING_PYTHON || 'python', ['tools/check-lightning-studio.py', acctId], { cwd: APP_ROOT, env: { ...process.env, PYTHONIOENCODING: 'utf-8' } });
+        } catch (e) { return resolve({ ok: false, error: 'spawn failed: ' + e.message }); }
+        proc.stdout.on('data', (d) => { stdout += d.toString(); });
+        proc.stderr.on('data', (d) => d.toString().split(/\r?\n/).forEach((l) => { if (l.trim()) send(l.trim()); }));
+        proc.on('error', (e) => resolve({ ok: false, error: e.message }));
+        proc.on('close', () => {
+            const last = stdout.trim().split(/\r?\n/).filter(Boolean).pop() || '';
+            let res;
+            try { res = JSON.parse(last); } catch (_) { res = { ok: false, error: 'bad output: ' + last.slice(0, 200) }; }
+            send(res.ok ? '✅ Check PASSED — vision works' : `⚠️ Check failed: ${res.error || (res.steps && res.steps.visionReply) || 'unknown'}`);
+            resolve(res);
+        });
+    });
+});
+// Validate candidate account creds BEFORE adding (catches teamspace/username/key typos): runs
+// lightning-control.py `status`, which resolves the Studio via the SDK without booting anything.
+ipcMain.handle('lightning-validate', async (event, account) => {
+    return new Promise((resolve) => {
+        const a = account || {};
+        if (!a.userId || !a.apiKey || !a.studioName) return resolve({ ok: false, error: 'User ID, API Key and Studio name are required' });
+        const env = {
+            ...process.env, PYTHONIOENCODING: 'utf-8',
+            LIGHTNING_USER_ID: String(a.userId), LIGHTNING_API_KEY: String(a.apiKey),
+            LIGHTNING_STUDIO_NAME: String(a.studioName), LIGHTNING_TEAMSPACE: String(a.teamspace || ''),
+            LIGHTNING_USER: String(a.user || ''), LIGHTNING_ORG: String(a.org || ''),
+        };
+        let proc, stdout = '';
+        try {
+            proc = spawn(process.env.LIGHTNING_PYTHON || 'python', ['src/lightning-control.py', 'status'], { cwd: APP_ROOT, env });
+        } catch (e) { return resolve({ ok: false, error: 'spawn failed: ' + e.message }); }
+        proc.stdout.on('data', (d) => { stdout += d.toString(); });
+        proc.on('error', (e) => resolve({ ok: false, error: e.message }));
+        proc.on('close', () => {
+            const last = stdout.trim().split(/\r?\n/).filter(Boolean).pop() || '';
+            try {
+                const r = JSON.parse(last);
+                resolve(r.ok ? { ok: true, state: r.state } : { ok: false, error: r.error || 'Studio not found' });
+            } catch (_) { resolve({ ok: false, error: 'No response from Lightning — check your User ID / API Key. ' + last.slice(0, 120) }); }
+        });
+    });
+});
+
+// Open a web URL in the user's default browser (Media Log panel link clicks).
+ipcMain.handle('open-external', async (event, url) => {
+    try {
+        if (/^https?:\/\//i.test(String(url || ''))) { await shell.openExternal(url); return { ok: true }; }
+        return { ok: false, error: 'not an http(s) url' };
+    } catch (e) { return { ok: false, error: e.message }; }
 });
 
 // ── QA Results persistence ──────────────────────────────────────────────────
@@ -1248,7 +1895,16 @@ ipcMain.handle('get-audio-path', async (event, filename) => {
     try {
         if (!filename) return null;
 
-        // Check public folder
+        // Prefer input/ — it is the STABLE source copy of the audio (written once per
+        // build and never cleaned). public/ and temp/ are build outputs that Step 0 wipes,
+        // so resolving the canonical audio path to them leaves a dangling reference that
+        // breaks the next "Copy audio" on Generate/Repeat (ENOENT). Order: input → public → temp.
+        const inputPath = path.join(INPUT_PATH, filename);
+        if (fs.existsSync(inputPath)) {
+            return inputPath;
+        }
+
+        // Check public folder (serving copy)
         const publicPath = path.join(PUBLIC_PATH, filename);
         if (fs.existsSync(publicPath)) {
             return publicPath;
@@ -1258,12 +1914,6 @@ ipcMain.handle('get-audio-path', async (event, filename) => {
         const tempPath = path.join(TEMP_PATH, filename);
         if (fs.existsSync(tempPath)) {
             return tempPath;
-        }
-
-        // Check input folder (fallback)
-        const inputPath = path.join(INPUT_PATH, filename);
-        if (fs.existsSync(inputPath)) {
-            return inputPath;
         }
 
         return null;
@@ -1551,6 +2201,1005 @@ ipcMain.handle('mux-audio', async (event, videoFile, outputFile, audioTrimStartS
         return { success: true, outputPath: finalOutput };
     } catch (err) {
         console.error('[WebGL Export] mux-audio error:', err.message);
+        return { success: false, error: err.message };
+    }
+});
+
+function sendRenderProgress(percent, message) {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('render-progress', { percent, message });
+    }
+}
+
+function checkHyperframesNodeRuntime() {
+    try {
+        const version = execSync('node -v', {
+            cwd: PROJECT_ROOT,
+            encoding: 'utf8',
+            stdio: ['ignore', 'pipe', 'ignore'],
+        }).trim();
+        const major = parseInt(version.replace(/^v/, '').split('.')[0], 10);
+        return {
+            ok: Number.isFinite(major) && major >= 22,
+            version,
+            major,
+        };
+    } catch (err) {
+        return {
+            ok: false,
+            version: 'not found',
+            error: err.message,
+        };
+    }
+}
+
+// HyperFrames' optimized render/capture path REQUIRES Google's chrome-headless-shell.
+// A full chrome.exe / brave.exe makes the streaming capture hang on the (15 min)
+// protocol timeout instead of rendering. So always prefer the headless-shell that
+// HyperFrames downloads into its own browser cache (~/.cache/hyperframes/chrome).
+function findHyperframesHeadlessShell() {
+    let homeDir = '';
+    try { homeDir = require('os').homedir(); } catch (_) { homeDir = process.env.USERPROFILE || ''; }
+    if (!homeDir) return null;
+    const base = path.join(homeDir, '.cache', 'hyperframes', 'chrome', 'chrome-headless-shell');
+    try {
+        if (!fs.existsSync(base)) return null;
+        // Version-agnostic: pick whatever win64-<version> build is present.
+        for (const entry of fs.readdirSync(base)) {
+            for (const sub of ['chrome-headless-shell-win64', 'chrome-headless-shell-linux64', 'chrome-headless-shell-mac-x64', 'chrome-headless-shell-mac-arm64']) {
+                const exe = path.join(base, entry, sub, process.platform === 'win32' ? 'chrome-headless-shell.exe' : 'chrome-headless-shell');
+                if (fs.existsSync(exe)) return exe;
+            }
+        }
+    } catch (_) { /* ignore */ }
+    return null;
+}
+
+// An interrupted browser download leaves the headless-shell folder present but
+// WITHOUT the executable. That makes HyperFrames fail ("Browser was not found at
+// executablePath") AND blocks @puppeteer/browsers from re-downloading ("folder
+// exists but executable is missing"). Purge confirmed-broken partials so the next
+// render can cleanly re-fetch. Only runs when NO valid install exists.
+function purgePartialHyperframesBrowser() {
+    let homeDir = '';
+    try { homeDir = require('os').homedir(); } catch (_) { homeDir = process.env.USERPROFILE || ''; }
+    if (!homeDir) return;
+    const base = path.join(homeDir, '.cache', 'hyperframes', 'chrome', 'chrome-headless-shell');
+    try {
+        if (!fs.existsSync(base)) return;
+        if (findHyperframesHeadlessShell()) return; // a valid install exists — leave it alone
+        for (const entry of fs.readdirSync(base)) {
+            const full = path.join(base, entry);
+            try {
+                fs.rmSync(full, { recursive: true, force: true });
+                console.warn(`[HyperFrames] Removed partial/corrupt browser cache: ${full}`);
+            } catch (_) { /* ignore */ }
+        }
+    } catch (_) { /* ignore */ }
+}
+
+function findHyperframesBrowserPath() {
+    // Prefer the proper headless-shell; a full system browser is only a last resort.
+    const headlessShell = findHyperframesHeadlessShell();
+    if (headlessShell) return headlessShell;
+    const programFiles = process.env.PROGRAMFILES || process.env.ProgramFiles || 'C:\\Program Files';
+    const programFilesX86 = process.env['PROGRAMFILES(X86)'] || process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
+    const localAppData = process.env.LOCALAPPDATA || process.env.LocalAppData;
+    const candidates = [
+        process.env.HYPERFRAMES_BROWSER_PATH,
+        process.env.PRODUCER_HEADLESS_SHELL_PATH,
+        process.env.CHROME_PATH,
+        path.join(programFiles, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+        path.join(programFilesX86, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+        localAppData ? path.join(localAppData, 'Google', 'Chrome', 'Application', 'chrome.exe') : null,
+        path.join(programFiles, 'BraveSoftware', 'Brave-Browser', 'Application', 'brave.exe'),
+        localAppData ? path.join(localAppData, 'BraveSoftware', 'Brave-Browser', 'Application', 'brave.exe') : null,
+        path.join(programFiles, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+        path.join(programFilesX86, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+    ].filter(Boolean);
+
+    return candidates.find((candidate) => {
+        try {
+            return fs.existsSync(candidate);
+        } catch (_) {
+            return false;
+        }
+    }) || null;
+}
+
+// Pre-render lint gate (OPENMONTAGE-BORROW-PLAN #12). Runs the hyperframes CLI's
+// own `lint` validator on the generated project and logs findings BEFORE the
+// expensive render. Advisory only — never blocks the render. HF_PRERENDER_LINT=0
+// disables. Returns a summary object (or null when skipped/unavailable).
+function runHyperframesLint(projectDir) {
+    if (/^(0|false|off|no)$/i.test(String(process.env.HF_PRERENDER_LINT || '').trim())) return null;
+    const { spawnSync } = require('child_process');
+    const localCliJs = path.join(PROJECT_ROOT, 'node_modules', 'hyperframes', 'dist', 'cli.js');
+    if (!fs.existsSync(localCliJs)) return null;
+    let r;
+    try {
+        r = spawnSync('node', [localCliJs, 'lint', projectDir, '--json'], {
+            cwd: PROJECT_ROOT, encoding: 'utf8', timeout: 90_000, maxBuffer: 8 * 1024 * 1024,
+            env: { ...process.env, FORCE_COLOR: '0' }, windowsHide: true,
+        });
+    } catch (e) { console.warn(`[HF-Lint] skipped (${e.message})`); return null; }
+    let data = null;
+    try { data = JSON.parse(String(r.stdout || '').trim()); } catch (_) { /* non-JSON */ }
+    if (!data || !Array.isArray(data.findings)) { return null; }
+    const errs = Number(data.errorCount || 0);
+    const warns = Number(data.warningCount || 0);
+    if (errs === 0 && warns === 0) {
+        console.log('[HF-Lint] ✅ composition clean (0 errors, 0 warnings)');
+        return { ok: true, errorCount: 0, warningCount: 0 };
+    }
+    console.warn(`[HF-Lint] ${errs} error(s), ${warns} warning(s) in the generated composition:`);
+    for (const f of data.findings.filter((x) => x.severity === 'error' || x.severity === 'warning').slice(0, 20)) {
+        console.warn(`[HF-Lint]   ${f.severity === 'error' ? '❌' : '⚠️'} ${f.code}: ${f.message}${f.elementId ? ` (#${f.elementId})` : ''}`);
+    }
+    return { ok: data.ok !== false, errorCount: errs, warningCount: warns, findings: data.findings };
+}
+
+function runHyperframesCli(projectDir, outputFile, options = {}) {
+    return new Promise((resolve) => {
+        const localCliJs = path.join(PROJECT_ROOT, 'node_modules', 'hyperframes', 'dist', 'cli.js');
+        const hasLocalCli = fs.existsSync(localCliJs);
+        const cliCmd = hasLocalCli ? 'node' : (process.platform === 'win32' ? 'npx.cmd' : 'npx');
+        const workerCountRaw = Number(options.workers);
+        const workerCount = Number.isFinite(workerCountRaw) && workerCountRaw > 0
+            ? Math.max(1, Math.min(8, Math.floor(workerCountRaw)))
+            : 1;
+        const browserGpu = options.browserGpu === true;
+        const args = hasLocalCli ? [
+            localCliJs,
+            'render',
+            projectDir,
+            '--output',
+            outputFile,
+            '--fps',
+            String(options.fps || 30),
+            '--quality',
+            options.quality || 'standard',
+            '--workers',
+            String(workerCount),
+        ] : [
+            '--no-install',
+            'hyperframes',
+            'render',
+            projectDir,
+            '--output',
+            outputFile,
+            '--fps',
+            String(options.fps || 30),
+            '--quality',
+            options.quality || 'standard',
+            '--workers',
+            String(workerCount),
+        ];
+        const browserPath = findHyperframesBrowserPath();
+        if (options.gpu !== false) args.push('--gpu');
+        args.push(browserGpu ? '--browser-gpu' : '--no-browser-gpu');
+        if (options.strict) args.push('--strict');
+
+        console.log(`[HyperFrames] Running: ${cliCmd} ${args.join(' ')}`);
+        console.log(`[HyperFrames] Browser: ${browserPath || 'HyperFrames default browser resolution'}`);
+        const workerLabel = workerCount === 1 ? '1 worker' : `${workerCount} workers`;
+        sendRenderProgress(18, `[HyperFrames] Rendering ${options.gpu === false ? 'CPU' : 'GPU'} HTML/MG composition (${workerLabel}, browser ${browserGpu ? 'GPU' : 'software'})...`);
+
+        const proc = spawn(cliCmd, args, {
+            cwd: PROJECT_ROOT,
+            env: {
+                ...process.env,
+                FORCE_COLOR: '0',
+                PRODUCER_MAX_WORKERS: String(workerCount),
+                PRODUCER_BROWSER_GPU_MODE: browserGpu ? 'hardware' : 'software',
+                PRODUCER_PUPPETEER_PROTOCOL_TIMEOUT_MS: String(options.protocolTimeoutMs || 900000),
+                PRODUCER_PLAYER_READY_TIMEOUT_MS: String(options.playerReadyTimeoutMs || 180000),
+                PRODUCER_RENDER_READY_TIMEOUT_MS: String(options.renderReadyTimeoutMs || 180000),
+                ...(browserPath ? {
+                    HYPERFRAMES_BROWSER_PATH: browserPath,
+                    PRODUCER_HEADLESS_SHELL_PATH: browserPath,
+                } : {}),
+            },
+            windowsHide: true,
+        });
+        activeProcess = proc;
+        activeProcessType = 'render';
+
+        let stdout = '';
+        let stderr = '';
+        const started = Date.now();
+        let lastFrameLogAt = 0;
+        let lastFrameLogged = 0;
+        let lastFrameProgressAt = 0;
+        let sawFrameProgress = false;
+        const progressTimer = setInterval(() => {
+            const sec = ((Date.now() - started) / 1000).toFixed(0);
+            if (!sawFrameProgress) {
+                sendRenderProgress(45, `[HyperFrames] Rendering... ${sec}s elapsed`);
+            }
+        }, 5000);
+
+        const stripAnsi = (value) => String(value || '')
+            .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
+            .replace(/\x1b\][^\x07]*(\x07|\x1b\\)/g, '');
+
+        const appendTail = (current, text) => (current + text).slice(-50000);
+        const isCancellationError = () => activeRenderCancelled === true;
+
+        const handleCliOutput = (raw, streamName) => {
+            const text = raw.toString();
+            if (streamName === 'stdout') stdout = appendTail(stdout, text);
+            else stderr = appendTail(stderr, text);
+
+            const clean = stripAnsi(text).replace(/\r/g, '\n');
+            const frameMatches = [...clean.matchAll(/Streaming frame\s+(\d+)\s*\/\s*(\d+)/g)];
+            if (frameMatches.length) {
+                const lastMatch = frameMatches[frameMatches.length - 1];
+                const frame = Number(lastMatch[1]);
+                const total = Number(lastMatch[2]);
+                const now = Date.now();
+                if (Number.isFinite(frame) && Number.isFinite(total) && total > 0) {
+                    sawFrameProgress = true;
+                    if (now - lastFrameProgressAt >= 1000 || frame === total) {
+                        const percent = Math.min(98, Math.max(20, Math.round(20 + (frame / total) * 76)));
+                        sendRenderProgress(percent, `[HyperFrames] Rendering frame ${frame}/${total} (${workerLabel}, browser ${browserGpu ? 'GPU' : 'software'})`);
+                        lastFrameProgressAt = now;
+                    }
+                    if (now - lastFrameLogAt >= 5000 || frame - lastFrameLogged >= 250 || frame === total) {
+                        console.log(`[HyperFrames] Streaming frame ${frame}/${total}`);
+                        lastFrameLogAt = now;
+                        lastFrameLogged = frame;
+                    }
+                }
+            }
+
+            const nonFrameLines = clean
+                .split('\n')
+                .map(line => line.trim())
+                .filter(line => line && !/Streaming frame\s+\d+\s*\/\s*\d+/.test(line));
+            for (const line of nonFrameLines) {
+                console.log(`[HyperFrames] ${line}`);
+            }
+        };
+
+        proc.stdout.on('data', (data) => {
+            handleCliOutput(data, 'stdout');
+        });
+        proc.stderr.on('data', (data) => {
+            handleCliOutput(data, 'stderr');
+        });
+        proc.on('error', (err) => {
+            clearInterval(progressTimer);
+            activeProcess = null;
+            activeProcessType = null;
+            if (isCancellationError()) {
+                resolve({ success: false, cancelled: true, error: 'Cancelled', stdout, stderr });
+                return;
+            }
+            resolve({ success: false, error: err.message, stdout, stderr });
+        });
+        proc.on('close', (code) => {
+            clearInterval(progressTimer);
+            activeProcess = null;
+            activeProcessType = null;
+            if (isCancellationError()) {
+                resolve({ success: false, cancelled: true, error: 'Cancelled', stdout, stderr });
+                return;
+            }
+            if (code === 0 && fs.existsSync(outputFile)) {
+                resolve({ success: true, outputPath: outputFile, stdout, stderr });
+            } else {
+                const tail = `${stdout}\n${stderr}`.trim().slice(-2000);
+                resolve({
+                    success: false,
+                    error: `HyperFrames exited with code ${code}${tail ? `\n${tail}` : ''}`,
+                    stdout,
+                    stderr,
+                });
+            }
+        });
+    });
+}
+
+function loadHyperframesBridgeFresh() {
+    const bridgePath = require.resolve('./src/hyperframes-bridge');
+    delete require.cache[bridgePath];
+    return require(bridgePath);
+}
+
+// Agent-authored compositions (templates + fullscreen MGs). Runs on the final
+// plan right before the bridge so `_authoredComposition` lands on the exact
+// objects the bridge renders. Failures degrade silently to fixed renderers.
+async function runCompositionAuthorPass(plan) {
+    try {
+        if (!plan) return;
+        const { authorPlanCompositions } = require('./src/agents/workers/composition-author');
+        // openMode: project open / refresh / render-prep must NEVER author —
+        // fresh authoring belongs to builds (Step 7.6). HF_AUTHOR_REFRESH=1
+        // overrides for an explicit re-author.
+        const openMode = !/^(1|true|on|yes)$/i.test(String(process.env.HF_AUTHOR_REFRESH || '').trim());
+        await authorPlanCompositions(plan, { projectDir: PROJECT_DIR, openMode, log: (m) => console.log(`[HyperFrames]${m}`) });
+    } catch (err) {
+        console.warn(`[HyperFrames] composition author pass skipped: ${err.message}`);
+    }
+}
+
+function readJsonSafe(filePath) {
+    try {
+        if (!filePath || !fs.existsSync(filePath)) return null;
+        return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    } catch (_) {
+        return null;
+    }
+}
+
+function loadHyperframesLabRegistry() {
+    const mg = require('./src/render/mg-registry');
+    let templateRegistry = {};
+    try {
+        templateRegistry = require('./src/agents/ai-templates').TEMPLATE_REGISTRY || {};
+    } catch (err) {
+        console.warn(`[HyperFrames Lab] Template registry unavailable: ${err.message}`);
+    }
+    let themeIds = ['standard', 'minimal', 'modern', 'history', 'crime'];
+    let styles = ['clean', 'minimal', 'bold', 'neon', 'cinematic', 'elegant'];
+    try {
+        const themes = require('./src/data/themes');
+        if (typeof themes.getThemeIds === 'function') themeIds = themes.getThemeIds();
+        if (typeof themes.getMGStylePresetNames === 'function') styles = themes.getMGStylePresetNames();
+    } catch (err) {
+        console.warn(`[HyperFrames Lab] Theme registry unavailable: ${err.message}`);
+    }
+
+    const mgCategories = Object.entries(mg.MG_REGISTRY || {}).map(([key, reg]) => ({
+        key,
+        label: reg.label || key,
+        group: reg.group || 'overlay',
+        defaultVariant: reg.defaultType || Object.keys(reg.types || {})[0] || 'standard',
+        variants: Object.entries(reg.types || {}).map(([variantKey, variant]) => ({
+            key: variantKey,
+            label: variant.label || variantKey,
+            animation: variant.animation || reg.animations?.[0] || 'fadeSlide',
+        })),
+        animations: Array.isArray(reg.animations) ? reg.animations : [],
+        fields: Array.isArray(reg.fields) ? reg.fields : [],
+    }));
+
+    const templates = Object.entries(templateRegistry).map(([key, reg]) => ({
+        key,
+        label: reg.label || key,
+        defaultVariant: reg.defaultVariant || reg.variants?.[0] || 'standard',
+        variants: Array.isArray(reg.variants) ? reg.variants : ['standard'],
+        animations: Array.isArray(reg.animations) ? reg.animations : [reg.defaultAnimation || 'fadeSlide'],
+        defaultAnimation: reg.defaultAnimation || reg.animations?.[0] || 'fadeSlide',
+        requiresItems: !!reg.requiresItems,
+        needsBackground: !!reg.needsBackground,
+        needsItemImages: !!reg.needsItemImages,
+        contentFields: Array.isArray(reg.contentFields) ? reg.contentFields : [],
+    }));
+
+    return {
+        success: true,
+        updatedAt: new Date().toISOString(),
+        projectDir: PROJECT_DIR,
+        mgCategories,
+        templates,
+        styles,
+        themeIds,
+        transitions: ['crossfade', 'swipe', 'wipe', 'slide', 'push', 'zoom', 'flash', 'glitch'],
+    };
+}
+
+function hyperframesLabBackgroundFiles() {
+    const candidates = [
+        path.join(APP_ROOT, 'assets', 'backgrounds'),
+        path.join(APP_ROOT, 'assets', 'overlays'),
+        path.join(PROJECT_DIR, 'temp'),
+        path.join(PROJECT_DIR, 'public'),
+        path.join(PROJECT_DIR, 'media'),
+    ];
+    const allowed = new Set(['.mp4', '.mov', '.webm', '.png', '.jpg', '.jpeg', '.webp']);
+    const files = [];
+    for (const dir of candidates) {
+        try {
+            if (!fs.existsSync(dir)) continue;
+            for (const entry of fs.readdirSync(dir)) {
+                const full = path.join(dir, entry);
+                if (!fs.statSync(full).isFile()) continue;
+                if (allowed.has(path.extname(full).toLowerCase())) files.push(full);
+            }
+        } catch (_) {
+            // Ignore missing/locked media folders.
+        }
+    }
+    return files;
+}
+
+function pickHyperframesLabBackground(index = 0) {
+    const files = hyperframesLabBackgroundFiles();
+    if (!files.length) return null;
+    const videos = files.filter(file => ['.mp4', '.mov', '.webm'].includes(path.extname(file).toLowerCase()));
+    const pool = videos.length ? videos : files;
+    return pool[Math.abs(index) % pool.length];
+}
+
+function sampleItemsForVisual(type, variant, index = 0) {
+    const label = String(type || 'visual').replace(/([A-Z])/g, ' $1').replace(/[-_]/g, ' ').trim();
+    if (/comparison/i.test(type)) {
+        return [
+            { label: 'Before', value: 'Slow', text: 'Old workflow' },
+            { label: 'After', value: 'Fast', text: 'HyperFrames pipeline' },
+        ];
+    }
+    if (/timeline/i.test(type)) {
+        return [
+            { label: 'Step 1', value: 'Plan', text: 'Scene intent' },
+            { label: 'Step 2', value: 'Animate', text: 'Motion pass' },
+            { label: 'Step 3', value: 'Render', text: 'Final output' },
+        ];
+    }
+    if (/listicle|infographic|imageShowcase|personIntro|splitScreen/i.test(type)) {
+        return [
+            { label: '01', value: 'Variant', text: variant || 'standard' },
+            { label: '02', value: 'Motion', text: 'GSAP timing' },
+            { label: '03', value: 'Style', text: 'Theme tokens' },
+            { label: '04', value: 'Render', text: 'Bridge output' },
+        ];
+    }
+    if (/stat|counter|progress/i.test(type)) {
+        return [
+            { label: 'Coverage', value: `${index + 1}`, text: `${label} test` },
+            { label: 'Status', value: 'Live', text: 'Real bridge' },
+        ];
+    }
+    return [
+        { label: 'Style', value: variant || 'standard', text: `${label} variant` },
+        { label: 'Motion', value: 'OK', text: 'Animation wired' },
+    ];
+}
+
+function buildHyperframesLabPlan(payload = {}, registry = loadHyperframesLabRegistry()) {
+    const mode = payload.mode || 'single';
+    const kind = payload.kind || 'mg';
+    const themeId = payload.themeId || registry.themeIds?.[0] || 'standard';
+    const styles = Array.isArray(payload.styles) && payload.styles.length ? payload.styles : (registry.styles || ['clean']);
+    const sceneDuration = Math.max(1.6, Math.min(8, Number(payload.duration || 2.6) || 2.6));
+    const gap = Math.max(0.15, Math.min(1.5, Number(payload.gap || 0.35) || 0.35));
+    const speed = Math.max(0.25, Math.min(2.5, Number(payload.speed || 1) || 1));
+    const shadowStrength = Math.max(0, Math.min(1, Number(payload.shadowStrength || 0.55) || 0.55));
+    const items = [];
+
+    const pushMg = (entry, variant, animation, styleName) => {
+        const i = items.length;
+        const start = i * (sceneDuration + gap);
+        const label = entry.label || entry.key;
+        items.push({
+            kind: 'mg',
+            type: entry.key,
+            subType: variant,
+            variant,
+            animation,
+            styleName,
+            themeId,
+            startTime: start,
+            duration: sceneDuration,
+            sceneIndex: i,
+            position: i % 3 === 0 ? 'lower' : i % 3 === 1 ? 'center' : 'upper',
+            text: `${label}`,
+            subtext: `${variant} / ${animation} / ${styleName}`,
+            value: String(i + 1),
+            progress: Math.min(100, 20 + (i * 7) % 80),
+            items: sampleItemsForVisual(entry.key, variant, i),
+        });
+    };
+
+    const pushTemplate = (entry, variant, animation, styleName) => {
+        const i = items.length;
+        const start = i * (sceneDuration + gap);
+        const background = pickHyperframesLabBackground(i);
+        const label = entry.label || entry.key;
+        items.push({
+            kind: 'template',
+            type: entry.key,
+            templateType: entry.key,
+            templateVariant: variant,
+            variant,
+            templateAnimation: animation,
+            animation,
+            styleName,
+            themeId,
+            startTime: start,
+            duration: Math.max(sceneDuration, 3.2),
+            sceneIndex: i,
+            text: `${label}`,
+            templateText: `${label}`,
+            subText: `${variant} / ${animation} / ${styleName}`,
+            templateSubtext: `Real HyperFrames template bridge test`,
+            templateHint: `${label} ${variant}`,
+            items: sampleItemsForVisual(entry.key, variant, i),
+            mediaPath: background,
+            templateMediaFile: background,
+            backgroundMediaFile: background,
+        });
+    };
+
+    if (mode === 'all' || mode === 'mg-all') {
+        for (const entry of registry.mgCategories || []) {
+            for (const v of entry.variants || [{ key: entry.defaultVariant || 'standard' }]) {
+                const styleName = styles[items.length % styles.length] || 'clean';
+                const animation = v.animation || entry.animations?.[items.length % Math.max(1, entry.animations.length)] || 'fadeSlide';
+                pushMg(entry, v.key || v, animation, styleName);
+            }
+        }
+    }
+
+    if (mode === 'all' || mode === 'template-all') {
+        for (const entry of registry.templates || []) {
+            for (const variant of entry.variants || [entry.defaultVariant || 'standard']) {
+                const styleName = styles[items.length % styles.length] || 'clean';
+                const animation = entry.animations?.[items.length % Math.max(1, entry.animations.length)] || entry.defaultAnimation || 'fadeSlide';
+                pushTemplate(entry, variant, animation, styleName);
+            }
+        }
+    }
+
+    if (mode === 'single') {
+        if (kind === 'template') {
+            const entry = (registry.templates || []).find(t => t.key === payload.type) || registry.templates?.[0];
+            if (entry) {
+                pushTemplate(
+                    entry,
+                    payload.variant || entry.defaultVariant || entry.variants?.[0] || 'standard',
+                    payload.animation || entry.defaultAnimation || entry.animations?.[0] || 'fadeSlide',
+                    payload.styleName || styles[0] || 'clean'
+                );
+            }
+        } else {
+            const entry = (registry.mgCategories || []).find(t => t.key === payload.type) || registry.mgCategories?.[0];
+            if (entry) {
+                const variantObj = (entry.variants || []).find(v => v.key === payload.variant) || entry.variants?.[0] || {};
+                pushMg(
+                    entry,
+                    payload.variant || variantObj.key || entry.defaultVariant || 'standard',
+                    payload.animation || variantObj.animation || entry.animations?.[0] || 'fadeSlide',
+                    payload.styleName || styles[0] || 'clean'
+                );
+            }
+        }
+    }
+
+    const totalDuration = Math.max(3, ...items.map(item => Number(item.startTime || 0) + Number(item.duration || sceneDuration))) + 0.5;
+    const background = pickHyperframesLabBackground(0);
+    const scenes = [
+        {
+            index: 0,
+            startTime: 0,
+            endTime: totalDuration,
+            duration: totalDuration,
+            text: 'HyperFrames Motion Lab background scene',
+            keyword: 'motion graphics lab background',
+            mediaPath: background,
+            assetPath: background,
+            fit: 'cover',
+        },
+    ];
+
+    return {
+        title: 'HyperFrames Motion Lab',
+        fps: 30,
+        width: 1920,
+        height: 1080,
+        duration: totalDuration,
+        totalDuration,
+        themeId,
+        mgStyle: styles[0] || 'clean',
+        scriptContext: {
+            themeId,
+            mgStyle: styles[0] || 'clean',
+            hyperframesLab: true,
+            mgAnimationSpeed: speed,
+            mgShadowStrength: shadowStrength,
+        },
+        scenes,
+        transitions: [
+            { fromSceneIndex: 0, toSceneIndex: 1, type: payload.transition || 'crossfade', duration: 0.35 },
+        ],
+        motionGraphics: items.filter(item => item.kind === 'mg').map(({ kind: _kind, ...item }) => item),
+        templateScenes: items.filter(item => item.kind === 'template').map(({ kind: _kind, ...item }) => item),
+        _labStats: {
+            mode,
+            totalItems: items.length,
+            mgItems: items.filter(item => item.kind === 'mg').length,
+            templateItems: items.filter(item => item.kind === 'template').length,
+            background,
+        },
+    };
+}
+
+function readHyperframesLabReports(projectDir) {
+    return {
+        visual: readJsonSafe(path.join(projectDir, 'hyperframes-visual-report.json')),
+        style: readJsonSafe(path.join(projectDir, 'hyperframes-style-report.json')),
+        snapshot: readJsonSafe(path.join(projectDir, 'video-plan.snapshot.json')),
+    };
+}
+
+let hyperframesLabWindow = null;
+
+function openHyperframesLabWindow() {
+    const htmlFile = path.join(__dirname, 'ui', 'hyperframes-lab.html');
+    if (hyperframesLabWindow && !hyperframesLabWindow.isDestroyed()) {
+        hyperframesLabWindow.focus();
+        return hyperframesLabWindow;
+    }
+    hyperframesLabWindow = new BrowserWindow({
+        width: 1540,
+        height: 920,
+        minWidth: 1100,
+        minHeight: 700,
+        backgroundColor: '#070a10',
+        title: 'HyperFrames Motion Lab',
+        webPreferences: {
+            nodeIntegration: false,
+            contextIsolation: false,
+            sandbox: false,
+            preload: path.join(__dirname, 'preload.js'),
+        },
+        icon: getWindowIconPath() || undefined,
+        parent: mainWindow || undefined,
+    });
+    hyperframesLabWindow.loadFile(htmlFile);
+    hyperframesLabWindow.on('closed', () => { hyperframesLabWindow = null; });
+    return hyperframesLabWindow;
+}
+
+ipcMain.handle('open-hyperframes-lab', async () => {
+    openHyperframesLabWindow();
+    return { success: true };
+});
+
+ipcMain.handle('hyperframes-lab-registry', async () => {
+    try {
+        return loadHyperframesLabRegistry();
+    } catch (err) {
+        return { success: false, error: err.message || String(err) };
+    }
+});
+
+ipcMain.handle('hyperframes-lab-generate', async (_event, payload = {}) => {
+    try {
+        const registry = loadHyperframesLabRegistry();
+        const plan = buildHyperframesLabPlan(payload, registry);
+        if (payload.motionDirector !== false) {
+            const { applyHyperframesMotionDirector } = require('./src/render/hyperframes-motion-director');
+            await applyHyperframesMotionDirector({
+                motionGraphics: plan.motionGraphics || [],
+                mgScenes: plan.mgScenes || [],
+                templateScenes: plan.templateScenes || [],
+                scenes: plan.scenes || [],
+                scriptContext: plan.scriptContext || {},
+                style: {
+                    mgStyle: plan.mgStyle,
+                    themeId: plan.themeId,
+                    labMode: plan._labStats?.mode,
+                },
+                log: {
+                    info: (m) => console.log(`[HyperFrames Lab] ${m}`),
+                    ok: (m) => console.log(`[HyperFrames Lab] ${m}`),
+                    warn: (m) => console.warn(`[HyperFrames Lab] ${m}`),
+                    dim: (m) => console.log(`[HyperFrames Lab] ${m}`),
+                },
+            });
+            plan._labStats.motionDirector = true;
+        } else {
+            plan._labStats.motionDirector = false;
+        }
+        await runCompositionAuthorPass(plan);
+        const { generateHyperframesProject } = loadHyperframesBridgeFresh();
+        const result = generateHyperframesProject({
+            plan,
+            projectDir: PROJECT_DIR,
+            appRoot: APP_ROOT,
+            tempDir: TEMP_PATH,
+            publicDir: PUBLIC_PATH,
+            inputDir: INPUT_PATH,
+            outputRoot: path.join(PROJECT_DIR, 'hyperframes-lab'),
+            options: payload.options || {},
+        });
+        const reports = readHyperframesLabReports(result.projectDir);
+        return {
+            success: true,
+            ...result,
+            fileUrl: result.indexPath ? pathToFileURL(result.indexPath).href : null,
+            reports,
+            labStats: plan._labStats,
+        };
+    } catch (err) {
+        console.error('[HyperFrames Lab] Generate failed:', err);
+        return { success: false, error: err.message || String(err) };
+    }
+});
+
+ipcMain.handle('hyperframes-lab-open-folder', async (_event, folder) => {
+    const fallback = path.join(PROJECT_DIR, 'hyperframes-lab');
+    const target = folder && fs.existsSync(folder) ? folder : fallback;
+    if (!fs.existsSync(target)) fs.mkdirSync(target, { recursive: true });
+    await shell.openPath(target);
+    return { success: true, path: target };
+});
+
+ipcMain.handle('hyperframes-generate-project', async (_event, payload = {}) => {
+    try {
+        await runCompositionAuthorPass(payload.plan);
+        const { generateHyperframesProject } = loadHyperframesBridgeFresh();
+        const result = generateHyperframesProject({
+            plan: payload.plan,
+            projectDir: PROJECT_DIR,
+            appRoot: APP_ROOT,
+            tempDir: TEMP_PATH,
+            publicDir: PUBLIC_PATH,
+            inputDir: INPUT_PATH,
+            outputRoot: path.join(PROJECT_DIR, 'hyperframes'),
+            options: payload.options || {},
+        });
+        console.log(`[HyperFrames] Project generated: ${result.projectDir}`);
+        return result;
+    } catch (err) {
+        console.error('[HyperFrames] Project generation failed:', err.message);
+        return { success: false, error: err.message };
+    }
+});
+
+// Clip a plan down to [startSec, endSec] for a FAST partial HyperFrames render (In/Out
+// points). Shifts all timings to start at 0, drops out-of-range items, keeps a transition
+// only if both its scenes survive, and trims the narration audio so the section stays in
+// sync. Returns a NEW plan object; never mutates the original. Used only when In/Out is set.
+async function _clipPlanForRange(plan, startSec, endSec) {
+    const dur = Math.max(0.1, endSec - startSec);
+    const overlaps = (s, e) => Number(e) > startSec + 0.001 && Number(s) < endSec - 0.001;
+    const shift = (item) => {
+        const s = Number(item.startTime ?? item.start ?? 0);
+        const eRaw = item.endTime ?? item.end ?? (item.duration != null ? s + Number(item.duration) : s);
+        const e = Number(eRaw);
+        const ns = Math.max(0, Math.min(dur, s - startSec));
+        const ne = Math.max(ns, Math.min(dur, e - startSec));
+        const out = { ...item, startTime: ns, endTime: ne };
+        if (item.duration != null) out.duration = Number((ne - ns).toFixed(3)); // bridge derives from start/end anyway
+        delete out._hfTiming; // force the bridge to recompute timing
+        return out;
+    };
+    const clipped = { ...plan };
+    const keptIdx = new Set();
+    if (Array.isArray(plan.scenes)) {
+        clipped.scenes = plan.scenes
+            .filter(sc => {
+                const keep = overlaps(Number(sc.startTime ?? 0), Number(sc.endTime ?? sc.startTime ?? 0));
+                if (keep && sc.index != null) keptIdx.add(Number(sc.index));
+                return keep;
+            })
+            .map(shift);
+    }
+    if (Array.isArray(plan.mgScenes)) {
+        clipped.mgScenes = plan.mgScenes
+            .filter(sc => overlaps(Number(sc.startTime ?? 0), Number(sc.endTime ?? sc.startTime ?? 0)))
+            .map(shift);
+    }
+    if (Array.isArray(plan.motionGraphics)) {
+        clipped.motionGraphics = plan.motionGraphics
+            .filter(mg => overlaps(Number(mg.startTime ?? 0), Number(mg.startTime ?? 0) + Number(mg.duration ?? 0)))
+            .map(shift);
+    }
+    // templateScenes (stat cards, key-takeaways, listicle grids, etc.) are a SEPARATE timed
+    // array the renderer places by startTime. Without clipping+re-basing them here, a section
+    // render leaves them at their ABSOLUTE time → they appear shifted late (out of audio sync)
+    // while the full preview is correct. Mirror the mgScenes handling.
+    if (Array.isArray(plan.templateScenes)) {
+        clipped.templateScenes = plan.templateScenes
+            .filter(sc => overlaps(Number(sc.startTime ?? 0), Number(sc.endTime ?? sc.startTime ?? 0)))
+            .map(shift);
+    }
+    if (Array.isArray(plan.sfxClips)) {
+        clipped.sfxClips = plan.sfxClips
+            .filter(sx => overlaps(Number(sx.startTime ?? 0), Number(sx.startTime ?? 0) + Number(sx.duration ?? 0.5)))
+            .map(shift);
+    }
+    if (Array.isArray(plan.transitions)) {
+        clipped.transitions = plan.transitions.filter(t => keptIdx.has(Number(t.fromSceneIndex)) && keptIdx.has(Number(t.toSceneIndex)));
+    }
+    clipped.totalDuration = dur;
+
+    // Trim the narration audio to the range so it matches the shifted visuals.
+    if (plan.audio) {
+        const resolved = [PUBLIC_PATH, TEMP_PATH, INPUT_PATH].map(d => path.join(d, plan.audio)).find(p => { try { return fs.existsSync(p); } catch (_) { return false; } });
+        if (resolved) {
+            const outName = `hf-clip-voiceover-${Date.now()}.mp3`;
+            const outPath = path.join(TEMP_PATH, outName);
+            try {
+                await new Promise((resolve, reject) => {
+                    const { execFile } = require('child_process');
+                    execFile(WEBGL_FFMPEG_PATH, ['-y', '-ss', String(startSec), '-to', String(endSec), '-i', resolved, '-vn', '-c:a', 'libmp3lame', '-q:a', '4', outPath], (err) => err ? reject(err) : resolve());
+                });
+                clipped.audio = outName; // bridge resolves it from TEMP_PATH
+            } catch (e) {
+                console.warn(`[HyperFrames] audio trim failed (${e.message}); section may be out of sync`);
+            }
+        }
+    }
+    return clipped;
+}
+
+ipcMain.handle('hyperframes-render', async (_event, payload = {}) => {
+    try {
+        activeRenderCancelled = false;
+        purgePartialHyperframesBrowser();
+        const { generateHyperframesProject } = loadHyperframesBridgeFresh();
+        const nodeRuntime = checkHyperframesNodeRuntime();
+        if (!nodeRuntime.ok) {
+            const versionLabel = nodeRuntime.version || 'unknown';
+            const message = `HyperFrames requires Node 22+ for the CLI renderer. Current node is ${versionLabel}. Install/switch to Node 22+, then retry the HyperFrames render.`;
+            console.warn(`[HyperFrames] ${message}`);
+            sendRenderProgress(0, `[HyperFrames] ${message}`);
+            return { success: false, error: message, nodeRuntime };
+        }
+        if (!fs.existsSync(OUTPUT_PATH)) fs.mkdirSync(OUTPUT_PATH, { recursive: true });
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        const outputFile = path.join(OUTPUT_PATH, `hyperframes-${stamp}.mp4`);
+
+        // Partial render (In/Out points): clip the plan to the range so HyperFrames renders
+        // ONLY that section (fast check) instead of the whole timeline.
+        let renderPlan = payload.plan;
+        const _opt = payload.options || {};
+        const _start = Number(_opt.startSec || 0);
+        const _end = Number.isFinite(Number(_opt.endSec)) ? Number(_opt.endSec) : null;
+        const _fullDur = Number(payload.plan?.totalDuration || 0);
+        const _isPartial = _end != null && _end > _start + 0.05 && ((_start > 0.05) || (_fullDur && _end < _fullDur - 0.05));
+        if (_isPartial) {
+            sendRenderProgress(6, `[HyperFrames] Partial render ${_start.toFixed(1)}s → ${_end.toFixed(1)}s (clipping to section)...`);
+            try { renderPlan = await _clipPlanForRange(payload.plan, _start, _end); }
+            catch (e) { console.warn(`[HyperFrames] plan clip failed (${e.message}); rendering full timeline`); renderPlan = payload.plan; }
+        }
+
+        sendRenderProgress(8, '[HyperFrames] Generating HTML composition...');
+        await runCompositionAuthorPass(renderPlan);
+        const project = generateHyperframesProject({
+            plan: renderPlan,
+            projectDir: PROJECT_DIR,
+            appRoot: APP_ROOT,
+            tempDir: TEMP_PATH,
+            publicDir: PUBLIC_PATH,
+            inputDir: INPUT_PATH,
+            outputRoot: path.join(PROJECT_DIR, 'hyperframes'),
+            options: {
+                ...(payload.options || {}),
+                onProgress: sendRenderProgress,
+            },
+        });
+
+        console.log(`[HyperFrames] Project generated: ${project.projectDir}`);
+        sendRenderProgress(14, '[HyperFrames] Project generated, starting renderer...');
+
+        // Pre-render slideshow/monotony advisory (OPENMONTAGE-BORROW-PLAN #10).
+        // Log-only — surfaces monotony before we spend a full render; never blocks.
+        try {
+            const { scoreSlideshowRisk } = require('./src/agents/scene-risk');
+            const sr = scoreSlideshowRisk(renderPlan);
+            if (sr.level !== 'ok') {
+                console.warn(`[SlideshowRisk] ${sr.level.toUpperCase()} (score ${sr.score}) — ${sr.findings.length} finding(s):`);
+                for (const f of sr.findings) console.warn(`[SlideshowRisk]   ${f.severity === 'fail' ? '❌' : '⚠️'} ${f.message}`);
+            }
+        } catch (_) { /* advisory only */ }
+
+        // Pre-render HyperFrames lint (OPENMONTAGE-BORROW-PLAN #12).
+        try { runHyperframesLint(project.projectDir); } catch (_) { /* advisory only */ }
+
+        const renderOptions = {
+            fps: payload.fps || payload.plan?.fps || 30,
+            quality: payload.quality || 'standard',
+            gpu: payload.gpu !== false,
+            workers: payload.workers || 4,
+            browserGpu: payload.browserGpu !== false,
+            strict: payload.strict === true,
+        };
+        let rendered = await runHyperframesCli(project.projectDir, outputFile, renderOptions);
+
+        if (rendered.cancelled) {
+            activeRenderCancelled = false;
+            return { ...rendered, projectDir: project.projectDir };
+        }
+
+        if (!rendered.success && (renderOptions.browserGpu || Number(renderOptions.workers) > 1)) {
+            console.warn('[HyperFrames] Fast browser render failed. Retrying stable mode (1 worker, browser software).');
+            sendRenderProgress(22, '[HyperFrames] Fast render failed, retrying stable mode...');
+            rendered = await runHyperframesCli(project.projectDir, outputFile, {
+                ...renderOptions,
+                workers: 1,
+                browserGpu: false,
+            });
+        }
+
+        if (rendered.cancelled) {
+            activeRenderCancelled = false;
+            return { ...rendered, projectDir: project.projectDir };
+        }
+
+        if (!rendered.success && renderOptions.gpu) {
+            console.warn('[HyperFrames] GPU render failed. Retrying without GPU encoding.');
+            sendRenderProgress(22, '[HyperFrames] GPU render failed, retrying CPU encode...');
+            rendered = await runHyperframesCli(project.projectDir, outputFile, {
+                ...renderOptions,
+                gpu: false,
+                workers: 1,
+                browserGpu: false,
+            });
+        }
+
+        if (rendered.cancelled) {
+            activeRenderCancelled = false;
+            return { ...rendered, projectDir: project.projectDir };
+        }
+
+        if (!rendered.success) {
+            activeRenderCancelled = false;
+            return { ...rendered, projectDir: project.projectDir };
+        }
+
+        // ── Audio finishing (OPENMONTAGE-BORROW-PLAN #1) ──
+        // The CLI muxed voice+sfx crudely (no ducking, no loudnorm, no bed).
+        // Post-process the finished mp4: normalize to −16 LUFS and, if a music
+        // bed is present, duck it under the narration. Non-destructive: video
+        // stream is copied and the original is only replaced on success.
+        // Skipped for partial (In/Out) renders — those are quick section checks.
+        if (!_isPartial) {
+            try {
+                sendRenderProgress(99, '[HyperFrames] Finishing audio (loudness + mix)...');
+                const { finishAudio } = require('./src/render/audio-mixer');
+                let bedPath = null;
+                const bedCandidate = renderPlan?.musicBed || process.env.MUSIC_BED_PATH || '';
+                if (bedCandidate) {
+                    bedPath = [PUBLIC_PATH, TEMP_PATH, INPUT_PATH, '']
+                        .map((d) => (d ? path.join(d, bedCandidate) : bedCandidate))
+                        .find((p) => { try { return fs.existsSync(p); } catch (_) { return false; } }) || null;
+                }
+                finishAudio({ videoPath: rendered.outputPath, bedPath, log: (m) => console.log(m) });
+            } catch (e) {
+                console.warn(`[HyperFrames] audio finishing skipped (${e.message}) — original render kept`);
+            }
+        }
+
+        // ── Post-render final review (OPENMONTAGE-BORROW-PLAN #7 + #8 + #9) ──
+        // Probe the ACTUAL output (duration/black/audio) + plan (motion-ratio,
+        // pacing). Advisory: we never fail a render that produced a file, but we
+        // surface the verdict to the UI and logs. FINAL_REVIEW=0 disables.
+        let review = null;
+        if (!_isPartial) {
+            try {
+                sendRenderProgress(99, '[HyperFrames] Reviewing final render...');
+                const { finalReview } = require('./src/pipeline/final-review');
+                review = await finalReview({
+                    videoPath: rendered.outputPath,
+                    plan: renderPlan,
+                    publicDir: PUBLIC_PATH,
+                    log: (m) => console.log(m),
+                });
+            } catch (e) {
+                console.warn(`[HyperFrames] final review skipped (${e.message})`);
+            }
+        }
+
+        sendRenderProgress(100, '[HyperFrames] Render complete');
+        activeRenderCancelled = false;
+        return {
+            success: true,
+            outputPath: rendered.outputPath,
+            projectDir: project.projectDir,
+            indexPath: project.indexPath,
+            review,
+        };
+    } catch (err) {
+        activeProcess = null;
+        activeProcessType = null;
+        activeRenderCancelled = false;
+        console.error('[HyperFrames] Render failed:', err.message);
         return { success: false, error: err.message };
     }
 });
@@ -1882,7 +3531,7 @@ ipcMain.handle('get-sfx-path', async (event, filename) => {
 // Download real SFX from Freesound API (replaces synthetic placeholders)
 ipcMain.handle('download-real-sfx', async () => {
     try {
-        const { downloadAllSfx } = require('./src/sfx-provider');
+        const { downloadAllSfx } = require('./src/media/sfx-provider');
         const simpleLog = {
             step: (msg) => console.log(msg),
             ok: (msg) => console.log(`   ✅ ${msg}`),
@@ -2012,11 +3661,1056 @@ ipcMain.handle('get-project-info', async () => {
 
 // Qwen model pool status + reset (used by UI)
 const _qwenExhaustedPath = path.join(APP_ROOT, '.qwen-exhausted-models.json');
+function _parseEnvListForUi(raw) {
+    return String(raw || '')
+        .split(/[,\n;]/)
+        .map(v => v.trim())
+        .filter(Boolean);
+}
+
+function _readEnvValueForUi(envPath, key) {
+    try {
+        if (!fs.existsSync(envPath)) return '';
+        const content = fs.readFileSync(envPath, 'utf8');
+        const re = new RegExp(`^${key}=([\\s\\S]*?)$`, 'm');
+        const match = content.match(re);
+        if (!match) return '';
+        let value = String(match[1] || '').trim();
+        if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+            value = value.slice(1, -1);
+        }
+        return value;
+    } catch (_) {
+        return '';
+    }
+}
+
+function _envHasKeyForUi(envPath, key) {
+    try {
+        if (!fs.existsSync(envPath)) return false;
+        const content = fs.readFileSync(envPath, 'utf8');
+        return new RegExp(`^${key}=`, 'm').test(content);
+    } catch (_) {
+        return false;
+    }
+}
+
+function _maskSecretForUi(secret) {
+    const value = String(secret || '').trim();
+    if (!value) return '';
+    if (value.length <= 10) return `${value.slice(0, 2)}...${value.slice(-2)}`;
+    return `${value.slice(0, 4)}...${value.slice(-6)}`;
+}
+
+function _qwenVisionKeysForUi() {
+    const envPath = path.join(APP_ROOT, '.env');
+    const sharedKeys = _parseEnvListForUi(_readEnvValueForUi(envPath, 'QWEN_VISION_API_KEY'));
+    const hasImagePrimary = _envHasKeyForUi(envPath, 'QWEN_IMAGE_API_KEY');
+    const hasImageLane = hasImagePrimary || _envHasKeyForUi(envPath, 'QWEN_VL_API_KEY');
+    const hasOmniLane = _envHasKeyForUi(envPath, 'QWEN_OMNI_API_KEY');
+    const imageRaw = _parseEnvListForUi(hasImageLane ? (hasImagePrimary ? _readEnvValueForUi(envPath, 'QWEN_IMAGE_API_KEY') : _readEnvValueForUi(envPath, 'QWEN_VL_API_KEY')) : '');
+    const omniRaw = _parseEnvListForUi(hasOmniLane ? _readEnvValueForUi(envPath, 'QWEN_OMNI_API_KEY') : '');
+    const mapKeys = (keys) => keys.map((key, index) => ({
+        index,
+        tail: key.slice(-6),
+        masked: _maskSecretForUi(key),
+        length: key.length,
+    }));
+    return {
+        envPath,
+        shared: { envKey: 'QWEN_VISION_API_KEY', explicit: sharedKeys.length > 0, keys: mapKeys(sharedKeys) },
+        image: { envKey: 'QWEN_IMAGE_API_KEY', explicit: hasImageLane, fallback: hasImageLane ? '' : 'QWEN_VISION_API_KEY', keys: mapKeys(hasImageLane ? imageRaw : sharedKeys) },
+        omni: { envKey: 'QWEN_OMNI_API_KEY', explicit: hasOmniLane, fallback: hasOmniLane ? '' : 'QWEN_VISION_API_KEY', keys: mapKeys(hasOmniLane ? omniRaw : sharedKeys) },
+        keys: mapKeys(sharedKeys),
+    };
+}
+
+function _resolveQwenLaneKeysForSave(envPath, lane) {
+    const sharedKeys = _parseEnvListForUi(_readEnvValueForUi(envPath, 'QWEN_VISION_API_KEY'));
+    if (lane === 'image') {
+        const hasImagePrimary = _envHasKeyForUi(envPath, 'QWEN_IMAGE_API_KEY');
+        const hasImageLane = hasImagePrimary || _envHasKeyForUi(envPath, 'QWEN_VL_API_KEY');
+        const imageKeys = _parseEnvListForUi(hasImagePrimary ? _readEnvValueForUi(envPath, 'QWEN_IMAGE_API_KEY') : _readEnvValueForUi(envPath, 'QWEN_VL_API_KEY'));
+        return hasImageLane ? imageKeys : sharedKeys;
+    }
+    if (lane === 'omni') {
+        const hasOmniLane = _envHasKeyForUi(envPath, 'QWEN_OMNI_API_KEY');
+        const omniKeys = _parseEnvListForUi(_readEnvValueForUi(envPath, 'QWEN_OMNI_API_KEY'));
+        return hasOmniLane ? omniKeys : sharedKeys;
+    }
+    return sharedKeys;
+}
+
+function _applyQwenKeyEdit(baseKeys, edit = {}) {
+    const rows = Array.isArray(edit.rows) ? edit.rows : [];
+    const additions = _parseEnvListForUi(Array.isArray(edit.additions) ? edit.additions.join(',') : edit.additions);
+    const next = [];
+    for (let i = 0; i < baseKeys.length; i++) {
+        const row = rows.find(r => Number(r.index) === i) || {};
+        if (row.remove === true) continue;
+        const replacement = String(row.replacement || '').trim();
+        next.push(replacement || baseKeys[i]);
+    }
+    for (const key of additions) next.push(key);
+    const deduped = [];
+    const seen = new Set();
+    for (const key of next.map(k => String(k || '').trim()).filter(Boolean)) {
+        if (seen.has(key)) continue;
+        seen.add(key);
+        deduped.push(key);
+    }
+    return deduped;
+}
+
+const RESOURCE_ENV_GROUPS = [
+    {
+        id: 'qwen',
+        title: 'Alibaba Qwen Vision',
+        description: 'Primary vision lanes: image/VL frame scoring and Omni multimodal clip analysis.',
+        fields: [
+            { key: 'QWEN_BASE_URL', label: 'DashScope base URL', kind: 'text', importance: 'recommended' },
+            { key: 'QWEN_VISION_MODEL', label: 'Image/VL model pool', kind: 'text', importance: 'recommended' },
+            { key: 'QWEN_VISION_API_KEY', label: 'Shared fallback key pool', kind: 'secret-list', importance: 'recommended', note: 'Used only when lane-specific keys are not configured.' },
+            { key: 'QWEN_IMAGE_API_KEY', label: 'Image/VL key pool', kind: 'secret-list', importance: 'optional', note: 'Leave absent to use the shared fallback pool.' },
+            { key: 'QWEN_OMNI_API_KEY', label: 'Omni key pool', kind: 'secret-list', importance: 'optional', note: 'Separate this lane when Omni burns quota faster than image/VL.' },
+            { key: 'QWEN_OMNI_MODEL', label: 'Omni HTTP model pool', kind: 'text', importance: 'optional' },
+            { key: 'QWEN_OMNI_REALTIME_MODEL', label: 'Omni realtime model pool', kind: 'text', importance: 'optional' },
+            { key: 'QWEN_OMNI_HTTP_ENABLED', label: 'Omni HTTP enabled', kind: 'toggle', importance: 'optional' },
+            { key: 'QWEN_OMNI_REALTIME_ENABLED', label: 'Omni realtime enabled', kind: 'toggle', importance: 'optional' },
+            { key: 'QWEN_MODEL_SYNC', label: 'Auto-sync model registry', kind: 'toggle', importance: 'optional' },
+            { key: 'QWEN_MODEL_SYNC_PROBE', label: 'Probe discovered models', kind: 'toggle', importance: 'optional' },
+            { key: 'QWEN_MODEL_SYNC_INTERVAL_HOURS', label: 'Model sync interval hours', kind: 'number', importance: 'optional' },
+            { key: 'QWEN_DYNAMIC_MODEL_POOLS', label: 'Use generated model pools', kind: 'toggle', importance: 'optional' },
+            { key: 'QWEN_PREFLIGHT', label: 'Preflight keys on build', kind: 'toggle', importance: 'optional' },
+            { key: 'QWEN_HEALTH_FRESH_MS', label: 'Health cache freshness', kind: 'number', importance: 'optional' },
+        ],
+    },
+    {
+        id: 'bedrock',
+        title: 'AWS Bedrock',
+        description: 'Text AI route plus Bedrock vision fallback. Replace these when you move to a fresh AWS credit account.',
+        fields: [
+            { key: 'AI_PROVIDER', label: 'Text provider', kind: 'text', importance: 'required' },
+            { key: 'BEDROCK_REGION', label: 'Region', kind: 'text', importance: 'required' },
+            { key: 'BEDROCK_ACCESS_KEY_ID', label: 'Access key ID', kind: 'secret', importance: 'required' },
+            { key: 'BEDROCK_SECRET_ACCESS_KEY', label: 'Secret access key', kind: 'secret', importance: 'required' },
+            { key: 'BEDROCK_DIRECTOR_MODEL', label: 'Director model', kind: 'text', importance: 'recommended' },
+            { key: 'BEDROCK_PLANNER_MODEL', label: 'Planner model', kind: 'text', importance: 'recommended' },
+            { key: 'BEDROCK_UTILITY_MODEL', label: 'Utility model', kind: 'text', importance: 'recommended' },
+            { key: 'BEDROCK_FALLBACK_MODEL', label: 'Text fallback model', kind: 'text', importance: 'optional' },
+            { key: 'BEDROCK_TASK_TYPES', label: 'Task type allowlist', kind: 'text', importance: 'optional', note: 'Empty means all Bedrock text task types are allowed.' },
+            { key: 'BEDROCK_VISION_NOVA_MODEL', label: 'Vision fallback: Nova', kind: 'text', importance: 'optional' },
+            { key: 'BEDROCK_VISION_QWEN_MODEL', label: 'Vision fallback: Qwen VL', kind: 'text', importance: 'optional' },
+            { key: 'BEDROCK_VISION_CLAUDE_MODEL', label: 'Vision fallback: Claude', kind: 'text', importance: 'optional' },
+        ],
+    },
+    {
+        id: 'azure',
+        title: 'Azure AI',
+        description: 'Azure AI Foundry text brains. Azure Claude and Azure OpenAI-compatible deployments like Grok can replace the Bedrock Sonnet tier; Bedrock remains fallback.',
+        fields: [
+            { key: 'AZURE_API_KEY', label: 'API key', kind: 'secret', importance: 'required' },
+            { key: 'AZURE_ANTHROPIC_BASE_URL', label: 'Claude base URL', kind: 'text', importance: 'optional' },
+            { key: 'AZURE_CLAUDE_MODEL', label: 'Claude deployment/model', kind: 'text', importance: 'optional' },
+            { key: 'AZURE_TASK_TYPES', label: 'Claude task allowlist', kind: 'text', importance: 'optional', note: 'Claude dropdown fills this with the Sonnet tier.' },
+            { key: 'AZURE_OPENAI_ENDPOINT', label: 'OpenAI-compatible endpoint', kind: 'text', importance: 'optional' },
+            { key: 'AZURE_OPENAI_MODEL', label: 'OpenAI-compatible deployment/model', kind: 'text', importance: 'optional' },
+            { key: 'AZURE_OPENAI_TASK_TYPES', label: 'OpenAI-compatible task allowlist', kind: 'text', importance: 'optional', note: 'Grok dropdown fills this with the Sonnet tier.' },
+            { key: 'AZURE_TIMEOUT_MS', label: 'Timeout ms', kind: 'text', importance: 'optional' },
+            { key: 'AZURE_OPENAI_TIMEOUT_MS', label: 'OpenAI-compatible timeout ms', kind: 'text', importance: 'optional' },
+        ],
+    },
+    {
+        id: 'stock',
+        title: 'Stock Footage',
+        description: 'Free stock API providers. Storyblocks is suspended unless manually re-enabled later.',
+        fields: [
+            { key: 'PEXELS_API_KEY', label: 'Pexels API key', kind: 'secret', importance: 'recommended' },
+            { key: 'PIXABAY_API_KEY', label: 'Pixabay API key', kind: 'secret', importance: 'recommended' },
+            { key: 'STORYBLOCKS_SUBSCRIBED', label: 'Storyblocks subscribed mode', kind: 'toggle', importance: 'optional', note: 'Suspended in source policy until re-enabled.' },
+            { key: 'STORYBLOCKS_EMAIL', label: 'Storyblocks email', kind: 'secret', importance: 'optional', note: 'Suspended in source policy until re-enabled.' },
+            { key: 'STORYBLOCKS_PASSWORD', label: 'Storyblocks password', kind: 'secret', importance: 'optional', note: 'Suspended in source policy until re-enabled.' },
+            { key: 'STORYBLOCKS_COOKIE_FILE', label: 'Cookie file', kind: 'path', importance: 'optional', defaultValue: '.storyblocks-cookies.json' },
+            { key: 'STORYBLOCKS_PARALLEL_DOWNLOADS', label: 'Parallel downloads', kind: 'number', importance: 'optional' },
+            { key: 'STORYBLOCKS_SEARCH_RESULTS', label: 'Search result limit', kind: 'number', importance: 'optional' },
+            { key: 'STORYBLOCKS_RACE_CANDIDATE_TIMEOUT_MS', label: 'Race candidate timeout', kind: 'number', importance: 'optional' },
+        ],
+    },
+    {
+        id: 'youtube',
+        title: 'YouTube and Reddit Video',
+        description: 'yt-dlp, cookies, and social/video search inputs.',
+        fields: [
+            { key: 'YTDLP_PATH', label: 'yt-dlp executable', kind: 'path', importance: 'recommended' },
+            { key: 'YTDLP_COOKIES_FILE', label: 'yt-dlp cookies file', kind: 'path', importance: 'recommended' },
+            { key: 'YTDLP_COOKIES_FROM_BROWSER', label: 'Cookie browser fallback', kind: 'text', importance: 'optional' },
+            { key: 'YTDLP_CHECK_TIMEOUT_MS', label: 'yt-dlp check timeout', kind: 'number', importance: 'optional' },
+            { key: 'YTDLP_TIMEOUT_SCALE', label: 'yt-dlp timeout scale', kind: 'number', importance: 'optional' },
+            { key: 'YOUTUBE_API_KEY', label: 'YouTube API key', kind: 'secret', importance: 'optional' },
+            { key: 'REDDIT_SEARCH_VARIANTS', label: 'Reddit search variants', kind: 'number', importance: 'optional' },
+        ],
+    },
+    {
+        id: 'web-images',
+        title: 'Web Images',
+        description: 'Reference image search for exact brands, diagrams, product shots, screenshots, maps, and news visuals.',
+        fields: [
+            { key: 'BRAVE_API_KEY', label: 'Brave Search API key', kind: 'secret', importance: 'recommended' },
+            { key: 'BRAVE_COUNTRY', label: 'Brave country', kind: 'text', importance: 'optional' },
+            { key: 'BRAVE_SEARCH_LANG', label: 'Brave language', kind: 'text', importance: 'optional' },
+            { key: 'BRAVE_SAFESEARCH', label: 'Brave safe search', kind: 'text', importance: 'optional' },
+            { key: 'BRAVE_IMAGES_DISABLED', label: 'Disable Brave Images', kind: 'toggle', importance: 'optional' },
+            { key: 'BING_IMAGES_DISABLED', label: 'Disable Bing Images', kind: 'toggle', importance: 'optional' },
+            { key: 'BING_API_KEY', label: 'Bing API key (legacy)', kind: 'secret', importance: 'optional', note: 'Empty is OK if the current Bing image path is browser/free mode.' },
+        ],
+    },
+    {
+        id: 'research-maps-assets',
+        title: 'Research, Maps, and Assets',
+        description: 'External resources used by director research, map media, icons, and sound effects.',
+        fields: [
+            { key: 'TAVILY_API_KEY', label: 'Tavily web research', kind: 'secret', importance: 'recommended' },
+            { key: 'RAPIDAPI_KEY', label: 'RapidAPI search backend', kind: 'secret', importance: 'optional' },
+            { key: 'FREEPIK_API_KEY', label: 'Freepik icons/assets', kind: 'secret', importance: 'optional' },
+            { key: 'FREESOUND_API_KEY', label: 'Freesound SFX', kind: 'secret', importance: 'optional' },
+            { key: 'GEOAPIFY_API_KEY', label: 'Geoapify maps', kind: 'secret', importance: 'optional' },
+            { key: 'MAPTILER_API_KEY', label: 'MapTiler maps', kind: 'secret', importance: 'optional' },
+        ],
+    },
+    {
+        id: 'media-performance',
+        title: 'Media Agent and Performance',
+        description: 'Quality/speed controls for media search, candidate armies, scene concurrency, and referee decisions.',
+        fields: [
+            { key: 'MEDIA_AGENT_ENABLED', label: 'Media agent enabled', kind: 'toggle', importance: 'optional' },
+            { key: 'MEDIA_AGENT_AI', label: 'Media agent AI planning', kind: 'toggle', importance: 'optional' },
+            { key: 'FOOTAGE_PARALLEL_RACE', label: 'Parallel race enabled', kind: 'toggle', importance: 'optional' },
+            { key: 'FOOTAGE_RACE_CONCURRENCY', label: 'Footage soldiers per batch', kind: 'number', importance: 'optional' },
+            { key: 'FOOTAGE_RACE_MAX_BATCHES', label: 'Default footage batches', kind: 'number', importance: 'optional' },
+            { key: 'IMAGE_RACE_HARD_LOCK_MAX_BATCHES', label: 'Image batches for locked scenes', kind: 'number', importance: 'optional' },
+            { key: 'MEDIA_SCENE_CONCURRENCY', label: 'Scenes in parallel', kind: 'number', importance: 'optional' },
+            { key: 'FOOTAGE_AI_REFEREE', label: 'AI referee', kind: 'toggle', importance: 'optional' },
+            { key: 'FOOTAGE_AI_REFEREE_TIMEOUT_MS', label: 'AI referee timeout', kind: 'number', importance: 'optional' },
+            { key: 'CLIP_ANALYZER_ENABLED', label: 'Clip analyzer env default', kind: 'toggle', importance: 'optional' },
+            { key: 'VISION_CACHE', label: 'Vision cache', kind: 'toggle', importance: 'optional' },
+        ],
+    },
+    {
+        id: 'build-pipeline',
+        title: 'Build Pipeline',
+        description: 'Global build switches that affect scene splitting, orchestration, rendering, and editor agent workers.',
+        fields: [
+            { key: 'USE_SMART_SPLITTER', label: 'Smart splitter', kind: 'toggle', importance: 'recommended' },
+            { key: 'USE_SCENE_CLASSES', label: 'Scene classifier', kind: 'toggle', importance: 'optional' },
+            { key: 'USE_CAMERA_PLAN_STOPS', label: 'Camera plan stops', kind: 'toggle', importance: 'optional' },
+            { key: 'RENDER_GPU_MAX_CONCURRENCY', label: 'Renderer GPU concurrency', kind: 'number', importance: 'optional' },
+            { key: 'EDITOR_AGENT', label: 'Editor agent', kind: 'toggle', importance: 'optional' },
+            { key: 'EDITOR_AGENT_CONCURRENCY', label: 'Editor agent workers', kind: 'number', importance: 'optional' },
+            { key: 'SCOUT_LAB_BATCH_SCENE_TIMEOUT_MS', label: 'Scout lab scene timeout', kind: 'number', importance: 'optional' },
+        ],
+    },
+    {
+        id: 'legacy-watch',
+        title: 'Legacy Watchlist',
+        description: 'Old providers. If these appear in .env they are visible here so they do not hide in the system.',
+        fields: [
+            { key: 'NVIDIA_API_KEY', label: 'NVIDIA key', kind: 'secret', importance: 'optional', legacy: true },
+            { key: 'NVIDIA_API_KEYS', label: 'NVIDIA key pool', kind: 'secret-list', importance: 'optional', legacy: true },
+            { key: 'GEMINI_MODEL', label: 'Gemini model', kind: 'text', importance: 'optional', legacy: true },
+            { key: 'GEMINI_THINKING', label: 'Gemini thinking', kind: 'toggle', importance: 'optional', legacy: true },
+            { key: 'GOOGLE_APPLICATION_CREDENTIALS', label: 'Google credentials', kind: 'path', importance: 'optional', legacy: true },
+        ],
+    },
+];
+
+const CLOUD_ACCOUNT_DEFS = {
+    bedrock: {
+        id: 'bedrock',
+        title: 'AWS Bedrock Accounts',
+        envPrefix: 'BEDROCK',
+        activeKey: 'BEDROCK_ACTIVE_ACCOUNT',
+        note: 'The active slot is copied into the normal BEDROCK_* variables used by the real build.',
+        fields: [
+            { suffix: 'REGION', canonical: 'BEDROCK_REGION', label: 'Region', kind: 'text', required: true, defaultValue: 'us-east-1' },
+            { suffix: 'ACCESS_KEY_ID', canonical: 'BEDROCK_ACCESS_KEY_ID', label: 'Access key ID', kind: 'secret', required: true },
+            { suffix: 'SECRET_ACCESS_KEY', canonical: 'BEDROCK_SECRET_ACCESS_KEY', label: 'Secret access key', kind: 'secret', required: true },
+            { suffix: 'DIRECTOR_MODEL', canonical: 'BEDROCK_DIRECTOR_MODEL', label: 'Director model', kind: 'text' },
+            { suffix: 'PLANNER_MODEL', canonical: 'BEDROCK_PLANNER_MODEL', label: 'Planner / VP model', kind: 'text' },
+            { suffix: 'UTILITY_MODEL', canonical: 'BEDROCK_UTILITY_MODEL', label: 'Utility model', kind: 'text' },
+            { suffix: 'FALLBACK_MODEL', canonical: 'BEDROCK_FALLBACK_MODEL', label: 'Text fallback model', kind: 'text' },
+            { suffix: 'TASK_TYPES', canonical: 'BEDROCK_TASK_TYPES', label: 'Allowed task types', kind: 'text' },
+            { suffix: 'VISION_NOVA_MODEL', canonical: 'BEDROCK_VISION_NOVA_MODEL', label: 'Vision fallback: Nova', kind: 'text' },
+            { suffix: 'VISION_QWEN_MODEL', canonical: 'BEDROCK_VISION_QWEN_MODEL', label: 'Vision fallback: Qwen VL', kind: 'text' },
+            { suffix: 'VISION_CLAUDE_MODEL', canonical: 'BEDROCK_VISION_CLAUDE_MODEL', label: 'Vision fallback: Claude', kind: 'text' },
+        ],
+    },
+    azure: {
+        id: 'azure',
+        title: 'Azure AI Accounts',
+        envPrefix: 'AZURE',
+        activeKey: 'AZURE_ACTIVE_ACCOUNT',
+        note: 'The active slot is copied into Azure Claude and Azure OpenAI variables used by the Sonnet-tier router.',
+        fields: [
+            { suffix: 'ANTHROPIC_BASE_URL', canonical: 'AZURE_ANTHROPIC_BASE_URL', label: 'Claude base URL', kind: 'text' },
+            { suffix: 'API_KEY', canonical: 'AZURE_API_KEY', label: 'API key', kind: 'secret', required: true },
+            { suffix: 'CLAUDE_MODEL', canonical: 'AZURE_CLAUDE_MODEL', label: 'Claude deployment/model', kind: 'text', defaultValue: 'claude-sonnet-4-6' },
+            { suffix: 'TASK_TYPES', canonical: 'AZURE_TASK_TYPES', label: 'Allowed task types', kind: 'text' },
+            { suffix: 'OPENAI_ENDPOINT', canonical: 'AZURE_OPENAI_ENDPOINT', label: 'OpenAI-compatible endpoint', kind: 'text' },
+            { suffix: 'OPENAI_MODEL', canonical: 'AZURE_OPENAI_MODEL', label: 'OpenAI-compatible deployment/model', kind: 'text', defaultValue: 'grok-4.3' },
+            { suffix: 'OPENAI_TASK_TYPES', canonical: 'AZURE_OPENAI_TASK_TYPES', label: 'OpenAI-compatible task types', kind: 'text' },
+            { suffix: 'TIMEOUT_MS', canonical: 'AZURE_TIMEOUT_MS', label: 'Timeout ms', kind: 'text' },
+            { suffix: 'OPENAI_TIMEOUT_MS', canonical: 'AZURE_OPENAI_TIMEOUT_MS', label: 'OpenAI-compatible timeout ms', kind: 'text' },
+        ],
+    },
+};
+
+function _resourceEnvPath() {
+    return path.join(APP_ROOT, '.env');
+}
+
+function _backupEnvFile(envPath, reason = 'resource-edit') {
+    if (!fs.existsSync(envPath)) return null;
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const backupPath = path.join(path.dirname(envPath), `.env.backup-${reason}-${stamp}`);
+    fs.copyFileSync(envPath, backupPath);
+    return backupPath;
+}
+
+function _parseEnvContent(content) {
+    const lines = String(content || '').split(/\r?\n/);
+    const entries = [];
+    const byKey = new Map();
+    const duplicates = [];
+    const keyCounts = new Map();
+    lines.forEach((raw, index) => {
+        const match = raw.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/);
+        if (!match) return;
+        const key = match[1].trim();
+        const value = String(match[2] || '').trim();
+        const entry = { key, value, line: index + 1, raw };
+        entries.push(entry);
+        keyCounts.set(key, (keyCounts.get(key) || 0) + 1);
+        if (byKey.has(key)) {
+            duplicates.push({ key, firstLine: byKey.get(key).line, line: index + 1 });
+            return;
+        }
+        byKey.set(key, entry);
+    });
+    return { lines, entries, byKey, duplicates, keyCounts };
+}
+
+function _readParsedEnvForResources() {
+    const envPath = _resourceEnvPath();
+    const content = fs.existsSync(envPath) ? fs.readFileSync(envPath, 'utf8') : '';
+    return { envPath, content, ..._parseEnvContent(content) };
+}
+
+function _unquoteEnvValue(value) {
+    let next = String(value || '').trim();
+    if ((next.startsWith('"') && next.endsWith('"')) || (next.startsWith("'") && next.endsWith("'"))) {
+        next = next.slice(1, -1);
+    }
+    return next;
+}
+
+function _isTruthyEnvValue(value) {
+    return ['1', 'true', 'yes', 'on', 'enabled'].includes(String(value || '').trim().toLowerCase());
+}
+
+function _resourcePathExists(rawValue) {
+    const value = _unquoteEnvValue(rawValue);
+    if (!value) return false;
+    const candidates = [
+        value,
+        path.resolve(APP_ROOT, value),
+        path.resolve(PROJECT_DIR, value),
+    ];
+    return candidates.some(candidate => {
+        try { return fs.existsSync(candidate); } catch (_) { return false; }
+    });
+}
+
+function _fieldIsSecret(field) {
+    return field.kind === 'secret' || field.kind === 'secret-list' || /(?:KEY|SECRET|PASSWORD|TOKEN|CREDENTIAL)/.test(field.key);
+}
+
+function _maskListForResource(raw) {
+    const keys = _parseEnvListForUi(_unquoteEnvValue(raw));
+    return {
+        count: keys.length,
+        masked: keys.map(key => _maskSecretForUi(key)),
+        tails: keys.map(key => key.slice(-6)),
+    };
+}
+
+function _resourceFieldStatus(field, parsed) {
+    const entry = parsed.byKey.get(field.key);
+    const exists = !!entry;
+    const raw = exists ? _unquoteEnvValue(entry.value) : '';
+    const isEmpty = !String(raw).trim();
+    const isSecret = _fieldIsSecret(field);
+    const list = field.kind === 'secret-list' ? _maskListForResource(raw) : null;
+    const pathExists = field.kind === 'path' && !isEmpty ? _resourcePathExists(raw) : null;
+    let status = 'missing';
+    if (exists && isEmpty) status = field.importance === 'required' ? 'bad' : 'empty';
+    else if (exists && field.kind === 'toggle') status = _isTruthyEnvValue(raw) ? 'on' : 'off';
+    else if (exists && pathExists === false) status = field.importance === 'required' || field.importance === 'recommended' ? 'warn' : 'missing-path';
+    else if (exists) status = field.legacy ? 'legacy' : 'ok';
+    else if (field.defaultValue) status = 'default';
+    else if (field.future) status = 'future';
+
+    let displayValue = raw;
+    if (field.kind === 'secret-list') {
+        displayValue = list.count ? `${list.count} key${list.count === 1 ? '' : 's'} (${list.tails.join(', ')})` : '';
+    } else if (isSecret) {
+        displayValue = _maskSecretForUi(raw);
+    }
+
+    return {
+        ...field,
+        exists,
+        line: entry?.line || null,
+        empty: isEmpty,
+        secret: isSecret,
+        status,
+        displayValue,
+        editableValue: isSecret ? '' : raw,
+        placeholder: isSecret && raw ? `${displayValue} - paste replacement to change` : '',
+        list,
+        pathExists,
+        duplicateCount: parsed.keyCounts.get(field.key) || 0,
+    };
+}
+
+function _resourceGroupStatus(fields) {
+    const bad = fields.some(field => field.status === 'bad');
+    const warn = fields.some(field => ['warn', 'legacy'].includes(field.status));
+    const hasAny = fields.some(field => field.exists && !field.empty);
+    if (bad) return 'bad';
+    if (warn) return 'warn';
+    if (hasAny) return 'ok';
+    return 'empty';
+}
+
+function _getResourceEnvStatus() {
+    const parsed = _readParsedEnvForResources();
+    const knownKeys = new Set();
+    const groups = RESOURCE_ENV_GROUPS.map(group => {
+        const fields = group.fields.map(field => {
+            knownKeys.add(field.key);
+            return _resourceFieldStatus(field, parsed);
+        });
+        return {
+            id: group.id,
+            title: group.title,
+            description: group.description,
+            status: _resourceGroupStatus(fields),
+            fields,
+        };
+    });
+    for (const entry of parsed.entries) {
+        if (/^(BEDROCK|AZURE)_ACTIVE_ACCOUNT$/.test(entry.key) || /^(BEDROCK|AZURE)_ACCOUNT_\d+_/.test(entry.key)) {
+            knownKeys.add(entry.key);
+        }
+    }
+
+    const unmatched = parsed.entries
+        .filter(entry => !knownKeys.has(entry.key))
+        .map(entry => ({
+            key: entry.key,
+            line: entry.line,
+            empty: !_unquoteEnvValue(entry.value),
+            secret: /(?:KEY|SECRET|PASSWORD|TOKEN|CREDENTIAL)/.test(entry.key),
+            displayValue: /(?:KEY|SECRET|PASSWORD|TOKEN|CREDENTIAL)/.test(entry.key)
+                ? _maskSecretForUi(_unquoteEnvValue(entry.value))
+                : _unquoteEnvValue(entry.value),
+        }));
+
+    const cleanupSuggestions = [];
+    if (parsed.duplicates.length) {
+        cleanupSuggestions.push(`${parsed.duplicates.length} duplicate env line(s) can be removed safely.`);
+    }
+    const legacyPresent = groups.find(g => g.id === 'legacy-watch')?.fields.filter(f => f.exists && !f.empty) || [];
+    if (legacyPresent.length) {
+        cleanupSuggestions.push(`${legacyPresent.length} legacy provider setting(s) are still present.`);
+    }
+    const intentionalEmpty = groups.flatMap(g => g.fields).filter(f => f.exists && f.empty && f.importance !== 'required');
+    if (intentionalEmpty.length) {
+        cleanupSuggestions.push(`${intentionalEmpty.length} empty optional/default setting(s) are present. These are kept unless you clear/remove them manually.`);
+    }
+
+    return {
+        success: true,
+        envPath: parsed.envPath,
+        projectEnvPath: path.join(PROJECT_DIR, '.env'),
+        appRoot: APP_ROOT,
+        projectDir: PROJECT_DIR,
+        updatedAt: new Date().toISOString(),
+        groups,
+        unmatched,
+        duplicates: parsed.duplicates,
+        cleanupSuggestions,
+    };
+}
+
+function _escapeRegexLiteral(value) {
+    return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function _setEnvValueInContent(content, key, value) {
+    const cleanKey = String(key || '').trim();
+    const cleanValue = String(value ?? '');
+    const regex = new RegExp(`^\\s*${_escapeRegexLiteral(cleanKey)}\\s*=.*$`, 'm');
+    const line = `${cleanKey}=${cleanValue}`;
+    if (regex.test(content)) return content.replace(regex, line);
+    return `${String(content || '').replace(/\s*$/, '')}\n${line}\n`;
+}
+
+function _removeEnvKeyFromContent(content, key) {
+    const regex = new RegExp(`^\\s*${_escapeRegexLiteral(key)}\\s*=.*(?:\\r?\\n)?`, 'gm');
+    return String(content || '').replace(regex, '');
+}
+
+function _cloudProviderDef(provider) {
+    const id = String(provider || '').trim().toLowerCase();
+    if (!CLOUD_ACCOUNT_DEFS[id]) throw new Error(`Unknown cloud account provider: ${provider}`);
+    return CLOUD_ACCOUNT_DEFS[id];
+}
+
+function _cloudSlotEnvKey(def, slotId, suffix) {
+    return `${def.envPrefix}_ACCOUNT_${Number(slotId)}_${suffix}`;
+}
+
+function _cloudActiveSlotId(def, parsed) {
+    const raw = _unquoteEnvValue(parsed.byKey.get(def.activeKey)?.value || '');
+    const n = parseInt(raw || '1', 10);
+    return Number.isFinite(n) && n > 0 ? String(n) : '1';
+}
+
+function _cloudSlotIds(def, parsed) {
+    const ids = new Set();
+    const re = new RegExp(`^${def.envPrefix}_ACCOUNT_(\\d+)_`);
+    for (const entry of parsed.entries || []) {
+        const match = entry.key.match(re);
+        if (match) ids.add(match[1]);
+    }
+    return [...ids].sort((a, b) => Number(a) - Number(b));
+}
+
+function _cloudCanonicalValue(parsed, field) {
+    const value = parsed.byKey.get(field.canonical)?.value;
+    if (value == null || value === '') return field.defaultValue || '';
+    return _unquoteEnvValue(value);
+}
+
+function _cloudSlotStoredValue(parsed, def, slotId, suffix) {
+    const value = parsed.byKey.get(_cloudSlotEnvKey(def, slotId, suffix))?.value;
+    return value == null ? null : _unquoteEnvValue(value);
+}
+
+function _cloudFieldForUi(parsed, def, slotId, field, useCanonicalFallback) {
+    let raw = _cloudSlotStoredValue(parsed, def, slotId, field.suffix);
+    if (raw == null && useCanonicalFallback) raw = _cloudCanonicalValue(parsed, field);
+    if (raw == null) raw = field.defaultValue || '';
+    const empty = !String(raw || '').trim();
+    const secret = field.kind === 'secret';
+    return {
+        suffix: field.suffix,
+        canonical: field.canonical,
+        label: field.label,
+        kind: field.kind || 'text',
+        required: field.required === true,
+        secret,
+        secretSet: secret && !empty,
+        status: field.required && empty ? 'bad' : empty ? 'empty' : 'ok',
+        displayValue: secret ? _maskSecretForUi(raw) : raw,
+        editableValue: secret ? '' : raw,
+        placeholder: secret && raw ? `${_maskSecretForUi(raw)} - paste replacement` : '',
+    };
+}
+
+function _cloudSlotStatus(fields) {
+    if (fields.some(field => field.status === 'bad')) return 'bad';
+    if (fields.some(field => field.status === 'ok')) return 'ok';
+    return 'empty';
+}
+
+function _getCloudAccountStatus() {
+    const parsed = _readParsedEnvForResources();
+    const providers = Object.values(CLOUD_ACCOUNT_DEFS).map(def => {
+        const activeSlotId = _cloudActiveSlotId(def, parsed);
+        let ids = _cloudSlotIds(def, parsed);
+        const hasStoredSlots = ids.length > 0;
+        if (!ids.includes(activeSlotId)) ids.push(activeSlotId);
+        if (!ids.length) ids = ['1'];
+        ids = [...new Set(ids)].sort((a, b) => Number(a) - Number(b));
+
+        const slots = ids.map(id => {
+            const label = _cloudSlotStoredValue(parsed, def, id, 'LABEL') || (hasStoredSlots ? `${def.title.replace(/ Accounts$/, '')} ${id}` : 'Current .env account');
+            const useCanonicalFallback = id === activeSlotId || (!hasStoredSlots && id === '1');
+            const fields = {};
+            for (const field of def.fields) {
+                fields[field.suffix] = _cloudFieldForUi(parsed, def, id, field, useCanonicalFallback);
+            }
+            const fieldList = Object.values(fields);
+            const canonicalApplied = id === activeSlotId && def.fields.every(field => {
+                const slotVal = fields[field.suffix]?.displayValue || '';
+                const canonicalRaw = _cloudCanonicalValue(parsed, field);
+                const canonicalDisplay = field.kind === 'secret' ? _maskSecretForUi(canonicalRaw) : canonicalRaw;
+                return String(slotVal || '') === String(canonicalDisplay || '');
+            });
+            return {
+                id,
+                label,
+                active: id === activeSlotId,
+                virtual: !hasStoredSlots && id === '1',
+                canonicalApplied,
+                status: _cloudSlotStatus(fieldList),
+                fields,
+            };
+        });
+
+        return {
+            id: def.id,
+            title: def.title,
+            note: def.note,
+            activeSlotId,
+            activeKey: def.activeKey,
+            fields: def.fields,
+            slots,
+        };
+    });
+    return { success: true, envPath: parsed.envPath, updatedAt: new Date().toISOString(), providers };
+}
+
+function _cloudPayloadFieldValue(parsed, def, slotId, field, payloadField = {}) {
+    if (payloadField.clear === true) return '';
+    if (payloadField.keep === true) {
+        const stored = _cloudSlotStoredValue(parsed, def, slotId, field.suffix);
+        if (stored != null) return stored;
+        return _cloudCanonicalValue(parsed, field);
+    }
+    const value = String(payloadField.value ?? '').trim();
+    return value || '';
+}
+
+function _normalizeCloudSlotsPayload(providerPayload = {}) {
+    const slots = Array.isArray(providerPayload.slots) ? providerPayload.slots : [];
+    const normalized = [];
+    const seen = new Set();
+    for (const slot of slots) {
+        const idNum = parseInt(slot?.id, 10);
+        if (!Number.isFinite(idNum) || idNum <= 0 || idNum > 99 || seen.has(idNum)) continue;
+        seen.add(idNum);
+        normalized.push({ ...slot, id: String(idNum) });
+    }
+    normalized.sort((a, b) => Number(a.id) - Number(b.id));
+    return normalized;
+}
+
+function _resolvedCloudSlotFromPayload(parsed, def, slotPayload) {
+    const slotId = String(slotPayload.id || '1');
+    const fields = {};
+    for (const field of def.fields) {
+        fields[field.suffix] = _cloudPayloadFieldValue(parsed, def, slotId, field, slotPayload.fields?.[field.suffix] || {});
+    }
+    return {
+        id: slotId,
+        label: String(slotPayload.label || '').trim() || `${def.title.replace(/ Accounts$/, '')} ${slotId}`,
+        fields,
+    };
+}
+
+function _applyCloudAccountSlots(payload = {}) {
+    const envPath = _resourceEnvPath();
+    const parsed = _readParsedEnvForResources();
+    let content = parsed.content || '';
+    const changedKeys = [];
+    const providerPayloads = payload.providers && typeof payload.providers === 'object' ? payload.providers : {};
+
+    for (const [providerId, providerPayload] of Object.entries(providerPayloads)) {
+        const def = _cloudProviderDef(providerId);
+        const slots = _normalizeCloudSlotsPayload(providerPayload);
+        if (!slots.length) continue;
+        const activeRequested = String(providerPayload.activeSlotId || slots[0].id);
+        const activeSlotId = slots.some(slot => slot.id === activeRequested) ? activeRequested : slots[0].id;
+        const resolvedSlots = slots.map(slot => _resolvedCloudSlotFromPayload(parsed, def, slot));
+
+        const slotLineRe = new RegExp(`^\\s*${_escapeRegexLiteral(def.envPrefix)}_ACCOUNT_\\d+_[A-Za-z0-9_]+\\s*=.*(?:\\r?\\n)?`, 'gm');
+        content = String(content || '').replace(slotLineRe, '');
+        content = _removeEnvKeyFromContent(content, def.activeKey);
+
+        content = _setEnvValueInContent(content, def.activeKey, activeSlotId);
+        changedKeys.push(def.activeKey);
+        for (const slot of resolvedSlots) {
+            const labelKey = _cloudSlotEnvKey(def, slot.id, 'LABEL');
+            content = _setEnvValueInContent(content, labelKey, slot.label);
+            changedKeys.push(labelKey);
+            for (const field of def.fields) {
+                const envKey = _cloudSlotEnvKey(def, slot.id, field.suffix);
+                content = _setEnvValueInContent(content, envKey, slot.fields[field.suffix] || '');
+                changedKeys.push(envKey);
+            }
+        }
+
+        const active = resolvedSlots.find(slot => slot.id === activeSlotId) || resolvedSlots[0];
+        for (const field of def.fields) {
+            content = _setEnvValueInContent(content, field.canonical, active.fields[field.suffix] || '');
+            process.env[field.canonical] = active.fields[field.suffix] || '';
+            changedKeys.push(field.canonical);
+        }
+        process.env[def.activeKey] = activeSlotId;
+    }
+
+    fs.writeFileSync(envPath, content.trim() + '\n', 'utf8');
+    for (const key of changedKeys) {
+        const parsedAgain = _parseEnvContent(content);
+        const value = parsedAgain.byKey.get(key)?.value;
+        if (value != null) process.env[key] = _unquoteEnvValue(value);
+    }
+    for (const mod of ['./src/config', './src/ai-provider']) {
+        try { delete require.cache[require.resolve(mod)]; } catch (_) {}
+    }
+    return {
+        changedKeys: [...new Set(changedKeys)],
+        runtimeConfigRefreshed: true,
+        ..._getCloudAccountStatus(),
+    };
+}
+
+function _applyResourceEnvEdits(envPath, updates = {}, removals = []) {
+    let content = fs.existsSync(envPath) ? fs.readFileSync(envPath, 'utf8') : '';
+    const changedKeys = [];
+    for (const key of removals || []) {
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(String(key || ''))) continue;
+        content = _removeEnvKeyFromContent(content, key);
+        delete process.env[key];
+        changedKeys.push(key);
+    }
+    for (const [key, value] of Object.entries(updates || {})) {
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(String(key || ''))) continue;
+        content = _setEnvValueInContent(content, key, value);
+        process.env[key] = String(value ?? '');
+        changedKeys.push(key);
+    }
+    fs.writeFileSync(envPath, content.trim() + '\n', 'utf8');
+    const qwenChanged = changedKeys.some(key => String(key).startsWith('QWEN_'));
+    const runtimeConfigChanged = changedKeys.some(key => /^(AI_PROVIDER|BEDROCK_|AZURE_|QWEN_|BRAVE_|TAVILY_|YTDLP_|STORYBLOCKS_|MEDIA_|FOOTAGE_|IMAGE_|CLIP_ANALYZER_|VISION_)/.test(String(key)));
+    if (runtimeConfigChanged) {
+        for (const mod of ['./src/config', './src/ai-provider']) {
+            try { delete require.cache[require.resolve(mod)]; } catch (_) {}
+        }
+    }
+    if (qwenChanged && fs.existsSync(_qwenExhaustedPath)) {
+        fs.unlinkSync(_qwenExhaustedPath);
+    }
+    return { changedKeys: [...new Set(changedKeys)], qwenTrackingReset: qwenChanged, runtimeConfigRefreshed: runtimeConfigChanged };
+}
+
+function _cleanResourceEnvFile(envPath) {
+    const content = fs.existsSync(envPath) ? fs.readFileSync(envPath, 'utf8') : '';
+    const lines = content.split(/\r?\n/);
+    const seen = new Set();
+    const removed = [];
+    const next = [];
+    for (const raw of lines) {
+        const trimmedLine = raw.replace(/[ \t]+$/g, '');
+        const match = trimmedLine.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=/);
+        if (!match) {
+            next.push(trimmedLine);
+            continue;
+        }
+        const key = match[1].trim();
+        if (seen.has(key)) {
+            removed.push(key);
+            continue;
+        }
+        seen.add(key);
+        next.push(trimmedLine);
+    }
+    const normalized = next.join('\n').replace(/\n{4,}/g, '\n\n\n').trim() + '\n';
+    fs.writeFileSync(envPath, normalized, 'utf8');
+    return { removedDuplicates: removed };
+}
+
+function _withTimeout(promise, timeoutMs, label) {
+    let timer = null;
+    const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label || 'check'} timed out after ${timeoutMs}ms`)), timeoutMs);
+    });
+    return Promise.race([promise, timeout]).finally(() => {
+        if (timer) clearTimeout(timer);
+    });
+}
+
+function _checkResult(id, title, status, detail = '') {
+    return { id, title, status, detail };
+}
+
+async function _checkBedrockAccountValues(values = {}, timeoutMs = 9000, title = 'AWS Bedrock') {
+    const region = values.REGION || process.env.BEDROCK_REGION || 'us-east-1';
+    const accessKeyId = values.ACCESS_KEY_ID || process.env.BEDROCK_ACCESS_KEY_ID || '';
+    const secretAccessKey = values.SECRET_ACCESS_KEY || process.env.BEDROCK_SECRET_ACCESS_KEY || '';
+    const modelId = values.UTILITY_MODEL || values.DIRECTOR_MODEL || process.env.BEDROCK_UTILITY_MODEL || process.env.BEDROCK_DIRECTOR_MODEL || '';
+    if (!accessKeyId || !secretAccessKey || !modelId) {
+        return _checkResult('bedrock', title, 'warn', 'Missing access key, secret key, or model ID.');
+    }
+    try {
+        const { BedrockRuntimeClient, ConverseCommand } = require('@aws-sdk/client-bedrock-runtime');
+        const client = new BedrockRuntimeClient({ region, credentials: { accessKeyId, secretAccessKey } });
+        const t0 = Date.now();
+        const res = await _withTimeout(client.send(new ConverseCommand({
+            modelId,
+            messages: [{ role: 'user', content: [{ text: 'Reply with exactly OK.' }] }],
+            inferenceConfig: { maxTokens: 12 },
+        })), timeoutMs, title);
+        const elapsed = Date.now() - t0;
+        const usage = res?.usage ? ` input=${res.usage.inputTokens || 0} output=${res.usage.outputTokens || 0}` : '';
+        return _checkResult('bedrock', title, 'ok', `${modelId} responded in ${(elapsed / 1000).toFixed(1)}s.${usage}`);
+    } catch (e) {
+        return _checkResult('bedrock', title, 'bad', e.message || String(e));
+    }
+}
+
+async function _checkBedrockResource(timeoutMs) {
+    return _checkBedrockAccountValues({}, timeoutMs, 'AWS Bedrock');
+}
+
+async function _checkBraveResource(timeoutMs) {
+    const apiKey = process.env.BRAVE_API_KEY || '';
+    if (!apiKey) return _checkResult('brave', 'Brave Images', 'warn', 'BRAVE_API_KEY is empty.');
+    try {
+        const url = new URL('https://api.search.brave.com/res/v1/images/search');
+        url.searchParams.set('q', 'test image');
+        url.searchParams.set('count', '1');
+        url.searchParams.set('safesearch', 'strict');
+        const fetchFn = typeof fetch === 'function' ? fetch : net.fetch.bind(net);
+        const res = await _withTimeout(fetchFn(url, {
+            headers: {
+                Accept: 'application/json',
+                'X-Subscription-Token': apiKey,
+            },
+        }), timeoutMs, 'Brave Images');
+        if (!res.ok) {
+            return _checkResult('brave', 'Brave Images', res.status === 429 ? 'warn' : 'bad', `HTTP ${res.status}`);
+        }
+        const json = await res.json().catch(() => ({}));
+        const count = Array.isArray(json?.results) ? json.results.length : 0;
+        return _checkResult('brave', 'Brave Images', 'ok', `API reachable; ${count} sample result(s).`);
+    } catch (e) {
+        return _checkResult('brave', 'Brave Images', 'bad', e.message || String(e));
+    }
+}
+
+function _azureAnthropicBaseUrl(value = '') {
+    const raw = String(value || '').trim().replace(/\/+$/, '');
+    if (!raw) return '';
+    if (/\/anthropic$/i.test(raw)) return raw;
+    if (/\/anthropic\/v1\/messages$/i.test(raw)) return raw.replace(/\/v1\/messages$/i, '');
+    if (/\/openai\/v1$/i.test(raw)) return raw.replace(/\/openai\/v1$/i, '/anthropic');
+    if (/\.services\.ai\.azure\.com\/api\/projects\//i.test(raw)) return raw.replace(/\/api\/projects\/.*$/i, '/anthropic');
+    if (/\.services\.ai\.azure\.com$/i.test(raw)) return `${raw}/anthropic`;
+    if (/\.openai\.azure\.com$/i.test(raw)) return raw.replace(/\.openai\.azure\.com$/i, '.services.ai.azure.com/anthropic');
+    return raw;
+}
+
+function _azureOpenAIBaseUrl(value = '') {
+    const raw = String(value || '').trim().replace(/\/+$/, '');
+    if (!raw) return '';
+    if (/\/chat\/completions$/i.test(raw)) return raw.replace(/\/chat\/completions$/i, '');
+    if (/\/openai\/v1$/i.test(raw)) return raw;
+    if (/\.openai\.azure\.com$/i.test(raw)) return `${raw}/openai/v1`;
+    if (/\.services\.ai\.azure\.com\/api\/projects\//i.test(raw)) return raw.replace(/\/api\/projects\/.*$/i, '/openai/v1');
+    if (/\.services\.ai\.azure\.com$/i.test(raw)) return `${raw}/openai/v1`;
+    return raw;
+}
+
+function _checkAzureResource() {
+    const apiKey = process.env.AZURE_API_KEY || process.env.AZURE_OPENAI_API_KEY || '';
+    if (!apiKey) return _checkResult('azure', 'Azure AI', 'warn', 'Incomplete: missing API key.');
+    const routes = [];
+    if (process.env.AZURE_ANTHROPIC_BASE_URL && process.env.AZURE_CLAUDE_MODEL) routes.push(`Claude:${process.env.AZURE_CLAUDE_MODEL}`);
+    if (process.env.AZURE_OPENAI_ENDPOINT && (process.env.AZURE_OPENAI_MODEL || process.env.AZURE_OPENAI_DEPLOYMENT)) {
+        routes.push(`OpenAI:${process.env.AZURE_OPENAI_MODEL || process.env.AZURE_OPENAI_DEPLOYMENT}`);
+    }
+    if (!routes.length) {
+        return _checkResult('azure', 'Azure AI', 'warn', 'Incomplete: set either Claude base+model or OpenAI endpoint+model.');
+    }
+    return _checkResult('azure', 'Azure AI', 'ok', `Configured routes: ${routes.join(', ')}.`);
+}
+
+async function _checkAzureAccountValues(values = {}, timeoutMs = 9000, title = 'Azure AI') {
+    const apiKey = values.API_KEY || process.env.AZURE_API_KEY || process.env.AZURE_OPENAI_API_KEY || '';
+    const openAIEndpoint = String(values.OPENAI_ENDPOINT || values.ENDPOINT || process.env.AZURE_OPENAI_ENDPOINT || '').replace(/\/+$/, '');
+    const openAIModel = values.OPENAI_MODEL || values.OPENAI_DEPLOYMENT || process.env.AZURE_OPENAI_MODEL || process.env.AZURE_OPENAI_DEPLOYMENT || '';
+    const claudeEndpoint = String(values.ANTHROPIC_BASE_URL || values.CLAUDE_BASE_URL || process.env.AZURE_ANTHROPIC_BASE_URL || '').replace(/\/+$/, '');
+    const claudeDeployment = values.CLAUDE_MODEL || values.DEPLOYMENT || process.env.AZURE_CLAUDE_MODEL || 'claude-sonnet-4-6';
+    const apiVersion = values.ANTHROPIC_VERSION || process.env.AZURE_ANTHROPIC_VERSION || '2023-06-01';
+    if (!apiKey) {
+        return _checkResult('azure', title, 'warn', 'Incomplete slot: missing API key.');
+    }
+    if (openAIEndpoint && openAIModel) {
+        try {
+            const fetchFn = typeof fetch === 'function' ? fetch : net.fetch.bind(net);
+            const url = `${_azureOpenAIBaseUrl(openAIEndpoint)}/chat/completions`;
+            const t0 = Date.now();
+            const res = await _withTimeout(fetchFn(url, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'api-key': apiKey,
+                },
+                body: JSON.stringify({
+                    model: openAIModel,
+                    messages: [{ role: 'user', content: 'Reply with exactly OK.' }],
+                    max_tokens: 8,
+                }),
+            }), timeoutMs, title);
+            const elapsed = Date.now() - t0;
+            if (!res.ok) {
+                const body = await res.text().catch(() => '');
+                return _checkResult('azure', title, 'bad', `OpenAI HTTP ${res.status}${body ? ` - ${body.slice(0, 180)}` : ''}`);
+            }
+            return _checkResult('azure', title, 'ok', `${openAIModel} responded in ${(elapsed / 1000).toFixed(1)}s.`);
+        } catch (e) {
+            return _checkResult('azure', title, 'bad', e.message || String(e));
+        }
+    }
+    if (!claudeEndpoint || !claudeDeployment) {
+        return _checkResult('azure', title, 'warn', 'Incomplete slot: set either OpenAI endpoint+model or Claude base+model.');
+    }
+    try {
+        const fetchFn = typeof fetch === 'function' ? fetch : net.fetch.bind(net);
+        const url = `${_azureAnthropicBaseUrl(claudeEndpoint)}/v1/messages`;
+        const t0 = Date.now();
+        const res = await _withTimeout(fetchFn(url, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'x-api-key': apiKey,
+                'anthropic-version': apiVersion,
+            },
+            body: JSON.stringify({
+                model: claudeDeployment,
+                messages: [{ role: 'user', content: 'Reply with exactly OK.' }],
+                max_tokens: 8,
+                stream: false,
+            }),
+        }), timeoutMs, title);
+        const elapsed = Date.now() - t0;
+        if (!res.ok) {
+            const body = await res.text().catch(() => '');
+            return _checkResult('azure', title, 'bad', `HTTP ${res.status}${body ? ` - ${body.slice(0, 180)}` : ''}`);
+        }
+        return _checkResult('azure', title, 'ok', `${claudeDeployment} responded in ${(elapsed / 1000).toFixed(1)}s.`);
+    } catch (e) {
+        return _checkResult('azure', title, 'bad', e.message || String(e));
+    }
+}
+
+function _cloudSlotPayloadValues(provider, slotPayload = {}) {
+    const def = _cloudProviderDef(provider);
+    const parsed = _readParsedEnvForResources();
+    const slotId = String(slotPayload.id || slotPayload.slotId || _cloudActiveSlotId(def, parsed));
+    const resolved = _resolvedCloudSlotFromPayload(parsed, def, {
+        id: slotId,
+        label: slotPayload.label || '',
+        fields: slotPayload.fields || {},
+    });
+    return { def, slotId, values: resolved.fields, label: resolved.label };
+}
+
+async function _checkCloudAccountSlot(provider, slotPayload = {}, timeoutMs = 9000) {
+    const { def, slotId, values, label } = _cloudSlotPayloadValues(provider, slotPayload);
+    const title = `${def.title.replace(/ Accounts$/, '')} ${slotId}${label ? ` - ${label}` : ''}`;
+    if (def.id === 'bedrock') return _checkBedrockAccountValues(values, timeoutMs, title);
+    if (def.id === 'azure') return _checkAzureAccountValues(values, timeoutMs, title);
+    return _checkResult(def.id, title, 'warn', 'No checker is wired for this provider.');
+}
+
+function _checkLocalResourcePaths() {
+    const checks = [];
+    const ytdlpPath = process.env.YTDLP_PATH || '';
+    checks.push(_checkResult(
+        'ytdlp',
+        'yt-dlp',
+        ytdlpPath && _resourcePathExists(ytdlpPath) ? 'ok' : 'warn',
+        ytdlpPath ? (_resourcePathExists(ytdlpPath) ? 'Executable found.' : 'Configured path was not found.') : 'YTDLP_PATH is empty.'
+    ));
+
+    const cookies = process.env.YTDLP_COOKIES_FILE || '';
+    checks.push(_checkResult(
+        'youtube-cookies',
+        'YouTube cookies',
+        cookies && _resourcePathExists(cookies) ? 'ok' : 'warn',
+        cookies ? (_resourcePathExists(cookies) ? 'Cookie file found.' : 'Configured cookie file was not found.') : 'YTDLP_COOKIES_FILE is empty.'
+    ));
+
+    const storyblocksCookie = process.env.STORYBLOCKS_COOKIE_FILE || '.storyblocks-cookies.json';
+    checks.push(_checkResult(
+        'storyblocks',
+        'Storyblocks',
+        (process.env.STORYBLOCKS_SUBSCRIBED === '1' || process.env.STORYBLOCKS_SUBSCRIBED === 'true') ? 'ok' : 'warn',
+        `${_resourcePathExists(storyblocksCookie) ? 'Cookie file found' : 'Cookie file not found'}; subscribed=${process.env.STORYBLOCKS_SUBSCRIBED || 'unset'}.`
+    ));
+    return checks;
+}
+
+async function _runResourceLiveChecks(options = {}) {
+    const changedKeys = Array.isArray(options.changedKeys) ? options.changedKeys : [];
+    const force = options.force === true;
+    const timeoutMs = Math.max(4000, Math.min(20000, Number(options.timeoutMs || 9000) || 9000));
+    const checks = [];
+    checks.push(..._checkLocalResourcePaths());
+    const changed = (prefixes) => force || changedKeys.some(key => prefixes.some(prefix => String(key).startsWith(prefix)));
+    const changedOnly = (prefixes) => changedKeys.some(key => prefixes.some(prefix => String(key).startsWith(prefix)));
+    if (changed(['BEDROCK_', 'AI_PROVIDER'])) checks.push(await _checkBedrockResource(timeoutMs));
+    if (changed(['BRAVE_'])) checks.push(await _checkBraveResource(timeoutMs));
+    const azureConfigured = !!(process.env.AZURE_API_KEY || process.env.AZURE_OPENAI_API_KEY || process.env.AZURE_OPENAI_ENDPOINT || process.env.AZURE_OPENAI_MODEL || process.env.AZURE_OPENAI_DEPLOYMENT || process.env.AZURE_ANTHROPIC_BASE_URL || process.env.AZURE_CLAUDE_MODEL);
+    if (changedOnly(['AZURE_']) || (force && azureConfigured)) checks.push(_checkAzureResource());
+    if (changed(['QWEN_'])) {
+        try {
+            const aiProvider = require('./src/brain/ai-provider');
+            const status = aiProvider.getQwenVisionStatus();
+            checks.push(_checkResult(
+                'qwen',
+                'Alibaba Qwen Vision',
+                Number(status?.image?.available || 0) > 0 || Number(status?.omniHttp?.available || 0) > 0 ? 'ok' : 'warn',
+                `Image ${status?.image?.available || 0}/${status?.image?.total || 0}; Omni ${status?.omniHttp?.available || 0}/${status?.omniHttp?.total || 0}. Use Live Probe for real model calls.`
+            ));
+        } catch (e) {
+            checks.push(_checkResult('qwen', 'Alibaba Qwen Vision', 'bad', e.message || String(e)));
+        }
+    }
+    return {
+        success: true,
+        checkedAt: new Date().toISOString(),
+        checks,
+        summary: {
+            ok: checks.filter(c => c.status === 'ok').length,
+            warn: checks.filter(c => c.status === 'warn').length,
+            bad: checks.filter(c => c.status === 'bad').length,
+        },
+    };
+}
+
 ipcMain.handle('qwen-pool-status', async () => {
     try {
         if (fs.existsSync(_qwenExhaustedPath)) {
             const data = JSON.parse(fs.readFileSync(_qwenExhaustedPath, 'utf8'));
-            // Support both old format (flat) and new format (keys: { hash: { ... } })
+            // Support role/lane-scoped format ({ text, image, omni }), older
+            // role-scoped format ({ text, vision }), multi-key legacy, and old flat format.
+            if (data.text || data.image || data.omni || data.vision) {
+                let totalExhausted = 0, totalModels = 0;
+                for (const roleMap of [data.text || {}, data.image || {}, data.omni || {}, data.vision || {}]) {
+                    for (const map of Object.values(roleMap)) {
+                        totalExhausted += Object.values(map).filter(v => v === true).length;
+                        totalModels += Object.keys(map).length;
+                    }
+                }
+                return { exhausted: totalExhausted, total: totalModels, multiKey: true, roleScoped: true, laneScoped: !!(data.image || data.omni) };
+            }
+            // Support both old format (flat) and legacy multi-key format (keys: { hash: { ... } })
             if (data.keys) {
                 let totalExhausted = 0, totalModels = 0;
                 for (const [hash, map] of Object.entries(data.keys)) {
@@ -2044,6 +4738,179 @@ ipcMain.handle('qwen-pool-reset', async () => {
     }
 });
 
+ipcMain.handle('qwen-vision-keys-status', async () => {
+    try {
+        return { success: true, ..._qwenVisionKeysForUi() };
+    } catch (e) {
+        return { success: false, error: e.message || String(e) };
+    }
+});
+
+ipcMain.handle('qwen-vision-keys-save', async (_event, payload = {}) => {
+    try {
+        const envPath = path.join(APP_ROOT, '.env');
+        let saved;
+        if (payload?.lanes && typeof payload.lanes === 'object') {
+            const imageKeys = _applyQwenKeyEdit(_resolveQwenLaneKeysForSave(envPath, 'image'), payload.lanes.image || {});
+            const omniKeys = _applyQwenKeyEdit(_resolveQwenLaneKeysForSave(envPath, 'omni'), payload.lanes.omni || {});
+            updateEnvFileAt(envPath, 'QWEN_IMAGE_API_KEY', imageKeys.join(','));
+            updateEnvFileAt(envPath, 'QWEN_VL_API_KEY', '');
+            updateEnvFileAt(envPath, 'QWEN_OMNI_API_KEY', omniKeys.join(','));
+            process.env.QWEN_IMAGE_API_KEY = imageKeys.join(',');
+            process.env.QWEN_VL_API_KEY = '';
+            process.env.QWEN_OMNI_API_KEY = omniKeys.join(',');
+            saved = { image: imageKeys.length, omni: omniKeys.length };
+        } else {
+            // Legacy UI payload: edit the shared fallback pool only.
+            const sharedKeys = _applyQwenKeyEdit(_resolveQwenLaneKeysForSave(envPath, 'shared'), payload);
+            updateEnvFileAt(envPath, 'QWEN_VISION_API_KEY', sharedKeys.join(','));
+            process.env.QWEN_VISION_API_KEY = sharedKeys.join(',');
+            saved = sharedKeys.length;
+        }
+        if (fs.existsSync(_qwenExhaustedPath)) {
+            fs.unlinkSync(_qwenExhaustedPath);
+        }
+
+        const aiProvider = require('./src/brain/ai-provider');
+        const status = aiProvider.getQwenVisionStatus();
+        return { success: true, saved, clearedTracking: true, status, ..._qwenVisionKeysForUi() };
+    } catch (e) {
+        return { success: false, error: e.message || String(e) };
+    }
+});
+
+ipcMain.handle('vision-health-status', async () => {
+    try {
+        const aiProvider = require('./src/brain/ai-provider');
+        return { success: true, status: aiProvider.getQwenVisionStatus() };
+    } catch (e) {
+        return { success: false, error: e.message || String(e) };
+    }
+});
+
+ipcMain.handle('vision-health-live-check', async (_event, options = {}) => {
+    try {
+        const aiProvider = require('./src/brain/ai-provider');
+        const imageLimit = Math.max(0, Math.min(4, Number(options.imageLimit || 1) || 1));
+        const omniLimit = Math.max(0, Math.min(4, Number(options.omniLimit || 1) || 1));
+        const concurrency = Math.max(1, Math.min(8, Number(options.concurrency || 3) || 3));
+        const timeoutMs = Math.max(5000, Math.min(30000, Number(options.timeoutMs || 12000) || 12000));
+        const lanes = Array.isArray(options.lanes) && options.lanes.length
+            ? options.lanes.filter(lane => ['image', 'omniHttp', 'omniRealtime'].includes(lane))
+            : ['image', 'omniHttp'];
+        const probe = await aiProvider.refreshQwenVisionHealth({
+            lanes,
+            imageLimit,
+            omniLimit,
+            concurrency,
+            timeoutMs
+        });
+        return { success: true, probe, status: aiProvider.getQwenVisionStatus() };
+    } catch (e) {
+        return { success: false, error: e.message || String(e) };
+    }
+});
+
+ipcMain.handle('resource-env-status', async () => {
+    try {
+        return _getResourceEnvStatus();
+    } catch (e) {
+        return { success: false, error: e.message || String(e) };
+    }
+});
+
+ipcMain.handle('resource-env-save', async (_event, payload = {}) => {
+    try {
+        const envPath = _resourceEnvPath();
+        const updates = payload?.updates && typeof payload.updates === 'object' ? payload.updates : {};
+        const removals = Array.isArray(payload?.removals) ? payload.removals : [];
+        const updateCount = Object.keys(updates).length;
+        if (!updateCount && !removals.length) {
+            return { success: true, changedKeys: [], skipped: true, ..._getResourceEnvStatus() };
+        }
+        const backupPath = _backupEnvFile(envPath, 'resource-save');
+        const editResult = _applyResourceEnvEdits(envPath, updates, removals);
+        return {
+            success: true,
+            backupPath,
+            ...editResult,
+            ..._getResourceEnvStatus(),
+        };
+    } catch (e) {
+        return { success: false, error: e.message || String(e) };
+    }
+});
+
+ipcMain.handle('resource-env-clean', async () => {
+    try {
+        const envPath = _resourceEnvPath();
+        const backupPath = _backupEnvFile(envPath, 'resource-clean');
+        const cleaned = _cleanResourceEnvFile(envPath);
+        return {
+            success: true,
+            backupPath,
+            ...cleaned,
+            ..._getResourceEnvStatus(),
+        };
+    } catch (e) {
+        return { success: false, error: e.message || String(e) };
+    }
+});
+
+ipcMain.handle('resource-env-live-check', async (_event, options = {}) => {
+    try {
+        return await _runResourceLiveChecks(options || {});
+    } catch (e) {
+        return { success: false, error: e.message || String(e) };
+    }
+});
+
+ipcMain.handle('cloud-account-slots-status', async () => {
+    try {
+        return _getCloudAccountStatus();
+    } catch (e) {
+        return { success: false, error: e.message || String(e) };
+    }
+});
+
+ipcMain.handle('cloud-account-slots-save', async (_event, payload = {}) => {
+    try {
+        const envPath = _resourceEnvPath();
+        const backupPath = _backupEnvFile(envPath, 'cloud-accounts');
+        const result = _applyCloudAccountSlots(payload || {});
+        return { success: true, backupPath, ...result };
+    } catch (e) {
+        return { success: false, error: e.message || String(e) };
+    }
+});
+
+ipcMain.handle('cloud-account-slot-check', async (_event, payload = {}) => {
+    try {
+        const provider = payload?.provider || '';
+        const slot = payload?.slot || {};
+        const timeoutMs = Math.max(4000, Math.min(30000, Number(payload?.timeoutMs || 9000) || 9000));
+        const check = await _checkCloudAccountSlot(provider, slot, timeoutMs);
+        return { success: true, check };
+    } catch (e) {
+        return { success: false, error: e.message || String(e) };
+    }
+});
+
+ipcMain.handle('open-footage-resources', async () => {
+    createFootageResourcesWindow();
+    return { success: true };
+});
+
+ipcMain.handle('footage-resources-get', async () => {
+    return { success: true, ...footageResourceState };
+});
+
+ipcMain.handle('footage-resources-set', async (_event, payload = {}) => {
+    footageResourceState = normalizeFootageResourceState(payload || {});
+    broadcastFootageResourceState();
+    return { success: true, ...footageResourceState };
+});
+
 // ============ STYLE LEARNER IPC ============
 // Reference video → Gemini multimodal analysis → structured style profile JSON.
 // Profiles live under PROJECT_DIR/styles/ and are picked from a dropdown in build settings.
@@ -2059,7 +4926,7 @@ ipcMain.handle('learn-style', async (event, input) => {
         if (!input || typeof input !== 'string') {
             return { success: false, error: 'No input provided' };
         }
-        const styleLearner = require('./src/style-learner');
+        const styleLearner = require('./src/studio/style-learner');
         const saveDir = _styleProfilesDir();
 
         const sendProgress = (percent, message) => {
@@ -2086,7 +4953,7 @@ ipcMain.handle('learn-style-multi', async (event, urls, profileName) => {
         if (!urls || !Array.isArray(urls) || urls.length === 0) {
             return { success: false, error: 'No URLs provided' };
         }
-        const styleLearner = require('./src/style-learner');
+        const styleLearner = require('./src/studio/style-learner');
         const saveDir = _styleProfilesDir();
 
         const sendProgress = (percent, message) => {
@@ -2110,7 +4977,7 @@ ipcMain.handle('learn-style-multi', async (event, urls, profileName) => {
 
 ipcMain.handle('compare-style', async (event, profilePath, videoPlan) => {
     try {
-        const styleLearner = require('./src/style-learner');
+        const styleLearner = require('./src/studio/style-learner');
         const profile = styleLearner.loadStyleProfile(profilePath);
         if (!profile) return { success: false, error: 'Could not load style profile' };
         const report = styleLearner.compareWithBuild(profile, videoPlan);
@@ -2136,7 +5003,7 @@ ipcMain.handle('style-studio-start', async (event, input, options) => {
         if (!input || typeof input !== 'string') {
             return { error: 'No input provided' };
         }
-        const studio = require('./src/style-studio-agent');
+        const studio = require('./src/studio/style-studio-agent');
         const saveDir = _styleProfilesDir();
         const win = BrowserWindow.fromWebContents(event.sender);
 
@@ -2155,7 +5022,7 @@ ipcMain.handle('style-studio-start', async (event, input, options) => {
 
 ipcMain.handle('style-studio-add-video', async (event, sessionId, input) => {
     try {
-        const studio = require('./src/style-studio-agent');
+        const studio = require('./src/studio/style-studio-agent');
         const win = BrowserWindow.fromWebContents(event.sender);
         const result = await studio.addVideo(sessionId, input, (pct, msg) =>
             _sendStudioProgress(win, pct, msg));
@@ -2168,7 +5035,7 @@ ipcMain.handle('style-studio-add-video', async (event, sessionId, input) => {
 
 ipcMain.handle('style-studio-chat', async (event, sessionId, message) => {
     try {
-        const studio = require('./src/style-studio-agent');
+        const studio = require('./src/studio/style-studio-agent');
         const result = await studio.chat(sessionId, message);
         return result;
     } catch (e) {
@@ -2179,7 +5046,7 @@ ipcMain.handle('style-studio-chat', async (event, sessionId, message) => {
 
 ipcMain.handle('style-studio-analyze-script', async (event, sessionId) => {
     try {
-        const studio = require('./src/style-studio-agent');
+        const studio = require('./src/studio/style-studio-agent');
         const result = await studio.analyzeScript(sessionId);
         return result;
     } catch (e) {
@@ -2190,7 +5057,7 @@ ipcMain.handle('style-studio-analyze-script', async (event, sessionId) => {
 
 ipcMain.handle('style-studio-extract-profile', async (event, sessionId) => {
     try {
-        const studio = require('./src/style-studio-agent');
+        const studio = require('./src/studio/style-studio-agent');
         const profile = await studio.extractProfile(sessionId);
         return { profile };
     } catch (e) {
@@ -2201,7 +5068,7 @@ ipcMain.handle('style-studio-extract-profile', async (event, sessionId) => {
 
 ipcMain.handle('style-studio-save-profile', async (event, sessionId, name) => {
     try {
-        const studio = require('./src/style-studio-agent');
+        const studio = require('./src/studio/style-studio-agent');
         const profile = studio.saveProfile(sessionId, name);
         return { savedPath: profile.savedPath, profile };
     } catch (e) {
@@ -2212,7 +5079,7 @@ ipcMain.handle('style-studio-save-profile', async (event, sessionId, name) => {
 
 ipcMain.handle('style-studio-end-session', async (event, sessionId) => {
     try {
-        const studio = require('./src/style-studio-agent');
+        const studio = require('./src/studio/style-studio-agent');
         return await studio.endSession(sessionId);
     } catch (e) {
         console.error('[style-studio-end-session] Failed:', e);
@@ -2222,7 +5089,7 @@ ipcMain.handle('style-studio-end-session', async (event, sessionId) => {
 
 ipcMain.handle('style-studio-session-info', async (event, sessionId) => {
     try {
-        const studio = require('./src/style-studio-agent');
+        const studio = require('./src/studio/style-studio-agent');
         return studio.getSessionInfo(sessionId);
     } catch (e) {
         return { error: e.message || String(e) };
@@ -2231,7 +5098,7 @@ ipcMain.handle('style-studio-session-info', async (event, sessionId) => {
 
 ipcMain.handle('style-studio-set-code-access', async (event, sessionId, enabled) => {
     try {
-        const studio = require('./src/style-studio-agent');
+        const studio = require('./src/studio/style-studio-agent');
         return studio.setCodeAccess(sessionId, enabled);
     } catch (e) {
         return { error: e.message || String(e) };
@@ -2242,7 +5109,7 @@ ipcMain.handle('style-studio-set-code-access', async (event, sessionId, enabled)
 // user's video title / niche / AI instructions even before the .fvp is saved.
 ipcMain.handle('style-studio-set-project-context', async (event, ctx) => {
     try {
-        const studio = require('./src/style-studio-agent');
+        const studio = require('./src/studio/style-studio-agent');
         studio.setLiveProjectContext(ctx || {});
         return { ok: true };
     } catch (e) {
@@ -2254,7 +5121,7 @@ ipcMain.handle('style-studio-set-project-context', async (event, ctx) => {
 
 ipcMain.handle('style-studio-check-saved', async () => {
     try {
-        const studio = require('./src/style-studio-agent');
+        const studio = require('./src/studio/style-studio-agent');
         const saveDir = _styleProfilesDir();
         const saved = studio.loadSavedSession(saveDir);
         return saved; // null if no saved session
@@ -2265,7 +5132,7 @@ ipcMain.handle('style-studio-check-saved', async () => {
 
 ipcMain.handle('style-studio-restore', async (event) => {
     try {
-        const studio = require('./src/style-studio-agent');
+        const studio = require('./src/studio/style-studio-agent');
         const saveDir = _styleProfilesDir();
         const win = BrowserWindow.fromWebContents(event.sender);
         const result = await studio.restoreSession(saveDir, (pct, msg) =>
@@ -2279,7 +5146,7 @@ ipcMain.handle('style-studio-restore', async (event) => {
 
 ipcMain.handle('style-studio-discard-saved', async () => {
     try {
-        const studio = require('./src/style-studio-agent');
+        const studio = require('./src/studio/style-studio-agent');
         studio.deleteSavedSession(_styleProfilesDir());
         return { ok: true };
     } catch (e) {
@@ -2291,7 +5158,7 @@ ipcMain.handle('style-studio-discard-saved', async () => {
 
 ipcMain.handle('style-studio-load-memory', async () => {
     try {
-        const studio = require('./src/style-studio-agent');
+        const studio = require('./src/studio/style-studio-agent');
         return { memories: studio.loadMemory(_styleProfilesDir()) };
     } catch (e) {
         return { memories: [] };
@@ -2300,7 +5167,7 @@ ipcMain.handle('style-studio-load-memory', async () => {
 
 ipcMain.handle('style-studio-save-memory', async (event, text, category) => {
     try {
-        const studio = require('./src/style-studio-agent');
+        const studio = require('./src/studio/style-studio-agent');
         const memories = studio.saveMemoryEntry(_styleProfilesDir(), text, category || 'user-note');
         return { memories };
     } catch (e) {
@@ -2310,7 +5177,7 @@ ipcMain.handle('style-studio-save-memory', async (event, text, category) => {
 
 ipcMain.handle('style-studio-delete-memory', async (event, index) => {
     try {
-        const studio = require('./src/style-studio-agent');
+        const studio = require('./src/studio/style-studio-agent');
         const memories = studio.deleteMemoryEntry(_styleProfilesDir(), index);
         return { memories };
     } catch (e) {
@@ -2320,7 +5187,7 @@ ipcMain.handle('style-studio-delete-memory', async (event, index) => {
 
 ipcMain.handle('style-studio-clear-memory', async () => {
     try {
-        const studio = require('./src/style-studio-agent');
+        const studio = require('./src/studio/style-studio-agent');
         studio.clearMemory(_styleProfilesDir());
         return { memories: [] };
     } catch (e) {
@@ -2370,14 +5237,14 @@ ipcMain.handle('style-studio-transcribe-audio', async (event, audioPath, options
         };
 
         send(5, 'Loading Whisper…');
-        const { transcribeAudio } = require('./src/transcribe');
+        const { transcribeAudio } = require('./src/pipeline/transcribe');
         const result = await transcribeAudio(audioPath, {
             languageHint: options?.languageHint || null
         });
         send(100, 'Transcription complete');
 
         // transcribeAudio wrote the JSON to <project>/temp/transcription.json
-        const config = require('./src/config');
+        const config = require('./src/settings/config');
         const outPath = path.join(config.paths.temp, 'transcription.json');
         return {
             ok: true,
@@ -2395,7 +5262,7 @@ ipcMain.handle('style-studio-transcribe-audio', async (event, audioPath, options
 
 ipcMain.handle('style-studio-get-transcript-info', async () => {
     try {
-        const config = require('./src/config');
+        const config = require('./src/settings/config');
         const p = path.join(config.paths.temp, 'transcription.json');
         if (!fs.existsSync(p)) return { exists: false };
         const j = JSON.parse(fs.readFileSync(p, 'utf8'));
@@ -2646,187 +5513,78 @@ if (process.platform === 'win32' && !fs.existsSync(fvpRegisteredFlag)) {
 }
 
 // ========================================
-// VK Token Auto-Refresh (OAuth popup)
-// ========================================
-
-/**
- * Check if VK token is valid. If expired and VK_APP_ID is set,
- * automatically open OAuth popup to get a fresh token before build starts.
- */
-async function checkVKToken(sendProgress) {
-    // Check both project .env and app .env for VK credentials
-    const envPaths = [
-        path.join(PROJECT_DIR, '.env'),
-        path.join(APP_ROOT, '.env'),
-    ];
-    let token = '', appId = '';
-    for (const envPath of envPaths) {
-        try {
-            const content = fs.readFileSync(envPath, 'utf8');
-            if (!token) {
-                const m = content.match(/^VK_ACCESS_TOKEN=(.+)$/m);
-                if (m) token = m[1].trim();
-            }
-            if (!appId) {
-                const m = content.match(/^VK_APP_ID=(.+)$/m);
-                if (m) appId = m[1].trim();
-            }
-        } catch (e) {}
-    }
-
-    // No token or no app ID — skip silently
-    if (!token || !appId) return;
-
-    // Quick validation: call video.search (the actual endpoint we use) with current token
-    try {
-        const https = require('https');
-        const valid = await new Promise((resolve) => {
-            const url = `https://api.vk.com/method/video.search?q=test&count=1&access_token=${token}&v=5.199`;
-            https.get(url, { timeout: 8000 }, (res) => {
-                let data = '';
-                res.on('data', c => data += c);
-                res.on('end', () => {
-                    try {
-                        const json = JSON.parse(data);
-                        resolve(!json.error || json.error.error_code !== 5);
-                    } catch (e) { resolve(true); } // parse error = assume ok
-                });
-            }).on('error', () => resolve(true)); // network error = assume ok, let build handle it
-        });
-
-        if (valid) {
-            console.log('[VK] Token is valid');
-            return;
-        }
-    } catch (e) {
-        return; // can't check = don't block build
-    }
-
-    // Token expired — open OAuth popup
-    console.log('[VK] Token expired — opening refresh popup...');
-    if (sendProgress) sendProgress(5, '🔑 VK token expired — authorize in popup...');
-
-    const result = await openVKOAuthPopup(appId);
-    if (result.success) {
-        console.log('[VK] Token refreshed successfully');
-        if (sendProgress) sendProgress(8, '🔑 VK token refreshed!');
-    } else {
-        console.log(`[VK] Token refresh failed: ${result.error} — VK provider will be skipped`);
-    }
-}
-
-/**
- * Opens a BrowserWindow to VK OAuth, waits for user to authorize,
- * extracts token from redirect, saves to .env and process.env.
- */
-function openVKOAuthPopup(appId) {
-    const redirectUri = 'https://oauth.vk.com/blank.html';
-    // scope=video as string + v=5.131 — this combo works for Mini-apps (numeric scope IDs don't)
-    const authUrl = `https://oauth.vk.com/authorize?client_id=${appId}&display=page&redirect_uri=${encodeURIComponent(redirectUri)}&scope=video&response_type=token&v=5.131`;
-
-    return new Promise((resolve) => {
-        const authWin = new BrowserWindow({
-            width: 600,
-            height: 500,
-            title: 'VK Authorization — Token Refresh',
-            autoHideMenuBar: true,
-            alwaysOnTop: true,
-            webPreferences: { nodeIntegration: false, contextIsolation: true },
-        });
-
-        let resolved = false;
-        const finish = (result) => {
-            if (resolved) return;
-            resolved = true;
-            if (!authWin.isDestroyed()) authWin.close();
-            resolve(result);
-        };
-
-        const saveToken = (token) => {
-            // Save to app .env (where VK_ACCESS_TOKEN lives)
-            updateEnvFileAt(path.join(APP_ROOT, '.env'), 'VK_ACCESS_TOKEN', token);
-            // Also save to project .env if it exists and has VK_ACCESS_TOKEN
-            if (PROJECT_DIR !== APP_ROOT) {
-                const projEnv = path.join(PROJECT_DIR, '.env');
-                try {
-                    const c = fs.readFileSync(projEnv, 'utf8');
-                    if (/^VK_ACCESS_TOKEN=/m.test(c)) {
-                        updateEnvFileAt(projEnv, 'VK_ACCESS_TOKEN', token);
-                    }
-                } catch (e) {}
-            }
-            process.env.VK_ACCESS_TOKEN = token;
-            console.log(`[VK] New token: ${token.substring(0, 15)}...`);
-            finish({ success: true, token });
-        };
-
-        // Watch for navigation to blank.html
-        authWin.webContents.on('will-redirect', (event, url) => {
-            if (url.startsWith(redirectUri)) {
-                const token = extractTokenFromFragment(url);
-                if (token) { event.preventDefault(); saveToken(token); }
-            }
-        });
-
-        authWin.webContents.on('did-navigate', (event, url) => {
-            if (url.startsWith(redirectUri)) {
-                const token = extractTokenFromFragment(url);
-                if (token) saveToken(token);
-            }
-        });
-
-        // Fragment (#access_token=...) doesn't always appear in navigation events.
-        // Extract it via JS once the blank page loads.
-        authWin.webContents.on('did-finish-load', () => {
-            const currentUrl = authWin.webContents.getURL();
-            if (currentUrl.startsWith(redirectUri)) {
-                authWin.webContents.executeJavaScript(`
-                    (() => {
-                        const hash = window.location.hash.substring(1);
-                        const params = new URLSearchParams(hash);
-                        return params.get('access_token') || '';
-                    })()
-                `).then(token => {
-                    if (token) saveToken(token);
-                }).catch(() => {});
-            }
-        });
-
-        authWin.on('closed', () => {
-            finish({ success: false, error: 'Window closed by user' });
-        });
-
-        // Timeout after 3 minutes
-        setTimeout(() => finish({ success: false, error: 'Timeout' }), 3 * 60 * 1000);
-
-        authWin.loadURL(authUrl);
-    });
-}
-
-function extractTokenFromFragment(url) {
-    const hashIdx = url.indexOf('#');
-    if (hashIdx < 0) return null;
-    const params = new URLSearchParams(url.substring(hashIdx + 1));
-    return params.get('access_token') || null;
-}
-
-// IPC handler for manual refresh from UI
-ipcMain.handle('vk-refresh-token', async () => {
-    let appId = '';
-    for (const dir of [PROJECT_DIR, APP_ROOT]) {
-        try {
-            const content = fs.readFileSync(path.join(dir, '.env'), 'utf8');
-            const match = content.match(/^VK_APP_ID=(.+)$/m);
-            if (match && match[1].trim()) { appId = match[1].trim(); break; }
-        } catch (e) {}
-    }
-    if (!appId) return { success: false, error: 'VK_APP_ID not set in .env' };
-    return openVKOAuthPopup(appId);
-});
-
-// ========================================
 // Helper Functions
 // ========================================
+
+// Brain switch: the AI Provider dropdown value maps onto AI_PROVIDER +
+// AILINK_TASK_TYPES. process.env is updated LIVE (render-prep authoring in
+// this process + child builds inherit it); .env persists across restarts.
+function applyBrainProvider(value) {
+    const ailinkBrain = value === 'bedrock-ailink';
+    const aplinkBrain = value === 'bedrock-aplink';
+    const azureBrain = value === 'bedrock-azure';
+    const azureOpenAIBrain = value === 'bedrock-azure-grok' || value === 'bedrock-azure-openai';
+    const base = (ailinkBrain || aplinkBrain || azureBrain || azureOpenAIBrain) ? 'bedrock' : String(value || 'bedrock');
+
+    // An alt brain (AiLink GPT-5.5 / APlink Claude-Opus-4-6 / Azure Claude Sonnet / Azure Grok)
+    // takes over EXACTLY the
+    // Bedrock "Sonnet tier" — the high-reasoning editorial tasks (Visual Planner,
+    // Director scene-split, effects/icon/transition directors). The DeepSeek default
+    // tier and Haiku utility tier ALWAYS stay on Bedrock, and Bedrock stays the
+    // automatic fallback for the alt-routed tasks. Only ONE alt brain runs at a time.
+    let sonnetTier = 'brain,planner-outline,planner-large,planner-small';
+    let defaultTier = 'bedrock default';
+    let plannerTier = 'bedrock planner';
+    let utilityTier = 'bedrock utility';
+    let fallbackTier = 'bedrock fallback';
+    let ailinkModel = 'gpt-5.5';
+    let aplinkModel = 'claude-opus-4-6';
+    let azureModel = 'claude-sonnet-4-6';
+    let azureOpenAIModel = 'grok-4.3';
+    let hasAplinkKey = false;
+    try {
+        const cfg = require('./src/settings/config');
+        const tier = cfg?.bedrock?.plannerTaskTypes;
+        if (Array.isArray(tier) && tier.length) sonnetTier = tier.join(',');
+        if (cfg?.bedrock?.model) defaultTier = `bedrock:${cfg.bedrock.model}`;
+        if (cfg?.bedrock?.plannerModel) plannerTier = `bedrock:${cfg.bedrock.plannerModel}`;
+        if (cfg?.bedrock?.utilityModel) utilityTier = `bedrock:${cfg.bedrock.utilityModel}`;
+        if (cfg?.bedrock?.fallbackModel) fallbackTier = `bedrock:${cfg.bedrock.fallbackModel}`;
+        if (cfg?.ailink?.model) ailinkModel = cfg.ailink.model;
+        if (cfg?.aplink?.model) aplinkModel = cfg.aplink.model;
+        hasAplinkKey = !!cfg?.aplink?.apiKey;
+        if (cfg?.azure?.model) azureModel = cfg.azure.model;
+        if (cfg?.azureOpenAI?.model) azureOpenAIModel = cfg.azureOpenAI.model;
+    } catch (_) {}
+
+    updateEnvFile('AI_PROVIDER', base);
+    // Set the chosen alt brain's task gate; clear the other so only one is active.
+    updateEnvFile('AILINK_TASK_TYPES', ailinkBrain ? sonnetTier : '');
+    updateEnvFile('APLINK_TASK_TYPES', aplinkBrain ? sonnetTier : '');
+    updateEnvFile('AZURE_TASK_TYPES', azureBrain ? sonnetTier : '');
+    updateEnvFile('AZURE_OPENAI_TASK_TYPES', azureOpenAIBrain ? sonnetTier : '');
+    process.env.AI_PROVIDER = base;
+    process.env.AILINK_TASK_TYPES = ailinkBrain ? sonnetTier : '';
+    process.env.APLINK_TASK_TYPES = aplinkBrain ? sonnetTier : '';
+    process.env.AZURE_TASK_TYPES = azureBrain ? sonnetTier : '';
+    process.env.AZURE_OPENAI_TASK_TYPES = azureOpenAIBrain ? sonnetTier : '';
+
+    const sonnetOwner = ailinkBrain ? `ailink:${ailinkModel}`
+        : aplinkBrain ? `aplink:${aplinkModel}`
+        : azureBrain ? `azure-claude:${azureModel}`
+        : azureOpenAIBrain ? `azure-openai:${azureOpenAIModel}`
+        : plannerTier;
+    console.log(`[Brain Router] dropdown=${value || 'bedrock'} base=${base} sonnetTier=${sonnetOwner} tasks=[${sonnetTier}]`);
+    console.log(`[Brain Router] default=${defaultTier}; utility=${utilityTier}; fallback=${fallbackTier}; AILINK=${ailinkBrain ? sonnetTier : '(off)'}; APLINK=${aplinkBrain ? sonnetTier : '(off)'}; AZURE_CLAUDE=${azureBrain ? sonnetTier : '(off)'}; AZURE_OPENAI=${azureOpenAIBrain ? sonnetTier : '(off)'}`);
+    if ((azureBrain || azureOpenAIBrain) && hasAplinkKey && !/^(0|false|off|no)$/i.test(String(process.env.AZURE_LARGE_PROMPT_APLINK || 'on').trim())) {
+        console.log(`[Brain Router] azure-large-detour=aplink:${aplinkModel} tasks=[${process.env.AZURE_LARGE_PROMPT_APLINK_TASKS || 'planner-large'}] fallback=${plannerTier}`);
+    }
+}
+
+ipcMain.handle('set-ai-provider', (event, value) => {
+    try { applyBrainProvider(value); return { success: true }; }
+    catch (e) { return { success: false, error: e.message }; }
+});
 
 function updateEnvFile(key, value) {
     updateEnvFileAt(path.join(PROJECT_DIR, '.env'), key, value);
@@ -2925,6 +5683,93 @@ ipcMain.handle('open-qa-chat', async () => {
     });
     qaStudioWindow.loadFile(htmlFile, { query: 'chat=1' });
     qaStudioWindow.on('closed', () => { qaStudioWindow = null; });
+});
+
+// ========================================
+// Scout Lab — Separate Window
+// ========================================
+let scoutLabWindow = null;
+
+ipcMain.handle('open-scout-lab', async () => {
+    const htmlFile = path.join(__dirname, 'ui', 'scout-lab.html');
+    if (scoutLabWindow && !scoutLabWindow.isDestroyed()) {
+        scoutLabWindow.focus();
+        return;
+    }
+    scoutLabWindow = new BrowserWindow({
+        width: 1400,
+        height: 880,
+        minWidth: 1000,
+        minHeight: 640,
+        backgroundColor: '#0a0a0a',
+        title: 'Scout Lab',
+        webPreferences: {
+            nodeIntegration: false,
+            contextIsolation: false,
+            sandbox: false,
+            preload: path.join(__dirname, 'preload.js'),
+        },
+        icon: getWindowIconPath() || undefined,
+        parent: mainWindow || undefined,
+    });
+    scoutLabWindow.loadFile(htmlFile);
+    scoutLabWindow.on('closed', () => { scoutLabWindow = null; });
+});
+
+ipcMain.handle('scout-lab-load-build', async (_event, buildDir) => {
+    const scoutLab = require('./src/media/scout-lab');
+    return await scoutLab.loadBuild(buildDir);
+});
+
+ipcMain.handle('scout-lab-test-scene', async (event, buildDir, sceneId, options) => {
+    const scoutLab = require('./src/media/scout-lab');
+    const win = BrowserWindow.fromWebContents(event.sender);
+    const emit = (evt) => {
+        if (win && !win.isDestroyed()) {
+            win.webContents.send('scout-lab-event', evt && evt.sceneId == null ? { ...evt, sceneId } : evt);
+        }
+    };
+    try {
+        return await scoutLab.testScene(buildDir, sceneId, emit, options || {});
+    } catch (err) {
+        emit({ stage: 'log', message: `[err] ${err.message}` });
+        return { ok: false, error: err.message };
+    }
+});
+
+ipcMain.handle('scout-lab-test-batch', async (event, buildDir, sceneId, options) => {
+    const scoutLab = require('./src/media/scout-lab');
+    const win = BrowserWindow.fromWebContents(event.sender);
+    const emit = (evt) => {
+        if (win && !win.isDestroyed()) {
+            win.webContents.send('scout-lab-event', evt && evt.sceneId == null ? { ...evt, sceneId } : evt);
+        }
+    };
+    try {
+        return await scoutLab.testSceneBatch(buildDir, sceneId, emit, options || {});
+    } catch (err) {
+        emit({ stage: 'log', message: `[err] ${err.message}` });
+        return { ok: false, error: err.message };
+    }
+});
+
+ipcMain.handle('scout-lab-export-scene-log', async (_event, payload = {}) => {
+    try {
+        const buildDir = String(payload.buildDir || '').trim();
+        const sceneId = String(payload.sceneId ?? 'unknown').replace(/[^\w.-]+/g, '_');
+        const content = String(payload.content || '').trim();
+        if (!buildDir) throw new Error('Missing buildDir');
+        if (!content) throw new Error('No scene log content to export');
+
+        const outDir = path.join(ensureLogsDir(buildDir), 'scout-lab');
+        fs.mkdirSync(outDir, { recursive: true });
+        const outPath = path.join(outDir, `scene-S${sceneId}-${nowStamp()}.md`);
+        fs.writeFileSync(outPath, `${content}\n`, 'utf8');
+        try { clipboard.writeText(outPath); } catch (_) {}
+        return { ok: true, path: outPath, copiedToClipboard: true };
+    } catch (err) {
+        return { ok: false, error: err.message || String(err) };
+    }
 });
 
 // ========================================

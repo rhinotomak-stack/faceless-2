@@ -16,7 +16,7 @@ window._nodeFs = _nodeFs;
 
 // Expose theme tokens to renderer (single source of truth from src/themes.js)
 try {
-    const themes = require('./src/themes');
+    const themes = require('./src/data/themes');
     window._themeTokens = {
         getTokens: (themeId) => themes.getThemeTokens(themeId),
         getStylePreset: (styleName) => themes.getMGStylePreset(styleName),
@@ -30,7 +30,7 @@ try {
 
 // Expose MG Registry to renderer (categories, types, animations)
 try {
-    const mgReg = require('./src/mg-registry');
+    const mgReg = require('./src/render/mg-registry');
     window._mgRegistry = {
         registry: mgReg.MG_REGISTRY,
         getTypesForCategory: mgReg.getTypesForCategory,
@@ -44,7 +44,7 @@ try {
 
 // Expose Effect Presets to renderer (pre-made effect combos)
 try {
-    window._effectPresets = require('./src/effect-presets');
+    window._effectPresets = require('./src/render/effect-presets');
 } catch (e) {
     console.warn('Effect presets not available:', e.message);
 }
@@ -54,8 +54,8 @@ try {
 // populate the language dropdown in the build settings panel, and load Google Fonts
 // for non-Latin scripts (e.g. Korean) on demand.
 try {
-    const languages = require('./src/languages');
-    const langHelper = require('./src/language-helper');
+    const languages = require('./src/data/languages');
+    const langHelper = require('./src/data/language-helper');
     window._languages = {
         LANGUAGES: languages.LANGUAGES,
         DEFAULT_LANGUAGE: languages.DEFAULT_LANGUAGE,
@@ -76,31 +76,46 @@ try {
 
 // Expose QA Studio Agent to renderer (deep per-scene analysis — separate window)
 try {
-    window._qaStudioAgent = require('./src/qa-studio-agent');
+    window._qaStudioAgent = require('./src/studio/qa-studio-agent');
 } catch (e) {
     console.warn('QA Studio Agent not available:', e.message);
 }
 
 // Expose QA Chat Agent to renderer (developer chat to test niche knowledge)
 try {
-    window._qaChatAgent = require('./src/qa-chat-agent');
+    window._qaChatAgent = require('./src/studio/qa-chat-agent');
 } catch (e) {
     console.warn('QA Chat Agent not available:', e.message);
 }
 
 // Expose QA Replacer to renderer (surgical scene re-download + article re-screenshot on Apply Fixes)
 try {
-    const qaReplacer = require('./src/qa-replacer');
+    const qaReplacer = require('./src/studio/qa-replacer');
     window._qaReplacer = qaReplacer; // { replaceSceneMedia, rescreenhotArticle }
 } catch (e) {
     console.warn('QA Replacer not available:', e.message);
 }
 
 
+// Expose Scene Actions to renderer (timeline right-click: retry footage / CEO edit)
+try {
+    window._sceneActions = require('./src/agents/scene-actions'); // { retrySceneMedia, ceoEditScene }
+} catch (e) {
+    console.warn('Scene Actions not available:', e.message);
+}
+
+// Expose Vision Box control to renderer (auto start/stop the AWS GPU box around retries)
+try {
+    window._visionBox = require('./src/vision/vision-box'); // { isConfigured, status, ensureReady, stop, ... }
+} catch (e) {
+    console.warn('Vision Box control not available:', e.message);
+}
+
+
 // Expose Map Provider to renderer (geocoding + tile stitching for map test preview)
 try {
-    const mapProvider = require('./src/map-provider');
-    const appConfig = require('./src/config');
+    const mapProvider = require('./src/map/map-provider');
+    const appConfig = require('./src/settings/config');
     window._mapProvider = mapProvider;
     window._appConfig = appConfig;
     // Load country boundary GeoJSON for polygon highlighting
@@ -120,9 +135,19 @@ window.electronAPI = {
         return ipcRenderer.invoke('copy-file', sourcePath, destFolder);
     },
 
+    // Copy a presenter image into the active project's assets/ folder (talking-head mode)
+    copyPresenterImage: (sourcePath) => {
+        return ipcRenderer.invoke('copy-presenter-image', sourcePath);
+    },
+
     // Run the build pipeline
     runBuild: (options) => {
         return ipcRenderer.invoke('run-build', options);
+    },
+
+    // Switch the creative brain (AI Provider dropdown) live
+    setAiProvider: (value) => {
+        return ipcRenderer.invoke('set-ai-provider', value);
     },
 
     // Load video plan
@@ -154,6 +179,24 @@ window.electronAPI = {
     getSceneMediaPath: (sceneIndex, extension, prefix) => {
         return ipcRenderer.invoke('get-scene-media-path', sceneIndex, extension, prefix);
     },
+
+    // Run timeline scene actions in the main process so media downloads use Node
+    // networking, not renderer/XHR rules.
+    sceneAction: (payload) => ipcRenderer.invoke('scene-action', payload || {}),
+    onSceneActionProgress: (callback) => {
+        ipcRenderer.removeAllListeners('scene-action-progress');
+        ipcRenderer.on('scene-action-progress', (event, data) => callback(data));
+        return () => ipcRenderer.removeAllListeners('scene-action-progress');
+    },
+
+    // Conversational ACTING agent: compile a free-text order → apply to the built
+    // plan (per-scene + compliance fixers) → re-download footage → refresh preview.
+    qaPreviewOrder: (text) => ipcRenderer.invoke('qa-preview-order', { text }),
+    qaApplyOrder: (text) => ipcRenderer.invoke('qa-apply-order', { text }),
+    qaUndo: () => ipcRenderer.invoke('qa-undo'),
+
+    // Open a web URL in the default browser (Media Log link clicks)
+    openExternal: (url) => ipcRenderer.invoke('open-external', url),
 
     // Get audio path
     getAudioPath: (filename) => {
@@ -203,6 +246,11 @@ window.electronAPI = {
     // Listen for progress updates
     onBuildProgress: (callback) => {
         ipcRenderer.on('build-progress', (event, data) => callback(data));
+    },
+
+    // Structured Build Log events (phase/scene/note) for the in-app log panel.
+    onBuildEvent: (callback) => {
+        ipcRenderer.on('build-event', (event, data) => callback(data));
     },
 
     onRenderProgress: (callback) => {
@@ -281,6 +329,37 @@ window.electronAPI = {
     // Qwen model pool management
     qwenPoolStatus: () => ipcRenderer.invoke('qwen-pool-status'),
     qwenPoolReset: () => ipcRenderer.invoke('qwen-pool-reset'),
+    qwenVisionKeysStatus: () => ipcRenderer.invoke('qwen-vision-keys-status'),
+    qwenVisionKeysSave: (payload) => ipcRenderer.invoke('qwen-vision-keys-save', payload || {}),
+    visionHealthStatus: () => ipcRenderer.invoke('vision-health-status'),
+    visionHealthLiveCheck: (options) => ipcRenderer.invoke('vision-health-live-check', options || {}),
+    getVisionBackend: () => ipcRenderer.invoke('get-vision-backend'),
+    setVisionBackend: (backend) => ipcRenderer.invoke('set-vision-backend', backend),
+    lightningPoolList: () => ipcRenderer.invoke('lightning-pool-list'),
+    lightningPoolAdd: (account) => ipcRenderer.invoke('lightning-pool-add', account || {}),
+    lightningPoolRemove: (id) => ipcRenderer.invoke('lightning-pool-remove', id),
+    lightningPoolReset: (id) => ipcRenderer.invoke('lightning-pool-reset', id),
+    lightningPoolUpdate: (id, patch) => ipcRenderer.invoke('lightning-pool-update', { id, patch }),
+    lightningPoolGetActive: () => ipcRenderer.invoke('lightning-pool-get-active'),
+    lightningPoolSetActive: (id) => ipcRenderer.invoke('lightning-pool-set-active', id),
+    lightningProvision: (id) => ipcRenderer.invoke('lightning-provision', id),
+    lightningCheck: (id) => ipcRenderer.invoke('lightning-check', id),
+    lightningValidate: (account) => ipcRenderer.invoke('lightning-validate', account || {}),
+    onLightningProvisionProgress: (cb) => ipcRenderer.on('lightning-provision-progress', (e, d) => cb(d)),
+    openFootageResources: () => ipcRenderer.invoke('open-footage-resources'),
+    footageResourcesGet: () => ipcRenderer.invoke('footage-resources-get'),
+    footageResourcesSet: (payload) => ipcRenderer.invoke('footage-resources-set', payload || {}),
+    resourceEnvStatus: () => ipcRenderer.invoke('resource-env-status'),
+    resourceEnvSave: (payload) => ipcRenderer.invoke('resource-env-save', payload || {}),
+    resourceEnvClean: () => ipcRenderer.invoke('resource-env-clean'),
+    resourceEnvLiveCheck: (options) => ipcRenderer.invoke('resource-env-live-check', options || {}),
+    cloudAccountSlotsStatus: () => ipcRenderer.invoke('cloud-account-slots-status'),
+    cloudAccountSlotsSave: (payload) => ipcRenderer.invoke('cloud-account-slots-save', payload || {}),
+    cloudAccountSlotCheck: (payload) => ipcRenderer.invoke('cloud-account-slot-check', payload || {}),
+    onFootageResourcesUpdated: (callback) => {
+        ipcRenderer.removeAllListeners('footage-resources-updated');
+        ipcRenderer.on('footage-resources-updated', (event, data) => callback(data));
+    },
 
     // Style Learner — analyze reference video(s), scan saved profiles, compare, pick local file
     learnStyle: (input) => ipcRenderer.invoke('learn-style', input),
@@ -333,6 +412,25 @@ window.electronAPI = {
     // Mux audio onto a finished video file (uses main process for path resolution)
     muxAudio: (videoFile, outputFile, audioTrimStartSec, audioTrimEndSec) => {
         return ipcRenderer.invoke('mux-audio', videoFile, outputFile, audioTrimStartSec, audioTrimEndSec);
+    },
+
+    // Scout Lab — isolated per-scene test harness
+    // HyperFrames bridge render path
+    hyperframesGenerateProject: (payload) => ipcRenderer.invoke('hyperframes-generate-project', payload || {}),
+    hyperframesRender: (payload) => ipcRenderer.invoke('hyperframes-render', payload || {}),
+    openHyperframesLab: () => ipcRenderer.invoke('open-hyperframes-lab'),
+    hyperframesLabRegistry: () => ipcRenderer.invoke('hyperframes-lab-registry'),
+    hyperframesLabGenerate: (payload) => ipcRenderer.invoke('hyperframes-lab-generate', payload || {}),
+    hyperframesLabOpenFolder: (folder) => ipcRenderer.invoke('hyperframes-lab-open-folder', folder),
+
+    openScoutLab: () => ipcRenderer.invoke('open-scout-lab'),
+    scoutLabLoadBuild: (buildDir) => ipcRenderer.invoke('scout-lab-load-build', buildDir),
+    scoutLabTestScene: (buildDir, sceneId, options) => ipcRenderer.invoke('scout-lab-test-scene', buildDir, sceneId, options || {}),
+    scoutLabTestBatch: (buildDir, sceneId, options) => ipcRenderer.invoke('scout-lab-test-batch', buildDir, sceneId, options || {}),
+    scoutLabExportSceneLog: (payload) => ipcRenderer.invoke('scout-lab-export-scene-log', payload || {}),
+    onScoutLabEvent: (callback) => {
+        ipcRenderer.removeAllListeners('scout-lab-event');
+        ipcRenderer.on('scout-lab-event', (event, data) => callback(data));
     },
 
     // Open QA Studio in a separate window

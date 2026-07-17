@@ -1,0 +1,25 @@
+{
+  "_comment": "Tripwire: load-bearing 'smartness' anchors that a behavior-preserving refactor MUST keep verbatim. If a move/rename would legitimately change a path here, update THIS file in the same commit and re-run. Expand as phases proceed. Paths updated for the P1 folder reorg.",
+  "invariants": [
+    {
+      "file": "src/brain/ai-provider.js",
+      "mustContain": ["async function callAI", "callVisionAI", "taskType", "_normalizeTextTaskType", "_textRouteKey"]
+    },
+    {
+      "file": "src/agents/workers/effects-director.js",
+      "mustContain": ["BASE LOOK", "one era family per video", "single grade owner", "HF_FX_AGENT"]
+    },
+    {
+      "file": "src/agents/ai-director.js",
+      "mustContain": ["buildScenesFromAnchors", "buildIdeaScenePrompt", "parseIdeaScenePlan"]
+    },
+    {
+      "file": "src/directives/directive-compiler.js",
+      "mustContain": ["compileDirectives", "renderDirectivesBlock", "SOURCE_FAMILIES"]
+    },
+    {
+      "file": "src/settings/config.js",
+      "mustContain": ["PROJECT_OVERRIDE_KEYS"]
+    }
+  ]
+}

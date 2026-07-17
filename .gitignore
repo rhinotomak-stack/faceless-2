@@ -52,3 +52,25 @@ temp/
 logs/
 .env
 *.mp4
+
+# Lightning multi-account rotation (secrets + live state)
+lightning-accounts.json
+.lightning-rotation-state.json
+
+# ── Secrets / session cookies (NEVER commit) ──
+*.cookies.json
+.kling-cookies.json
+.storyblocks-cookies.json
+
+# ── Runtime state / caches / backups ──
+.qwen-vision-health.json
+.qwen-vision-health.json.bak
+.qwen-exhausted-models.json.bak
+*.bak
+.claude-session-backup/
+.tmp/
+.storyblocks-browser-downloads/
+__pycache__/
+src/__pycache__/
+hyperframes-smoke/
+hyperframes-smoke-test/

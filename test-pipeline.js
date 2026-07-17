@@ -23,7 +23,7 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
-const config = require('./src/config');
+const config = require('./src/settings/config');
 
 const CACHE_FILE = path.join(config.paths.temp, 'test-pipeline-cache.json');
 
@@ -61,7 +61,7 @@ async function main() {
     console.log(`  📄 Full log saved to: ${LOG_FILE}`);
     console.log('='.repeat(70));
 
-    const { createDirectorsBrief } = require('./src/directors-brief');
+    const { createDirectorsBrief } = require('./src/agents/directors-brief');
     const directorsBrief = createDirectorsBrief();
     console.log(`\n  📋 Brief: format=${directorsBrief.format} quality=${directorsBrief.qualityTier}`);
     console.log(`     niche=${directorsBrief.nicheOverride || 'auto'} theme=${directorsBrief.themeOverride || 'auto'}`);
@@ -83,7 +83,7 @@ async function main() {
         fullScript = cached.fullScript;
         console.log(`  ✅ ${transcription.segments.length} segments, ${transcription.duration?.toFixed(1)}s`);
     } else {
-        const { transcribeAudio } = require('./src/transcribe');
+        const { transcribeAudio } = require('./src/pipeline/transcribe');
         const inputFiles = fs.readdirSync(config.paths.input);
         const audioFile = audioArg
             ? inputFiles.find(f => f === audioArg)
@@ -139,7 +139,7 @@ async function main() {
 
     // Tavily
     try {
-        const { searchTavily, hasCredentials } = require('./src/tavily-client');
+        const { searchTavily, hasCredentials } = require('./src/media/tavily-client');
         if (hasCredentials()) {
             const { items } = await searchTavily(queryText, { num: numResults, timeout: 10000 });
             if (items.length > 0) {
@@ -206,7 +206,7 @@ async function main() {
     let webContext = null;
     if (allSnippets.length > 0) {
         try {
-            const { callAI } = require('./src/ai-provider');
+            const { callAI } = require('./src/brain/ai-provider');
             const snippetsText = allSnippets.join('\n');
             webContext = await callAI(
                 `You are analyzing a video narration and web search results to extract context that will help an AI plan visual scenes.
@@ -252,7 +252,7 @@ Return ONLY the analysis, no disclaimers.`,
     console.log(`  📡 AI Provider: ${config.aiProvider}`);
     console.log(`  📥 Inputs: transcription + ${webContext ? 'web context ✅' : 'NO web context ❌'}`);
 
-    const { analyzeAndCreateScenes } = require('./src/ai-director');
+    const { analyzeAndCreateScenes } = require('./src/agents/ai-director');
     const { scenes, scriptContext } = await analyzeAndCreateScenes(transcription, directorsBrief);
 
     console.log(`\n  ✅ AI Director output:`);
@@ -292,7 +292,7 @@ Return ONLY the analysis, no disclaimers.`,
     console.log('  📌 STEP 4: NICHE & THEME RESOLUTION');
     console.log('━'.repeat(70));
 
-    const { getNiche } = require('./src/niches');
+    const { getNiche } = require('./src/data/niches');
     const niche = getNiche(scriptContext.nicheId);
 
     console.log(`\n  🔗 Resolution chain:`);
@@ -321,7 +321,7 @@ Return ONLY the analysis, no disclaimers.`,
     console.log('━'.repeat(70));
     console.log(`  📥 Inputs: ${scenes.length} scenes + scriptContext (niche=${scriptContext.nicheId}, theme=${scriptContext.themeId})`);
 
-    const { planVisuals } = require('./src/ai-visual-planner');
+    const { planVisuals } = require('./src/agents/ai-visual-planner');
     const scenesWithKeywords = await planVisuals(scenes, scriptContext, directorsBrief);
 
     console.log(`\n  ✅ Visual Planner assigned keywords to ${scenesWithKeywords.filter(s => s.keyword).length}/${scenesWithKeywords.length} scenes`);
@@ -340,7 +340,7 @@ Return ONLY the analysis, no disclaimers.`,
     console.log('━'.repeat(70));
     console.log(`  📥 Niche "${scriptContext.nicheId}" applies search policy to each query\n`);
 
-    const { rewriteQuery } = require('./src/niches');
+    const { rewriteQuery } = require('./src/data/niches');
     const nicheId = scriptContext.nicheId || 'general';
 
     for (const scene of scenesWithKeywords) {
@@ -348,13 +348,13 @@ Return ONLY the analysis, no disclaimers.`,
         const sq = scene.stockQuery || kw;
         const wq = scene.webQuery || kw;
 
-        const stockRewritten = rewriteQuery(sq, nicheId, 'pexels', scene);
-        const webRewritten = rewriteQuery(wq, nicheId, 'bing', scene);
+        const stockRewritten = rewriteQuery(sq, nicheId, 'storyblocks', scene);
+        const webRewritten = rewriteQuery(wq, nicheId, 'stock', scene);
         const ytRewritten = rewriteQuery(wq, nicheId, 'youtube', scene);
 
         console.log(`  Scene ${scene.index}: "${kw}" [${scene.sourceHint || 'stock'}]`);
-        console.log(`    stockQuery: "${sq}" → Pexels: "${stockRewritten}"${stockRewritten !== sq ? ' ✏️' : ''}`);
-        console.log(`    webQuery:   "${wq}" → Bing:   "${webRewritten}"${webRewritten !== wq ? ' ✏️' : ''}`);
+        console.log(`    stockQuery: "${sq}"   Storyblocks: "${stockRewritten}"${stockRewritten !== sq ? ' ??' : ''}`);
+        console.log(`    webQuery:   "${wq}"   Stock:  "${webRewritten}"${webRewritten !== wq ? ' ??' : ''}`);
         console.log(`    webQuery:   "${wq}" → YouTube: "${ytRewritten}"${ytRewritten !== wq ? ' ✏️' : ''}`);
     }
 
@@ -382,7 +382,7 @@ function runInteractiveDownload(scenesWithKeywords, scriptContext) {
     console.log('  Type "all" to download all scenes sequentially');
     console.log('  Type "quit" to exit\n');
 
-    const { downloadMedia, initProviders } = require('./src/footage-manager');
+    const { downloadMedia, initProviders } = require('./src/media/footage-manager');
     initProviders(scriptContext);
 
     const downloadDir = path.join(config.paths.temp, 'test-downloads');

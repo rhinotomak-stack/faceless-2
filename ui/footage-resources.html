@@ -1,0 +1,120 @@
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob: asset: file:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; media-src 'self' data: blob: asset: file:; img-src 'self' data: blob: asset: file: https:; connect-src 'self' data: blob: asset: file: https:; font-src 'self' data: asset: file:;">
+    <title>Resource Control Center</title>
+    <link rel="stylesheet" href="css/style.css?v=16">
+</head>
+
+<body class="resource-window-body">
+    <main class="resource-window">
+        <header class="resource-window-header">
+            <div>
+                <h1>Resource Control Center</h1>
+                <p>Providers, API keys, account slots, vision health, and build resource controls.</p>
+            </div>
+            <span id="resource-save-status" class="resource-save-status">ready</span>
+        </header>
+
+        <section class="resource-grid">
+            <div class="resource-card resource-card-wide">
+                <div class="resource-card-head">
+                    <h2>Provider Switches</h2>
+                    <span>Used by the real build media downloader</span>
+                </div>
+                <label class="source-toggle resource-primary-toggle" title="Deep clip analysis using Qwen Omni — sends frames per clip for holistic video understanding.">
+                    <input type="checkbox" id="clip-analyzer-toggle" checked>
+                    <strong>Clip Analyzer</strong>
+                    <small>(Omni multimodal)</small>
+                </label>
+                <div class="source-toggles resource-source-toggles">
+                    <label class="source-toggle" title="Suspended until a subscription is available."><input type="checkbox" id="src-storyblocks"> Storyblocks (suspended)</label>
+                    <label class="source-toggle" title="Free stock video/image API. Requires PEXELS_API_KEY in .env."><input type="checkbox" id="src-pexels" checked> Pexels</label>
+                    <label class="source-toggle" title="Free stock video/image API. Requires PIXABAY_API_KEY in .env."><input type="checkbox" id="src-pixabay" checked> Pixabay</label>
+                    <label class="source-toggle"><input type="checkbox" id="src-youtube" checked> YouTube (yt-dlp)</label>
+                    <label class="source-toggle"><input type="checkbox" id="src-reddit" checked> Reddit</label>
+                    <label class="source-toggle" title="Bing Image Search — used for web-image scenes, reference stills, diagrams, and similar exact visuals."><input type="checkbox" id="src-bing" checked> Bing Images</label>
+                    <label class="source-toggle" title="Brave Search API — real web image search (official keyed API, Bing replacement). Races alongside Bing for real-image scenes; needs BRAVE_API_KEY in .env."><input type="checkbox" id="src-brave" checked> Brave Images</label>
+                </div>
+            </div>
+
+            <div class="resource-card resource-card-wide">
+                <div class="resource-card-head">
+                    <h2>API Keys & Accounts</h2>
+                    <span id="resource-env-path">checking .env...</span>
+                </div>
+                <div class="resource-env-toolbar">
+                    <button id="resource-env-refresh-btn" class="vision-health-btn">Refresh</button>
+                    <button id="resource-env-save-btn" class="vision-health-btn">Save Edited Rows</button>
+                    <button id="resource-env-live-btn" class="vision-health-btn" title="Run small checks for configured provider accounts and local tools.">Live Check</button>
+                    <button id="resource-env-clean-btn" class="vision-health-btn danger-soft" title="Back up .env, remove duplicate variable lines, and trim trailing whitespace. Empty defaults are kept.">Clean .env</button>
+                    <span id="resource-env-status" class="qwen-pool-status"></span>
+                </div>
+                <div id="resource-env-notes" class="resource-env-notes"></div>
+                <div id="resource-env-live-results" class="resource-env-live-results"></div>
+                <div id="resource-env-groups" class="resource-env-groups"></div>
+                <div class="resource-env-add">
+                    <div class="resource-env-add-head">
+                        <strong>Add custom env variable</strong>
+                        <small>Useful for new providers like Azure or temporary account slots.</small>
+                    </div>
+                    <div class="resource-env-add-row">
+                        <input id="resource-env-add-key" type="text" placeholder="AZURE_OPENAI_API_KEY">
+                        <input id="resource-env-add-value" type="password" placeholder="Paste value">
+                        <button id="resource-env-add-btn" class="vision-health-btn">Add</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="resource-card resource-card-wide">
+                <div class="resource-card-head">
+                    <h2>Cloud Account Slots</h2>
+                    <span>Switch AWS credits smoothly; prepare Azure accounts without editing files by hand.</span>
+                </div>
+                <div class="resource-cloud-toolbar">
+                    <button id="cloud-account-refresh-btn" class="vision-health-btn">Refresh Slots</button>
+                    <button id="cloud-account-save-btn" class="vision-health-btn">Save + Apply Active</button>
+                    <span id="cloud-account-status" class="qwen-pool-status"></span>
+                </div>
+                <div id="cloud-account-panels" class="resource-cloud-panels"></div>
+            </div>
+
+            <div id="vision-health-panel" class="vision-health-panel resource-card resource-card-wide">
+                <div class="vision-health-head">
+                    <strong>Vision Health</strong>
+                    <span id="vision-health-summary" class="vision-health-summary">checking...</span>
+                </div>
+                <div id="vision-health-metrics" class="vision-health-metrics"></div>
+                <div id="vision-health-keys" class="vision-health-keys"></div>
+                <div id="vision-health-warnings" class="vision-health-warnings"></div>
+                <div class="vision-health-actions">
+                    <button id="reset-qwen-pool-btn" class="vision-health-btn danger-soft" title="Reset exhausted Qwen model tracking after changing keys">Reset Tracking</button>
+                    <button id="vision-health-refresh-btn" class="vision-health-btn" title="Refresh cached vision status">Check</button>
+                    <button id="vision-health-live-btn" class="vision-health-btn" title="Run a small live Qwen probe">Live Probe</button>
+                    <button id="vision-key-manager-toggle" class="vision-health-btn" title="Add, replace, or remove Qwen vision keys">Manage Keys</button>
+                    <span id="qwen-pool-status" class="qwen-pool-status"></span>
+                </div>
+                <div id="vision-key-manager" class="vision-key-manager hidden">
+                    <div class="vision-key-manager-head">
+                        <strong>Qwen Lane Keys</strong>
+                        <span id="vision-key-env-path"></span>
+                    </div>
+                    <div id="vision-key-list" class="vision-key-list"></div>
+                    <textarea id="vision-key-additions" class="vision-key-additions" rows="3" placeholder="Paste new key(s) here. Use one per line or comma-separated."></textarea>
+                    <div class="vision-health-actions">
+                        <button id="vision-key-save-btn" class="vision-health-btn">Save Keys + Probe</button>
+                        <button id="vision-key-cancel-btn" class="vision-health-btn">Cancel</button>
+                        <span id="vision-key-save-status" class="qwen-pool-status"></span>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <script src="js/footage-resources.js?v=4"></script>
+</body>
+
+</html>

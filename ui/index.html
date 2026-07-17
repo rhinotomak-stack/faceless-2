@@ -5,9 +5,9 @@
     <meta charset="UTF-8">
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob: asset: file:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; media-src 'self' data: blob: asset: file:; img-src 'self' data: blob: asset: file: https:; connect-src 'self' data: blob: asset: file: https:; font-src 'self' data: asset: file:;">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob: asset: file:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; media-src 'self' data: blob: asset: file:; img-src 'self' data: blob: asset: file: https:; connect-src 'self' data: blob: asset: file: https: http://34.198.52.220:8000 http://localhost:8000; font-src 'self' data: asset: file:;">
     <title>YTA Empire WEBGL</title>
-    <link rel="stylesheet" href="css/style.css?v=15">
+    <link rel="stylesheet" href="css/style.css?v=16">
     <!-- ── Multi-language font declarations ──
          Local fonts shipped in assets/fonts/. Add new @font-face blocks here
          when adding a language that needs a non-Latin script. Name the file
@@ -59,7 +59,8 @@
                 <button id="btn-open-project" class="btn btn-secondary" title="Open existing project">Open Project</button>
                 <button id="btn-new" class="btn btn-secondary">New Project</button>
                 <select id="renderer-select" title="Render engine" style="padding:6px 8px;border-radius:6px;background:#2a2a3e;color:#fff;border:1px solid #444;font-size:12px;cursor:pointer;">
-                    <option value="webgl2" selected>WebGL2 Engine (WYSIWYG)</option>
+                    <option value="hyperframes" selected>HyperFrames Bridge (HTML/MG)</option>
+                    <option value="webgl2">WebGL2 Engine (Fallback)</option>
                 </select>
                 <button id="btn-compositor-toggle" class="btn btn-secondary" title="Toggle WebGL2 preview engine" style="font-size:11px;padding:4px 8px;display:none;">Engine: OFF</button>
                 <select id="preview-quality" title="Preview resolution (lower = smoother)" style="display:none;padding:4px 6px;border-radius:6px;background:#2a2a3e;color:#fff;border:1px solid #444;font-size:11px;cursor:pointer;">
@@ -71,6 +72,8 @@
                 <label id="legacy-export-label" style="display:none;align-items:center;gap:4px;font-size:11px;color:#aaa;cursor:pointer;" title="Use legacy per-frame seeking export (slower, for A/B hash comparison)"><input type="checkbox" id="legacy-export-toggle" style="cursor:pointer;">Legacy</label>
                 <button id="btn-qa-studio" class="btn btn-secondary" title="Open QA Studio — deep per-scene analysis" style="font-size:11px;padding:4px 10px;display:inline-flex;align-items:center;gap:5px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>QA Studio</button>
                 <button id="btn-qa-chat" class="btn btn-secondary" title="Open QA Studio with Agent Chat" style="font-size:11px;padding:4px 10px;display:inline-flex;align-items:center;gap:5px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><line x1="9" y1="10" x2="15" y2="10"/><line x1="12" y1="7" x2="12" y2="13"/></svg>Agent Chat</button>
+                <button id="btn-hyperframes-lab" class="btn btn-secondary" title="Open HyperFrames Motion Lab — test MG/template coverage through the real bridge" style="font-size:11px;padding:4px 10px;display:inline-flex;align-items:center;gap:5px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16v10H4z"/><path d="M8 21h8"/><path d="M12 15v6"/><path d="M8 9h8"/><path d="M8 12h5"/></svg>HF Lab</button>
+                <button id="btn-scout-lab" class="btn btn-secondary" title="Open Scout Lab — isolated per-scene media-download test harness" style="font-size:11px;padding:4px 10px;display:inline-flex;align-items:center;gap:5px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>Scout Lab</button>
                 <button id="btn-render" class="btn btn-primary">Render Video</button>
             </div>
         </header>
@@ -104,30 +107,31 @@
                         <span class="toggle-label">Resume from previous build</span>
                     </label>
                     <small class="ai-instructions-hint">When ON: skips completed steps and keeps cached scene media. When OFF: fresh build from scratch every time.</small>
+                    <label class="toggle-row" style="margin-top:8px">
+                        <input type="checkbox" id="fast-media-toggle">
+                        <span class="toggle-label">⚡ Fast test (random stock media)</span>
+                    </label>
+                    <small class="ai-instructions-hint">When ON: skips the slow footage search/vision — every scene gets a RANDOM real stock clip (not matched to script). For quickly testing the rest of the build (presenter, MGs, transitions, SFX, effects, render).</small>
+                    <label style="margin-top:8px">Repeat From Step:</label>
+                    <select id="repeat-from-step">
+                        <option value="visual-planner">Visual Planner (keep scene split)</option>
+                        <option value="media">Media Download (keep VP plan)</option>
+                    </select>
+                    <small class="ai-instructions-hint">Use the Repeat Step button to skip everything above the selected step during testing.</small>
+                    <label class="toggle-row" style="margin-top:8px">
+                        <input type="checkbox" id="force-fresh-footage-toggle">
+                        <span class="toggle-label">Force fresh footage on repeat</span>
+                    </label>
+                    <small class="ai-instructions-hint">When ON with "Media Download": re-downloads all clips instead of reusing cached scene media (keeps the Director/VP plan). Use it to re-pick footage without paying for the AI plan again.</small>
                     <label>AI Provider:</label>
                     <select id="ai-provider">
-                        <option value="ollama">Ollama (Free, Local)</option>
-                        <option value="deepseek">DeepSeek (Cheap)</option>
-                        <option value="qwen">Qwen / Alibaba (Cheap)</option>
-                        <option value="openai">OpenAI GPT</option>
-                        <option value="claude">Claude API</option>
-                        <option value="nvidia">NVIDIA (Qwen 3.5)</option>
-                        <option value="groq">Groq (Ultra-Fast)</option>
-                        <option value="gemini">Google Gemini</option>
+                        <option value="bedrock" selected>AWS Bedrock (DeepSeek V3.2 + Sonnet/Haiku)</option>
+                        <option value="bedrock-ailink">AWS Bedrock + GPT-5.5 (AiLink) — replaces Sonnet</option>
+                        <option value="bedrock-aplink">AWS Bedrock + Claude Opus 4.6 (APlink) — replaces Sonnet</option>
+                        <option value="bedrock-azure">AWS Bedrock + Claude Sonnet 4.6 (Azure) — replaces Sonnet</option>
+                        <option value="bedrock-azure-grok">AWS Bedrock + Grok 4.3 (Azure) — replaces Sonnet</option>
                     </select>
-                    <div id="ollama-model-row" style="margin-top:6px; display:none;">
-                        <label>Ollama Model:</label>
-                        <select id="ollama-model">
-                            <option value="gemma3:12b">Gemma3 12B (Best, 8GB)</option>
-                            <option value="gemma3:4b">Gemma3 4B (Light, 3GB)</option>
-                            <option value="llama3.2:latest">Llama 3.2 (Fast, 2GB)</option>
-                        </select>
-                        <label style="margin-top:4px">Vision Model:</label>
-                        <select id="ollama-vision-model">
-                            <option value="llava">LLaVA (Standard, 4.7GB)</option>
-                            <option value="moondream">Moondream (Light, 1.7GB)</option>
-                        </select>
-                    </div>
+                    <small class="ai-instructions-hint">Text: Bedrock only, or send the Sonnet-tier tasks (Visual Planner, Director scene-split, effects/icon/transition directors) to AiLink, APlink, Azure Claude, or Azure Grok. DeepSeek + utility tasks always stay on Bedrock, which is also the automatic fallback. Vision: DashScope Qwen free-quota pool first, Bedrock Qwen-VL/Claude/Nova fallback.</small>
                     <label style="margin-top:8px">Video Title:</label>
                     <input type="text" id="video-title" placeholder="e.g., How Monolithic Domes Are Built" style="width:100%;padding:6px 8px;border:1px solid #555;border-radius:4px;background:#2a2a2a;color:#eee;font-size:13px">
                     <small class="ai-instructions-hint">Guides AI niche detection, keyword generation &amp; visual planning</small>
@@ -139,11 +143,11 @@
                         <option value="medium">Medium</option>
                         <option value="high">High (best quality, slowest)</option>
                     </select>
-                    <small class="ai-instructions-hint">Deeper reasoning for AI Director &amp; Visual Planner. Works with Gemini, Qwen, DeepSeek.</small>
+                    <small class="ai-instructions-hint">Deeper reasoning for AI Director &amp; Visual Planner (via Bedrock Sonnet/DeepSeek).</small>
 
-                    <label style="margin-top:8px">AI Instructions:</label>
-                    <textarea id="ai-instructions" rows="3" placeholder="e.g., Use charts for statistics, cinematic style, prefer kinetic text for quotes..."></textarea>
-                    <small class="ai-instructions-hint">Guide how AI picks footage, graphics &amp; effects</small>
+                    <label style="margin-top:8px">AI Instructions <span style="opacity:0.6;font-weight:normal">(steers the whole pipeline)</span>:</label>
+                    <textarea id="ai-instructions" rows="3" placeholder="Plain-English rules for THIS video — they override the defaults everywhere. e.g. &quot;95% footage, almost no templates&quot; · &quot;no text cards at all&quot; · &quot;keep it under 10 minutes&quot; · &quot;cinematic, no glitchy effects&quot; · &quot;use maps heavily early on&quot;"></textarea>
+                    <small class="ai-instructions-hint">Sent to every decision brain — Director, Visual Planner, templates, motion graphics, effects. Highest priority: overrides the system defaults.</small>
                 </div>
 
                 <div class="panel-section">
@@ -163,6 +167,68 @@
                         <option value="listicle">Listicle</option>
                     </select>
                     <small style="display:block; margin-top:4px; color:#888">Affects pacing and transition style</small>
+
+                    <label style="margin-top:12px">Production Mode:</label>
+                    <select id="build-production-mode">
+                        <option value="faceless" selected>🎞️ Faceless (B-roll only)</option>
+                        <option value="talkingHead">🧑‍💼 Talking Head (presenter)</option>
+                    </select>
+                    <small style="display:block; margin-top:4px; color:#888">Faceless = normal B-roll video. Talking Head = a recurring presenter appears at a few key beats (documentary-style inserts); everything else stays B-roll. Static image now, animated avatar later.</small>
+                    <div id="presenter-image-row" style="display:none;margin-top:8px">
+                        <label>Presenter Image:</label>
+                        <div style="display:flex;gap:6px;align-items:center">
+                            <input id="presenter-image-path" type="text" readonly placeholder="Using built-in placeholder" style="flex:1;font-size:11px;padding:4px 6px;background:#1a1a1a;color:#ccc;border:1px solid #333;border-radius:4px" />
+                            <button id="btn-pick-presenter" class="btn-small" style="padding:4px 10px;font-size:11px;background:#1a3a2a;color:#8fc;border:1px solid #2a5a4a;border-radius:4px;cursor:pointer;font-weight:600;" title="Choose the presenter's photo (a clear, front-facing face works best)">📷 Browse</button>
+                            <button id="btn-clear-presenter" class="btn-small" style="padding:4px 8px;font-size:11px;background:#2a1a1a;color:#f88;border:1px solid #5a2a2a;border-radius:4px;cursor:pointer;" title="Clear (use the built-in placeholder)">✕</button>
+                        </div>
+                        <small style="display:block; margin-top:4px; color:#888">A person photo used as the on-camera presenter. Leave empty to use the built-in placeholder.</small>
+                        <div id="kling-avatar-row" style="margin-top:10px;padding:8px;background:#141414;border:1px solid #2a2a2a;border-radius:6px">
+                            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:600;margin:0">
+                                <input id="kling-avatar-enabled" type="checkbox" style="width:auto" />
+                                🎤 Animate presenter with Kling AI (lip-synced avatar)
+                            </label>
+                            <small style="display:block; margin-top:4px; color:#c99">Uses your Kling web credits (~20 per presenter clip). OFF = static presenter photo. Run <code>npm run kling-cookies</code> once to log in.</small>
+                            <div id="kling-avatar-opts" style="display:none;margin-top:8px">
+                                <label>Avatar Quality:</label>
+                                <select id="kling-resolution">
+                                    <option value="1080p" selected>1080p — sharper (more credits)</option>
+                                    <option value="720p">720p — cheaper</option>
+                                </select>
+                                <label style="margin-top:8px">Delivery Prompt (optional):</label>
+                                <input id="kling-avatar-prompt" type="text" placeholder="e.g. confident calm delivery, subtle gestures" style="width:100%;font-size:11px;padding:4px 6px;background:#1a1a1a;color:#ccc;border:1px solid #333;border-radius:4px" />
+                                <small style="display:block; margin-top:4px; color:#888">Optional style direction for HOW the presenter delivers (tone, energy, gestures). Kling layers it over your narration audio.</small>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div id="veo-ai-video-row" style="margin-top:12px;padding:8px;background:#141414;border:1px solid #2a2a2a;border-radius:6px">
+                        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:600;margin:0">
+                            <input id="veo-ai-video-enabled" type="checkbox" style="width:auto" />
+                            🎬 AI Video — generate select scenes
+                        </label>
+                        <small style="display:block; margin-top:4px; color:#c99">Generates B-roll with an AI video model instead of downloading it. OFF = normal stock/YouTube footage.</small>
+                        <div id="veo-ai-video-opts" style="display:none;margin-top:8px">
+                            <label>Generator:</label>
+                            <select id="veo-backend">
+                                <option value="kling" selected>Kling (browser — uses your credits, no API key)</option>
+                                <option value="veo-fal">Veo 3.1 via fal.ai (needs API key)</option>
+                                <option value="veo-gemini">Veo 3.1 via Google Gemini (needs API key)</option>
+                            </select>
+                            <small id="veo-backend-note" style="display:block; margin-top:4px; color:#888">Kling drives your logged-in web account (run <code>npm run kling-cookies</code> once). Standard 5s ≈ 10 credits; failed generations still cost credits. Veo options bill real money and need a <code>VEO_API_KEY</code> in <code>.env</code>.</small>
+                            <label style="margin-top:8px">Where to use AI video:</label>
+                            <select id="veo-scope">
+                                <option value="directives" selected>Only when I ask (per-scene orders)</option>
+                                <option value="hero">Key / hook scenes (up to 3)</option>
+                                <option value="all">All B-roll scenes (expensive!)</option>
+                            </select>
+                            <small style="display:block; margin-top:4px; color:#888">"Only when I ask" costs nothing unless your AI Instructions request AI video for a scene (e.g. "generate scene 5 with AI video").</small>
+                            <label style="margin-top:8px">Resolution:</label>
+                            <select id="veo-resolution">
+                                <option value="720p" selected>720p — cheaper / fewer credits</option>
+                                <option value="1080p">1080p — sharper (costs more)</option>
+                            </select>
+                        </div>
+                    </div>
 
                     <label style="margin-top:12px">Niche Preset:</label>
                     <select id="build-niche">
@@ -201,6 +267,9 @@
                         <option value="modern">⚡ Modern / Vibrant</option>
                         <option value="minimal">🌿 Minimal / Organic</option>
                         <option value="standard">⚪ Standard / Clean</option>
+                        <option value="warm-editorial">🍂 Warm Editorial / Paper</option>
+                        <option value="luxury">👑 Luxury / Gold</option>
+                        <option value="nature">🌲 Nature / Forest</option>
                     </select>
                     <small style="display:block; margin-top:4px; color:#888">Controls background, colors, MG style, fonts</small>
 
@@ -213,6 +282,15 @@
                         <option value="geopolitical">🗺️ Geopolitical — solid color-coded political basemap</option>
                     </select>
                     <small style="display:block; margin-top:4px; color:#888">Visual overlay style for map scenes (polygons, route, pins, labels, basemap filter)</small>
+
+                    <label style="margin-top:12px">Vision Backend (image scoring):</label>
+                    <select id="build-vision-backend">
+                        <option value="aws">🟦 AWS GPU box — auto-starts during build</option>
+                        <option value="lightning">🟨 Lightning.ai — auto-starts during build (or manual)</option>
+                        <option value="bedrock">☁️ AWS Bedrock — always on, no GPU box</option>
+                    </select>
+                    <small style="display:block; margin-top:4px; color:#888">Where B-roll images get scored by the vision model. <b>AWS</b> &amp; <b>Lightning</b> are both woken automatically when the build needs vision and stop themselves when idle (Lightning needs <code>LIGHTNING_API_KEY</code> set, else it's manual). <b>Bedrock</b> has no box to manage.</small>
+                    <button id="btn-manage-lightning" class="btn-small" style="margin-top:6px;padding:5px 12px;font-size:11px;background:#3a3416;color:#fbbf24;border:1px solid #f59e0b;border-radius:4px;cursor:pointer;font-weight:600;" title="Add Lightning accounts and manage their free monthly credit (rotation pool)">🟨 Manage Lightning accounts</button>
 
                     <label style="margin-top:12px">Language:</label>
                     <select id="build-language">
@@ -391,27 +469,24 @@
                     <small style="display:block; margin-top:4px; color:#888">Soft shadow strength for all overlay MGs (0=off, 1=strong)</small>
                 </div>
 
-                <div class="panel-section">
-                    <h3>🎬 Footage Sources</h3>
-                    <label class="source-toggle" style="margin-bottom:8px;" title="Deep clip analysis using Qwen Omni — sends 8 frames per clip for holistic video understanding (watermarks, motion, relevance)">
-                        <input type="checkbox" id="clip-analyzer-toggle" checked> <strong>Clip Analyzer</strong> <small style="color:#888">(Omni multimodal)</small>
-                    </label>
-                    <div style="margin-bottom:8px;display:flex;align-items:center;gap:6px;">
-                        <button id="reset-qwen-pool-btn" style="padding:2px 8px;font-size:11px;background:#2a2a3a;color:#ccc;border:1px solid #444;border-radius:4px;cursor:pointer;" title="Reset exhausted Qwen VL/Omni model pool (use after changing API key)">🔄 Reset Qwen Pool</button>
-                        <span id="qwen-pool-status" style="font-size:11px;color:#888;"></span>
-                    </div>
-                    <div class="source-toggles">
-                        <label class="source-toggle"><input type="checkbox" id="src-pexels" checked> Pexels</label>
-                        <label class="source-toggle"><input type="checkbox" id="src-pixabay" checked> Pixabay</label>
-                        <label class="source-toggle"><input type="checkbox" id="src-youtube"> YouTube (yt-dlp)</label>
-                        <label class="source-toggle"><input type="checkbox" id="src-telegram" checked> Telegram (yt-dlp)</label>
-                        <label class="source-toggle"><input type="checkbox" id="src-vk-video" checked> VK Video</label>
-                        <label class="source-toggle"><input type="checkbox" id="src-reddit" checked> Reddit</label>
-                        <label class="source-toggle"><input type="checkbox" id="src-unsplash" checked> Unsplash</label>
-                        <label class="source-toggle"><input type="checkbox" id="src-google-cse"> Google CSE</label>
-                        <label class="source-toggle"><input type="checkbox" id="src-bing"> Bing</label>
-                        <label class="source-toggle"><input type="checkbox" id="src-duckduckgo" checked> DuckDuckGo</label>
-                        <label class="source-toggle"><input type="checkbox" id="src-google-scrape" checked> Google Images</label>
+                <div class="panel-section footage-resource-compact">
+                    <h3>Resource Control</h3>
+                    <p id="footage-resource-summary" class="footage-resource-summary">Resources ready.</p>
+                    <button id="open-footage-resources-btn" class="footage-resource-open-btn" title="Open providers, API keys, account slots, vision health, and Qwen controls in a full window">Open Resource Center</button>
+
+                    <div id="footage-resource-state" class="hidden">
+                        <label class="source-toggle" title="Deep clip analysis using Qwen Omni — sends 8 frames per clip for holistic video understanding (watermarks, motion, relevance)">
+                            <input type="checkbox" id="clip-analyzer-toggle" checked> <strong>Clip Analyzer</strong> <small style="color:#888">(Omni multimodal)</small>
+                        </label>
+                        <div class="source-toggles">
+                            <label class="source-toggle" title="Suspended until a subscription is available."><input type="checkbox" id="src-storyblocks"> Storyblocks (suspended)</label>
+                            <label class="source-toggle" title="Free stock video/image API. Requires PEXELS_API_KEY in .env."><input type="checkbox" id="src-pexels" checked> Pexels</label>
+                            <label class="source-toggle" title="Free stock video/image API. Requires PIXABAY_API_KEY in .env."><input type="checkbox" id="src-pixabay" checked> Pixabay</label>
+                            <label class="source-toggle"><input type="checkbox" id="src-youtube" checked> YouTube (yt-dlp)</label>
+                            <label class="source-toggle"><input type="checkbox" id="src-reddit" checked> Reddit</label>
+                            <label class="source-toggle" title="Bing Image Search — used for web-image scenes (reference stills, diagrams, etc.)"><input type="checkbox" id="src-bing" checked> Bing Images</label>
+                            <label class="source-toggle" title="Brave Search API image search"><input type="checkbox" id="src-brave" checked> Brave Images</label>
+                        </div>
                     </div>
                 </div>
 
@@ -515,6 +590,9 @@
                 <button id="btn-generate" class="btn btn-large btn-primary" disabled>
                     🚀 Generate Video
                 </button>
+                <button id="btn-repeat-step" class="btn btn-large" disabled style="margin-top:8px">
+                    Repeat Selected Step
+                </button>
             </aside>
 
             <!-- Left Resize Handle -->
@@ -572,6 +650,7 @@
                             <button id="btn-fullscreen" class="control-btn">⛶</button>
                         </div>
                     </div>
+                    <iframe id="hyperframes-preview-frame" class="hyperframes-preview-frame hidden" title="HyperFrames preview"></iframe>
                     <audio id="preview-audio" class="hidden"></audio>
                 </div>
                 <!-- Preview zoom toolbar -->
@@ -600,8 +679,46 @@
                             <button id="btn-cancel" class="btn-cancel" title="Cancel">Cancel</button>
                         </div>
                     </div>
+
+                    <!-- Build Log panel — clean, phase-grouped, per-scene status -->
+                    <div id="build-log" class="build-log hidden">
+                        <div class="build-log-head">
+                            <span class="build-log-title">📋 Build Log</span>
+                            <button id="build-log-toggle" class="build-log-toggle" title="Collapse / expand">▾</button>
+                        </div>
+                        <div id="build-log-body" class="build-log-body"></div>
+                    </div>
                 </div>
             </main>
+
+            <style>
+            .build-log { margin-top: 10px; border: 1px solid var(--border, #2a2a3a); border-radius: 8px;
+                background: rgba(0,0,0,0.25); overflow: hidden; font-size: 12px; }
+            .build-log.collapsed .build-log-body { display: none; }
+            .build-log-head { display: flex; align-items: center; justify-content: space-between;
+                padding: 6px 10px; background: rgba(255,255,255,0.04); cursor: pointer; user-select: none; }
+            .build-log-title { font-weight: 600; color: #cbd5e1; }
+            .build-log-toggle { background: none; border: none; color: #94a3b8; cursor: pointer; font-size: 13px; }
+            .build-log-body { max-height: 260px; overflow-y: auto; padding: 4px 0; }
+            .bl-phase { border-top: 1px solid rgba(255,255,255,0.05); }
+            .bl-phase:first-child { border-top: none; }
+            .bl-phase-head { display: flex; align-items: center; gap: 8px; padding: 5px 10px;
+                font-weight: 600; color: #e2e8f0; }
+            .bl-phase-summary { margin-left: auto; font-weight: 400; color: #94a3b8; font-size: 11px; }
+            .bl-rows { padding: 0 0 4px 0; }
+            .bl-row { display: flex; align-items: flex-start; gap: 7px; padding: 2px 10px 2px 26px;
+                color: #cbd5e1; line-height: 1.5; }
+            .bl-row.has-detail { cursor: pointer; }
+            .bl-row.has-detail:hover { background: rgba(255,255,255,0.04); }
+            .bl-icon { width: 14px; text-align: center; flex-shrink: 0; }
+            .bl-msg { flex: 1; }
+            .bl-scene-id { color: #64748b; min-width: 30px; }
+            .bl-detail { display: none; padding: 2px 10px 6px 47px; color: #8b9bb4;
+                font-size: 11px; white-space: pre-wrap; }
+            .bl-row.open + .bl-detail { display: block; }
+            .bl-ok { color: #4ade80; } .bl-fail { color: #f87171; } .bl-warn { color: #fbbf24; }
+            .bl-timeout { color: #fb923c; } .bl-start { color: #60a5fa; } .bl-info { color: #94a3b8; }
+            </style>
 
             <!-- Right Resize Handle -->
             <div class="resize-handle resize-handle-right" id="resize-right"></div>
@@ -1154,7 +1271,7 @@
                             <div class="property-row">
                                 <label>Background</label>
                                 <select id="tpl-background" class="property-select">
-                                    <option value="">None (Transparent)</option>
+                                    <option value="none">None (Transparent)</option>
                                     <option value="solid-black">Solid Black</option>
                                     <option value="solid-dark">Solid Dark</option>
                                     <option value="scrim-light">Scrim Light</option>
@@ -1271,6 +1388,47 @@
     <script src="js/compositor/Compositor.js"></script>
     <script src="js/compositor/VideoFrameSource.js"></script>
     <script src="js/compositor/ExportPipeline.js"></script>
+
+    <!-- Lightning account pool manager (no-code) -->
+    <div id="lightning-accounts-modal" style="display:none;position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,0.6);align-items:center;justify-content:center;">
+      <div style="background:#16131f;border:1px solid #4a3a5a;border-radius:10px;width:680px;max-width:94vw;max-height:88vh;overflow:auto;box-shadow:0 12px 48px rgba(0,0,0,0.5);">
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid #2e2640;">
+          <div style="font-size:15px;font-weight:700;color:#fbbf24;">🟨 Lightning Vision Accounts</div>
+          <button id="lightning-modal-close" style="background:none;border:none;color:#aaa;font-size:20px;cursor:pointer;line-height:1;">×</button>
+        </div>
+        <div style="padding:14px 18px;">
+          <div style="font-size:11px;color:#999;margin-bottom:10px;line-height:1.5;">
+            Each Lightning account gives ~$15/month free GPU credit (~18 usable hours). Builds rotate through these accounts; when one runs low it switches to the next, and falls back to Bedrock if all are spent. When an account's credit refreshes (monthly), click <b>Reset</b> to put it back in play.
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;padding:8px 10px;background:#1a1726;border:1px solid #2e2640;border-radius:6px;">
+            <label style="font-size:12px;color:#ddd;font-weight:600;white-space:nowrap;">⚡ Build uses:</label>
+            <select id="lightning-active-account" style="flex:1;padding:5px 8px;font-size:12px;background:#0e0c16;color:#eee;border:1px solid #3a3450;border-radius:4px;">
+              <option value="auto">🔄 Auto-rotate (recommended)</option>
+            </select>
+          </div>
+          <div id="lightning-accounts-list" style="display:flex;flex-direction:column;gap:8px;margin-bottom:16px;"></div>
+
+          <div style="border-top:1px solid #2e2640;padding-top:14px;">
+            <div style="font-size:13px;font-weight:600;color:#ddd;margin-bottom:8px;">➕ Add an account</div>
+            <div style="font-size:11px;color:#888;margin-bottom:10px;line-height:1.5;">
+              From lightning.ai → <b>Settings → Keys → Programmatic login</b> copy your <b>User ID</b> + <b>API Key</b>. The Studio fields come from your Studio URL: <code>lightning.ai/&lt;user&gt;/&lt;teamspace&gt;/studios/&lt;studio&gt;</code>. (The Studio must already have <code>serve-vision.sh</code> + vLLM set up.)
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+              <label style="font-size:11px;color:#bbb;">Label (any name)<input id="la-label" type="text" placeholder="account 2" style="width:100%"></label>
+              <label style="font-size:11px;color:#bbb;">User ID<input id="la-userId" type="text" placeholder="xxxxxxxx-xxxx-..." style="width:100%"></label>
+              <label style="font-size:11px;color:#bbb;">API Key<input id="la-apiKey" type="text" placeholder="xxxxxxxx-xxxx-..." style="width:100%"></label>
+              <label style="font-size:11px;color:#bbb;">Studio name<input id="la-studioName" type="text" placeholder="my-first-one" style="width:100%"></label>
+              <label style="font-size:11px;color:#bbb;">Teamspace<input id="la-teamspace" type="text" placeholder="vision-model" style="width:100%"></label>
+              <label style="font-size:11px;color:#bbb;">Username<input id="la-user" type="text" placeholder="your-username" style="width:100%"></label>
+              <label style="font-size:11px;color:#bbb;">Machine<input id="la-machine" type="text" value="L4" style="width:100%"></label>
+              <label style="font-size:11px;color:#bbb;">Budget (GPU hours)<input id="la-budget" type="number" value="18" min="1" step="1" style="width:100%"></label>
+            </div>
+            <div id="lightning-add-error" style="display:none;color:#f87171;font-size:11px;margin-top:8px;"></div>
+            <button id="lightning-add-btn" style="margin-top:10px;padding:7px 16px;font-size:12px;background:#f59e0b;color:#1a1408;border:none;border-radius:5px;cursor:pointer;font-weight:700;">Add account</button>
+          </div>
+        </div>
+      </div>
+    </div>
 
     <script src="js/app.js"></script>
 </body>

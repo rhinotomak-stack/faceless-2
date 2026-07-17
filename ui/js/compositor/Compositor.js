@@ -225,9 +225,12 @@ class Compositor {
         // Preload video/image elements for all non-MG scenes
         const mediaScenes = this.sceneGraph.scenes.filter(s => !s.isMGScene && s.mediaType !== 'motion-graphic');
         await this._preloadMedia(mediaScenes);
+        const templateMediaScenes = this.sceneGraph.scenes.filter(s => s.isMGScene && s.templateType && s.templateMediaFile);
+        const templateMediaLoaded = await this.mgRenderer.preloadTemplateMedia(templateMediaScenes, this._mediaFileResolver);
 
         console.log('[Compositor] Plan loaded:', this.sceneGraph.totalFrames, 'frames,',
-            mediaScenes.length, 'media scenes,', this.sceneGraph.motionGraphics.length, 'MG overlays');
+            mediaScenes.length, 'media scenes,', templateMediaLoaded, 'template media,',
+            this.sceneGraph.motionGraphics.length, 'MG overlays');
     }
 
     /**
@@ -708,6 +711,22 @@ class Compositor {
             // Apply position offset (posX/posY are percentages)
             offsetX = (scene.posX || 0) / 100;
             offsetY = (scene.posY || 0) / 100;
+
+            // Subject-anchored crop (preview parity with the HyperFrames render): if the
+            // framing worker found a subject focus and there's no manual posX/Y nudge, shift
+            // the cover crop so the face/subject stays in frame instead of centering+cutting.
+            // Shader: texture point at screen-center = 0.5 - offset; textures aren't Y-flipped
+            // (uv.y=0 = screen-bottom), so offsetX = 0.5 - focusX, offsetY = focusY - 0.5.
+            // Clamped to the crop overflow (±0.5·(1 - 1/scale)) so no black edges appear.
+            if ((scene.focusX != null || scene.focusY != null)
+                && Math.abs(offsetX) < 1e-6 && Math.abs(offsetY) < 1e-6) {
+                const fx = Number.isFinite(Number(scene.focusX)) ? Number(scene.focusX) : 0.5;
+                const fy = Number.isFinite(Number(scene.focusY)) ? Number(scene.focusY) : 0.5;
+                const maxX = Math.max(0, 0.5 * (1 - 1 / scaleX));
+                const maxY = Math.max(0, 0.5 * (1 - 1 / scaleY));
+                offsetX = Math.max(-maxX, Math.min(maxX, 0.5 - fx));
+                offsetY = Math.max(-maxY, Math.min(maxY, fy - 0.5));
+            }
 
             // Ken Burns animation for images (skip compositor overlays — they have slide animation)
             if (scene.mediaType === 'image' && scene.kenBurnsEnabled !== false && !scene._compositorDirective) {

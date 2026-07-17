@@ -412,6 +412,7 @@ const state = {
     activeSceneIndices: [], // Active media scene indices (non-overlay, non-MG)
     activeOverlaySceneIndices: [], // Active overlay scene indices
     _mediaUrlCache: {}, // Cache: sceneIndex+ext → mediaUrl (avoids repeated IPC calls)
+    _assetVersions: {}, // sceneIndex → version token; bumped after a Retry so the swapped file's URL changes (cache-bust)
     _trackActiveEl: { '1': 'a', '2': 'a', '3': 'a' }, // Double-buffer: which element ('a' or 'b') is active per track
     _trackSwapPending: { '1': false, '2': false, '3': false }, // Per-track: deferred swap in progress
     _trackLastHardSyncMs: { '1': 0, '2': 0, '3': 0 }, // Last forced seek time per track (prevents seek thrash)
@@ -459,6 +460,7 @@ const state = {
     sfxEnabled: true,
     sfxVolume: 0.35,
     _sfxAudioPool: [],
+    sfxDesignedByWorker: false, // true when sfxClips were hydrated from an AI-designed plan
     // Motion Graphics system - AI-placed text overlays
     motionGraphics: [],
     mgEnabled: true,
@@ -508,6 +510,16 @@ const state = {
     // WebGL2 Compositor Engine state
     compositor: null,           // Compositor instance
     compositorActive: false,    // Whether compositor preview is active
+    // HyperFrames preview state (uses the same generated HTML as final render)
+    hyperframesPreview: {
+        active: false,
+        loading: false,
+        projectDir: null,
+        indexPath: null,
+        signature: '',
+        refreshTimer: null,
+        frameReady: false,
+    },
 };
 
 const TRACK_HEADER_WIDTH = 100;
@@ -560,7 +572,12 @@ const elements = {
     btnRender: document.getElementById('btn-render'),
     btnQAStudio: document.getElementById('btn-qa-studio'),
     btnQAChat:   document.getElementById('btn-qa-chat'),
+    btnHyperframesLab: document.getElementById('btn-hyperframes-lab'),
+    btnScoutLab: document.getElementById('btn-scout-lab'),
+    openFootageResources: document.getElementById('open-footage-resources-btn'),
+    footageResourceSummary: document.getElementById('footage-resource-summary'),
     btnGenerate: document.getElementById('btn-generate'),
+    btnRepeatStep: document.getElementById('btn-repeat-step'),
     btnRemoveAudio: document.getElementById('btn-remove-audio'),
     dropZone: document.getElementById('drop-zone'),
     fileInput: document.getElementById('file-input'),
@@ -579,6 +596,23 @@ const elements = {
     buildNiche: document.getElementById('build-niche'),
     buildTheme: document.getElementById('build-theme'),
     buildMapStylePack: document.getElementById('build-map-style-pack'),
+    buildProductionMode: document.getElementById('build-production-mode'),
+    presenterImageRow: document.getElementById('presenter-image-row'),
+    presenterImagePath: document.getElementById('presenter-image-path'),
+    btnPickPresenter: document.getElementById('btn-pick-presenter'),
+    btnClearPresenter: document.getElementById('btn-clear-presenter'),
+    klingAvatarRow: document.getElementById('kling-avatar-row'),
+    klingAvatarEnabled: document.getElementById('kling-avatar-enabled'),
+    klingAvatarOpts: document.getElementById('kling-avatar-opts'),
+    klingResolution: document.getElementById('kling-resolution'),
+    klingAvatarPrompt: document.getElementById('kling-avatar-prompt'),
+    veoAiVideoRow: document.getElementById('veo-ai-video-row'),
+    veoAiVideoEnabled: document.getElementById('veo-ai-video-enabled'),
+    veoAiVideoOpts: document.getElementById('veo-ai-video-opts'),
+    veoScope: document.getElementById('veo-scope'),
+    veoResolution: document.getElementById('veo-resolution'),
+    veoBackend: document.getElementById('veo-backend'),
+    buildVisionBackend: document.getElementById('build-vision-backend'),
     buildLanguage: document.getElementById('build-language'),
     buildStyleProfile: document.getElementById('build-style-profile'),
     btnLearnStyle: document.getElementById('btn-learn-style'),
@@ -628,20 +662,20 @@ const elements = {
     clipAnalyzerToggle: document.getElementById('clip-analyzer-toggle'),
     // Resume build toggle (skip completed steps + reuse cached scene media)
     buildResumeToggle: document.getElementById('build-resume-toggle'),
+    fastMediaToggle: document.getElementById('fast-media-toggle'),
+    repeatFromStep: document.getElementById('repeat-from-step'),
+    forceFreshFootage: document.getElementById('force-fresh-footage-toggle'),
     // Footage source toggles
+    srcStoryblocks: document.getElementById('src-storyblocks'),
     srcPexels: document.getElementById('src-pexels'),
     srcPixabay: document.getElementById('src-pixabay'),
     srcYouTube: document.getElementById('src-youtube'),
-    srcTelegram: document.getElementById('src-telegram'),
-    srcVKVideo: document.getElementById('src-vk-video'),
     srcReddit: document.getElementById('src-reddit'),
-    srcUnsplash: document.getElementById('src-unsplash'),
-    srcGoogleCSE: document.getElementById('src-google-cse'),
     srcBing: document.getElementById('src-bing'),
-    srcDuckDuckGo: document.getElementById('src-duckduckgo'),
-    srcGoogleScrape: document.getElementById('src-google-scrape'),
+    srcBrave: document.getElementById('src-brave'),
     transitionStyle: document.getElementById('transition-style'),
     previewPlaceholder: document.getElementById('preview-placeholder'),
+    hyperframesPreviewFrame: document.getElementById('hyperframes-preview-frame'),
     // Multi-track video system
     videoContainer: document.getElementById('video-transition-container'),
     videoTrack1: document.getElementById('video-track-1'),
@@ -970,6 +1004,8 @@ async function init() {
         if (!video) return;
         const label = i < 3 ? `Track ${i + 1}A` : `Track ${i - 2}B`;
         video.addEventListener('error', (e) => {
+            const rawSrc = video.getAttribute('src') || '';
+            if (!rawSrc && !video._loadedUrl) return;
             const err = video.error;
             console.error(`[Video ${label}] Error: code=${err?.code} message=${err?.message} src=${video.src?.substring(video.src.lastIndexOf('/') + 1)}`);
         });
@@ -1014,6 +1050,7 @@ async function init() {
     setupPreviewZoom();
     setupNotifCenter();
     loadSettings();
+    syncFootageResourcesToMainProcess();
     // Push initial project context to Style Studio agent so it knows the video
     // title / niche / instructions immediately, without waiting for an edit.
     try {
@@ -1065,6 +1102,9 @@ async function init() {
     // Initialize WebGL2 Compositor Engine
     initCompositor();
 
+    // Timeline scene right-click menu (retry footage / CEO editor)
+    initSceneContextMenu();
+
     console.log('🎬 YTA Empire WEBGL UI Ready');
 }
 
@@ -1080,9 +1120,24 @@ function setupEventListeners() {
     elements.fileInput.addEventListener('change', (e) => { if (e.target.files.length > 0) handleFileSelect(e.target.files[0]); });
     elements.btnRemoveAudio.addEventListener('click', removeAudio);
     elements.btnGenerate.addEventListener('click', generateVideo);
+    if (elements.btnRepeatStep) elements.btnRepeatStep.addEventListener('click', () => generateVideo({ repeatStep: true }));
+    // Build Log collapse/expand
+    const _blHead = document.querySelector('#build-log .build-log-head');
+    if (_blHead) _blHead.addEventListener('click', () => {
+        const panel = document.getElementById('build-log');
+        const tog = document.getElementById('build-log-toggle');
+        if (!panel) return;
+        panel.classList.toggle('collapsed');
+        if (tog) tog.textContent = panel.classList.contains('collapsed') ? '▸' : '▾';
+    });
     elements.btnRender.addEventListener('click', renderVideo);
     if (elements.btnQAStudio) elements.btnQAStudio.addEventListener('click', () => window.electronAPI.openQAStudio());
     if (elements.btnQAChat)   elements.btnQAChat.addEventListener('click',   () => window.electronAPI.openQAChat());
+    if (elements.btnHyperframesLab) elements.btnHyperframesLab.addEventListener('click', () => window.electronAPI.openHyperframesLab());
+    if (elements.btnScoutLab) elements.btnScoutLab.addEventListener('click', () => window.electronAPI.openScoutLab());
+    if (elements.openFootageResources) {
+        elements.openFootageResources.addEventListener('click', () => window.electronAPI?.openFootageResources?.());
+    }
     elements.btnCancel.addEventListener('click', cancelProcess);
     elements.btnNew.addEventListener('click', newProject);
     if (elements.btnOpenProject) {
@@ -1104,52 +1159,397 @@ function setupEventListeners() {
         updateSmartAI();
     }
     if (elements.clipAnalyzerToggle) {
-        elements.clipAnalyzerToggle.addEventListener('change', () => saveSettings());
+        elements.clipAnalyzerToggle.addEventListener('change', () => {
+            saveSettings();
+            syncFootageResourcesToMainProcess();
+        });
     }
     if (elements.buildResumeToggle) {
         elements.buildResumeToggle.addEventListener('change', () => saveSettings());
     }
+    if (elements.fastMediaToggle) {
+        elements.fastMediaToggle.addEventListener('change', () => saveSettings());
+    }
+    if (elements.repeatFromStep) {
+        elements.repeatFromStep.addEventListener('change', () => saveSettings());
+    }
+    if (elements.forceFreshFootage) {
+        elements.forceFreshFootage.addEventListener('change', () => saveSettings());
+    }
 
-    // Qwen Pool reset button + status (uses IPC, not direct Node.js)
+    // Vision health dashboard (uses IPC, not direct Node.js)
     const qwenPoolBtn = document.getElementById('reset-qwen-pool-btn');
     const qwenPoolStatus = document.getElementById('qwen-pool-status');
+    const visionHealthSummary = document.getElementById('vision-health-summary');
+    const visionHealthMetrics = document.getElementById('vision-health-metrics');
+    const visionHealthKeys = document.getElementById('vision-health-keys');
+    const visionHealthWarnings = document.getElementById('vision-health-warnings');
+    const visionHealthRefreshBtn = document.getElementById('vision-health-refresh-btn');
+    const visionHealthLiveBtn = document.getElementById('vision-health-live-btn');
+    const visionKeyManagerToggle = document.getElementById('vision-key-manager-toggle');
+    const visionKeyManager = document.getElementById('vision-key-manager');
+    const visionKeyEnvPath = document.getElementById('vision-key-env-path');
+    const visionKeyList = document.getElementById('vision-key-list');
+    const visionKeyAdditions = document.getElementById('vision-key-additions');
+    const visionKeySaveBtn = document.getElementById('vision-key-save-btn');
+    const visionKeyCancelBtn = document.getElementById('vision-key-cancel-btn');
+    const visionKeySaveStatus = document.getElementById('vision-key-save-status');
+    let visionKeyRows = { image: [], omni: [] };
 
-    function _updateQwenPoolStatus() {
-        if (!qwenPoolStatus || !window.electronAPI?.qwenPoolStatus) return;
-        window.electronAPI.qwenPoolStatus().then(status => {
-            if (status.exhausted > 0) {
-                qwenPoolStatus.textContent = `${status.exhausted} model${status.exhausted > 1 ? 's' : ''} exhausted`;
-                qwenPoolStatus.style.color = status.exhausted > 12 ? '#f55' : '#fa0';
-            } else {
-                qwenPoolStatus.textContent = 'all models available';
-                qwenPoolStatus.style.color = '#5a5';
+    const escapeVisionHtml = (value) => String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+
+    const ratioText = (item) => `${Number(item?.available || 0)}/${Number(item?.total || 0)}`;
+    const verifiedText = (item) => Number(item?.verifiedOk || 0) > 0 ? `${Number(item.verifiedOk)} live` : 'not probed';
+
+    function setVisionSummary(text, level) {
+        if (!visionHealthSummary) return;
+        visionHealthSummary.textContent = text;
+        visionHealthSummary.className = `vision-health-summary ${level || ''}`.trim();
+    }
+
+    function renderVisionHealth(status, modeLabel = '') {
+        if (!status) {
+            setVisionSummary('unavailable', 'bad');
+            return;
+        }
+
+        const warnings = status.diagnostics?.warnings || [];
+        const hasImage = Number(status.image?.available || 0) > 0;
+        const hasOmni = Number(status.omniHttp?.available || 0) > 0 || Number(status.omniRealtime?.available || 0) > 0;
+        const level = !hasImage && !hasOmni ? 'bad' : warnings.length ? 'warn' : 'ok';
+        const label = !hasImage && !hasOmni ? 'No Qwen Vision' : warnings.length ? 'Degraded' : 'Healthy';
+        setVisionSummary(modeLabel ? `${label} - ${modeLabel}` : label, level);
+
+        if (visionHealthMetrics) {
+            const healthAge = status.health?.updatedAt
+                ? new Date(status.health.updatedAt).toLocaleString()
+                : 'no live probe';
+            const realtime = status.omniRealtime?.activeInCurrentRuntime ? 'on' : 'off';
+            visionHealthMetrics.innerHTML = [
+                ['Keys', `${Number(status.imageKeys || 0)} VL / ${Number(status.omniKeys || 0)} Omni`],
+                ['Image/VL', `${ratioText(status.image)} (${verifiedText(status.image)})`],
+                ['Omni HTTP', `${ratioText(status.omniHttp)} (${verifiedText(status.omniHttp)})`],
+                ['Realtime', `${ratioText(status.omniRealtime)} (${realtime})`],
+                ['Health Cache', healthAge],
+            ].map(([name, value]) => `
+                <div class="vision-health-metric">
+                    <span>${escapeVisionHtml(name)}</span>
+                    <strong title="${escapeVisionHtml(value)}">${escapeVisionHtml(value)}</strong>
+                </div>
+            `).join('');
+        }
+
+        if (visionHealthKeys) {
+            const imageCards = (status.image?.perKey || []).map(item => `
+                <div class="vision-health-key">
+                    <span>Image ${Number(item.keyIndex || 0)} - ${escapeVisionHtml(item.keyTail || 'unknown')}</span>
+                    <strong>VL ${ratioText(item)}</strong>
+                    <small>${Number(item.verifiedOk || 0)} live verified</small>
+                </div>
+            `);
+            const omniCards = (status.omniHttp?.perKey || []).map(item => {
+                const rt = (status.omniRealtime?.perKey || []).find(k => Number(k.keyIndex) === Number(item.keyIndex));
+                return `
+                    <div class="vision-health-key">
+                        <span>Omni ${Number(item.keyIndex || 0)} - ${escapeVisionHtml(item.keyTail || 'unknown')}</span>
+                        <strong>HTTP ${ratioText(item)}${rt ? ` | RT ${ratioText(rt)}` : ''}</strong>
+                        <small>${Number(item.verifiedOk || 0) + Number(rt?.verifiedOk || 0)} live verified</small>
+                    </div>
+                `;
+            });
+            visionHealthKeys.innerHTML = [...imageCards, ...omniCards].join('') || '<div class="vision-health-warning">No Qwen vision keys loaded.</div>';
+        }
+
+        if (visionHealthWarnings) {
+            const notes = warnings.slice(0, 4);
+            visionHealthWarnings.innerHTML = notes.length
+                ? notes.map(w => `<div class="vision-health-warning">${escapeVisionHtml(w)}</div>`).join('')
+                : '';
+        }
+    }
+
+    function renderVisionKeyRows(data) {
+        const laneDefs = [
+            { id: 'image', title: 'Image/VL Keys', description: 'Used for still-image scoring and frame scoring.', fallback: 'shared fallback' },
+            { id: 'omni', title: 'Omni Multimodal Keys', description: 'Used for clip analyzer and video-frame reasoning.', fallback: 'shared fallback' },
+        ];
+        visionKeyRows = {
+            image: (data?.image?.keys || []).map(key => ({ ...key, remove: false })),
+            omni: (data?.omni?.keys || []).map(key => ({ ...key, remove: false })),
+        };
+        if (visionKeyEnvPath) {
+            visionKeyEnvPath.textContent = data?.envPath || '';
+            visionKeyEnvPath.title = data?.envPath || '';
+        }
+        if (!visionKeyList) return;
+        if (visionKeyAdditions) visionKeyAdditions.style.display = 'none';
+        visionKeyList.innerHTML = laneDefs.map(lane => {
+            const laneData = data?.[lane.id] || {};
+            const rows = visionKeyRows[lane.id] || [];
+            const badge = laneData.explicit
+                ? laneData.envKey
+                : `${laneData.envKey || ''} using ${laneData.fallback || lane.fallback}`;
+            const emptyText = laneData.explicit
+                ? 'No keys in this explicit lane. Add keys below, or remove the env line manually to use shared fallback.'
+                : 'No lane-specific keys found. This lane is using shared fallback; add keys below to split it.';
+            const rowsHtml = rows.length ? rows.map(row => `
+                <div class="vision-key-row" data-key-lane="${lane.id}" data-key-index="${Number(row.index)}">
+                    <div class="vision-key-label">
+                        <span>${lane.id} key ${Number(row.index) + 1} - ${escapeVisionHtml(row.tail || '')}</span>
+                        <strong title="${escapeVisionHtml(row.masked || '')}">${escapeVisionHtml(row.masked || '')}</strong>
+                    </div>
+                    <input class="vision-key-replace" data-key-replace-lane="${lane.id}" data-key-replace-index="${Number(row.index)}" type="password" placeholder="Paste replacement key (optional)">
+                    <button class="vision-key-remove" data-key-remove-lane="${lane.id}" data-key-remove-index="${Number(row.index)}" type="button">Remove</button>
+                </div>
+            `).join('') : `<div class="vision-health-warning">${escapeVisionHtml(emptyText)}</div>`;
+            return `
+                <div class="vision-key-section" data-key-section="${lane.id}">
+                    <div class="vision-key-section-head">
+                        <div>
+                            <strong>${escapeVisionHtml(lane.title)}</strong>
+                            <small>${escapeVisionHtml(lane.description)}</small>
+                        </div>
+                        <span>${escapeVisionHtml(badge)}</span>
+                    </div>
+                    ${rowsHtml}
+                    <textarea class="vision-key-additions" data-key-additions="${lane.id}" rows="2" placeholder="Add ${escapeVisionHtml(lane.title)} here, one per line or comma-separated."></textarea>
+                </div>
+            `;
+        }).join('');
+        visionKeyList.querySelectorAll('[data-key-remove-lane]').forEach(button => {
+            button.addEventListener('click', () => {
+                const lane = button.getAttribute('data-key-remove-lane');
+                const index = Number(button.getAttribute('data-key-remove-index'));
+                const row = (visionKeyRows[lane] || []).find(item => Number(item.index) === index);
+                if (!row) return;
+                row.remove = !row.remove;
+                button.classList.toggle('active', row.remove);
+                button.textContent = row.remove ? 'Undo' : 'Remove';
+            });
+        });
+    }
+
+    async function loadVisionKeys() {
+        if (!window.electronAPI?.qwenVisionKeysStatus) return;
+        try {
+            const result = await window.electronAPI.qwenVisionKeysStatus();
+            if (result?.success) {
+                renderVisionKeyRows(result);
+                if (visionKeySaveStatus) visionKeySaveStatus.textContent = '';
+            } else if (visionKeySaveStatus) {
+                visionKeySaveStatus.textContent = result?.error || 'could not load keys';
+                visionKeySaveStatus.style.color = '#fca5a5';
             }
-        }).catch(() => { qwenPoolStatus.textContent = ''; });
+        } catch (err) {
+            if (visionKeySaveStatus) {
+                visionKeySaveStatus.textContent = err?.message || 'could not load keys';
+                visionKeySaveStatus.style.color = '#fca5a5';
+            }
+        }
+    }
+
+    async function saveVisionKeysAndProbe() {
+        if (!window.electronAPI?.qwenVisionKeysSave) return;
+        const lanes = {};
+        for (const lane of ['image', 'omni']) {
+            lanes[lane] = {
+                rows: (visionKeyRows[lane] || []).map(row => {
+                    const input = visionKeyList?.querySelector(`[data-key-replace-lane="${lane}"][data-key-replace-index="${Number(row.index)}"]`);
+                    return {
+                        index: Number(row.index),
+                        remove: row.remove === true,
+                        replacement: input?.value || ''
+                    };
+                }),
+                additions: visionKeyList?.querySelector(`[data-key-additions="${lane}"]`)?.value || ''
+            };
+        }
+        if (visionKeySaveStatus) {
+            visionKeySaveStatus.textContent = 'saving...';
+            visionKeySaveStatus.style.color = '#fbbf24';
+        }
+        if (visionKeySaveBtn) visionKeySaveBtn.disabled = true;
+        try {
+            const result = await window.electronAPI.qwenVisionKeysSave({ lanes });
+            if (!result?.success) throw new Error(result?.error || 'save failed');
+            renderVisionKeyRows(result);
+            renderVisionHealth(result.status, 'saved');
+            if (visionKeySaveStatus) {
+                const saved = result.saved && typeof result.saved === 'object'
+                    ? `Image ${result.saved.image || 0}, Omni ${result.saved.omni || 0}`
+                    : `${result.saved || 0}`;
+                visionKeySaveStatus.textContent = `saved ${saved}; probing...`;
+                visionKeySaveStatus.style.color = '#86efac';
+            }
+            if (window.electronAPI?.visionHealthLiveCheck) {
+                setVisionSummary('probing new keys...', 'warn');
+                const probe = await window.electronAPI.visionHealthLiveCheck({
+                    lanes: ['image', 'omniHttp'],
+                    imageLimit: 1,
+                    omniLimit: 1,
+                    concurrency: 3,
+                    timeoutMs: 12000
+                });
+                if (probe?.success) {
+                    renderVisionHealth(probe.status, 'keys checked');
+                    if (visionKeySaveStatus) visionKeySaveStatus.textContent = 'saved and checked';
+                } else if (visionKeySaveStatus) {
+                    visionKeySaveStatus.textContent = 'saved; probe failed';
+                    visionKeySaveStatus.style.color = '#fca5a5';
+                }
+            }
+        } catch (err) {
+            if (visionKeySaveStatus) {
+                visionKeySaveStatus.textContent = err?.message || 'save failed';
+                visionKeySaveStatus.style.color = '#fca5a5';
+            }
+        } finally {
+            if (visionKeySaveBtn) visionKeySaveBtn.disabled = false;
+            updateQwenPoolStatus();
+        }
+    }
+
+    async function updateQwenPoolStatus() {
+        if (!qwenPoolStatus || !window.electronAPI?.qwenPoolStatus) return;
+        try {
+            const status = await window.electronAPI.qwenPoolStatus();
+            if (status.exhausted > 0) {
+                qwenPoolStatus.textContent = `${status.exhausted} exhausted`;
+                qwenPoolStatus.style.color = status.exhausted > 12 ? '#fca5a5' : '#fbbf24';
+            } else {
+                qwenPoolStatus.textContent = 'tracking clean';
+                qwenPoolStatus.style.color = '#86efac';
+            }
+        } catch (_) {
+            qwenPoolStatus.textContent = '';
+        }
+    }
+
+    async function refreshVisionHealth(modeLabel = '') {
+        if (!window.electronAPI?.visionHealthStatus) {
+            setVisionSummary('unsupported', 'bad');
+            return;
+        }
+        try {
+            const result = await window.electronAPI.visionHealthStatus();
+            if (result?.success) {
+                renderVisionHealth(result.status, modeLabel);
+            } else {
+                setVisionSummary('status failed', 'bad');
+                if (visionHealthWarnings) {
+                    visionHealthWarnings.innerHTML = `<div class="vision-health-warning">${escapeVisionHtml(result?.error || 'Could not read vision status.')}</div>`;
+                }
+            }
+        } catch (err) {
+            setVisionSummary('status failed', 'bad');
+            if (visionHealthWarnings) {
+                visionHealthWarnings.innerHTML = `<div class="vision-health-warning">${escapeVisionHtml(err?.message || err)}</div>`;
+            }
+        }
+        updateQwenPoolStatus();
+        if (visionKeyManager && !visionKeyManager.classList.contains('hidden')) {
+            loadVisionKeys();
+        }
     }
 
     if (qwenPoolBtn) {
-        qwenPoolBtn.addEventListener('click', () => {
+        qwenPoolBtn.textContent = 'Reset Tracking';
+        qwenPoolBtn.className = 'vision-health-btn danger-soft';
+        qwenPoolBtn.removeAttribute('style');
+        qwenPoolBtn.addEventListener('click', async () => {
             if (!window.electronAPI?.qwenPoolReset) return;
-            window.electronAPI.qwenPoolReset().then(result => {
-                if (result.success) {
-                    qwenPoolStatus.textContent = 'pool reset!';
-                    qwenPoolStatus.style.color = '#5a5';
-                    setTimeout(() => _updateQwenPoolStatus(), 2000);
-                } else {
-                    qwenPoolStatus.textContent = 'reset failed';
-                    qwenPoolStatus.style.color = '#f55';
+            qwenPoolBtn.disabled = true;
+            try {
+                const result = await window.electronAPI.qwenPoolReset();
+                if (qwenPoolStatus) {
+                    qwenPoolStatus.textContent = result?.success ? 'tracking reset' : 'reset failed';
+                    qwenPoolStatus.style.color = result?.success ? '#86efac' : '#fca5a5';
                 }
-            }).catch(() => {
-                qwenPoolStatus.textContent = 'reset failed';
-                qwenPoolStatus.style.color = '#f55';
-            });
+                setTimeout(() => refreshVisionHealth('reset'), 800);
+            } catch (_) {
+                if (qwenPoolStatus) {
+                    qwenPoolStatus.textContent = 'reset failed';
+                    qwenPoolStatus.style.color = '#fca5a5';
+                }
+            } finally {
+                qwenPoolBtn.disabled = false;
+            }
         });
-        _updateQwenPoolStatus();
     }
+
+    if (visionHealthRefreshBtn) {
+        visionHealthRefreshBtn.addEventListener('click', () => refreshVisionHealth('cached'));
+    }
+
+    if (visionKeyManagerToggle && visionKeyManager) {
+        visionKeyManagerToggle.addEventListener('click', async () => {
+            const opening = visionKeyManager.classList.contains('hidden');
+            visionKeyManager.classList.toggle('hidden', !opening);
+            visionKeyManagerToggle.textContent = opening ? 'Hide Keys' : 'Manage Keys';
+            if (opening) await loadVisionKeys();
+        });
+    }
+
+    if (visionKeyCancelBtn && visionKeyManager) {
+        visionKeyCancelBtn.addEventListener('click', () => {
+            visionKeyManager.classList.add('hidden');
+            if (visionKeyManagerToggle) visionKeyManagerToggle.textContent = 'Manage Keys';
+            if (visionKeySaveStatus) visionKeySaveStatus.textContent = '';
+        });
+    }
+
+    if (visionKeySaveBtn) {
+        visionKeySaveBtn.addEventListener('click', saveVisionKeysAndProbe);
+    }
+
+    if (visionHealthLiveBtn) {
+        visionHealthLiveBtn.addEventListener('click', async () => {
+            if (!window.electronAPI?.visionHealthLiveCheck) return;
+            visionHealthLiveBtn.disabled = true;
+            setVisionSummary('probing...', 'warn');
+            try {
+                const result = await window.electronAPI.visionHealthLiveCheck({
+                    lanes: ['image', 'omniHttp'],
+                    imageLimit: 1,
+                    omniLimit: 1,
+                    concurrency: 3,
+                    timeoutMs: 12000
+                });
+                if (result?.success) {
+                    const total = result.probe?.summary?.total || 0;
+                    renderVisionHealth(result.status, `${total} checked`);
+                } else {
+                    setVisionSummary('probe failed', 'bad');
+                    if (visionHealthWarnings) {
+                        visionHealthWarnings.innerHTML = `<div class="vision-health-warning">${escapeVisionHtml(result?.error || 'Live probe failed.')}</div>`;
+                    }
+                }
+            } catch (err) {
+                setVisionSummary('probe failed', 'bad');
+                if (visionHealthWarnings) {
+                    visionHealthWarnings.innerHTML = `<div class="vision-health-warning">${escapeVisionHtml(err?.message || err)}</div>`;
+                }
+            } finally {
+                visionHealthLiveBtn.disabled = false;
+                updateQwenPoolStatus();
+            }
+        });
+    }
+
+    refreshVisionHealth();
     elements.aiProvider.addEventListener('change', () => {
         // Show/hide Ollama model selection
         if (elements.ollamaModelRow) {
             elements.ollamaModelRow.style.display = elements.aiProvider.value === 'ollama' ? 'block' : 'none';
+        }
+        // Apply the brain switch immediately (live for refresh/open, not just builds)
+        if (window.electronAPI?.setAiProvider) {
+            window.electronAPI.setAiProvider(elements.aiProvider.value).catch(() => {});
         }
         saveSettings();
     });
@@ -1185,8 +1585,11 @@ function setupEventListeners() {
         });
     }
     // Footage source toggle listeners
-    ['srcPexels', 'srcPixabay', 'srcYouTube', 'srcTelegram', 'srcVKVideo', 'srcReddit', 'srcUnsplash', 'srcGoogleCSE', 'srcBing', 'srcDuckDuckGo', 'srcGoogleScrape'].forEach(key => {
-        if (elements[key]) elements[key].addEventListener('change', saveSettings);
+    ['srcStoryblocks', 'srcPexels', 'srcPixabay', 'srcYouTube', 'srcReddit', 'srcBing', 'srcBrave'].forEach(key => {
+        if (elements[key]) elements[key].addEventListener('change', () => {
+            saveSettings();
+            syncFootageResourcesToMainProcess();
+        });
     });
 
     // Style Learner — populate dropdown, wire learn dialog
@@ -1216,7 +1619,14 @@ function setupEventListeners() {
     if (elements.sfxEnabled) {
         elements.sfxEnabled.addEventListener('change', () => {
             state.sfxEnabled = elements.sfxEnabled.checked;
-            generateSfxClips();
+            if (!state.sfxEnabled) {
+                state.sfxClips = [];
+            } else if (state.sfxDesignedByWorker && state.videoPlan?.sfxClips?.length) {
+                // Re-enable the AI-designed track instead of rebuilding the floor.
+                hydrateDesignedSfx(state.videoPlan.sfxClips);
+            } else {
+                generateSfxClips();
+            }
             renderTimeline();
             saveSettings();
         });
@@ -1292,6 +1702,282 @@ function setupEventListeners() {
             saveSettings();
         });
     }
+    // Production mode — toggle the presenter picker row + persist. Talking-head adds a
+    // recurring on-camera presenter at a few key beats; faceless is the default B-roll video.
+    if (elements.buildProductionMode) {
+        elements.buildProductionMode.addEventListener('change', () => {
+            _syncPresenterRow();
+            saveSettings();
+        });
+    }
+    // Presenter image picker (talking-head): pick a photo → copy into the project's assets/
+    // (never input/, which wipes narration audio) → remember the path for the build.
+    if (elements.btnPickPresenter) {
+        elements.btnPickPresenter.addEventListener('click', async () => {
+            try {
+                const picked = await window.electronAPI?.selectFile?.({ filters: [{ name: 'Images', extensions: ['jpg', 'jpeg', 'png', 'webp'] }] });
+                if (!picked) return;
+                let finalPath = picked;
+                try {
+                    const copied = await window.electronAPI?.copyPresenterImage?.(picked);
+                    if (copied && copied.success && copied.path) finalPath = copied.path;
+                } catch (_) {}
+                state.presenterImage = finalPath;
+                if (elements.presenterImagePath) elements.presenterImagePath.value = finalPath;
+                saveSettings();
+            } catch (e) {
+                if (typeof showToast === 'function') showToast('Could not set presenter image', 'error');
+            }
+        });
+    }
+    if (elements.btnClearPresenter) {
+        elements.btnClearPresenter.addEventListener('click', () => {
+            state.presenterImage = '';
+            if (elements.presenterImagePath) elements.presenterImagePath.value = '';
+            saveSettings();
+        });
+    }
+    // Kling avatar toggle → show/hide the resolution + prompt options, persist.
+    if (elements.klingAvatarEnabled) {
+        elements.klingAvatarEnabled.addEventListener('change', () => { _syncPresenterRow(); saveSettings(); });
+    }
+    if (elements.klingResolution) elements.klingResolution.addEventListener('change', saveSettings);
+    if (elements.klingAvatarPrompt) elements.klingAvatarPrompt.addEventListener('change', saveSettings);
+    // AI Video (Veo) toggle → show/hide scope+resolution+backend, persist.
+    if (elements.veoAiVideoEnabled) {
+        elements.veoAiVideoEnabled.addEventListener('change', () => { _syncVeoRow(); saveSettings(); });
+    }
+    if (elements.veoScope) elements.veoScope.addEventListener('change', saveSettings);
+    if (elements.veoResolution) elements.veoResolution.addEventListener('change', saveSettings);
+    if (elements.veoBackend) elements.veoBackend.addEventListener('change', saveSettings);
+    _syncVeoRow();
+    _syncPresenterRow();
+    // Vision backend dropdown — persist immediately to .env (main process) so the choice
+    // survives restart AND the live build/retry pick it up, then save UI settings.
+    if (elements.buildVisionBackend) {
+        // Reflect the actual current backend from .env on load (overrides the default option).
+        if (window.electronAPI && electronAPI.getVisionBackend) {
+            electronAPI.getVisionBackend().then((b) => {
+                if (b && [...elements.buildVisionBackend.options].some(o => o.value === b)) {
+                    elements.buildVisionBackend.value = b;
+                }
+            }).catch(() => {});
+        }
+        elements.buildVisionBackend.addEventListener('change', () => {
+            const backend = elements.buildVisionBackend.value;
+            if (window.electronAPI && electronAPI.setVisionBackend) {
+                electronAPI.setVisionBackend(backend).then((r) => {
+                    if (r && r.note) showToast(r.note, 'info');
+                }).catch(() => {});
+            }
+            saveSettings();
+        });
+    }
+    setupLightningAccountsUI();
+}
+
+// ── Lightning account pool manager (no-code) ──────────────────────────────────────────
+// Persisted per-account provisioning/check logs so list re-renders (budget edits, other
+// buttons, reopening the modal) don't wipe an in-progress or just-finished log.
+const _lightningProvLog = {}; // id -> { text }
+function _provBox(id) { return document.querySelector(`[data-provlog="${id}"]`); }
+function _provShow(id) { const c = document.querySelector(`[data-provbox="${id}"]`); if (c) c.style.display = 'block'; }
+function _provReset(id, text) { _lightningProvLog[id] = { text: text || '' }; _provShow(id); const box = _provBox(id); if (box) box.textContent = text || ''; }
+function _provAppend(id, line) {
+    const st = _lightningProvLog[id] || (_lightningProvLog[id] = { text: '' });
+    st.text = (st.text + '\n' + line).split('\n').slice(-16).join('\n').trim();
+    _provShow(id);
+    const box = _provBox(id);
+    if (box) { box.textContent = st.text; box.scrollTop = box.scrollHeight; }
+}
+
+function setupLightningAccountsUI() {
+    const modal = document.getElementById('lightning-accounts-modal');
+    const openBtn = document.getElementById('btn-manage-lightning');
+    const closeBtn = document.getElementById('lightning-modal-close');
+    const addBtn = document.getElementById('lightning-add-btn');
+    if (!modal || !openBtn) return;
+
+    const open = () => { modal.style.display = 'flex'; renderLightningAccounts(); };
+    const close = () => { modal.style.display = 'none'; };
+    openBtn.addEventListener('click', open);
+    if (closeBtn) closeBtn.addEventListener('click', close);
+    modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
+
+    if (addBtn) addBtn.addEventListener('click', async () => {
+        const errEl = document.getElementById('lightning-add-error');
+        if (errEl) errEl.style.display = 'none';
+        const val = (id) => (document.getElementById(id)?.value || '').trim();
+        const account = {
+            label: val('la-label'), userId: val('la-userId'), apiKey: val('la-apiKey'),
+            studioName: val('la-studioName'), teamspace: val('la-teamspace'), user: val('la-user'),
+            machine: val('la-machine') || 'L4', monthlyBudgetHours: Number(val('la-budget')) || 18,
+        };
+        const showErr = (msg) => { if (errEl) { errEl.textContent = msg; errEl.style.display = 'block'; } };
+        if (!account.userId || !account.apiKey || !account.studioName) {
+            showErr('User ID, API Key and Studio name are required.'); return;
+        }
+        const ot = addBtn.textContent;
+        addBtn.disabled = true; addBtn.textContent = 'Verifying account…';
+        try {
+            // Verify the Studio actually resolves BEFORE saving — catches teamspace/username/key
+            // typos (e.g. "Ilm" vs "llm") with a clear message instead of failing later at setup.
+            const v = await electronAPI.lightningValidate(account);
+            if (!v || !v.ok) {
+                let msg = (v && v.error) || 'could not reach Lightning.';
+                if (/does not exist|not found|Teamspace/i.test(msg)) msg = 'Studio/teamspace not found — double-check Teamspace + Username (they are CASE-SENSITIVE: e.g. “llm” not “Ilm”).';
+                else msg = msg.slice(0, 180);
+                showErr('❌ ' + msg);
+                addBtn.disabled = false; addBtn.textContent = ot; return;
+            }
+            const r = await electronAPI.lightningPoolAdd(account);
+            if (r && r.ok) {
+                ['la-label', 'la-userId', 'la-apiKey', 'la-studioName', 'la-teamspace', 'la-user'].forEach((id) => { const el = document.getElementById(id); if (el) el.value = ''; });
+                showToast(`Added + verified “${account.label || account.studioName}” ✓ — now click ⚙ Set up Studio`, 'success');
+                renderLightningAccounts();
+            } else { showErr((r && r.error) || 'Could not add account.'); }
+        } catch (e) { showErr(e.message); }
+        addBtn.disabled = false; addBtn.textContent = ot;
+    });
+
+    // "Build uses" override — pin builds to one account, or auto-rotate.
+    const activeSel = document.getElementById('lightning-active-account');
+    if (activeSel) activeSel.addEventListener('change', async () => {
+        try {
+            await electronAPI.lightningPoolSetActive(activeSel.value);
+            const txt = activeSel.options[activeSel.selectedIndex].text;
+            showToast(activeSel.value === 'auto' ? 'Builds will auto-rotate accounts' : `Builds pinned to ${txt}`, 'info');
+        } catch (_) {}
+    });
+
+    // Stream provisioning/check output into the matching account's (persisted) log box.
+    if (electronAPI.onLightningProvisionProgress) {
+        electronAPI.onLightningProvisionProgress((d) => _provAppend(d.id, d.line));
+    }
+}
+
+async function renderLightningAccounts() {
+    const list = document.getElementById('lightning-accounts-list');
+    if (!list || !window.electronAPI || !electronAPI.lightningPoolList) return;
+    list.innerHTML = '<div style="color:#888;font-size:12px;">Loading…</div>';
+    let accounts = [];
+    try { const r = await electronAPI.lightningPoolList(); accounts = (r && r.accounts) || []; } catch (_) {}
+
+    // Populate the "Build uses" dropdown (Auto + each account), preserving the saved choice.
+    const activeSel = document.getElementById('lightning-active-account');
+    if (activeSel) {
+        let active = 'auto';
+        try { const r = await electronAPI.lightningPoolGetActive(); active = (r && r.id) || 'auto'; } catch (_) {}
+        activeSel.innerHTML = '<option value="auto">🔄 Auto-rotate (recommended)</option>' +
+            accounts.map((a) => `<option value="${escapeHTML(a.id)}">📌 ${escapeHTML(a.label)}</option>`).join('');
+        activeSel.value = accounts.some((a) => a.id === active) ? active : 'auto';
+    }
+
+    if (!accounts.length) {
+        list.innerHTML = '<div style="color:#888;font-size:12px;padding:8px;background:#1a1726;border-radius:6px;">No accounts yet — add one below to start the rotation pool.</div>';
+        return;
+    }
+    list.innerHTML = '';
+    for (const a of accounts) {
+        const pct = a.budgetHours > 0 ? Math.min(100, Math.round((a.usedHours / a.budgetHours) * 100)) : 0;
+        let badge, badgeColor;
+        if (a.exhausted) { badge = 'Spent'; badgeColor = '#f87171'; }
+        else if (a.coolingDown) { badge = 'Cooling down'; badgeColor = '#fbbf24'; }
+        else if (!a.healthy) { badge = 'Disabled'; badgeColor = '#888'; }
+        else { badge = 'Ready'; badgeColor = '#4ade80'; }
+        const row = document.createElement('div');
+        row.style.cssText = 'background:#1a1726;border:1px solid #2e2640;border-radius:6px;padding:10px 12px;';
+        row.innerHTML = `
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+            <div style="min-width:0;">
+              <div style="font-size:13px;font-weight:600;color:#eee;">${escapeHTML(a.label)}
+                <span style="font-size:10px;font-weight:600;color:${badgeColor};border:1px solid ${badgeColor};border-radius:3px;padding:1px 5px;margin-left:6px;">${badge}</span>
+              </div>
+              <div style="font-size:10px;color:#888;margin-top:2px;">studio: ${escapeHTML(a.studioName)} · key ${escapeHTML(a.apiKeyMasked)}${a.lastError ? ' · ' + escapeHTML(String(a.lastError)).slice(0, 40) : ''}</div>
+            </div>
+            <div style="display:flex;gap:6px;flex-shrink:0;">
+              <button data-check="${escapeHTML(a.id)}" title="Boot the Studio, run a real vision test, then stop it — confirms the account actually works" style="padding:4px 9px;font-size:11px;background:#1a2a3a;color:#7dd3fc;border:1px solid #2a4a6a;border-radius:4px;cursor:pointer;">🔍 Check</button>
+              <button data-provision="${escapeHTML(a.id)}" title="Install vLLM + serve script on this Studio (one-time, ~10-15 min, no terminal)" style="padding:4px 9px;font-size:11px;background:#2a2440;color:#c4b5fd;border:1px solid #4a3f6e;border-radius:4px;cursor:pointer;">⚙ Set up Studio</button>
+              <button data-reset="${escapeHTML(a.id)}" title="Credit refreshed this month — put this account back in play" style="padding:4px 9px;font-size:11px;background:#1e3a2a;color:#4ade80;border:1px solid #2e5a3e;border-radius:4px;cursor:pointer;">↻ Reset</button>
+              <button data-remove="${escapeHTML(a.id)}" title="Remove this account from the pool" style="padding:4px 9px;font-size:11px;background:#3a1e1e;color:#f87171;border:1px solid #5a2e2e;border-radius:4px;cursor:pointer;">Remove</button>
+            </div>
+          </div>
+          <div style="margin-top:8px;height:6px;background:#0e0c16;border-radius:3px;overflow:hidden;">
+            <div style="height:100%;width:${pct}%;background:${pct >= 90 ? '#f87171' : pct >= 60 ? '#fbbf24' : '#4ade80'};"></div>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;font-size:10px;color:#999;margin-top:5px;">
+            <span>${a.usedHours}h used ·</span>
+            <span>budget</span>
+            <input type="number" data-budget="${escapeHTML(a.id)}" value="${a.budgetHours}" min="1" step="1" style="width:52px;padding:2px 4px;font-size:11px;background:#0e0c16;color:#eee;border:1px solid #3a3450;border-radius:3px;">
+            <span>h · <b style="color:#bbb;">${a.remainingHours}h left</b></span>
+          </div>
+          <div data-provbox="${escapeHTML(a.id)}" style="display:none;position:relative;margin-top:8px;">
+            <button data-provhide="${escapeHTML(a.id)}" title="Hide this log" style="position:absolute;top:5px;right:7px;z-index:1;background:#2e2640;color:#bbb;border:1px solid #4a4060;border-radius:3px;font-size:10px;padding:1px 7px;cursor:pointer;">✕ hide</button>
+            <pre data-provlog="${escapeHTML(a.id)}" style="margin:0;padding:8px;padding-top:24px;background:#0b0a12;border:1px solid #2e2640;border-radius:4px;font-size:10px;color:#9fd39f;white-space:pre-wrap;max-height:140px;overflow:auto;"></pre>
+          </div>`;
+        list.appendChild(row);
+    }
+    // Restore any in-progress / finished provisioning logs (survive list re-renders).
+    Object.keys(_lightningProvLog).forEach((id) => {
+        const box = _provBox(id);
+        if (box && _lightningProvLog[id].text) { _provShow(id); box.textContent = _lightningProvLog[id].text; }
+    });
+    // ✕ hide log → dismiss it.
+    list.querySelectorAll('[data-provhide]').forEach((b) => b.addEventListener('click', () => {
+        const id = b.getAttribute('data-provhide');
+        delete _lightningProvLog[id];
+        const c = document.querySelector(`[data-provbox="${id}"]`);
+        if (c) c.style.display = 'none';
+    }));
+    // Budget edit → update + recompute "h left".
+    list.querySelectorAll('[data-budget]').forEach((inp) => inp.addEventListener('change', async () => {
+        const id = inp.getAttribute('data-budget');
+        const v = Number(inp.value);
+        if (!(v > 0)) { renderLightningAccounts(); return; }
+        await electronAPI.lightningPoolUpdate(id, { monthlyBudgetHours: v });
+        renderLightningAccounts();
+    }));
+    // Check → boot the Studio, run a vision test, stop it, report the verdict (persisted log).
+    list.querySelectorAll('[data-check]').forEach((b) => b.addEventListener('click', async () => {
+        const id = b.getAttribute('data-check');
+        b.disabled = true; const orig = b.textContent; b.textContent = '🔍 Checking…';
+        _provReset(id, '🔍 Booting Studio → vision test → stop. A few minutes…');
+        try {
+            const r = await electronAPI.lightningCheck(id);
+            const ok = r && r.ok;
+            _provAppend(id, (ok ? '✅ CHECK PASSED' : '⚠️ CHECK FAILED') + ' — ' + JSON.stringify((r && r.steps) || r));
+            if (ok) showToast(`✅ ${(r && r.label) || id}: vision works — “${(r.steps && r.steps.visionReply) || 'ok'}”`, 'success');
+            else showToast(`⚠️ ${(r && (r.error || (r.steps && r.steps.visionReply))) || 'check failed'}`, 'error');
+        } catch (e) { _provAppend(id, '❌ Check error: ' + e.message); showToast('Check error: ' + e.message, 'error'); }
+        b.disabled = false; b.textContent = orig; // no re-render — keep the result box visible
+    }));
+    // Set up Studio → run the provisioner with live progress (no terminal). The log persists
+    // across re-renders and a clear ✅/❌ line is written at the end — no silent disappearing.
+    list.querySelectorAll('[data-provision]').forEach((b) => b.addEventListener('click', async () => {
+        const id = b.getAttribute('data-provision');
+        b.disabled = true; b.textContent = '⚙ Setting up…';
+        _provReset(id, '⚙ Starting setup… (keep this open; ~10-15 min the first time)');
+        try {
+            const r = await electronAPI.lightningProvision(id);
+            const ok = r && r.ok;
+            _provAppend(id, ok ? '════════════\n✅ DONE — Studio is set up and ready. Click 🔍 Check to verify.'
+                               : `════════════\n❌ Setup did NOT finish${r && r.code != null ? ' (exit ' + r.code + ')' : ''}. Read the log above, then retry.`);
+            showToast(ok ? 'Studio set up ✓ — ready for builds' : 'Setup did not finish — see the log in the card', ok ? 'success' : 'error');
+        } catch (e) { _provAppend(id, '❌ Error: ' + e.message); showToast('Setup error: ' + e.message, 'error'); }
+        b.disabled = false; b.textContent = '⚙ Set up Studio'; // no re-render — keep the log + result visible
+    }));
+    list.querySelectorAll('[data-reset]').forEach((b) => b.addEventListener('click', async () => {
+        await electronAPI.lightningPoolReset(b.getAttribute('data-reset'));
+        showToast('Account credit reset ↻', 'success');
+        renderLightningAccounts();
+    }));
+    list.querySelectorAll('[data-remove]').forEach((b) => b.addEventListener('click', async () => {
+        const id = b.getAttribute('data-remove');
+        if (!confirm(`Remove account "${id}" from the rotation pool?`)) return;
+        await electronAPI.lightningPoolRemove(id);
+        showToast('Account removed', 'info');
+        renderLightningAccounts();
+    }));
 }
 
 function setupVideoControls() {
@@ -1346,6 +2032,7 @@ function setupElectronListeners() {
     if (window.electronAPI) {
         window.electronAPI.onBuildProgress((data) => updateProgress(data.percent, data.message));
         window.electronAPI.onRenderProgress((data) => updateProgress(data.percent, data.message));
+        window.electronAPI.onBuildEvent?.((evt) => buildLog.handle(evt));
 
         // Menu commands (Ctrl+Z/C/V/S routed through Electron menu)
         window.electronAPI.onMenuUndo?.(() => undo());
@@ -1355,6 +2042,9 @@ function setupElectronListeners() {
         window.electronAPI.onMenuDelete?.(() => deleteSelectedClips());
         window.electronAPI.onMenuSelectAll?.(() => selectAllClips());
         window.electronAPI.onMenuNew?.(() => newProject());
+        window.electronAPI.onFootageResourcesUpdated?.((settings) => {
+            applyFootageResourceSettings(settings, { save: true });
+        });
     }
 
     // QA Studio pushes fixes directly into memory so auto-save picks them up
@@ -1683,8 +2373,25 @@ function updateInOutDisplay() {
 // ========================================
 // Undo System
 // ========================================
+// Snapshot ALL editable timeline state (not just scenes) so undo/redo don't
+// silently drop motion-graphic / SFX / transition edits. Only real arrays are
+// captured; restore assigns back only what was captured (never wipes a field).
+const _UNDO_STATE_KEYS = ['scenes', 'motionGraphics', 'mgScenes', 'sfxClips', 'transitions', 'overlayScenes'];
+function _snapshotForUndo() {
+    const snap = {};
+    for (const k of _UNDO_STATE_KEYS) {
+        if (Array.isArray(state[k])) snap[k] = JSON.parse(JSON.stringify(state[k]));
+    }
+    return snap;
+}
+function _restoreUndoSnapshot(snap) {
+    if (!snap) return;
+    if (Array.isArray(snap)) { state.scenes = snap; return; } // back-compat: old scenes-only snapshot
+    for (const k of Object.keys(snap)) state[k] = snap[k];
+}
+
 function pushUndoState() {
-    state.undoStack.push(JSON.parse(JSON.stringify(state.scenes)));
+    state.undoStack.push(_snapshotForUndo());
     if (state.undoStack.length > state.maxUndoLevels) {
         state.undoStack.shift();
     }
@@ -1700,8 +2407,8 @@ function undo() {
         return;
     }
     // Save current state to redo stack before restoring
-    state.redoStack.push(JSON.parse(JSON.stringify(state.scenes)));
-    state.scenes = state.undoStack.pop();
+    state.redoStack.push(_snapshotForUndo());
+    _restoreUndoSnapshot(state.undoStack.pop());
     state.selectedClipIndex = -1;
     state.selectedClipIndices = [];
     recalcTotalDuration();
@@ -1718,8 +2425,8 @@ function redo() {
         return;
     }
     // Save current state to undo stack before redoing
-    state.undoStack.push(JSON.parse(JSON.stringify(state.scenes)));
-    state.scenes = state.redoStack.pop();
+    state.undoStack.push(_snapshotForUndo());
+    _restoreUndoSnapshot(state.redoStack.pop());
     state.selectedClipIndex = -1;
     state.selectedClipIndices = [];
     recalcTotalDuration();
@@ -3697,7 +4404,7 @@ function updateTemplateProperties(mgOrScene) {
     }
 
     if (tplStyle) tplStyle.value = mg.style || 'clean';
-    if (tplBackground) tplBackground.value = mg.mgBackground || '';
+    if (tplBackground) tplBackground.value = mg.mgBackground || 'none';
     if (tplAnimSpeed) {
         const speed = mg.animationSpeed || mg._animationSpeed || 1.0;
         tplAnimSpeed.value = speed;
@@ -3718,6 +4425,35 @@ function getActiveTemplateMG() {
 function _setTemplateProp(scene, key, value) {
     scene[key] = value;
     if (scene.mgData) scene.mgData[key] = value;
+}
+
+function _isTransparentTemplateBackground(scene = {}) {
+    const fields = [
+        scene.mgBackground,
+        scene.background,
+        scene.templateBackground,
+        scene.templateBg,
+        scene.backgroundMode,
+        scene.mgData?.mgBackground,
+        scene.mgData?.background,
+        scene.mgData?.templateBackground,
+        scene.mgData?.templateBg,
+        scene.mgData?.backgroundMode,
+    ];
+    return fields.some(value => {
+        if (typeof value !== 'string') return false;
+        const mode = value.trim().toLowerCase();
+        return mode === 'none'
+            || mode === 'transparent'
+            || (mode.includes('transparent') && !mode.startsWith('gradient:') && !mode.startsWith('image:'));
+    });
+}
+
+function _normalizeTemplateSceneBackground(scene) {
+    if (!scene || !scene.templateType) return scene;
+    if (!scene.mgBackground) scene.mgBackground = 'none';
+    if (scene.mgData && !scene.mgData.mgBackground) scene.mgData.mgBackground = scene.mgBackground;
+    return scene;
 }
 
 /**
@@ -3795,8 +4531,9 @@ function setupTemplatePropertyListeners() {
             const active = getActiveTemplateMG();
             if (!active) return;
             pushUndoState();
-            _setTemplateProp(active.scene, 'mgBackground', e.target.value || undefined);
+            _setTemplateProp(active.scene, 'mgBackground', e.target.value || 'none');
             refreshCompositorMGs();
+            triggerAutoSave();
         });
     }
 
@@ -4067,7 +4804,9 @@ function setPreviewZoom(zoom) {
 
     const container = elements.previewContainer;
     const videoFrame = elements.videoContainer;
-    if (!container || !videoFrame) return;
+    const hyperFrame = elements.hyperframesPreviewFrame;
+    const previewFrames = [videoFrame, hyperFrame].filter(Boolean);
+    if (!container || previewFrames.length === 0) return;
 
     // Update label
     if (elements.previewZoomLabel) {
@@ -4094,19 +4833,23 @@ function setPreviewZoom(zoom) {
     if (zoom === 'fit') {
         // Fit mode: 16:9 frame fills available space
         container.classList.remove('zoomed');
-        videoFrame.style.width = '';
-        videoFrame.style.height = '';
-        videoFrame.style.minWidth = '';
-        videoFrame.style.minHeight = '';
+        previewFrames.forEach(frame => {
+            frame.style.width = '';
+            frame.style.height = '';
+            frame.style.minWidth = '';
+            frame.style.minHeight = '';
+        });
     } else {
         // Specific zoom %: actual pixel size relative to 1920x1080
         const w = Math.round(1920 * zoom / 100);
         const h = Math.round(1080 * zoom / 100);
         container.classList.add('zoomed');
-        videoFrame.style.width = `${w}px`;
-        videoFrame.style.height = `${h}px`;
-        videoFrame.style.minWidth = `${w}px`;
-        videoFrame.style.minHeight = `${h}px`;
+        previewFrames.forEach(frame => {
+            frame.style.width = `${w}px`;
+            frame.style.height = `${h}px`;
+            frame.style.minWidth = `${w}px`;
+            frame.style.minHeight = `${h}px`;
+        });
 
         // Center scroll position (only on first zoom, not during pan)
         requestAnimationFrame(() => {
@@ -4119,24 +4862,117 @@ function setPreviewZoom(zoom) {
 // ========================================
 // Save Project
 // ========================================
+function syncVideoPlanFromEditor() {
+    if (!state.videoPlan) return null;
+
+    state.videoPlan.scenes = state.scenes.filter(s => !s.isMGScene).map((s, i) => ({
+        ...s,
+        index: i,
+        duration: (Number.isFinite(Number(s.endTime)) && Number.isFinite(Number(s.startTime)) && Number(s.endTime) > Number(s.startTime))
+            ? Number(s.endTime) - Number(s.startTime)
+            : s.duration,
+        originalStartTime: s.originalStartTime,
+        originalEndTime: s.originalEndTime
+    }));
+    state.videoPlan.mgScenes = state.scenes.filter(s => s.isMGScene && !s.disabled && !s.templateType).map(s => ({ ...s }));
+    state.videoPlan.templateScenes = state.scenes
+        .filter(s => s.isMGScene && !s.disabled && s.templateType)
+        .map(s => ({ ..._normalizeTemplateSceneBackground(s) }));
+    state.videoPlan.mutedTracks = { ...state.mutedTracks };
+    state.videoPlan.totalDuration = state.totalDuration;
+    state.videoPlan.transitionStyle = elements.transitionStyle?.value || state.videoPlan.transitionStyle || 'crossfade';
+
+    // Preserve an AI-designed SFX track (hydrated from the plan on open) instead
+    // of clobbering it with the mechanical floor. Only (re)generate the floor when
+    // there is no worker track. The SFX-enabled toggle re-hydrates explicitly.
+    if (!state.sfxDesignedByWorker || !(state.sfxClips && state.sfxClips.length)) {
+        generateSfxClips();
+    }
+    state.videoPlan.sfxEnabled = state.sfxEnabled;
+    state.videoPlan.sfxVolume = state.sfxVolume;
+    state.videoPlan.sfxClips = state.sfxClips.map(sfx => ({
+        file: sfx.file,
+        startTime: sfx.startTime,
+        duration: sfx.duration,
+        volume: sfx.volume
+    }));
+
+    state.videoPlan.subtitlesEnabled = state.subtitlesEnabled;
+    state.videoPlan.mgEnabled = state.mgEnabled;
+    state.videoPlan.mgStyle = state.mgStyle;
+    state.videoPlan.motionGraphics = state.motionGraphics.filter(mg => !mg.disabled).map(mg => {
+        const base = {
+            id: mg.id,
+            type: mg.type,
+            text: mg.text,
+            subtext: mg.subtext || '',
+            startTime: mg.startTime,
+            duration: mg.duration,
+            position: mg.position,
+            sceneIndex: mg.sceneIndex,
+            style: mg.style || state.mgStyle || 'clean',
+            subType: mg.subType || undefined,
+            animation: mg.animation || undefined,
+            animationSpeed: mg.animationSpeed || undefined,
+            overlayShadowStrength: mg.overlayShadowStrength != null ? mg.overlayShadowStrength : state.mgOverlayShadow,
+            styleManual: mg.styleManual === true ? true : undefined,
+            variantManual: mg.variantManual === true ? true : undefined,
+            animationManual: mg.animationManual === true ? true : undefined,
+        };
+        if (mg.type === 'explainer') {
+            if (mg.explainerImageFile) base.explainerImageFile = mg.explainerImageFile;
+            if (mg.explainerLabel) base.explainerLabel = mg.explainerLabel;
+            if (mg.explainerQuery) base.explainerQuery = mg.explainerQuery;
+            if (mg.explainerBgOpacity != null) base.explainerBgOpacity = mg.explainerBgOpacity;
+            if (mg.explainerImgScale != null) base.explainerImgScale = mg.explainerImgScale;
+            if (mg.explainerShadow) base.explainerShadow = mg.explainerShadow;
+        }
+        if (mg.articleImageFile) base.articleImageFile = mg.articleImageFile;
+        if (mg.highlightBoxes) base.highlightBoxes = mg.highlightBoxes;
+        [
+            'mediaFile',
+            'mediaPath',
+            'assetFile',
+            'assetPath',
+            'imageFile',
+            'imagePath',
+            'videoFile',
+            'videoPath',
+            'backgroundMediaFile',
+            'backgroundImageFile',
+            'backgroundVideoFile',
+            'templateMediaFile',
+            'templateBackgroundFile',
+            'templateBackgroundMediaFile',
+            'templateBackgroundImageFile',
+            'templateBackgroundVideoFile'
+        ].forEach((key) => {
+            if (mg[key]) base[key] = mg[key];
+        });
+        if (mg.mapImageFile) base.mapImageFile = mg.mapImageFile;
+        if (mg.mapImagePath) base.mapImagePath = mg.mapImagePath;
+        if (mg.mapImage) base.mapImage = mg.mapImage;
+        if (mg._mapView) base._mapView = mg._mapView;
+        if (mg._mapPins) base._mapPins = mg._mapPins;
+        if (mg.renderAssets) base.renderAssets = mg.renderAssets;
+        if (mg.mgData) base.mgData = mg.mgData;
+        return base;
+    });
+
+    const globalAnimSpeed = parseFloat(document.getElementById('mg-global-anim-speed')?.value) || 1.0;
+    if (!state.videoPlan.scriptContext) state.videoPlan.scriptContext = {};
+    state.videoPlan.scriptContext.mgAnimationSpeed = globalAnimSpeed;
+    state.videoPlan.scriptContext.mgOverlayShadow = state.mgOverlayShadow;
+    return state.videoPlan;
+}
+
 async function saveProject(silent = false) {
     if (!state.videoPlan) {
         if (!silent) showToast('No project to save', 'info');
         return;
     }
     try {
-        // Update the plan with current scene state
-        state.videoPlan.scenes = state.scenes.filter(s => !s.isMGScene).map((s, i) => ({
-            ...s,
-            index: i,
-            originalStartTime: s.originalStartTime,
-            originalEndTime: s.originalEndTime
-        }));
-        state.videoPlan.mgScenes = state.scenes.filter(s => s.isMGScene && !s.disabled && !s.templateType).map(s => ({ ...s }));
-        state.videoPlan.templateScenes = state.scenes.filter(s => s.isMGScene && !s.disabled && s.templateType).map(s => ({ ...s }));
-        state.videoPlan.mutedTracks = { ...state.mutedTracks };
-        state.videoPlan.totalDuration = state.totalDuration;
-        state.videoPlan.transitionStyle = elements.transitionStyle.value;
+        syncVideoPlanFromEditor();
 
         // Collect current editor settings
         const settings = {
@@ -4153,7 +4989,22 @@ async function saveProject(silent = false) {
             videoTitle: state.videoTitle,
             buildNiche: elements.buildNiche ? elements.buildNiche.value : 'auto',
             buildLanguage: elements.buildLanguage ? elements.buildLanguage.value : 'auto',
+            buildProductionMode: elements.buildProductionMode ? elements.buildProductionMode.value : 'faceless',
+            presenterImage: state.presenterImage || '',
+            klingAvatar: elements.klingAvatarEnabled ? elements.klingAvatarEnabled.checked : false,
+            klingResolution: elements.klingResolution ? elements.klingResolution.value : '1080p',
+            klingAvatarPrompt: elements.klingAvatarPrompt ? elements.klingAvatarPrompt.value.trim() : '',
+            veoAiVideo: elements.veoAiVideoEnabled ? elements.veoAiVideoEnabled.checked : false,
+            veoScope: elements.veoScope ? elements.veoScope.value : 'directives',
+            veoResolution: elements.veoResolution ? elements.veoResolution.value : '720p',
+            veoBackend: elements.veoBackend ? elements.veoBackend.value : 'kling',
             clipAnalyzer: elements.clipAnalyzerToggle?.checked !== false,
+            // These are restored by applyProjectSettings() but were never saved here
+            // → reopening a .fvp silently lost them. Save them so the round-trip works.
+            buildMapStylePack: elements.buildMapStylePack ? elements.buildMapStylePack.value : 'auto',
+            buildVisionBackend: elements.buildVisionBackend ? elements.buildVisionBackend.value : 'aws',
+            repeatFromStep: elements.repeatFromStep ? elements.repeatFromStep.value : 'visual-planner',
+            forceFreshFootage: elements.forceFreshFootage?.checked === true,
             mutedTracks: state.mutedTracks
         };
 
@@ -4180,6 +5031,7 @@ async function saveProject(silent = false) {
 // Debounced auto-save: saves .fvp file 3 seconds after last change
 let _autoSaveTimer = null;
 function triggerAutoSave() {
+    if (state.hyperframesPreview?.active) scheduleHyperframesPreviewRefresh();
     if (!state.hasProjectFile || !state.videoPlan) return;
     if (_autoSaveTimer) clearTimeout(_autoSaveTimer);
     _autoSaveTimer = setTimeout(() => {
@@ -4225,8 +5077,8 @@ function actuallyStartPlayback() {
         elements.btnPlay.textContent = '⏸';
     }
 
-    // Start all active track videos
-    if (activeScenes.length > 0) {
+    // Start all active track videos unless HyperFrames owns the visual preview.
+    if (!state.hyperframesPreview?.active && activeScenes.length > 0) {
         activeScenes.forEach(({ scene }) => {
             const trackNum = scene.trackId?.match(/video-track-(\d)/)?.[1] || '1';
             const video = getActiveTrackVideo(trackNum);
@@ -4234,13 +5086,17 @@ function actuallyStartPlayback() {
                 video.play().catch(e => console.warn('Video play failed:', e));
             }
         });
-    } else {
-        // In a gap - hide video container, but only show placeholder when the whole project is empty
+    } else if (state.hyperframesPreview?.active) {
         elements.videoContainer?.classList.add('hidden');
+        elements.previewPlaceholder?.classList.add('hidden');
+    } else {
+        // In a timeline gap, keep the last visual frame visible until the next scene/template starts.
         if (state.scenes.length === 0) {
-            elements.previewPlaceholder.classList.remove('hidden');
+            elements.videoContainer?.classList.add('hidden');
+            elements.previewPlaceholder?.classList.remove('hidden');
         } else {
-            elements.previewPlaceholder.classList.add('hidden');
+            elements.videoContainer?.classList.remove('hidden');
+            elements.previewPlaceholder?.classList.add('hidden');
         }
     }
 
@@ -4254,6 +5110,8 @@ function actuallyStartPlayback() {
     if (state.compositorActive && state.compositor) {
         state.compositor.playVideos(state.currentTime);
     }
+
+    syncHyperframesPreview(true);
 
     // Start the playback loop
     startPlaybackLoop();
@@ -4331,6 +5189,8 @@ function stopPlayback() {
     if (audio && !audio.paused) {
         audio.pause();
     }
+
+    syncHyperframesPreview(true);
 }
 
 
@@ -4343,6 +5203,54 @@ function startPlaybackLoop() {
         if (!state.isPlaying) return;
 
         const audio = elements.previewAudio;
+
+        // === HyperFrames preview path (same HTML as final render) ===
+        if (state.hyperframesPreview?.active) {
+            const now = performance.now();
+            const delta = Math.max(0, (now - (state.lastPlaybackTime || now)) / 1000);
+            state.lastPlaybackTime = now;
+
+            if (audio?.src && !audio.paused) {
+                state.currentTime = audio.currentTime;
+            } else {
+                state.currentTime = Math.min(state.totalDuration, state.currentTime + delta);
+            }
+
+            if (state.currentTime >= state.totalDuration) {
+                state.currentTime = state.totalDuration;
+                stopPlayback();
+                updatePlayhead();
+                updateTimeDisplay();
+                return;
+            }
+
+            // Trigger SFX in the HyperFrames preview (the iframe composition is a
+            // MUTED visual scrubber — its <audio> tags never play in preview — so
+            // the app's own SFX pool is the ONLY path to the speakers here. Without
+            // this block the user hears no SFX at all in the default preview.)
+            if (state.sfxEnabled && state.sfxClips.length > 0) {
+                const ct = state.currentTime;
+                state.sfxClips.forEach(sfx => {
+                    const sfxEnd = sfx.startTime + sfx.duration;
+                    if (ct >= sfx.startTime && ct < sfxEnd && !sfx._triggered) {
+                        sfx._triggered = true;
+                        playSfxClip(sfx);
+                    }
+                    if (ct < sfx.startTime || ct >= sfxEnd) {
+                        sfx._triggered = false;
+                    }
+                });
+            }
+
+            syncHyperframesPreview();
+            updatePlayhead();
+            updateTimeDisplay();
+            const activeScenes = getActiveScenesAtTime(state.currentTime);
+            updateSceneHighlight(activeScenes.length > 0 ? activeScenes[0].index : -1);
+
+            state.playbackAnimationFrame = requestAnimationFrame(loop);
+            return;
+        }
 
         // === WebGL2 Compositor path (when active, bypasses HTML preview) ===
         if (state.compositorActive && state.compositor && state.compositor.isInitialized) {
@@ -4544,6 +5452,9 @@ async function preloadSfxUrls() {
     const allFiles = new Set();
     for (const v of Object.values(SFX_MAP)) allFiles.add(v.file);
     for (const v of Object.values(MG_SFX_MAP)) allFiles.add(v.file);
+    // Also preload files from the current (possibly AI-designed) track — the
+    // worker palette can include files not in the maps (e.g. sfx-impact/riser/boom).
+    for (const c of (state.sfxClips || [])) if (c && c.file) allFiles.add(c.file);
     for (const file of allFiles) {
         if (!_sfxUrlCache[file]) {
             try {
@@ -4568,7 +5479,7 @@ function playSfxClip(sfx) {
             if (!resolvedUrl) return;
             _sfxUrlCache[sfx.file] = resolvedUrl;
             audio.src = resolvedUrl;
-            audio.volume = sfx.volume * state.volume;
+            audio.volume = Math.min(1, sfx.volume * state.volume * PREVIEW_SFX_GAIN);
             audio.currentTime = 0;
             poolEntry.playing = true;
             audio.play().catch(() => { });
@@ -5500,6 +6411,7 @@ function handleFileSelect(file) {
     elements.audioInfo.classList.remove('hidden');
     elements.dropZone.style.display = 'none';
     elements.btnGenerate.disabled = false;
+    if (elements.btnRepeatStep) elements.btnRepeatStep.disabled = false;
     showToast(`Audio loaded: ${file.name}`, 'success');
     loadAudioFile(filePath);
 }
@@ -5528,6 +6440,7 @@ function removeAudio() {
     elements.audioInfo.classList.add('hidden');
     elements.dropZone.style.display = 'block';
     elements.btnGenerate.disabled = true;
+    if (elements.btnRepeatStep) elements.btnRepeatStep.disabled = true;
     elements.fileInput.value = '';
     clearScenes();
 }
@@ -5587,12 +6500,17 @@ async function cancelProcess() {
 // ========================================
 // Video Generation
 // ========================================
-async function generateVideo() {
+async function generateVideo(options = {}) {
     if (!state.audioFile || state.isProcessing) return;
     if (!state.audioFile.path) {
         showToast('Audio file path is missing. Please re-import the audio file.', 'error'); return;
     }
-    state.isProcessing = true; elements.btnGenerate.disabled = true; showProgress(true); startTimer();
+    const repeatFromStep = options.repeatStep ? (elements.repeatFromStep?.value || 'visual-planner') : '';
+    // Only meaningful when repeating from Media Download — re-download clips instead of
+    // reusing cached scene media (the Director/VP plan is still reused from the checkpoint).
+    const forceFreshFootage = options.repeatStep ? !!(elements.forceFreshFootage?.checked) : false;
+    state.isProcessing = true; elements.btnGenerate.disabled = true; if (elements.btnRepeatStep) elements.btnRepeatStep.disabled = true; showProgress(true); startTimer();
+    buildLog.reset();
     try {
         updateProgress(5, '📁 Copying audio file...');
         const copyResult = await window.electronAPI?.copyFile(state.audioFile.path, 'input');
@@ -5615,11 +6533,24 @@ async function generateVideo() {
             buildNiche: elements.buildNiche ? elements.buildNiche.value : 'auto',
             buildTheme: elements.buildTheme.value,
             buildMapStylePack: elements.buildMapStylePack ? elements.buildMapStylePack.value : 'auto',
+            buildProductionMode: elements.buildProductionMode ? elements.buildProductionMode.value : 'faceless',
+            presenterImage: state.presenterImage || '',
+            klingAvatar: elements.klingAvatarEnabled ? elements.klingAvatarEnabled.checked : false,
+            klingResolution: elements.klingResolution ? elements.klingResolution.value : '1080p',
+            klingAvatarPrompt: elements.klingAvatarPrompt ? elements.klingAvatarPrompt.value.trim() : '',
+            veoAiVideo: elements.veoAiVideoEnabled ? elements.veoAiVideoEnabled.checked : false,
+            veoScope: elements.veoScope ? elements.veoScope.value : 'directives',
+            veoResolution: elements.veoResolution ? elements.veoResolution.value : '720p',
+            veoBackend: elements.veoBackend ? elements.veoBackend.value : 'kling',
+            visionBackend: elements.buildVisionBackend ? elements.buildVisionBackend.value : 'aws',
             buildLanguage: elements.buildLanguage ? elements.buildLanguage.value : 'auto',
             buildStyleProfile: elements.buildStyleProfile ? elements.buildStyleProfile.value : 'none',
             smartAI: elements.smartAiToggle ? elements.smartAiToggle.checked : true,
             clipAnalyzer: elements.clipAnalyzerToggle ? elements.clipAnalyzerToggle.checked : true,
             buildResume: elements.buildResumeToggle ? elements.buildResumeToggle.checked : false,
+            fastMedia: elements.fastMediaToggle ? elements.fastMediaToggle.checked : false,
+            repeatFromStep,
+            forceFreshFootage,
             aiThinking: elements.aiThinking ? elements.aiThinking.value : 'off'
         });
         if (result.success) {
@@ -5641,7 +6572,7 @@ async function generateVideo() {
             }
         }
     } catch (error) { console.error('❌ Generation error:', error); stopTimer(); showToast(`Error: ${error.message}`, 'error'); }
-    finally { state.isProcessing = false; elements.btnGenerate.disabled = false; elements.btnCancel.disabled = false; elements.btnCancel.textContent = 'Cancel'; setTimeout(() => showProgress(false), 5000); }
+    finally { state.isProcessing = false; elements.btnGenerate.disabled = false; if (elements.btnRepeatStep) elements.btnRepeatStep.disabled = false; elements.btnCancel.disabled = false; elements.btnCancel.textContent = 'Cancel'; setTimeout(() => showProgress(false), 5000); }
 }
 
 // ========================================
@@ -5701,7 +6632,10 @@ async function loadVideoPlan({ freshBuild = false } = {}) {
                 // Restore scenes as-is (user already edited the layout)
                 state.scenes = plan.scenes.map(s => ({
                     ...s,
-                    trackId: s.trackId || 'video-track-1'
+                    trackId: s.trackId || 'video-track-1',
+                    duration: (Number.isFinite(Number(s.endTime)) && Number.isFinite(Number(s.startTime)) && Number(s.endTime) > Number(s.startTime))
+                        ? Number(s.endTime) - Number(s.startTime)
+                        : s.duration
                 }));
                 state.totalDuration = plan.totalDuration || Math.max(...state.scenes.map(s => s.endTime));
             } else {
@@ -5729,6 +6663,9 @@ async function loadVideoPlan({ freshBuild = false } = {}) {
                         originalEndTime: scene.endTime,
                         startTime: scene.startTime,
                         endTime: endTime,
+                        duration: (Number.isFinite(Number(endTime)) && Number.isFinite(Number(scene.startTime)) && Number(endTime) > Number(scene.startTime))
+                            ? Number(endTime) - Number(scene.startTime)
+                            : scene.duration,
                         trackId: trackId
                     });
                 }
@@ -5749,6 +6686,11 @@ async function loadVideoPlan({ freshBuild = false } = {}) {
                         elements.audioInfo.classList.remove('hidden');
                         elements.dropZone.style.display = 'none';
                         elements.btnGenerate.disabled = false;
+                        // Mirror the manual-drop path: a restored project with
+                        // audio is just as valid a base for repeating a single
+                        // step (e.g. re-run media download) as a freshly dropped
+                        // file, so enable Repeat Selected Step too.
+                        if (elements.btnRepeatStep) elements.btnRepeatStep.disabled = false;
                         await loadAudioFile(audioPath);
                     }
                 } catch (e) { console.warn('Audio loading failed:', e.message); }
@@ -5761,8 +6703,22 @@ async function loadVideoPlan({ freshBuild = false } = {}) {
 
             // Transitions disabled - hard cut only, skip planned transitions
 
-            // Generate SFX for scene change points
-            try { generateSfxClips(); } catch (e) { console.warn('SFX generation failed:', e.message); }
+            // Hydrate the AI-designed SFX track from the plan (the Sound Designer
+            // worker writes plan.sfxClips at build time). Only fall back to the
+            // mechanical floor when the plan carries no designed track — so opening
+            // a project no longer clobbers the sound design with a sound-on-everything.
+            try {
+                if (plan.sfxDesigned && Array.isArray(plan.sfxClips) && plan.sfxClips.length) {
+                    hydrateDesignedSfx(plan.sfxClips);
+                } else {
+                    // No AI-designed track (or a stale mechanical one) — build the
+                    // RESTRAINED floor instead of trusting old dense clips, so the
+                    // editor never falls back to sound-on-everything.
+                    state.sfxDesignedByWorker = false;
+                    generateSfxClips();
+                }
+                preloadSfxUrls();
+            } catch (e) { console.warn('SFX hydrate failed:', e.message); }
 
             // Load motion graphics from plan
             // Full-screen types (barChart, donutChart, etc.) go on V3 as scene objects
@@ -5810,6 +6766,23 @@ async function loadVideoPlan({ freshBuild = false } = {}) {
                     mgData: core === mg ? mgFlat : core,
                 };
                 if (mg.templateType) sceneObj.templateType = true;
+                if (mg.templateType) {
+                    const templateBg = core.mgBackground || mg.mgBackground || core.background || mg.background || 'none';
+                    sceneObj.mgBackground = templateBg;
+                    if (sceneObj.mgData && !sceneObj.mgData.mgBackground) sceneObj.mgData.mgBackground = templateBg;
+                    const templateTimingKeys = [
+                        'templateContentStartTime',
+                        'templateContentEndTime',
+                        'templateContentDuration',
+                        'templateContentOffset',
+                    ];
+                    for (const key of templateTimingKeys) {
+                        const value = core[key] != null ? core[key] : mg[key];
+                        if (value == null) continue;
+                        sceneObj[key] = value;
+                        if (sceneObj.mgData) sceneObj.mgData[key] = value;
+                    }
+                }
                 if (mg.variant) sceneObj.variant = mg.variant;
                 if (mg.animation) sceneObj.animation = mg.animation;
                 if (mg.themeId) sceneObj.themeId = mg.themeId;
@@ -5955,12 +6928,12 @@ async function loadVideoPlan({ freshBuild = false } = {}) {
                         }
                     }).catch(() => { });
                 }
-                // Propagate template background image properties
+                // Propagate template background media properties
                 if (core.templateBgFile) {
                     sceneObj.templateBgFile = core.templateBgFile;
                     if (sceneObj.mgData) sceneObj.mgData.templateBgFile = core.templateBgFile;
                 }
-                // Pre-resolve template background image URL
+                // Pre-resolve template background media URL
                 if (core.templateBgFile && window.electronAPI?.getProjectInfo && window.electronAPI?.getFileUrl) {
                     window.electronAPI.getProjectInfo().then(async (info) => {
                         const bgPath = info.projectDir + '/public/' + core.templateBgFile;
@@ -5995,10 +6968,13 @@ async function loadVideoPlan({ freshBuild = false } = {}) {
             }
             // Carve out V2 scenes that overlap with full-screen MGs
             // Full-screen MGs ARE the visual — no footage underneath
-            if (seenIds.size > 0) {
+                if (seenIds.size > 0) {
                 const mgRanges = state.scenes
-                    .filter(s => s.isMGScene)
+                    .filter(s => s.isMGScene && !(_isTransparentTemplateBackground(s) && s.templateType))
                     .map(s => ({ start: s.startTime, end: s.endTime }));
+                if (mgRanges.length === 0) {
+                    console.log(`Loaded ${seenIds.size} full-screen MGs onto V3 (kept V2 under timed templates)`);
+                } else {
                 const carved = [];
                 for (const scene of state.scenes) {
                     if (scene.isMGScene) {
@@ -6038,6 +7014,7 @@ async function loadVideoPlan({ freshBuild = false } = {}) {
                 }
                 state.scenes = carved;
                 console.log(`Loaded ${seenIds.size} full-screen MGs onto V3 (carved gaps in V2)`);
+                }
             }
             } catch (mgError) {
                 console.warn('MG/overlay loading failed (scenes still OK):', mgError.message);
@@ -6066,8 +7043,11 @@ async function loadVideoPlan({ freshBuild = false } = {}) {
             await Promise.all(cachePromises);
             console.log(`[PreCache] Done. Cached ${Object.keys(state._mediaUrlCache).length} URLs`);
 
-            // Load plan into WebGL2 compositor if it's initialized
-            if (state.compositor) {
+            // Keep the selected preview engine in sync with the loaded plan.
+            const rendererMode = document.getElementById('renderer-select')?.value || 'hyperframes';
+            if (rendererMode === 'hyperframes') {
+                await setHyperframesPreviewMode(true);
+            } else if (state.compositor) {
                 loadPlanIntoCompositor().catch(e => console.warn('[Compositor] Plan load deferred:', e.message));
             }
 
@@ -6143,7 +7123,7 @@ window._loadTestPlan = async function(plan) {
     }
 
     state.currentTime = 0;
-    _cachedPlayhead = null; _cachedTimelineScroll = null; _cachedTimelineTime = null;
+    resetTimelineDomCache();
     renderTimeline();
     updateClipProperties();
     console.log(`✅ Test plan loaded: ${state.scenes.length} scenes, ${state.motionGraphics.length} overlay MGs`);
@@ -6160,7 +7140,11 @@ window._loadTestPlan = async function(plan) {
         await jumpToScene(0);
     }
 
-    if (state.compositor) {
+    const rendererMode = document.getElementById('renderer-select')?.value || 'hyperframes';
+    if (rendererMode === 'hyperframes') {
+        await setHyperframesPreviewMode(true);
+        console.log('[HyperFrames Preview] Test plan reloaded');
+    } else if (state.compositor) {
         await loadPlanIntoCompositor();
         console.log('✅ Compositor plan reloaded');
     }
@@ -6169,6 +7153,43 @@ window._loadTestPlan = async function(plan) {
 // ========================================
 // SFX Auto-Placement System
 // ========================================
+// ── SFX rule mirror — KEEP IN SYNC with src/editor-agent/workers/sfx-rules.js ──
+// The renderer sandbox can't require() a src module, so the gating constants are
+// mirrored here. They make the app-side mechanical floor match the AI Sound
+// Designer: motivated + sparse, and persistent text overlays (lower-thirds,
+// captions, focus words, bullets…) stay SILENT. This is a FALLBACK floor — it
+// runs only when the plan has no AI-designed SFX (see generateSfxClips).
+const SFX_MOTIVATED_TRANSITIONS = new Set([
+    'whip', 'whippan', 'zoompunch', 'zoomrotate', 'dipblack', 'fadetoblack', 'flash',
+    'cameraflash', 'glitch', 'datamosh', 'rgbsplit', 'static', 'filmburn', 'spin',
+    'prismshift', 'shutterslice', 'pixelate', 'mosaic', 'push', 'slide', 'swipe', 'bounce',
+    'lensflare', 'fireburn', 'lightsweep', 'wipe',
+]);
+// MIRRORS sfx-rules.js IMPACT_MG_TYPES (keep in sync). Graphics are SILENT by
+// default — a stat card / chart / counter / key-takeaway is punctuated by its own
+// reveal ANIMATION, so a reflexive ding on it is the #1 amateur tell. Only the
+// subscribe CTA earns a graphic sound (a once-per-video viewer-action chime);
+// dramatic beats ride the motivated transition on that cut, not the card.
+const SFX_IMPACT_MG_TYPES = new Set([
+    'subscribeCTA',
+]);
+// Preview-only gain: the final render is loudnorm-mixed (SFX ride under VO), but the
+// raw preview plays each <audio> at its bare level, which is too quiet to QA. Boost
+// preview playback so the designer's sounds are clearly audible while scrubbing.
+const PREVIEW_SFX_GAIN = 1.9;
+const SFX_SILENT_MG = new Set([
+    'lowerThird', 'callout', 'focusWord', 'kineticText', 'caption', 'subtitle',
+    'bulletList', 'typewriter', 'tag', 'eyebrow', 'explainer', 'progressBar',
+    'progressTracker', 'listicleCounter', 'personIntro', 'imageShowcase',
+    'listicleGrid', 'splitScreen',
+]);
+const SFX_MIN_GAP = 4.0;
+const SFX_SALIENCE = { impact: 3, whoosh: 2, accent: 2, texture: 1 };
+function sfxNormTx(t) {
+    const base = String(t || '').toLowerCase().replace(/[-_\s]/g, '');
+    return base.replace(/(left|right|up|down|pan)$/g, '') || base;
+}
+
 const SFX_MAP = {
     // === Smooth / Cinematic ===
     fade:           { file: 'sfx-fade.mp3', duration: 0.5 },
@@ -6279,6 +7300,24 @@ function applySfxVolumeLevels() {
     }
 }
 
+// Load an AI-designed SFX track (plan.sfxClips) into the editor WITHOUT rebuilding
+// the mechanical floor. The designer's per-clip volume is preserved as a multiplier
+// of the current SFX-volume slider, so dragging the slider scales the whole design
+// proportionally (a gain) instead of flattening every clip to one level.
+function hydrateDesignedSfx(clips) {
+    const base = state.sfxVolume > 0 ? state.sfxVolume : 0.35;
+    state.sfxClips = (clips || []).map((s, i) => ({
+        id: `sfx-${i}`,
+        file: s.file,
+        startTime: s.startTime,
+        duration: s.duration,
+        volume: (typeof s.volume === 'number' ? s.volume : state.sfxVolume),
+        volumeMultiplier: (typeof s.volume === 'number' ? +(s.volume / base).toFixed(4) : 1),
+        _triggered: false,
+    }));
+    state.sfxDesignedByWorker = true;
+}
+
 function generateSfxClips() {
     if (!state.sfxEnabled) {
         state.sfxClips = [];
@@ -6309,20 +7348,22 @@ function generateSfxClips() {
             const gap = curr.scene.startTime - prev.scene.endTime;
             if (Math.abs(gap) > 0.1) continue;
 
-            // Resolve transition type: per-scene override > global force > AI-assigned > fallback
+            // Resolve transition type: per-scene override > global force > AI-assigned > cut
             let transType = curr.scene.transitionType
                 || (state.transition.style !== 'auto' ? state.transition.style : null)
                 || curr.scene.transition?.type
-                || 'crossfade';
+                || 'cut';
             if (transType === 'random') {
                 const seed = curr.idx * 7 + 3;
                 transType = state.transition.types[seed % state.transition.types.length];
             }
 
-            // No SFX for cuts
-            if (transType === 'cut') continue;
+            // Only KINETIC / hard transitions earn a whoosh — cuts, crossfades and
+            // soft dissolves stay SILENT (a soft blend has no motion to sound).
+            if (!SFX_MOTIVATED_TRANSITIONS.has(sfxNormTx(transType))) continue;
 
-            const sfxInfo = SFX_MAP[transType] || SFX_MAP['fade'];
+            const _txBase = String(transType).toLowerCase().split(/[-_\s]/)[0];
+            const sfxInfo = SFX_MAP[transType] || SFX_MAP[_txBase] || SFX_MAP[sfxNormTx(transType)] || { file: 'sfx-whip.mp3', duration: 0.35 };
 
             // Start SFX before the transition point (150ms pre-roll for better sync)
             const preRoll = 0.15;
@@ -6334,8 +7375,8 @@ function generateSfxClips() {
                 sceneIndex: curr.idx,
                 startTime: startTime,
                 duration: sfxInfo.duration,
-                volumeMultiplier: 1,
-                volume: state.sfxVolume,
+                volumeMultiplier: 0.86, // ≈0.30 at default slider — matches the worker's whoosh band
+                volume: state.sfxVolume * 0.86,
                 file: sfxInfo.file
             });
         }
@@ -6345,6 +7386,11 @@ function generateSfxClips() {
     if (state.motionGraphics && state.motionGraphics.length > 0) {
         state.motionGraphics.forEach((mg, i) => {
             if (mg.disabled) return;
+            // Persistent reading aids (lower-thirds/callouts/focus-words/captions/
+            // bullets…) are NOT beats — they stay silent. Only genuine data/story
+            // reveals that punch in earn a sparse, quiet accent.
+            if (SFX_SILENT_MG.has(mg.type)) return;
+            if (!SFX_IMPACT_MG_TYPES.has(mg.type)) return;
             const mgSfx = MG_SFX_MAP[mg.type];
             if (!mgSfx) return;
             clips.push({
@@ -6353,8 +7399,8 @@ function generateSfxClips() {
                 sceneIndex: -1,
                 startTime: mg.startTime || 0,
                 duration: mgSfx.duration,
-                volumeMultiplier: 0.7,
-                volume: state.sfxVolume * 0.7,
+                volumeMultiplier: 0.91,
+                volume: state.sfxVolume * 0.91,
                 file: mgSfx.file
             });
         });
@@ -6363,6 +7409,8 @@ function generateSfxClips() {
     // MG SFX — fullscreen MG scenes
     state.scenes.forEach((scene, idx) => {
         if (!scene.isMGScene || scene.disabled) return;
+        if (SFX_SILENT_MG.has(scene.type)) return;
+        if (!SFX_IMPACT_MG_TYPES.has(scene.type)) return;
         const mgSfx = MG_SFX_MAP[scene.type];
         if (!mgSfx) return;
         clips.push({
@@ -6371,13 +7419,26 @@ function generateSfxClips() {
             sceneIndex: idx,
             startTime: scene.startTime || 0,
             duration: mgSfx.duration,
-            volumeMultiplier: 0.7,
-            volume: state.sfxVolume * 0.7,
+            volumeMultiplier: 0.55,
+            volume: state.sfxVolume * 0.55,
             file: mgSfx.file
         });
     });
 
-    state.sfxClips = clips;
+    // Density gate: sort by salience (impact > whoosh) then drop any clip within
+    // SFX_MIN_GAP of a kept one — mirrors the AI designer + build-video floor so
+    // the mechanical fallback is also sparse, never a sound-on-every-boundary.
+    const _roleOf = (c) => (c.sceneIndex === -1 || String(c.id).startsWith('sfx-mg')) ? 'accent'
+        : (SFX_IMPACT_MG_TYPES.has(c.transitionType) ? 'impact' : 'whoosh');
+    clips.sort((a, b) => (SFX_SALIENCE[_roleOf(b)] || 0) - (SFX_SALIENCE[_roleOf(a)] || 0) || a.startTime - b.startTime);
+    const _kept = [];
+    for (const c of clips) {
+        if (_kept.some(k => Math.abs(k.startTime - c.startTime) < SFX_MIN_GAP)) continue;
+        _kept.push(c);
+    }
+    _kept.sort((a, b) => a.startTime - b.startTime);
+
+    state.sfxClips = _kept;
     applySfxVolumeLevels();
 }
 
@@ -6416,9 +7477,7 @@ function renderTimeline() {
     const prevScroll = state.timeline.scrollX || 0;
 
     // Reset cached DOM refs — innerHTML destroys old elements
-    _cachedPlayhead = null;
-    _cachedTimelineScroll = null;
-    _cachedTimelineTime = null;
+    resetTimelineDomCache();
 
     container.innerHTML = `
         <div class="timeline-header">
@@ -6719,6 +7778,7 @@ function renderTracks() {
     // Clip events
     document.querySelectorAll('.timeline-clip[data-index]').forEach(clip => {
         clip.addEventListener('mousedown', (e) => {
+            if (e.button !== 0) return; // only left-drag — right/middle click is for the context menu (no drag, no preview refresh)
             if (e.target.classList.contains('clip-toggle-btn')) return;
             startDragClip(e, clip);
         });
@@ -6734,6 +7794,7 @@ function renderTracks() {
     // Trim handle events (must come before general clip drag)
     document.querySelectorAll('.clip-trim-handle').forEach(handle => {
         handle.addEventListener('mousedown', (e) => {
+            if (e.button !== 0) return; // left-drag only — don't start a trim on right-click
             e.stopPropagation();
             startTrimClip(e, handle);
         });
@@ -6899,6 +7960,51 @@ function setupTrackResize() {
 // ========================================
 const thumbnailCache = {};
 
+// Poster generation is throttled so the first timeline render doesn't decode 100+ videos at once.
+let _posterActive = 0;
+const _posterQueue = [];
+function _posterSlot() {
+    if (_posterActive < 4) { _posterActive++; return Promise.resolve(); }
+    return new Promise(res => _posterQueue.push(res)).then(() => { _posterActive++; });
+}
+function _posterRelease() {
+    _posterActive = Math.max(0, _posterActive - 1);
+    const next = _posterQueue.shift();
+    if (next) next();
+}
+
+// Draw the first real frame of a video into a small JPEG data URL for a timeline clip background.
+// CSS background-image can't render an .mp4, so video clips need a still poster like this — without
+// it they show up as dark "empty" slots even though the footage is present and will render fine.
+function generateVideoPoster(url) {
+    return new Promise((resolve, reject) => {
+        const v = document.createElement('video');
+        v.muted = true; v.preload = 'auto'; v.src = url;
+        let settled = false;
+        const finish = (val, err) => {
+            if (settled) return; settled = true;
+            try { v.removeAttribute('src'); v.load(); } catch (_) {}
+            err ? reject(err) : resolve(val);
+        };
+        v.addEventListener('loadeddata', () => {
+            try { v.currentTime = Math.min(0.5, (v.duration || 2) * 0.1); } catch (_) { finish(null, new Error('seek failed')); }
+        });
+        v.addEventListener('seeked', () => {
+            try {
+                const w = v.videoWidth || 160, h = v.videoHeight || 90;
+                const scale = 160 / w;
+                const c = document.createElement('canvas');
+                c.width = Math.max(1, Math.round(w * scale));
+                c.height = Math.max(1, Math.round(h * scale));
+                c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
+                finish(c.toDataURL('image/jpeg', 0.6));
+            } catch (e) { finish(null, e); }
+        });
+        v.addEventListener('error', () => finish(null, new Error('video load error')));
+        setTimeout(() => finish(null, new Error('poster timeout')), 8000);
+    });
+}
+
 async function loadClipThumbnails() {
     if (!window.electronAPI?.getSceneMediaPath) return;
     document.querySelectorAll('.timeline-clip[data-index]').forEach(async (clipEl) => {
@@ -6928,17 +8034,35 @@ async function loadClipThumbnails() {
                 }
                 return;
             }
-            // Fallback: if scene is an image, use it directly
-            if (scene.mediaType === 'image') {
-                const imgPath = await window.electronAPI.getSceneMediaPath(originalIdx, scene.mediaExtension);
-                if (imgPath) {
-                    const url = await window.electronAPI.getFileUrl(imgPath);
-                    thumbnailCache[idx] = url;
-                    if (url && clipEl.isConnected) {
+            // Fallback: use the scene's ACTUAL resolved media. mediaFile is always set by the
+            // build and points at the real file — including candidate-race names like
+            // scene-30.race-3-xxxx.mp4 that a scene-{index}.{ext} lookup would miss. Images go
+            // straight to the clip background; videos get a client-side poster frame (a raw .mp4
+            // can't be a CSS background-image, which is why video clips looked like empty slots).
+            if (scene.mediaFile) {
+                const url = await window.electronAPI.getFileUrl(scene.mediaFile).catch(() => null);
+                if (url && clipEl.isConnected) {
+                    const ext = (String(scene.mediaFile).split('.').pop() || '').toLowerCase();
+                    const isVideo = ['mp4', 'webm', 'mov', 'm4v', 'mkv'].includes(ext);
+                    if (!isVideo) {
+                        thumbnailCache[idx] = url;
                         clipEl.style.backgroundImage = `url("${url}")`;
                         clipEl.classList.add('has-thumbnail');
+                        return;
                     }
-                    return;
+                    await _posterSlot();
+                    try {
+                        const poster = await generateVideoPoster(url);
+                        if (poster) {
+                            thumbnailCache[idx] = poster;
+                            if (clipEl.isConnected) {
+                                clipEl.style.backgroundImage = `url("${poster}")`;
+                                clipEl.classList.add('has-thumbnail');
+                            }
+                            return;
+                        }
+                    } catch (_) { /* fall through to null */ }
+                    finally { _posterRelease(); }
                 }
             }
             thumbnailCache[idx] = null;
@@ -7189,6 +8313,15 @@ let _cachedPlayhead = null;
 let _cachedTimelineScroll = null;
 let _cachedTimelineTime = null;
 
+// Reset cached timeline DOM refs before any innerHTML rebuild of the timeline —
+// innerHTML destroys the old nodes, leaving these refs stale (a documented
+// playhead-freeze bug). Single owner so every rebuild site resets identically.
+function resetTimelineDomCache() {
+    _cachedPlayhead = null;
+    _cachedTimelineScroll = null;
+    _cachedTimelineTime = null;
+}
+
 function updatePlayhead() {
     if (!_cachedPlayhead) _cachedPlayhead = document.getElementById('playhead');
     if (!_cachedTimelineScroll) _cachedTimelineScroll = document.getElementById('timeline-scroll');
@@ -7224,7 +8357,11 @@ async function scrubMedia(time) {
     state.currentTime = time;
 
     // Load all active scenes at this time
-    await loadActiveScenes();
+    if (state.hyperframesPreview?.active) {
+        syncHyperframesPreview(true);
+    } else {
+        await loadActiveScenes();
+    }
 
     // Get active scenes for highlighting
     const activeScenes = getActiveScenesAtTime(time);
@@ -7565,7 +8702,11 @@ async function jumpToScene(index) {
     }
 
     // Load all active scenes at this time
-    await loadActiveScenes();
+    if (state.hyperframesPreview?.active) {
+        syncHyperframesPreview(true);
+    } else {
+        await loadActiveScenes();
+    }
 
     // Resume playback if we were playing
     if (wasPlaying) {
@@ -7587,7 +8728,9 @@ async function seekToTime(time) {
     cleanupVideoHandlers();
 
     // Load all active scenes at this time
-    if (state.compositorActive && state.compositor && state.compositor.isInitialized) {
+    if (state.hyperframesPreview?.active) {
+        syncHyperframesPreview(true);
+    } else if (state.compositorActive && state.compositor && state.compositor.isInitialized) {
         // WebGL2 compositor: just render the frame
         state.compositor.renderAtTime(state.currentTime);
     } else {
@@ -7605,7 +8748,7 @@ async function seekToTime(time) {
     updateSceneHighlight(activeScenes.length > 0 ? activeScenes[0].index : -1);
     updatePlayhead();
     updateTimeDisplay();
-    if (!state.compositorActive) updateMGOverlay();
+    if (!state.compositorActive && !state.hyperframesPreview?.active) updateMGOverlay();
 
     // Resume if was playing and within content
     if (wasPlaying && activeScenes.length > 0) {
@@ -7802,7 +8945,14 @@ async function getCachedMediaUrl(sceneIndex, mediaExtension, type) {
         console.warn(`[MediaCache] No path for scene ${sceneIndex} ext=${mediaExtension} type=${type || 'scene'}`);
         return null;
     }
-    const mediaUrl = await window.electronAPI.getFileUrl(mediaPath);
+    let mediaUrl = await window.electronAPI.getFileUrl(mediaPath);
+    // Cache-bust: if this scene was retried, its file changed at the SAME path, so append a
+    // version token to force the browser/compositor to re-fetch instead of serving the
+    // cached old texture. The asset:// handler strips this query before reading the file.
+    const ver = state._assetVersions?.[sceneIndex];
+    if (mediaUrl && ver) {
+        mediaUrl += (mediaUrl.includes('?') ? '&' : '?') + 'cb=' + ver;
+    }
     if (mediaUrl) {
         state._mediaUrlCache[cacheKey] = mediaUrl;
     } else {
@@ -7863,6 +9013,32 @@ async function loadActiveScenes(activeScenes) {
     // Use passed-in activeScenes to avoid duplicate getActiveScenesAtTime call
     if (!activeScenes) activeScenes = getActiveScenesAtTime(state.currentTime);
 
+    if (activeScenes.length === 0) {
+        if (state.scenes.length === 0) {
+            if (elements.videoContainer) {
+                elements.videoContainer.classList.add('hidden');
+            }
+            if (elements.videoControls) {
+                elements.videoControls.classList.add('hidden');
+            }
+            if (elements.previewPlaceholder) {
+                elements.previewPlaceholder.classList.remove('hidden');
+            }
+        } else {
+            // Keep the existing frame/track state through gaps so templates do not pre-roll over black.
+            if (elements.previewPlaceholder) {
+                elements.previewPlaceholder.classList.add('hidden');
+            }
+            if (elements.videoContainer) {
+                elements.videoContainer.classList.remove('hidden');
+            }
+            if (elements.videoControls) {
+                elements.videoControls.classList.remove('hidden');
+            }
+        }
+        return;
+    }
+
     // Determine which tracks have active scenes
     const activeTracks = new Set();
     activeScenes.forEach(({ scene }) => {
@@ -7906,24 +9082,6 @@ async function loadActiveScenes(activeScenes) {
     if (elements.bgVideo) elements.bgVideo.classList.remove('active');
     if (elements.bgImage) elements.bgImage.classList.remove('active');
     if (elements.bgGradient) elements.bgGradient.classList.remove('active');
-
-    if (activeScenes.length === 0) {
-        // No active scenes at this frame - hide video container
-        if (elements.videoContainer) {
-            elements.videoContainer.classList.add('hidden');
-        }
-        if (elements.videoControls) {
-            elements.videoControls.classList.add('hidden');
-        }
-        // Only show the "Import audio" placeholder when the whole project is empty.
-        // Otherwise we're just in a gap — keep placeholder hidden so the compositor frame remains.
-        if (state.scenes.length === 0) {
-            elements.previewPlaceholder.classList.remove('hidden');
-        } else {
-            elements.previewPlaceholder.classList.add('hidden');
-        }
-        return;
-    }
 
     // Show video container
     elements.previewPlaceholder.classList.add('hidden');
@@ -8303,6 +9461,213 @@ function updateSceneHighlight(index) {
 // WebGL2 Compositor Engine Integration
 // ========================================
 
+function filePathToPreviewUrl(filePath, query = '') {
+    if (!filePath) return '';
+    const normalized = String(filePath).replace(/\\/g, '/');
+    const url = normalized.startsWith('/')
+        ? `file://${normalized}`
+        : `file:///${normalized}`;
+    return encodeURI(url) + query;
+}
+
+function getHyperframesPreviewSignature() {
+    const compactScenes = state.scenes.map(s => ({
+        index: s.index,
+        startTime: s.startTime,
+        endTime: s.endTime,
+        duration: s.duration,
+        mediaFile: s.mediaFile,
+        mediaPath: s.mediaPath,
+        assetFile: s.assetFile,
+        assetPath: s.assetPath,
+        imageFile: s.imageFile,
+        imagePath: s.imagePath,
+        videoFile: s.videoFile,
+        videoPath: s.videoPath,
+        backgroundMediaFile: s.backgroundMediaFile,
+        backgroundImageFile: s.backgroundImageFile,
+        backgroundVideoFile: s.backgroundVideoFile,
+        templateMediaFile: s.templateMediaFile,
+        templateBackgroundFile: s.templateBackgroundFile,
+        templateBackgroundMediaFile: s.templateBackgroundMediaFile,
+        templateBackgroundImageFile: s.templateBackgroundImageFile,
+        templateBackgroundVideoFile: s.templateBackgroundVideoFile,
+        mapImageFile: s.mapImageFile,
+        mapImagePath: s.mapImagePath,
+        mapImage: s.mapImage,
+        renderAssets: s.renderAssets,
+        mgData: s.mgData,
+        _mapView: s._mapView,
+        _mapPins: s._mapPins,
+        mediaType: s.mediaType,
+        isMGScene: s.isMGScene,
+        templateType: s.templateType,
+        type: s.type,
+        text: s.text,
+        subtext: s.subtext,
+        style: s.style,
+        subType: s.subType,
+        animation: s.animation,
+        mgBackground: s.mgBackground,
+        scale: s.scale,
+        posX: s.posX,
+        posY: s.posY,
+        fitMode: s.fitMode,
+        cropTop: s.cropTop,
+        cropBottom: s.cropBottom,
+        cropLeft: s.cropLeft,
+        cropRight: s.cropRight,
+    }));
+    const compactMgs = state.motionGraphics.map(mg => ({
+        id: mg.id,
+        type: mg.type,
+        text: mg.text,
+        subtext: mg.subtext,
+        startTime: mg.startTime,
+        duration: mg.duration,
+        position: mg.position,
+        style: mg.style,
+        subType: mg.subType,
+        animation: mg.animation,
+        disabled: mg.disabled,
+        mediaFile: mg.mediaFile,
+        mediaPath: mg.mediaPath,
+        assetFile: mg.assetFile,
+        assetPath: mg.assetPath,
+        imageFile: mg.imageFile,
+        imagePath: mg.imagePath,
+        videoFile: mg.videoFile,
+        videoPath: mg.videoPath,
+        backgroundMediaFile: mg.backgroundMediaFile,
+        backgroundImageFile: mg.backgroundImageFile,
+        backgroundVideoFile: mg.backgroundVideoFile,
+        templateMediaFile: mg.templateMediaFile,
+        templateBackgroundFile: mg.templateBackgroundFile,
+        templateBackgroundMediaFile: mg.templateBackgroundMediaFile,
+        templateBackgroundImageFile: mg.templateBackgroundImageFile,
+        templateBackgroundVideoFile: mg.templateBackgroundVideoFile,
+        mapImageFile: mg.mapImageFile,
+        mapImagePath: mg.mapImagePath,
+        mapImage: mg.mapImage,
+        renderAssets: mg.renderAssets,
+        mgData: mg.mgData,
+        _mapView: mg._mapView,
+        _mapPins: mg._mapPins,
+    }));
+    return JSON.stringify({
+        hfPreviewRuntime: 6,
+        totalDuration: state.totalDuration,
+        transitionStyle: elements.transitionStyle?.value,
+        mgEnabled: state.mgEnabled,
+        mgStyle: state.mgStyle,
+        mgOverlayShadow: state.mgOverlayShadow,
+        scenes: compactScenes,
+        motionGraphics: compactMgs,
+    });
+}
+
+function syncHyperframesPreview(force = false) {
+    const frame = elements.hyperframesPreviewFrame;
+    if (!state.hyperframesPreview?.active || !frame?.contentWindow) return;
+    if (!force && !state.hyperframesPreview.frameReady) return;
+    frame.contentWindow.postMessage({
+        type: 'hf-preview-seek',
+        time: state.currentTime || 0,
+        playing: !!state.isPlaying,
+    }, '*');
+}
+
+function scheduleHyperframesPreviewRefresh(delay = 700) {
+    if (!state.hyperframesPreview?.active) return;
+    if (state.hyperframesPreview.refreshTimer) {
+        clearTimeout(state.hyperframesPreview.refreshTimer);
+    }
+    state.hyperframesPreview.refreshTimer = setTimeout(() => {
+        state.hyperframesPreview.refreshTimer = null;
+        refreshHyperframesPreview({ force: true }).catch(err => {
+            console.warn('[HyperFrames Preview] Refresh failed:', err);
+        });
+    }, delay);
+}
+
+async function refreshHyperframesPreview({ force = false } = {}) {
+    if (!state.hyperframesPreview?.active || !state.videoPlan) return;
+    if (!window.electronAPI?.hyperframesGenerateProject) {
+        showToast('HyperFrames preview IPC is not available. Restart the app.', 'error');
+        return;
+    }
+    if (state.hyperframesPreview.loading) return;
+
+    syncVideoPlanFromEditor();
+    const signature = getHyperframesPreviewSignature();
+    if (!force && state.hyperframesPreview.indexPath && state.hyperframesPreview.signature === signature) {
+        syncHyperframesPreview(true);
+        return;
+    }
+
+    state.hyperframesPreview.loading = true;
+    try {
+        console.log('[HyperFrames Preview] Generating preview project...');
+        const result = await window.electronAPI.hyperframesGenerateProject({
+            plan: state.videoPlan,
+            fps: state.videoPlan.fps || 30,
+            options: { preview: true },
+        });
+        if (!result?.success || !result.indexPath) {
+            throw new Error(result?.error || 'HyperFrames preview project generation failed');
+        }
+
+        const frame = elements.hyperframesPreviewFrame;
+        if (!frame) return;
+        state.hyperframesPreview.projectDir = result.projectDir;
+        state.hyperframesPreview.indexPath = result.indexPath;
+        state.hyperframesPreview.signature = signature;
+        state.hyperframesPreview.frameReady = false;
+        frame.onload = () => {
+            state.hyperframesPreview.frameReady = true;
+            syncHyperframesPreview(true);
+            console.log('[HyperFrames Preview] Ready:', result.indexPath);
+        };
+        frame.src = filePathToPreviewUrl(result.indexPath, `?preview=1&t=${encodeURIComponent((state.currentTime || 0).toFixed(3))}`);
+    } catch (err) {
+        console.error('[HyperFrames Preview] Failed:', err);
+        showToast(`HyperFrames preview failed: ${err.message || err}`, 'error');
+    } finally {
+        state.hyperframesPreview.loading = false;
+    }
+}
+
+async function setHyperframesPreviewMode(active) {
+    const frame = elements.hyperframesPreviewFrame;
+    const container = elements.previewContainer;
+    if (!frame || !container) return;
+
+    state.hyperframesPreview.active = !!active;
+    container.classList.toggle('hyperframes-preview-active', !!active);
+    frame.classList.toggle('hidden', !active);
+
+    if (active) {
+        if (state.compositorActive) {
+            await setCompositorMode(false);
+        }
+        document.querySelectorAll('.preview-video').forEach(video => {
+            try { video.pause(); } catch (_) {}
+        });
+        elements.videoContainer?.classList.add('hidden');
+        elements.previewPlaceholder?.classList.add('hidden');
+        elements.videoControls?.classList.add('hidden');
+        await refreshHyperframesPreview({ force: false });
+        syncHyperframesPreview(true);
+    } else {
+        frame.contentWindow?.postMessage({ type: 'hf-preview-pause' }, '*');
+        state.hyperframesPreview.frameReady = false;
+        if (!state.compositorActive) {
+            elements.videoContainer?.classList.remove('hidden');
+            elements.previewPlaceholder?.classList.remove('hidden');
+        }
+    }
+}
+
 /**
  * Initialize the WebGL2 compositor engine.
  * Called once during init() — creates the engine but does NOT activate it.
@@ -8323,8 +9688,12 @@ function initCompositor() {
         // Wire up the compositor toggle button
         const toggleBtn = document.getElementById('btn-compositor-toggle');
         if (toggleBtn) {
-            toggleBtn.style.display = 'inline-block';
-            toggleBtn.addEventListener('click', () => {
+            toggleBtn.addEventListener('click', async () => {
+                if (document.getElementById('renderer-select')?.value === 'hyperframes') {
+                    await setHyperframesPreviewMode(true);
+                    showToast('HyperFrames preview is active. Switch to WebGL2 to use Engine ON.', 'info');
+                    return;
+                }
                 setCompositorMode(!state.compositorActive);
             });
         }
@@ -8349,11 +9718,21 @@ function initCompositor() {
         const legacyLabel = document.getElementById('legacy-export-label');
         if (rendererSelect) {
             const updateLegacyVisibility = () => {
-                if (legacyLabel) legacyLabel.style.display = rendererSelect.value === 'webgl2' ? 'flex' : 'none';
+                const isWebgl2 = rendererSelect.value === 'webgl2';
+                if (legacyLabel) legacyLabel.style.display = isWebgl2 ? 'flex' : 'none';
+                if (toggleBtn) toggleBtn.style.display = isWebgl2 ? 'inline-block' : 'none';
+                if (qualitySelect && !isWebgl2) qualitySelect.style.display = 'none';
             };
-            rendererSelect.addEventListener('change', () => {
-                if (rendererSelect.value === 'webgl2' && !state.compositorActive) {
-                    setCompositorMode(true);
+            rendererSelect.addEventListener('change', async () => {
+                const useHyperframesPreview = rendererSelect.value === 'hyperframes';
+                if (useHyperframesPreview) {
+                    if (state.compositorActive) await setCompositorMode(false);
+                    await setHyperframesPreviewMode(true);
+                } else {
+                    await setHyperframesPreviewMode(false);
+                    if (rendererSelect.value === 'webgl2' && !state.compositorActive) {
+                        await setCompositorMode(true);
+                    }
                 }
                 updateLegacyVisibility();
             });
@@ -8376,6 +9755,12 @@ async function setCompositorMode(active) {
     const qualitySelect = document.getElementById('preview-quality');
 
     if (active) {
+        if (state.hyperframesPreview?.active) {
+            state.hyperframesPreview.active = false;
+            elements.previewContainer?.classList.remove('hyperframes-preview-active');
+            elements.hyperframesPreviewFrame?.classList.add('hidden');
+            elements.hyperframesPreviewFrame?.contentWindow?.postMessage({ type: 'hf-preview-pause' }, '*');
+        }
         // Initialize if not yet done
         if (state.compositor && !state.compositor.isInitialized) {
             state.compositor.init();
@@ -8445,6 +9830,8 @@ function refreshCompositorScene(sceneIndex) {
     target.posX = srcScene.posX;
     target.posY = srcScene.posY;
     target.fitMode = srcScene.fitMode;
+    target.focusX = srcScene.focusX;
+    target.focusY = srcScene.focusY;
     target.cropTop = srcScene.cropTop;
     target.cropBottom = srcScene.cropBottom;
     target.cropLeft = srcScene.cropLeft;
@@ -8465,6 +9852,244 @@ function refreshCompositorScene(sceneIndex) {
     const fps = state.compositor.fps;
     const frame = Math.round((state.currentTime || 0) * fps);
     state.compositor.renderFrame(frame);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Timeline scene right-click menu — Retry footage / CEO Editor (single or batch)
+// Reuses src/scene-actions.js (Media Agent + footage download + editor-agent CEO).
+// ─────────────────────────────────────────────────────────────────────────
+let _sceneMenuEl = null;
+
+function _selectedSceneIndices() {
+    if (state.selectedClipIndices && state.selectedClipIndices.length) return [...state.selectedClipIndices];
+    if (state.selectedClipIndex >= 0) return [state.selectedClipIndex];
+    return [];
+}
+
+function _hideSceneMenu() {
+    if (_sceneMenuEl) { _sceneMenuEl.remove(); _sceneMenuEl = null; }
+    document.removeEventListener('click', _hideSceneMenu);
+    document.removeEventListener('contextmenu', _hideSceneMenuOnOutside, true);
+}
+function _hideSceneMenuOnOutside(e) {
+    if (_sceneMenuEl && !_sceneMenuEl.contains(e.target)) _hideSceneMenu();
+}
+
+function initSceneContextMenu() {
+    // Delegate on document, NOT #timeline-content: renderTimeline() rebuilds the
+    // timeline via innerHTML on every change, so any listener bound inside it is
+    // destroyed. document is stable and this covers clips on ALL tracks at once
+    // (V1 footage + V2/V3 templates, MGs, overlays).
+    document.addEventListener('contextmenu', (e) => {
+        const clip = e.target.closest('.timeline-clip[data-index]');
+        if (!clip) return;
+        e.preventDefault();
+        const idx = parseInt(clip.dataset.index, 10);
+        if (Number.isNaN(idx)) return;
+        // If the right-clicked clip isn't already in the selection, select just it.
+        if (!_selectedSceneIndices().includes(idx)) {
+            state.selectedClipIndices = [idx];
+            state.selectedClipIndex = idx;
+            document.querySelectorAll('.timeline-clip.selected').forEach(c => c.classList.remove('selected'));
+            clip.classList.add('selected');
+        }
+        _showSceneMenu(e.clientX, e.clientY);
+    });
+}
+
+function _showSceneMenu(x, y) {
+    _hideSceneMenu();
+    const indices = _selectedSceneIndices();
+    if (!indices.length) return;
+    const first = state.scenes[indices[0]] || {};
+    const typeLabel = first.isMGScene ? (first.type || 'MG') : (first.mediaType === 'image' ? 'image' : 'video');
+    const label = indices.length > 1 ? `${indices.length} scenes selected` : `Scene ${indices[0]} · ${typeLabel}`;
+
+    const menu = document.createElement('div');
+    menu.className = 'scene-context-menu';
+    menu.innerHTML = `
+        <div class="scm-header">${label}</div>
+        <div class="scm-item" data-act="retry">🔄 Retry footage</div>
+        <div class="scm-sep"></div>
+        <div class="scm-item scm-sub">🎬 CEO Editor <span class="scm-arrow">▸</span>
+            <div class="scm-submenu">
+                <div class="scm-item" data-act="ceo:reframe">Re-frame</div>
+                <div class="scm-item scm-disabled" data-act="ceo:template">Re-template<span class="scm-soon">soon</span></div>
+                <div class="scm-item scm-disabled" data-act="ceo:mg">Re-do motion graphics<span class="scm-soon">soon</span></div>
+                <div class="scm-item scm-disabled" data-act="ceo:explainer">Re-do explainer images<span class="scm-soon">soon</span></div>
+                <div class="scm-item scm-disabled" data-act="ceo:map">Re-do map assets<span class="scm-soon">soon</span></div>
+                <div class="scm-item scm-disabled" data-act="ceo:transition">Re-do transitions<span class="scm-soon">soon</span></div>
+                <div class="scm-sep"></div>
+                <div class="scm-item scm-disabled" data-act="ceo:instruction">✏️ Edit with instruction…<span class="scm-soon">soon</span></div>
+            </div>
+        </div>`;
+    document.body.appendChild(menu);
+    menu.style.left = Math.min(x, window.innerWidth - 250) + 'px';
+    menu.style.top = Math.min(y, window.innerHeight - 280) + 'px';
+    _sceneMenuEl = menu;
+
+    menu.addEventListener('click', (ev) => {
+        const item = ev.target.closest('.scm-item[data-act]');
+        if (!item || item.classList.contains('scm-disabled')) return;
+        const act = item.dataset.act;
+        _hideSceneMenu();
+        _runSceneAction(act, indices);
+    });
+
+    setTimeout(() => {
+        document.addEventListener('click', _hideSceneMenu);
+        document.addEventListener('contextmenu', _hideSceneMenuOnOutside, true);
+    }, 0);
+}
+
+async function _runSceneAction(act, indices) {
+    if (!window.electronAPI?.sceneAction) {
+        showToast('Scene action IPC unavailable. Restart the app.', 'error');
+        return;
+    }
+
+    const sceneIds = [];
+    const idToArrayIndex = new Map();
+    for (const idx of indices) {
+        const scene = state.scenes[idx];
+        if (!scene) continue;
+        const sceneId = Number.isFinite(Number(scene.index)) ? Number(scene.index) : idx;
+        sceneIds.push(sceneId);
+        idToArrayIndex.set(String(sceneId), idx);
+    }
+    if (!sceneIds.length) {
+        showToast('No valid scene selected', 'error');
+        return;
+    }
+
+    const kind = act === 'retry' ? 'retry' : act.startsWith('ceo:') ? 'ceo' : '';
+    const action = kind === 'ceo' ? act.split(':')[1] : '';
+    if (!kind) return;
+
+    mediaLogShow();
+    const offProgress = window.electronAPI.onSceneActionProgress?.((evt) => {
+        if (!evt || typeof evt !== 'object') return;
+        const sceneIndex = Number(evt.sceneIndex);
+        const msg = evt.message || '';
+        const label = Number.isFinite(sceneIndex) && sceneIndex >= 0 ? `Scene ${sceneIndex}: ` : '';
+        // Report lines (box-drawing) go to the Media Log panel only — don't flood toasts.
+        const isReportLine = /^\s*[┌│└]/.test(msg) || msg.trim() === '';
+        mediaLogAppend(isReportLine ? msg : `${label}${msg}`);
+        if (!isReportLine && msg.trim()) {
+            showToast(`${label}${msg}`, Number.isFinite(sceneIndex) && sceneIndex < 0 ? 'warning' : 'info');
+        }
+    });
+
+    let result = null;
+    try {
+        showToast(kind === 'retry'
+            ? `${sceneIds.length} scene${sceneIds.length > 1 ? 's' : ''}: retrying footage in main process…`
+            : `${sceneIds.length} scene${sceneIds.length > 1 ? 's' : ''}: CEO ${action}…`, 'info');
+
+        result = await window.electronAPI.sceneAction({
+            kind,
+            action,
+            sceneIndices: sceneIds,
+        });
+    } catch (e) {
+        result = { success: false, ok: 0, fail: sceneIds.length, error: e.message || String(e) };
+    } finally {
+        if (typeof offProgress === 'function') offProgress();
+    }
+
+    const ok = Number(result?.ok || 0);
+    const fail = Number(result?.fail || 0);
+
+    if (Array.isArray(result?.scenes)) {
+        for (const row of result.scenes) {
+            const arrIdx = idToArrayIndex.get(String(row.si));
+            if (arrIdx === undefined || !state.scenes[arrIdx]) continue;
+            if (row.keyword) state.scenes[arrIdx].keyword = row.keyword;
+            if (row.sourceHint) state.scenes[arrIdx].sourceHint = row.sourceHint;
+            // Retry swapped the file at the same path → bump this scene's cache-bust token
+            // so getCachedMediaUrl returns a fresh URL and the preview re-fetches it.
+            if (row.reload && Number.isFinite(Number(row.si))) {
+                state._assetVersions[Number(row.si)] = Date.now();
+            }
+            if (row.scene) {
+                state.scenes[arrIdx] = row.scene;
+                refreshCompositorScene(arrIdx);
+                showToast(`Scene ${row.si}: ${row.change || 'updated'}`, 'success');
+            }
+        }
+    }
+
+    if (kind === 'retry' && ok > 0) {
+        // Replacement keeps the same filename; clear URL cache and reload so the
+        // compositor does not keep a stale media element around.
+        state._mediaUrlCache = {};
+        try { await loadPlanIntoCompositor(); } catch (_) {}
+    }
+
+    if (result?.error) showToast(result.error, 'error');
+    if (Array.isArray(result?.errors)) {
+        for (const err of result.errors.slice(0, 3)) {
+            showToast(`Scene ${err.si}: ${err.error}`, 'error');
+        }
+    }
+
+    showNotification('Scene actions', `${ok} done${fail ? `, ${fail} failed` : ''}`, (fail && !ok) ? 'error' : 'success');
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Media Log panel — persistent, scrollable view of retry/media diagnostics
+// (per-scene MEDIA REPORT: candidates tried, scores, clickable links, winner).
+// ─────────────────────────────────────────────────────────────────────────
+let _mediaLogEl = null;
+function _escapeHtmlML(s) {
+    return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+function _mediaLogEnsure() {
+    if (_mediaLogEl) return _mediaLogEl;
+    const el = document.createElement('div');
+    el.id = 'media-log-panel';
+    el.innerHTML = `
+        <div class="ml-header">
+            <span class="ml-title">🎬 Media Log</span>
+            <span class="ml-actions">
+                <button class="ml-btn ml-clear" title="Clear">Clear</button>
+                <button class="ml-btn ml-close" title="Hide">✕</button>
+            </span>
+        </div>
+        <div class="ml-body"></div>`;
+    document.body.appendChild(el);
+    el.querySelector('.ml-clear').addEventListener('click', () => { el.querySelector('.ml-body').innerHTML = ''; });
+    el.querySelector('.ml-close').addEventListener('click', () => { el.classList.add('ml-hidden'); });
+    el.querySelector('.ml-body').addEventListener('click', (e) => {
+        const a = e.target.closest('a.ml-link');
+        if (a) { e.preventDefault(); window.electronAPI?.openExternal?.(a.dataset.url); }
+    });
+    _mediaLogEl = el;
+    return el;
+}
+function mediaLogShow() { _mediaLogEnsure().classList.remove('ml-hidden'); }
+function mediaLogAppend(message) {
+    const body = _mediaLogEnsure().querySelector('.ml-body');
+    const msg = String(message || '');
+    // Turn URLs into clickable links; escape everything else.
+    let html = '', last = 0;
+    const re = /https?:\/\/[^\s)]+/g;
+    let m;
+    while ((m = re.exec(msg))) {
+        html += _escapeHtmlML(msg.slice(last, m.index));
+        html += `<a class="ml-link" href="#" data-url="${_escapeHtmlML(m[0])}">${_escapeHtmlML(m[0])}</a>`;
+        last = m.index + m[0].length;
+    }
+    html += _escapeHtmlML(msg.slice(last));
+    const line = document.createElement('div');
+    line.className = 'ml-line';
+    if (/✅|WINNER|accepted/.test(msg)) line.classList.add('ml-ok');
+    else if (/❌|rejected|\bfail|✗|not ready/.test(msg)) line.classList.add('ml-bad');
+    else if (/┌──|MEDIA REPORT/.test(msg)) line.classList.add('ml-hdr');
+    line.innerHTML = html || '&nbsp;';
+    body.appendChild(line);
+    while (body.childElementCount > 800) body.removeChild(body.firstChild);
+    body.scrollTop = body.scrollHeight;
 }
 
 function refreshCompositorMGs() {
@@ -8510,6 +10135,10 @@ function refreshCompositorMGs() {
                 mgBackground: mgScene.mgBackground,
                 duration: mgScene.duration,
                 startTime: mgScene.startTime, endTime: mgScene.endTime,
+                templateContentStartTime: mgScene.templateContentStartTime,
+                templateContentEndTime: mgScene.templateContentEndTime,
+                templateContentDuration: mgScene.templateContentDuration,
+                templateContentOffset: mgScene.templateContentOffset,
                 _startFrame: startFrame, _endFrame: endFrame,
                 _totalFrames: endFrame - startFrame,
                 _animationSpeed: mgScene.animationSpeed || 1.0,
@@ -8696,86 +10325,58 @@ async function renderVideoWebGL2() {
     }
 }
 
+/**
+ * Render through the HyperFrames bridge.
+ * Generates a standalone HTML/GSAP HyperFrames project from the current
+ * processed plan, then renders it through the HyperFrames CLI.
+ */
+async function renderVideoHyperFrames() {
+    if (!state.videoPlan) {
+        return { success: false, error: 'No video plan loaded' };
+    }
+    if (!window.electronAPI?.hyperframesRender) {
+        return { success: false, error: 'HyperFrames bridge IPC is not available. Restart the app after updating.' };
+    }
+
+    const fps = state.videoPlan.fps || 30;
+    const { inSec, outSec } = getRenderRange();
+    const hasRange = state.inPoint !== null || state.outPoint !== null;
+    if (hasRange) {
+        showToast(`HyperFrames: rendering section ${formatTime(inSec)} → ${formatTime(outSec)}`, 'info');
+    }
+
+    updateProgress(8, 'Generating HyperFrames HTML/MG project...');
+    return window.electronAPI.hyperframesRender({
+        plan: state.videoPlan,
+        fps,
+        quality: 'standard',
+        gpu: true,
+        strict: false,
+        options: { startSec: inSec, endSec: outSec },
+    });
+}
+
 async function renderVideo() {
     if (!state.videoPlan || state.isProcessing) return;
     state.isProcessing = true; elements.btnRender.disabled = true; showProgress(true); startTimer();
     try {
-        // Save current scene state + transition style + SFX into the plan before rendering
-        // Separate MG scenes from regular scenes for the renderer
-        state.videoPlan.scenes = state.scenes.filter(s => !s.isMGScene).map((s, i) => ({ ...s, index: i }));
-        state.videoPlan.mgScenes = state.scenes.filter(s => s.isMGScene && !s.disabled && !s.templateType).map(s => ({ ...s }));
-        state.videoPlan.templateScenes = state.scenes.filter(s => s.isMGScene && !s.disabled && s.templateType).map(s => ({ ...s }));
-        state.videoPlan.totalDuration = state.totalDuration;
-        state.videoPlan.transitionStyle = elements.transitionStyle.value;
-        // Add SFX data to plan
-        generateSfxClips();
-        state.videoPlan.sfxEnabled = state.sfxEnabled;
-        state.videoPlan.sfxVolume = state.sfxVolume;
-        state.videoPlan.sfxClips = state.sfxClips.map(sfx => ({
-            file: sfx.file,
-            startTime: sfx.startTime,
-            duration: sfx.duration,
-            volume: sfx.volume
-        }));
-        // Subtitles flag
-        state.videoPlan.subtitlesEnabled = state.subtitlesEnabled;
-        // Add motion graphics data to plan
-        state.videoPlan.mgEnabled = state.mgEnabled;
-        state.videoPlan.mgStyle = state.mgStyle;
-        state.videoPlan.motionGraphics = state.motionGraphics.filter(mg => !mg.disabled).map(mg => {
-            const base = {
-                id: mg.id,
-                type: mg.type,
-                text: mg.text,
-                subtext: mg.subtext || '',
-                startTime: mg.startTime,
-                duration: mg.duration,
-                position: mg.position,
-                sceneIndex: mg.sceneIndex,
-                style: mg.style || state.mgStyle || 'clean',
-                subType: mg.subType || undefined,
-                animation: mg.animation || undefined,
-                animationSpeed: mg.animationSpeed || undefined,
-                overlayShadowStrength: mg.overlayShadowStrength != null ? mg.overlayShadowStrength : state.mgOverlayShadow,
-                styleManual: mg.styleManual === true ? true : undefined,
-                variantManual: mg.variantManual === true ? true : undefined,
-                animationManual: mg.animationManual === true ? true : undefined,
-            };
-            // Preserve explainer-specific fields
-            if (mg.type === 'explainer') {
-                if (mg.explainerImageFile) base.explainerImageFile = mg.explainerImageFile;
-                if (mg.explainerLabel) base.explainerLabel = mg.explainerLabel;
-                if (mg.explainerQuery) base.explainerQuery = mg.explainerQuery;
-                if (mg.explainerBgOpacity != null) base.explainerBgOpacity = mg.explainerBgOpacity;
-                if (mg.explainerImgScale != null) base.explainerImgScale = mg.explainerImgScale;
-                if (mg.explainerShadow) base.explainerShadow = mg.explainerShadow;
-            }
-            // Preserve articleHighlight-specific fields
-            if (mg.articleImageFile) base.articleImageFile = mg.articleImageFile;
-            if (mg.highlightBoxes) base.highlightBoxes = mg.highlightBoxes;
-            // Preserve mapChart-specific fields
-            if (mg.mapImageFile) base.mapImageFile = mg.mapImageFile;
-            if (mg._mapView) base._mapView = mg._mapView;
-            if (mg._mapPins) base._mapPins = mg._mapPins;
-            return base;
-        });
-        // Save muted tracks so Composition.jsx can mute audio accordingly
-        state.videoPlan.mutedTracks = { ...state.mutedTracks };
-        // Global MG animation speed
-        const globalAnimSpeed = parseFloat(document.getElementById('mg-global-anim-speed')?.value) || 1.0;
-        if (!state.videoPlan.scriptContext) state.videoPlan.scriptContext = {};
-        state.videoPlan.scriptContext.mgAnimationSpeed = globalAnimSpeed;
-        state.videoPlan.scriptContext.mgOverlayShadow = state.mgOverlayShadow;
+        // Save current editor state into the plan before rendering.
+        syncVideoPlanFromEditor();
         await window.electronAPI.saveVideoPlan(state.videoPlan);
 
-        updateProgress(5, 'Starting WebGL2 WYSIWYG render...');
-        let result = await renderVideoWebGL2();
+        const selectedRenderer = document.getElementById('renderer-select')?.value || 'hyperframes';
+        const isHyperFramesRender = selectedRenderer === 'hyperframes';
+        updateProgress(5, isHyperFramesRender
+            ? 'Starting HyperFrames HTML/MG render...'
+            : 'Starting WebGL2 WYSIWYG render...');
+        let result = isHyperFramesRender ? await renderVideoHyperFrames() : await renderVideoWebGL2();
         if (result.success) {
             stopTimer();
             const renderTime = getElapsedString();
+            const engineLabel = isHyperFramesRender ? 'HyperFrames' : 'WebGL2';
             updateProgress(100, `✅ Video rendered! (${renderTime})`);
-            showToast(`Video rendered in ${renderTime}!`, 'success');
-            showNotification('Render Complete', `Video rendered in ${renderTime}`);
+            showToast(`${engineLabel} video rendered in ${renderTime}!`, 'success');
+            showNotification('Render Complete', `${engineLabel} video rendered in ${renderTime}`);
             if (result.outputPath) showFinalVideo(result.outputPath);
         } else {
             stopTimer();
@@ -8833,7 +10434,107 @@ async function showFinalVideo(videoPath) {
 // UI Helpers
 // ========================================
 function showProgress(show) { elements.progressContainer.classList.toggle('hidden', !show); if (!show) stopTimer(); }
-function updateProgress(percent, message) { elements.progressFill.style.width = `${percent}%`; elements.progressText.textContent = message; }
+// ── Build Log panel ──────────────────────────────────────────────────
+// Consumes structured `build-event` events (phase/scene/note) emitted by the
+// pipeline via src/logger.js and renders a clean, phase-grouped, per-scene view
+// with expandable detail. The verbose lines stay in the .log file.
+const buildLog = {
+    phases: new Map(),   // phaseId -> { label, order, rows: Map(key->row), notes: [] }
+    _order: 0,
+    _icons: { ok: '✅', fail: '❌', warn: '⚠️', timeout: '⏱️', start: '▸', info: '·', done: '✅' },
+
+    reset() {
+        this.phases = new Map();
+        this._order = 0;
+        const body = document.getElementById('build-log-body');
+        if (body) body.innerHTML = '';
+        const panel = document.getElementById('build-log');
+        if (panel) panel.classList.remove('hidden');
+    },
+
+    _phase(id, label) {
+        let p = this.phases.get(id);
+        if (!p) { p = { id, label: label || id, order: this._order++, rows: new Map(), notes: [] }; this.phases.set(id, p); }
+        else if (label) p.label = label;
+        return p;
+    },
+
+    handle(evt) {
+        if (!evt || typeof evt !== 'object') return;
+        const phaseId = evt.phase || 'phase';
+        if (evt.t === 'phase') {
+            this._phase(phaseId, evt.label);
+        } else if (evt.t === 'scene') {
+            const p = this._phase(phaseId);
+            const key = 's' + evt.scene;
+            p.rows.set(key, { kind: 'scene', scene: evt.scene, status: evt.status, msg: evt.msg, detail: evt.detail });
+        } else if (evt.t === 'note') {
+            const p = this._phase(phaseId);
+            p.rows.set('n' + (p.rows.size), { kind: 'note', scene: evt.scene, status: evt.status || 'info', msg: evt.msg, detail: evt.detail });
+        }
+        this.render();
+    },
+
+    render() {
+        const body = document.getElementById('build-log-body');
+        if (!body) return;
+        const phases = [...this.phases.values()].sort((a, b) => a.order - b.order);
+        const esc = (s) => String(s == null ? '' : s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+        let html = '';
+        for (const p of phases) {
+            const rows = [...p.rows.values()];
+            // Per-phase summary counts (mainly meaningful for download).
+            const c = { ok: 0, fail: 0, timeout: 0, start: 0 };
+            for (const r of rows) if (c[r.status] != null) c[r.status]++;
+            const inProg = c.start - c.ok - c.fail - c.timeout;
+            const sumBits = [];
+            if (c.ok) sumBits.push(`${c.ok} done`);
+            if (c.fail) sumBits.push(`${c.fail} failed`);
+            if (c.timeout) sumBits.push(`${c.timeout} timed out`);
+            if (inProg > 0) sumBits.push(`${inProg} working`);
+            const summary = sumBits.length ? sumBits.join(' · ') : '';
+
+            html += `<div class="bl-phase"><div class="bl-phase-head"><span>${esc(p.label)}</span>`
+                + (summary ? `<span class="bl-phase-summary">${esc(summary)}</span>` : '') + `</div>`;
+            if (rows.length) {
+                html += '<div class="bl-rows">';
+                for (const r of rows) {
+                    // Collapse a scene's "start" once it has a terminal status (handled by Map key reuse).
+                    const icon = this._icons[r.status] || '·';
+                    const sid = r.scene != null ? `<span class="bl-scene-id">S${r.scene}</span>` : '';
+                    const cls = 'bl-' + (r.status || 'info');
+                    const hasDetail = !!r.detail;
+                    html += `<div class="bl-row ${hasDetail ? 'has-detail' : ''}">`
+                        + `<span class="bl-icon ${cls}">${icon}</span>${sid}`
+                        + `<span class="bl-msg">${esc(r.msg)}</span></div>`;
+                    if (hasDetail) html += `<div class="bl-detail">${esc(r.detail)}</div>`;
+                }
+                html += '</div>';
+            }
+            html += '</div>';
+        }
+        body.innerHTML = html;
+        // Click-to-expand detail rows.
+        body.querySelectorAll('.bl-row.has-detail').forEach(row => {
+            row.onclick = () => row.classList.toggle('open');
+        });
+        body.scrollTop = body.scrollHeight;
+    },
+};
+
+function updateProgress(percent, message) {
+    // percent < 0 is a sticky-alert signal (e.g. Qwen key exhausted) — don't
+    // collapse the progress bar, just surface the message as a toast.
+    if (typeof percent === 'number' && percent >= 0) {
+        elements.progressFill.style.width = `${percent}%`;
+    }
+    if (message) {
+        elements.progressText.textContent = message;
+        if (typeof percent === 'number' && percent < 0 && typeof showToast === 'function') {
+            showToast(message, 'warning');
+        }
+    }
+}
 
 // Build / Render timer
 let _timerInterval = null;
@@ -9866,9 +11567,7 @@ function _finalizeMapTest(testScene, setStatus) {
         try {
             renderTracks();
             loadActiveScenes();
-            _cachedPlayhead = null;
-            _cachedTimelineScroll = null;
-            _cachedTimelineTime = null;
+            resetTimelineDomCache();
         } catch (e) {
             console.warn('[Map Test] renderTracks failed:', e.message);
         }
@@ -11090,6 +12789,25 @@ function _renderMapTestFrame(ctx, frame, fps, mg, mapImg, anim) {
     ctx.globalAlpha = 1;
 }
 
+// Show/hide the presenter-image picker based on production mode + reflect the stored path.
+function _syncPresenterRow() {
+    if (!elements.presenterImageRow) return;
+    const isTH = elements.buildProductionMode && elements.buildProductionMode.value === 'talkingHead';
+    elements.presenterImageRow.style.display = isTH ? 'block' : 'none';
+    if (elements.presenterImagePath) elements.presenterImagePath.value = state.presenterImage || '';
+    // Kling avatar options (resolution + delivery prompt) show only when the toggle is on.
+    if (elements.klingAvatarOpts && elements.klingAvatarEnabled) {
+        elements.klingAvatarOpts.style.display = elements.klingAvatarEnabled.checked ? 'block' : 'none';
+    }
+}
+
+// AI Video (Veo) options show only when the toggle is on.
+function _syncVeoRow() {
+    if (elements.veoAiVideoOpts && elements.veoAiVideoEnabled) {
+        elements.veoAiVideoOpts.style.display = elements.veoAiVideoEnabled.checked ? 'block' : 'none';
+    }
+}
+
 function saveSettings() {
     localStorage.setItem('faceless-settings', JSON.stringify({
         smartAI: elements.smartAiToggle?.checked !== false,
@@ -11104,15 +12822,26 @@ function saveSettings() {
         sfxVolume: state.sfxVolume,
         mgEnabled: state.mgEnabled,
         subtitlesEnabled: state.subtitlesEnabled,
-        aiInstructions: state.aiInstructions,
-        videoTitle: state.videoTitle,
         mutedTracks: state.mutedTracks,
         buildNiche: elements.buildNiche ? elements.buildNiche.value : 'auto',
         buildMapStylePack: elements.buildMapStylePack ? elements.buildMapStylePack.value : 'auto',
+        buildProductionMode: elements.buildProductionMode ? elements.buildProductionMode.value : 'faceless',
+        presenterImage: state.presenterImage || '',
+        klingAvatar: elements.klingAvatarEnabled ? elements.klingAvatarEnabled.checked : false,
+        klingResolution: elements.klingResolution ? elements.klingResolution.value : '1080p',
+        klingAvatarPrompt: elements.klingAvatarPrompt ? elements.klingAvatarPrompt.value.trim() : '',
+        veoAiVideo: elements.veoAiVideoEnabled ? elements.veoAiVideoEnabled.checked : false,
+        veoScope: elements.veoScope ? elements.veoScope.value : 'directives',
+        veoResolution: elements.veoResolution ? elements.veoResolution.value : '720p',
+        veoBackend: elements.veoBackend ? elements.veoBackend.value : 'kling',
+        buildVisionBackend: elements.buildVisionBackend ? elements.buildVisionBackend.value : 'aws',
         buildLanguage: elements.buildLanguage ? elements.buildLanguage.value : 'auto',
         buildStyleProfile: elements.buildStyleProfile ? elements.buildStyleProfile.value : 'none',
         clipAnalyzer: elements.clipAnalyzerToggle?.checked !== false,
-        buildResume: elements.buildResumeToggle?.checked === true
+        buildResume: elements.buildResumeToggle?.checked === true,
+        fastMedia: elements.fastMediaToggle?.checked === true,
+        repeatFromStep: elements.repeatFromStep ? elements.repeatFromStep.value : 'visual-planner',
+        forceFreshFootage: elements.forceFreshFootage?.checked === true
     }));
     // Also trigger .fvp auto-save so settings persist per-project
     triggerAutoSave();
@@ -11131,18 +12860,61 @@ function saveSettings() {
 
 function getEnabledSources() {
     return {
+        storyblocks: elements.srcStoryblocks?.checked === true,
         pexels: elements.srcPexels?.checked ?? true,
         pixabay: elements.srcPixabay?.checked ?? true,
-        youtube: elements.srcYouTube?.checked ?? false,
-        telegram: elements.srcTelegram?.checked ?? true,
-        vkVideo: elements.srcVKVideo?.checked ?? true,
+        youtube: elements.srcYouTube?.checked ?? true,
         reddit: elements.srcReddit?.checked ?? true,
-        unsplash: elements.srcUnsplash?.checked ?? true,
-        googleCSE: elements.srcGoogleCSE?.checked ?? false,
-        bing: elements.srcBing?.checked ?? false,
-        duckduckgo: elements.srcDuckDuckGo?.checked ?? true,
-        googleScrape: elements.srcGoogleScrape?.checked ?? true,
+        bing: elements.srcBing?.checked ?? true,
+        brave: elements.srcBrave?.checked ?? true,
     };
+}
+
+function getFootageResourceSettings() {
+    return {
+        clipAnalyzer: elements.clipAnalyzerToggle?.checked !== false,
+        footageSources: getEnabledSources(),
+    };
+}
+
+function updateFootageResourceSummary() {
+    if (!elements.footageResourceSummary) return;
+    const settings = getFootageResourceSettings();
+    const active = Object.entries(settings.footageSources)
+        .filter(([, enabled]) => enabled)
+        .map(([name]) => ({
+            storyblocks: 'Storyblocks',
+            pexels: 'Pexels',
+            pixabay: 'Pixabay',
+            youtube: 'YouTube',
+            reddit: 'Reddit',
+            bing: 'Bing',
+            brave: 'Brave',
+        }[name] || name));
+    const analyzer = settings.clipAnalyzer ? 'Analyzer on' : 'Analyzer off';
+    elements.footageResourceSummary.textContent = `${analyzer} • ${active.length || 0} provider${active.length === 1 ? '' : 's'} active`;
+    elements.footageResourceSummary.title = active.length ? active.join(', ') : 'No footage providers enabled';
+}
+
+function applyFootageResourceSettings(settings, options = {}) {
+    if (!settings) return;
+    const sources = settings.footageSources || settings.sources || {};
+    if (elements.clipAnalyzerToggle) elements.clipAnalyzerToggle.checked = settings.clipAnalyzer !== false;
+    if (elements.srcStoryblocks) elements.srcStoryblocks.checked = sources.storyblocks === true;
+    if (elements.srcPexels) elements.srcPexels.checked = sources.pexels !== false;
+    if (elements.srcPixabay) elements.srcPixabay.checked = sources.pixabay !== false;
+    if (elements.srcYouTube) elements.srcYouTube.checked = sources.youtube !== false;
+    if (elements.srcReddit) elements.srcReddit.checked = sources.reddit !== false;
+    if (elements.srcBing) elements.srcBing.checked = sources.bing !== false;
+    if (elements.srcBrave) elements.srcBrave.checked = sources.brave !== false;
+    updateFootageResourceSummary();
+    if (options.save) saveSettings();
+}
+
+function syncFootageResourcesToMainProcess() {
+    updateFootageResourceSummary();
+    const sync = window.electronAPI?.footageResourcesSet?.(getFootageResourceSettings());
+    if (sync && typeof sync.catch === 'function') sync.catch(() => {});
 }
 
 function loadSettings() {
@@ -11150,12 +12922,16 @@ function loadSettings() {
         const s = JSON.parse(localStorage.getItem('faceless-settings'));
         if (s) {
             if (elements.smartAiToggle) elements.smartAiToggle.checked = s.smartAI !== false;
-            elements.aiProvider.value = s.aiProvider || 'ollama';
+            elements.aiProvider.value = s.aiProvider || 'bedrock';
+            // Sync the restored brain choice into the main process env
+            if (window.electronAPI?.setAiProvider && elements.aiProvider.value) {
+                window.electronAPI.setAiProvider(elements.aiProvider.value).catch(() => {});
+            }
             // Restore Ollama model selections
             if (elements.ollamaModel) elements.ollamaModel.value = s.ollamaModel || 'gemma3:12b';
             if (elements.ollamaVisionModel) elements.ollamaVisionModel.value = s.ollamaVisionModel || 'llava';
             if (elements.ollamaModelRow) {
-                elements.ollamaModelRow.style.display = (s.aiProvider || 'ollama') === 'ollama' ? 'block' : 'none';
+                elements.ollamaModelRow.style.display = (s.aiProvider || 'bedrock') === 'ollama' ? 'block' : 'none';
             }
             // Restore transition settings
             // Ignore old saved 'cut' with duration 0 — that was the hardcoded default before transitions were enabled
@@ -11189,15 +12965,27 @@ function loadSettings() {
             // Restore Subtitles setting
             state.subtitlesEnabled = s.subtitlesEnabled !== undefined ? s.subtitlesEnabled : false;
             if (elements.subtitlesEnabled) elements.subtitlesEnabled.checked = state.subtitlesEnabled;
-            // Restore Video Title
-            state.videoTitle = s.videoTitle || '';
+            // Title/instructions are project-scoped. Restore them only from
+            // .fvp project settings, never from global app localStorage.
+            state.videoTitle = '';
             if (elements.videoTitle) elements.videoTitle.value = state.videoTitle;
-            // Restore AI Instructions
-            state.aiInstructions = s.aiInstructions || '';
+            state.aiInstructions = '';
             if (elements.aiInstructions) elements.aiInstructions.value = state.aiInstructions;
             // Restore Niche Preset
             if (elements.buildNiche && s.buildNiche) elements.buildNiche.value = s.buildNiche;
             if (elements.buildMapStylePack && s.buildMapStylePack) elements.buildMapStylePack.value = s.buildMapStylePack;
+            if (elements.buildProductionMode && s.buildProductionMode) elements.buildProductionMode.value = s.buildProductionMode;
+            state.presenterImage = s.presenterImage || '';
+            if (elements.klingAvatarEnabled) elements.klingAvatarEnabled.checked = !!s.klingAvatar;
+            if (elements.klingResolution && s.klingResolution) elements.klingResolution.value = s.klingResolution;
+            if (elements.klingAvatarPrompt) elements.klingAvatarPrompt.value = s.klingAvatarPrompt || '';
+            if (elements.veoAiVideoEnabled) elements.veoAiVideoEnabled.checked = !!s.veoAiVideo;
+            if (elements.veoScope && s.veoScope) elements.veoScope.value = s.veoScope;
+            if (elements.veoResolution && s.veoResolution) elements.veoResolution.value = s.veoResolution;
+            if (elements.veoBackend && s.veoBackend) elements.veoBackend.value = s.veoBackend;
+            _syncPresenterRow();
+            _syncVeoRow();
+            if (elements.buildVisionBackend && s.buildVisionBackend) elements.buildVisionBackend.value = s.buildVisionBackend;
             if (elements.buildLanguage && s.buildLanguage) elements.buildLanguage.value = s.buildLanguage;
             if (elements.buildStyleProfile && s.buildStyleProfile) {
                 // Defer setting until dropdown is populated
@@ -11207,22 +12995,22 @@ function loadSettings() {
             if (elements.clipAnalyzerToggle) elements.clipAnalyzerToggle.checked = s.clipAnalyzer !== false;
             // Restore Resume Build toggle (default OFF — fresh build unless user opts in)
             if (elements.buildResumeToggle) elements.buildResumeToggle.checked = s.buildResume === true;
+            if (elements.fastMediaToggle) elements.fastMediaToggle.checked = s.fastMedia === true;
+            if (elements.repeatFromStep) elements.repeatFromStep.value = s.repeatFromStep || 'visual-planner';
+            if (elements.forceFreshFootage) elements.forceFreshFootage.checked = s.forceFreshFootage === true;
             // Restore track mute state
             if (s.mutedTracks) state.mutedTracks = s.mutedTracks;
             // Restore footage source toggles
             if (s.footageSources) {
+                if (elements.srcStoryblocks) elements.srcStoryblocks.checked = s.footageSources.storyblocks === true;
                 if (elements.srcPexels) elements.srcPexels.checked = s.footageSources.pexels ?? true;
                 if (elements.srcPixabay) elements.srcPixabay.checked = s.footageSources.pixabay ?? true;
-                if (elements.srcYouTube) elements.srcYouTube.checked = s.footageSources.youtube ?? false;
-                if (elements.srcTelegram) elements.srcTelegram.checked = s.footageSources.telegram ?? true;
-                if (elements.srcVKVideo) elements.srcVKVideo.checked = s.footageSources.vkVideo ?? true;
+                if (elements.srcYouTube) elements.srcYouTube.checked = s.footageSources.youtube ?? true;
                 if (elements.srcReddit) elements.srcReddit.checked = s.footageSources.reddit ?? true;
-                if (elements.srcUnsplash) elements.srcUnsplash.checked = s.footageSources.unsplash ?? true;
-                if (elements.srcGoogleCSE) elements.srcGoogleCSE.checked = s.footageSources.googleCSE ?? false;
-                if (elements.srcBing) elements.srcBing.checked = s.footageSources.bing ?? false;
-                if (elements.srcDuckDuckGo) elements.srcDuckDuckGo.checked = s.footageSources.duckduckgo ?? true;
-                if (elements.srcGoogleScrape) elements.srcGoogleScrape.checked = s.footageSources.googleScrape ?? true;
+                if (elements.srcBing) elements.srcBing.checked = s.footageSources.bing ?? true;
+                if (elements.srcBrave) elements.srcBrave.checked = s.footageSources.brave ?? true;
             }
+            syncFootageResourcesToMainProcess();
         }
     } catch (e) { }
 }
@@ -11231,11 +13019,11 @@ function loadSettings() {
 function applyProjectSettings(s) {
     if (!s) return;
     try {
-        elements.aiProvider.value = s.aiProvider || 'ollama';
+        elements.aiProvider.value = s.aiProvider || 'bedrock';
         if (elements.ollamaModel) elements.ollamaModel.value = s.ollamaModel || 'gemma3:12b';
         if (elements.ollamaVisionModel) elements.ollamaVisionModel.value = s.ollamaVisionModel || 'llava';
         if (elements.ollamaModelRow) {
-            elements.ollamaModelRow.style.display = (s.aiProvider || 'ollama') === 'ollama' ? 'block' : 'none';
+            elements.ollamaModelRow.style.display = (s.aiProvider || 'bedrock') === 'ollama' ? 'block' : 'none';
         }
         // Restore transition settings (detect old 'cut' defaults and override)
         const savedTransDur2 = s.transitionDuration !== undefined ? s.transitionDuration : -1;
@@ -11265,32 +13053,43 @@ function applyProjectSettings(s) {
         // Subtitles
         state.subtitlesEnabled = s.subtitlesEnabled !== undefined ? s.subtitlesEnabled : false;
         if (elements.subtitlesEnabled) elements.subtitlesEnabled.checked = state.subtitlesEnabled;
-        // Video Title
-        state.videoTitle = s.videoTitle || '';
+        // Video Title and AI instructions are project-scoped, not global settings.
+        state.videoTitle = '';
         if (elements.videoTitle) elements.videoTitle.value = state.videoTitle;
         // AI Instructions
-        state.aiInstructions = s.aiInstructions || '';
+        state.aiInstructions = '';
         if (elements.aiInstructions) elements.aiInstructions.value = state.aiInstructions;
         // Niche Preset
         if (elements.buildNiche && s.buildNiche) elements.buildNiche.value = s.buildNiche;
         if (elements.buildMapStylePack && s.buildMapStylePack) elements.buildMapStylePack.value = s.buildMapStylePack;
+        if (elements.buildProductionMode && s.buildProductionMode) elements.buildProductionMode.value = s.buildProductionMode;
+        state.presenterImage = s.presenterImage || '';
+        if (elements.klingAvatarEnabled) elements.klingAvatarEnabled.checked = !!s.klingAvatar;
+        if (elements.klingResolution && s.klingResolution) elements.klingResolution.value = s.klingResolution;
+        if (elements.klingAvatarPrompt) elements.klingAvatarPrompt.value = s.klingAvatarPrompt || '';
+        if (elements.veoAiVideoEnabled) elements.veoAiVideoEnabled.checked = !!s.veoAiVideo;
+        if (elements.veoScope && s.veoScope) elements.veoScope.value = s.veoScope;
+        if (elements.veoResolution && s.veoResolution) elements.veoResolution.value = s.veoResolution;
+        if (elements.veoBackend && s.veoBackend) elements.veoBackend.value = s.veoBackend;
+        _syncPresenterRow();
+        _syncVeoRow();
+        if (elements.buildVisionBackend && s.buildVisionBackend) elements.buildVisionBackend.value = s.buildVisionBackend;
         if (elements.buildLanguage && s.buildLanguage) elements.buildLanguage.value = s.buildLanguage;
+        if (elements.repeatFromStep && s.repeatFromStep) elements.repeatFromStep.value = s.repeatFromStep;
+        if (elements.forceFreshFootage) elements.forceFreshFootage.checked = s.forceFreshFootage === true;
         // Track mute
         if (s.mutedTracks) state.mutedTracks = s.mutedTracks;
         // Footage sources
         if (s.footageSources) {
+            if (elements.srcStoryblocks) elements.srcStoryblocks.checked = s.footageSources.storyblocks === true;
             if (elements.srcPexels) elements.srcPexels.checked = s.footageSources.pexels ?? true;
             if (elements.srcPixabay) elements.srcPixabay.checked = s.footageSources.pixabay ?? true;
-            if (elements.srcYouTube) elements.srcYouTube.checked = s.footageSources.youtube ?? false;
-            if (elements.srcTelegram) elements.srcTelegram.checked = s.footageSources.telegram ?? true;
-            if (elements.srcVKVideo) elements.srcVKVideo.checked = s.footageSources.vkVideo ?? true;
+            if (elements.srcYouTube) elements.srcYouTube.checked = s.footageSources.youtube ?? true;
             if (elements.srcReddit) elements.srcReddit.checked = s.footageSources.reddit ?? true;
-            if (elements.srcUnsplash) elements.srcUnsplash.checked = s.footageSources.unsplash ?? true;
-            if (elements.srcGoogleCSE) elements.srcGoogleCSE.checked = s.footageSources.googleCSE ?? false;
-            if (elements.srcBing) elements.srcBing.checked = s.footageSources.bing ?? false;
-            if (elements.srcDuckDuckGo) elements.srcDuckDuckGo.checked = s.footageSources.duckduckgo ?? true;
-            if (elements.srcGoogleScrape) elements.srcGoogleScrape.checked = s.footageSources.googleScrape ?? true;
+            if (elements.srcBing) elements.srcBing.checked = s.footageSources.bing ?? true;
+            if (elements.srcBrave) elements.srcBrave.checked = s.footageSources.brave ?? true;
         }
+        syncFootageResourcesToMainProcess();
         console.log('✅ Applied project settings from .fvp file');
     } catch (e) {
         console.warn('Could not apply project settings:', e);
@@ -11444,6 +13243,10 @@ function resetCurrentProject() {
 
     state.selectedClipIndex = -1;
     state.selectedClipIndices = [];
+    state.videoTitle = '';
+    state.aiInstructions = '';
+    if (elements.videoTitle) elements.videoTitle.value = '';
+    if (elements.aiInstructions) elements.aiInstructions.value = '';
 
     [elements.videoTrack1, elements.videoTrack2, elements.videoTrack3,
     elements.videoTrack1B, elements.videoTrack2B, elements.videoTrack3B].forEach(video => {
@@ -11605,6 +13408,9 @@ if (!window.electronAPI) {
         openExistingProject: async () => ({ success: false, cancelled: true }),
         openExistingProjectFolder: async () => ({ success: false, cancelled: true }),
         openExistingProjectFile: async () => ({ success: false, cancelled: true }),
+        hyperframesGenerateProject: async () => ({ success: false, error: 'HyperFrames bridge not available' }),
+        hyperframesRender: async () => ({ success: false, error: 'HyperFrames bridge not available' }),
+        openHyperframesLab: async () => ({ success: false, error: 'HyperFrames lab not available' }),
         onBuildProgress: () => { }, onRenderProgress: () => { },
         cancelProcess: async () => ({ success: true, message: 'Cancelled' }),
         showNotification: () => { }

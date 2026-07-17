@@ -269,7 +269,7 @@
                 narrationText: s.text      || '',
                 sceneType:    s.mediaType === 'template' ? 'template' : (s.isMGScene ? 'motion-graphic' : 'footage'),
                 mediaType:    s.mediaType  || 'video',       // video / image / template
-                sourceHint:   s.sourceHint || '',            // stock / youtube / telegram / reddit / web-image
+                sourceHint:   s.sourceHint || '',            // stock / youtube / reddit / web-image
                 visualIntent: s.visualIntent || '',          // VP's description of what footage should look like
                 effectName:   s.effect || s.effectPreset || 'none',
                 framingMode:  (s.framing || s.framingMode || 'fullscreen'),
@@ -1548,7 +1548,7 @@
                     : `  ⚠ #${f.scene.sceneIndex} "${f.scene.keyword}" → flag for manual replacement`;
             }),
             ...templateFixes.map(f =>
-                `  🖼 #${f.scene.sceneIndex} personIntro portrait → replace with "${f.result.replacementKeyword}" via ${f.result.replacementSource || 'bing'}`
+                `  🖼 #${f.scene.sceneIndex} personIntro portrait → replace with "${f.result.replacementKeyword}" via ${f.result.replacementSource || 'stock'}`
             ),
         ].join('\n');
 
@@ -1757,12 +1757,12 @@
             }
 
             setProgress(null, `Scene #${scene.sceneIndex}: downloading portrait "${result.replacementKeyword}"…`);
-            log(`[Replace] Scene #${scene.sceneIndex} personIntro portrait → "${result.replacementKeyword}" via ${result.replacementSource || 'bing'}`);
+            log(`[Replace] Scene #${scene.sceneIndex} personIntro portrait → "${result.replacementKeyword}" via ${result.replacementSource || 'stock'}`);
 
             const replResult = await window._qaReplacer.replaceSceneMedia({
                 mediaFile:     absPortrait,
                 keyword:       result.replacementKeyword,
-                sourceHint:    result.replacementSource || 'bing',
+                sourceHint:    result.replacementSource || 'stock',
                 mediaType:     'image',
                 sceneDuration: 5,
                 scriptContext: state.videoPlan.scriptContext || {},
@@ -2002,8 +2002,34 @@
         };
     }
 
+    // Confirm chip for an actionable order — resolves true (Apply) / false (Cancel).
+    function _chatAddActionChip(summary) {
+        return new Promise((resolve) => {
+            const wrap = document.createElement('div');
+            wrap.className = 'chat-sys chat-action-chip';
+            wrap.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:wrap';
+            const label = document.createElement('span');
+            label.textContent = `⚡ Apply this order?`;
+            label.style.cssText = 'flex:1 1 auto';
+            const apply = document.createElement('button');
+            apply.textContent = 'Apply';
+            const cancel = document.createElement('button');
+            cancel.textContent = 'Cancel';
+            for (const b of [apply, cancel]) b.style.cssText = 'padding:4px 12px;border-radius:6px;cursor:pointer;border:1px solid #4b5563';
+            apply.style.background = '#2563eb'; apply.style.color = '#fff';
+            const done = (v) => { apply.disabled = true; cancel.disabled = true; wrap.style.opacity = '0.55'; resolve(v); };
+            apply.addEventListener('click', () => done(true));
+            cancel.addEventListener('click', () => done(false));
+            wrap.appendChild(label); wrap.appendChild(apply); wrap.appendChild(cancel);
+            chatEls.messages.appendChild(wrap);
+            chatEls.messages.scrollTop = chatEls.messages.scrollHeight;
+        });
+    }
+
     async function _chatSend() {
-        if (!window._qaChatAgent) {
+        const api = window.electronAPI || {};
+        const canAct = typeof api.qaPreviewOrder === 'function';
+        if (!window._qaChatAgent && !canAct) {
             _chatAddSys('Agent not available (window._qaChatAgent missing).');
             return;
         }
@@ -2017,18 +2043,57 @@
 
         chatState.history.push({ role: 'user', text });
         _chatAddMsg('user', text);
-        const typing = _chatAddTyping();
-
         _chatUpdateContextBar();
 
+        // "undo" shortcut → revert the last applied order.
+        if (canAct && typeof api.qaUndo === 'function' && /^undo\b/i.test(text)) {
+            try {
+                const u = await api.qaUndo();
+                _chatAddSys(u && u.success ? '↩️ Reverted the last order — preview refreshed.' : `Undo: ${u && u.error || 'nothing to undo'}`);
+            } catch (e) { _chatAddSys(`Undo failed: ${e.message}`); }
+            chatState.sending = false; chatEls.sendBtn.disabled = false; chatEls.input.focus();
+            return;
+        }
+
+        const typing = _chatAddTyping();
         try {
-            const projectContext = _buildProjectContext();
-            const reply = await window._qaChatAgent.sendMessageWithProject(chatState.history, projectContext);
+            // Acting-agent router: is this an actionable ORDER or a QUESTION?
+            let prev = null;
+            if (canAct) { try { prev = await api.qaPreviewOrder(text); } catch (_) { prev = null; } }
             typing.remove();
-            _chatAddMsg('model', reply);
-            chatState.history.push({ role: 'model', text: reply });
+
+            if (prev && prev.ok && prev.hasActions) {
+                _chatAddMsg('model', `I read that as an order: ${prev.summary}`);
+                chatState.history.push({ role: 'model', text: `(order: ${prev.summary})` });
+                const go = await _chatAddActionChip(prev.summary);
+                if (go) {
+                    const t2 = _chatAddTyping();
+                    const stopProg = typeof api.onSceneActionProgress === 'function'
+                        ? api.onSceneActionProgress(d => { if (d && d.message) _chatAddSys(d.message); }) : null;
+                    let res = null;
+                    try { res = await api.qaApplyOrder(text); } catch (e) { res = { success: false, error: e.message }; }
+                    if (stopProg) stopProg();
+                    t2.remove();
+                    if (res && res.success) {
+                        _chatAddMsg('model', `✅ Done — ${res.perSceneChanged || 0} per-scene · ${res.fixed || 0} enforced${res.footageRedownloaded ? ` · ${res.footageRedownloaded} footage re-download(s)` : ''}${res.flagged ? ` · ${res.flagged} flagged` : ''}. Preview refreshed. Type "undo" to revert.`);
+                    } else {
+                        _chatAddSys(`Order not applied: ${(res && res.error) || 'unknown error'}`);
+                    }
+                } else {
+                    _chatAddSys('Cancelled — nothing changed.');
+                }
+            } else if (window._qaChatAgent) {
+                // Not an order → normal Q&A.
+                const t2 = _chatAddTyping();
+                const projectContext = _buildProjectContext();
+                const reply = await window._qaChatAgent.sendMessageWithProject(chatState.history, projectContext);
+                t2.remove();
+                _chatAddMsg('model', reply);
+                chatState.history.push({ role: 'model', text: reply });
+            } else {
+                _chatAddSys('That did not look like an order I can act on, and the Q&A agent is unavailable.');
+            }
         } catch (err) {
-            typing.remove();
             _chatAddSys(`Error: ${err.message}`);
             chatState.history.pop();
         } finally {
