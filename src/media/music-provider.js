@@ -21,7 +21,7 @@ const config = require('../settings/config');
 let searchFreesound = null;
 try { ({ searchFreesound } = require('./sfx-provider')); } catch (_) { /* optional */ }
 
-const MUSIC_DIR = path.join(__dirname, '..', 'assets', 'music');
+const MUSIC_DIR = path.join(__dirname, '..', '..', 'assets', 'music');
 const AUDIO_RE = /\.(mp3|m4a|aac|ogg|wav)$/i;
 
 function _enabled() { return /^(1|true|on|yes)$/i.test(String(process.env.MUSIC_BED || '').trim()); }

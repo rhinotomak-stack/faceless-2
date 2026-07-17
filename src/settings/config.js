@@ -1,27 +1,24 @@
 const path = require('path');
 
 // Load app root .env first (has all API keys — single source of truth for credentials)
-const appRootEnv = path.join(__dirname, '..', '.env');
+const appRootEnv = path.join(__dirname, '..', '..', '.env');
 require('dotenv').config({ path: appRootEnv, quiet: true });
 
 // If a project-specific .env exists, only override PROJECT-SPECIFIC settings (not API keys).
 // This prevents stale API keys in old project .env files from breaking builds.
-const PROJECT_OVERRIDE_KEYS = new Set([
+// Build/UI setting env vars come from the settings schema (single source of truth);
+// only operational tuning vars are listed here. verify-settings.js asserts the
+// generated set equals the old hardcoded set exactly (behavior-preserving).
+const _settingsSchema = require('./schema');
+const OPERATIONAL_OVERRIDE_KEYS = [
     'AI_PROVIDER',
-    'BUILD_QUALITY_TIER', 'BUILD_FORMAT', 'BUILD_THEME', 'BUILD_NICHE',
-    'BUILD_MAP_STYLE_PACK',
-    'BUILD_STYLE_PROFILE',
-    'BUILD_PRODUCTION_MODE', 'BUILD_PRESENTER_IMAGE',
-    'KLING_AVATAR', 'KLING_RESOLUTION', 'KLING_AVATAR_PROMPT',
-    'VEO_AI_VIDEO', 'VEO_SCOPE', 'VEO_RESOLUTION', 'VEO_BACKEND', 'VEO_MODEL',
-    'AI_VIDEO_BACKEND', 'KLING_VIDEO_RESOLUTION', 'KLING_VIDEO_MODE', 'KLING_VIDEO_URL',
-    'SMART_AI',
     'LOW_BANDWIDTH_MODE', 'DATA_SAVER_MODE', 'NETWORK_PROFILE',
     'DOWNLOAD_CONCURRENCY', 'SCENE_DOWNLOAD_CONCURRENCY', 'MEDIA_SCENE_CONCURRENCY', 'SCENE_DOWNLOAD_TIMEOUT_MS',
     'STRICT_RAW_SCENE_TIMEOUT_MS', 'STRICT_RAW_BACKUP_TIMEOUT_MS',
     'MEDIA_DOWNLOAD_TIMEOUT_MS', 'MEDIA_DOWNLOAD_RETRIES',
     'YTDLP_PATH', 'YTDLP_CHECK_TIMEOUT_MS', 'YTDLP_TIMEOUT_SCALE',
-]);
+];
+const PROJECT_OVERRIDE_KEYS = new Set([...OPERATIONAL_OVERRIDE_KEYS, ..._settingsSchema.projectEnvVars()]);
 if (process.env.DOTENV_PATH && process.env.DOTENV_PATH !== appRootEnv) {
     const fs = require('fs');
     try {
@@ -41,7 +38,7 @@ if (process.env.DOTENV_PATH && process.env.DOTENV_PATH !== appRootEnv) {
 }
 
 // Project directory for isolated data (input/output/temp)
-const PROJECT_DIR = process.env.PROJECT_DIR || path.join(__dirname, '..');
+const PROJECT_DIR = process.env.PROJECT_DIR || path.join(__dirname, '..', '..');
 const LOW_BANDWIDTH_MODE = ['1', 'true', 'yes', 'slow', '3g', 'mobile']
     .includes(String(process.env.LOW_BANDWIDTH_MODE || process.env.DATA_SAVER_MODE || process.env.NETWORK_PROFILE || '').toLowerCase());
 

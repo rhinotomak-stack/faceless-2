@@ -34,7 +34,7 @@ try { ({ renderDirectivesBlock } = require('../directives/directive-compiler'));
 let EFFECT_IDS = [], GRADE_IDS = [];
 try { ({ EFFECT_IDS, GRADE_IDS } = require('./hf-effects')); } catch (_) { /* registry optional */ }
 
-const SKILL_DIR = path.join(__dirname, '..', 'skills', 'hyperframes-template');
+const SKILL_DIR = path.join(__dirname, '..', '..', 'skills', 'hyperframes-template');
 
 let _skillCache = null;
 function loadSkill() {

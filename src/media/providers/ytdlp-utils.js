@@ -130,7 +130,7 @@ function findYtdlp(opts = {}) {
     const logPrefix = opts.logPrefix || 'yt-dlp';
     const isWin = process.platform === 'win32';
     const bin = isWin ? 'yt-dlp.exe' : 'yt-dlp';
-    const repoRoot = path.join(__dirname, '..', '..');
+    const repoRoot = path.join(__dirname, '..', '..', '..');
     const projectDir = process.env.PROJECT_DIR || '';
     const candidates = _dedupe([
         config.youtube?.ytdlpPath || null,

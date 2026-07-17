@@ -2,10 +2,10 @@ const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 
-const APP_ROOT = path.join(__dirname, '..');
+const APP_ROOT = path.join(__dirname, '..', '..');
 const ENV_PATH = path.join(APP_ROOT, '.env');
 const DEFAULT_BASE_URL = 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1';
-const DEFAULT_REGISTRY_PATH = process.env.QWEN_MODEL_REGISTRY_PATH || path.join(__dirname, 'qwen-vision-generated-pools.json');
+const DEFAULT_REGISTRY_PATH = process.env.QWEN_MODEL_REGISTRY_PATH || path.join(__dirname, '..', 'qwen-vision-generated-pools.json');
 
 // Tiny valid PNG. The probe is intentionally trivial: support detection, not scoring quality.
 const PROBE_IMAGE_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAADUlEQVR42mNk+M9QDwADhgF/6hKVngAAAABJRU5ErkJggg==';

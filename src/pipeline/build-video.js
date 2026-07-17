@@ -1497,7 +1497,7 @@ async function buildDumbVideo(transcription, audioFile, directorsBrief) {
         scriptContext
     };
 
-    const PROJECT_DIR = process.env.PROJECT_DIR || path.join(__dirname, '..');
+    const PROJECT_DIR = process.env.PROJECT_DIR || path.join(__dirname, '..', '..');
     const publicDir = path.join(PROJECT_DIR, 'public');
     if (!fs.existsSync(publicDir)) fs.mkdirSync(publicDir, { recursive: true });
 
@@ -1550,7 +1550,7 @@ async function buildDumbVideo(transcription, audioFile, directorsBrief) {
     }
 
     // Copy SFX
-    const sfxDir = path.join(__dirname, '..', 'assets', 'sfx');
+    const sfxDir = path.join(__dirname, '..', '..', 'assets', 'sfx');
     if (fs.existsSync(sfxDir)) {
         const sfxFiles = fs.readdirSync(sfxDir).filter(f => f.endsWith('.mp3') || f.endsWith('.wav'));
         for (const sfxFile of sfxFiles) {
@@ -1791,7 +1791,7 @@ async function _runPresenterAssign(scenes, scriptContext, directorsBrief, label 
         const { assignPresenterDispositions, logPresenterDispositions } = require('../agents/presenter-assignment');
         let dispositions = null;
         let source = 'agent';
-        const projectDir = process.env.PROJECT_DIR || path.join(__dirname, '..');
+        const projectDir = process.env.PROJECT_DIR || path.join(__dirname, '..', '..');
         try {
             const { directPresenter } = require('../agents/workers/presenter-director');
             dispositions = await directPresenter(scenes, scriptContext, { projectDir, log: (m) => console.log(m) });
@@ -2056,7 +2056,7 @@ async function buildVideo() {
 
     const startTime = Date.now();
     resetCosts(); // begin a fresh per-run AI cost ledger
-    const PROJECT_DIR = process.env.PROJECT_DIR || path.join(__dirname, '..');
+    const PROJECT_DIR = process.env.PROJECT_DIR || path.join(__dirname, '..', '..');
     const CHECKPOINT_FILE = path.join(PROJECT_DIR, '.build-checkpoint.json');
     const DIRECTOR_CHECKPOINT_FILE = path.join(PROJECT_DIR, '.build-director-checkpoint.json');
     const repeatFromStep = _normalizeRepeatFromStep(process.env.BUILD_REPEAT_FROM);
@@ -4454,7 +4454,7 @@ async function buildVideo() {
     }
 
     // Copy SFX files to public folder
-    const sfxDir = path.join(__dirname, '..', 'assets', 'sfx');
+    const sfxDir = path.join(__dirname, '..', '..', 'assets', 'sfx');
     if (fs.existsSync(sfxDir)) {
         const sfxFiles = fs.readdirSync(sfxDir).filter(f => f.endsWith('.mp3') || f.endsWith('.wav'));
         for (const sfxFile of sfxFiles) {
@@ -4466,13 +4466,13 @@ async function buildVideo() {
     // Copy the selected music bed (#14) to public so the renderer/audio-mixer resolves it.
     if (musicBedFile) {
         try {
-            const srcBed = path.join(__dirname, '..', 'assets', 'music', musicBedFile);
+            const srcBed = path.join(__dirname, '..', '..', 'assets', 'music', musicBedFile);
             if (fs.existsSync(srcBed)) { fs.copyFileSync(srcBed, path.join(publicDir, musicBedFile)); log.dim(`🎵 Copied music bed: ${musicBedFile}`); }
         } catch (e) { log.warn(`Music bed copy failed: ${e.message}`); }
     }
 
     // Copy background pattern files referenced by scenes
-    const bgDir = path.join(__dirname, '..', 'assets', 'backgrounds');
+    const bgDir = path.join(__dirname, '..', '..', 'assets', 'backgrounds');
     const bgFilesCopied = new Set();
     for (const scene of scenesWithMedia) {
         if (scene.background && scene.background.startsWith('pattern:')) {

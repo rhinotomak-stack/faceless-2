@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const RECIPES_DIR = path.join(__dirname, '..', 'assets', 'recipes');
+const RECIPES_DIR = path.join(__dirname, '..', '..', 'assets', 'recipes');
 
 /**
  * Load all available recipe files from assets/recipes/

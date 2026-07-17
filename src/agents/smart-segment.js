@@ -393,7 +393,7 @@ async function selectBestSegment(videoUrl, opts = {}) {
         console.log(`  🎯 [${tag}] Smart segment: scoring ${numSamples} frames at ${timestamps.map(t => t + 's').join(', ')} (total: ${Math.round(totalDuration)}s)`);
 
         // 4. Extract frames in batches
-        const tempDir = config.paths?.temp || path.join(__dirname, '..', 'temp');
+        const tempDir = config.paths?.temp || path.join(__dirname, '..', '..', 'temp');
         if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
         const uid = Date.now().toString(36);
         const framePaths = [];
@@ -565,7 +565,7 @@ async function scoreDownloadedVideo(filePath, opts = {}) {
         const sampleRatio = totalDuration < 15 ? 0.5 : 0.25;
         const edgeMargin = Math.min(0.5, Math.max(0.05, totalDuration * 0.08));
         const sampleTime = Math.max(0, Math.min(totalDuration - edgeMargin, totalDuration * sampleRatio));
-        const tempDir = config.paths?.temp || path.join(__dirname, '..', 'temp');
+        const tempDir = config.paths?.temp || path.join(__dirname, '..', '..', 'temp');
         if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
         const framePath = path.join(tempDir, `_postscore_${Date.now().toString(36)}.jpg`);
 
@@ -704,7 +704,7 @@ function probeDuration(ffmpegPath, source) {
                 // If it succeeds, we know the video is at least 60s long.
                 // This is a last resort for HLS streams where duration is unknown.
                 if (isRemote) {
-                    const probePath = path.join(config.paths?.temp || path.join(__dirname, '..', 'temp'), `_probe_${Date.now().toString(36)}.jpg`);
+                    const probePath = path.join(config.paths?.temp || path.join(__dirname, '..', '..', 'temp'), `_probe_${Date.now().toString(36)}.jpg`);
                     execFile(ffmpegPath, [
                         '-ss', '60',
                         '-i', source,

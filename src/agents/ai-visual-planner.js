@@ -95,7 +95,7 @@ function _videoPriorityForVp(niche, fallback = 'youtube') {
  * Files without a theme prefix are available for all themes.
  */
 function _scanCustomBackgrounds(themeId) {
-    const bgDir = path.join(__dirname, '..', 'assets', 'backgrounds');
+    const bgDir = path.join(__dirname, '..', '..', 'assets', 'backgrounds');
     if (!fs.existsSync(bgDir)) return [];
 
     const VALID_THEMES = new Set(['crime', 'history', 'modern', 'minimal', 'standard', 'warm-editorial', 'luxury', 'nature']);

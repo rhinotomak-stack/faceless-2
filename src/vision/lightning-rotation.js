@@ -23,7 +23,7 @@ const path = require('path');
 // The account pool is GLOBAL to the app (shared across all projects), so always resolve to the
 // app root (src/..) — NOT process.env.PROJECT_DIR, which points at the currently-open project
 // and would scatter the pool into each project folder.
-function _root() { return path.join(__dirname, '..'); }
+function _root() { return path.join(__dirname, '..', '..'); }
 function _accountsFile() { return path.join(_root(), 'lightning-accounts.json'); }
 function _stateFile() { return path.join(_root(), '.lightning-rotation-state.json'); }
 

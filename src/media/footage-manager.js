@@ -9856,7 +9856,7 @@ async function downloadAllMedia(scenes, scriptContext, options = {}) {
 // BACKGROUND CANVAS DOWNLOAD
 // ============================================================
 
-const BACKGROUND_CACHE_DIR = path.join(__dirname, '..', 'assets', 'backgrounds');
+const BACKGROUND_CACHE_DIR = path.join(__dirname, '..', '..', 'assets', 'backgrounds');
 
 /**
  * Ensure background cache directory exists

@@ -28,16 +28,16 @@ function _nowStamp() {
     return new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19);
 }
 
-let _logFile = path.join(__dirname, '..', `qa-studio-${_nowStamp()}.log`);
+let _logFile = path.join(__dirname, '..', '..', `qa-studio-${_nowStamp()}.log`);
 
 function initLog(projectDir) {
     try {
-        const logsDir = path.join(projectDir || path.join(__dirname, '..'), 'logs');
+        const logsDir = path.join(projectDir || path.join(__dirname, '..', '..'), 'logs');
         if (!fs.existsSync(logsDir)) fs.mkdirSync(logsDir, { recursive: true });
         _logFile = path.join(logsDir, `qa-studio-${_nowStamp()}.log`);
         fs.writeFileSync(_logFile, `=== QA Studio Log ===\nStarted : ${new Date().toISOString()}\n\n`);
     } catch (e) {
-        _logFile = path.join(__dirname, '..', `qa-studio-${_nowStamp()}.log`);
+        _logFile = path.join(__dirname, '..', '..', `qa-studio-${_nowStamp()}.log`);
     }
 }
 
@@ -289,7 +289,7 @@ const QA_OMNI_OPENAI_UNSUPPORTED_POOL = [
     'qwen-omni-turbo-2025-03-26',
 ];
 
-const _qaExhaustedFile = path.join(__dirname, '..', '.qa-omni-exhausted-models.json');
+const _qaExhaustedFile = path.join(__dirname, '..', '..', '.qa-omni-exhausted-models.json');
 let _qaExhaustedModels = {}; // { model: true (permanent) | timestamp (cooldown end) }
 
 try {

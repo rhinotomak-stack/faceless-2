@@ -981,120 +981,17 @@ ipcMain.handle('run-build', async (event, options) => {
 
         // Run the build script
         return new Promise((resolve, reject) => {
-            const buildEnv = { ...process.env, FORCE_COLOR: '0', PROJECT_DIR: PROJECT_DIR };
-            // Pass explicit audio filename so build uses the correct file
-            if (options.audioFileName) {
-                buildEnv.BUILD_AUDIO_FILE = options.audioFileName;
-            }
-            // Pass enabled footage sources as JSON
-            if (options.footageSources) {
-                buildEnv.FOOTAGE_SOURCES = JSON.stringify(options.footageSources);
-            }
-            // Pass video title for AI guidance (niche detection, keyword gen, visual planning)
-            buildEnv.VIDEO_TITLE = String(options.videoTitle || '').trim();
-            // Pass AI instructions for prompt guidance
-            buildEnv.AI_INSTRUCTIONS = String(options.aiInstructions || '').trim();
-            // Pass build settings (quality, format, theme)
-            if (options.buildQuality) {
-                buildEnv.BUILD_QUALITY_TIER = options.buildQuality;
-            }
-            if (options.buildFormat) {
-                buildEnv.BUILD_FORMAT = options.buildFormat;
-            }
-            if (options.buildNiche) {
-                buildEnv.BUILD_NICHE = options.buildNiche;
-            }
-            if (options.buildTheme) {
-                buildEnv.BUILD_THEME = options.buildTheme;
-            }
-            if (options.buildMapStylePack) {
-                buildEnv.BUILD_MAP_STYLE_PACK = options.buildMapStylePack;
-            }
-            // Production mode (faceless vs talkingHead) + presenter image (talking-head only).
-            if (options.buildProductionMode) {
-                buildEnv.BUILD_PRODUCTION_MODE = options.buildProductionMode;
-            }
-            if (options.presenterImage) {
-                buildEnv.BUILD_PRESENTER_IMAGE = options.presenterImage;
-            }
-            // Kling avatar bridge (talking-head): animate the presenter photo into a
-            // lip-synced clip per hold via the Kling web UI (uses the account's credits).
-            if (options.klingAvatar) {
-                buildEnv.KLING_AVATAR = '1';
-                buildEnv.KLING_RESOLUTION = options.klingResolution || '1080p';
-                if (options.klingAvatarPrompt) buildEnv.KLING_AVATAR_PROMPT = options.klingAvatarPrompt;
-            }
-            // AI-video — opt-in generated B-roll. Generator = Kling browser bridge
-            // (default, no key, spends the account's credits) or Veo API (needs a
-            // VEO_API_KEY in the app-root .env, inherited via buildEnv above; the UI
-            // never collects the key). VEO_SCOPE controls breadth (shared by both).
-            if (options.veoAiVideo) {
-                buildEnv.VEO_AI_VIDEO = '1';                        // master enable (feature-wide)
-                buildEnv.VEO_SCOPE = options.veoScope || 'directives';
-                const gen = String(options.veoBackend || 'kling').toLowerCase();
-                if (gen === 'veo-fal') { buildEnv.AI_VIDEO_BACKEND = 'veo'; buildEnv.VEO_BACKEND = 'fal'; }
-                else if (gen === 'veo-gemini') { buildEnv.AI_VIDEO_BACKEND = 'veo'; buildEnv.VEO_BACKEND = 'gemini'; }
-                else { buildEnv.AI_VIDEO_BACKEND = 'kling'; }
-                if (options.veoResolution) {
-                    buildEnv.VEO_RESOLUTION = options.veoResolution;        // Veo backend
-                    buildEnv.KLING_VIDEO_RESOLUTION = options.veoResolution; // Kling backend
-                }
-            }
-            // Fast test mode: random stock media instead of the slow per-scene footage gauntlet.
-            if (options.fastMedia) {
-                buildEnv.BUILD_FAST_MEDIA = 'true';
-            }
-            // NOTE: vision backend selection + auto-start happens in _prepareVisionForBuild()
-            // BEFORE this Promise (so process.env — and thus buildEnv above — already carry the
-            // resolved QWEN_* for the chosen backend, including Lightning's captured tunnel URL).
-            // Multi-language support: 'auto' = Whisper auto-detects from audio,
-            // or a language code ('en','es','de','fr','it','ko') to force it.
-            // build-video.js reads BUILD_LANGUAGE + resolves via src/language-helper.js.
-            if (options.buildLanguage) {
-                buildEnv.BUILD_LANGUAGE = options.buildLanguage;
-            }
-            if (options.buildStyleProfile && options.buildStyleProfile !== 'none') {
-                buildEnv.BUILD_STYLE_PROFILE = options.buildStyleProfile;
-            }
-            // Smart AI toggle
-            const isSmartAI = options.smartAI !== false && options.smartAI !== 'false';
-            buildEnv.SMART_AI = isSmartAI ? 'true' : 'false';
+            // options -> child-process env now lives in the schema-driven single
+            // source of truth (src/settings/build-env.js), proven byte-identical to
+            // the old inline logic by scripts/verify-settings.js.
+            const { applyOptionsToEnv } = require('./src/settings/build-env');
+            const { env: buildEnv, isSmartAI } = applyOptionsToEnv(options, { projectDir: PROJECT_DIR });
             console.log(`   🧠 Smart AI: smartAI=${options.smartAI} (${typeof options.smartAI}) → SMART_AI=${buildEnv.SMART_AI}`);
-            // Clip Analyzer toggle
-            const clipAnalyzerOn = options.clipAnalyzer !== false && options.clipAnalyzer !== 'false';
-            buildEnv.CLIP_ANALYZER_ENABLED = clipAnalyzerOn ? 'true' : 'false';
-            console.log(`   🎬 Clip Analyzer: ${clipAnalyzerOn ? 'ON' : 'OFF'}`);
-            // Build Resume toggle — when OFF (default), wipe checkpoint + scene cache for a fresh run
-            const resumeOn = options.buildResume === true || options.buildResume === 'true';
-            buildEnv.BUILD_RESUME = resumeOn ? 'true' : 'false';
-            // Repeat-from-step can force resume ON, so resolve it BEFORE logging
-            // the effective resume state (logging first showed "OFF" even when
-            // "Media Download" had just turned resume on — looked like a bug).
-            const repeatFromStep = String(options.repeatFromStep || '').trim();
-            if (repeatFromStep) {
-                buildEnv.BUILD_REPEAT_FROM = repeatFromStep;
-                if (['media', 'download-media', 'footage', 'step5', 'step-5'].includes(repeatFromStep.toLowerCase())) {
-                    buildEnv.BUILD_RESUME = 'true';
-                    // Force-fresh footage: reuse the Director/VP checkpoint but re-download
-                    // all clips instead of preserving cached scene media (only honored on
-                    // repeat-from-media; the cleanFolder resume guard reads this env).
-                    if (options.forceFreshFootage) {
-                        buildEnv.BUILD_FORCE_FRESH_FOOTAGE = 'true';
-                        console.log(`   🆕 Force fresh footage: ON (re-downloading clips, keeping VP plan)`);
-                    }
-                }
-                console.log(`   🔁 Repeat From Step: ${repeatFromStep}`);
-            }
-            const resumeEffective = buildEnv.BUILD_RESUME === 'true';
-            console.log(`   ♻️  Resume Build: ${resumeEffective ? `ON (skip completed steps${repeatFromStep ? ` — repeat from ${repeatFromStep}` : ''})` : 'OFF (fresh build)'}`);
-            // AI thinking mode (Gemini, Qwen, DeepSeek)
-            const thinkMode = options.aiThinking || options.geminiThinking || 'off';
-            buildEnv.AI_THINKING = thinkMode;
-            if (thinkMode !== 'off') {
-                console.log(`   🧠 AI Thinking: ${thinkMode}`);
-            }
-            // Also pass DOTENV_PATH so build pipeline loads the project-local .env
-            buildEnv.DOTENV_PATH = path.join(PROJECT_DIR, '.env');
+            console.log(`   🎬 Clip Analyzer: ${buildEnv.CLIP_ANALYZER_ENABLED === 'true' ? 'ON' : 'OFF'}`);
+            if (buildEnv.BUILD_REPEAT_FROM) console.log(`   🔁 Repeat From Step: ${buildEnv.BUILD_REPEAT_FROM}`);
+            if (buildEnv.BUILD_FORCE_FRESH_FOOTAGE === 'true') console.log(`   🆕 Force fresh footage: ON (re-downloading clips, keeping VP plan)`);
+            console.log(`   ♻️  Resume Build: ${buildEnv.BUILD_RESUME === 'true' ? `ON (skip completed steps${buildEnv.BUILD_REPEAT_FROM ? ` — repeat from ${buildEnv.BUILD_REPEAT_FROM}` : ''})` : 'OFF (fresh build)'}`);
+            if (buildEnv.AI_THINKING && buildEnv.AI_THINKING !== 'off') console.log(`   🧠 AI Thinking: ${buildEnv.AI_THINKING}`);
             // Pass --smart-ai flag as CLI arg for reliability (env vars can be lost on Windows)
             const buildArgs = ['src/pipeline/build-video.js'];
             if (!isSmartAI) buildArgs.push('--dumb');

@@ -86,7 +86,7 @@ function _findYtdlp() {
     if (_ytdlpChecked) return _ytdlpPath;
     _ytdlpChecked = true;
 
-    const projectRoot = path.join(__dirname, '..');
+    const projectRoot = path.join(__dirname, '..', '..');
     const isWin = process.platform === 'win32';
     const bin = isWin ? 'yt-dlp.exe' : 'yt-dlp';
     const candidates = [
@@ -139,8 +139,8 @@ function _findFfmpegDir() {
     const candidates = [
         'C:\\ffmg\\bin',
         'C:\\ffmpeg\\bin',
-        path.join(__dirname, '..', 'ffmpeg'),
-        path.join(__dirname, '..', 'ffmpeg', 'bin'),
+        path.join(__dirname, '..', '..', 'ffmpeg'),
+        path.join(__dirname, '..', '..', 'ffmpeg', 'bin'),
     ];
     for (const dir of candidates) {
         const exe = path.join(dir, 'ffmpeg.exe');

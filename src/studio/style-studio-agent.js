@@ -63,7 +63,7 @@ function _isQuotaError(err) {
 
 // ============ CODEBASE SEARCH (opt-in via codeAccess flag) ============
 
-const ROOT_DIR = path.join(__dirname, '..');
+const ROOT_DIR = path.join(__dirname, '..', '..');
 const CODE_DIRS = [
     path.join(ROOT_DIR, 'src'),
     path.join(ROOT_DIR, 'ui', 'js'),

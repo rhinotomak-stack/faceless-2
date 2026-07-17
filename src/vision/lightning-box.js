@@ -34,7 +34,7 @@ function _python() {
     return process.env.LIGHTNING_PYTHON || 'python';
 }
 function _script() {
-    return path.join(__dirname, 'lightning-control.py');
+    return path.join(__dirname, '..', 'lightning-control.py');
 }
 function _visionUrl() {
     return String(process.env.LIGHTNING_VISION_URL || process.env.QWEN_BASE_URL || '').replace(/\/+$/, '');

@@ -125,7 +125,7 @@ function createDirectorsBrief() {
     let presenter = null;
     if (productionMode === 'talkingHead') {
         const userImg = (process.env.BUILD_PRESENTER_IMAGE || '').trim();
-        const placeholderPath = path.join(__dirname, '..', 'assets', 'presenter-placeholder.png');
+        const placeholderPath = path.join(__dirname, '..', '..', 'assets', 'presenter-placeholder.png');
         let imageFile = null;
         let source = null;
         if (userImg && fs.existsSync(userImg)) {

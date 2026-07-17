@@ -21,7 +21,7 @@ const config = require('../settings/config');
 let _iconCacheDir = null;
 function getIconCacheDir() {
     if (!_iconCacheDir) {
-        _iconCacheDir = path.join(config.paths?.temp || path.join(__dirname, '..', 'temp'), 'icons');
+        _iconCacheDir = path.join(config.paths?.temp || path.join(__dirname, '..', '..', 'temp'), 'icons');
         if (!fs.existsSync(_iconCacheDir)) fs.mkdirSync(_iconCacheDir, { recursive: true });
     }
     return _iconCacheDir;

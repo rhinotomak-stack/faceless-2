@@ -574,7 +574,7 @@ const BACKGROUND_LIBRARY = {
 
 const _fs = require('fs');
 const _path = require('path');
-const _bgDir = _path.join(__dirname, '..', 'assets', 'backgrounds');
+const _bgDir = _path.join(__dirname, '..', '..', 'assets', 'backgrounds');
 const _supportedBgExts = new Set(['.jpg', '.jpeg', '.png', '.gif', '.mp4', '.webm', '.mov']);
 const _validThemes = new Set(['crime', 'history', 'modern', 'minimal', 'standard', 'warm-editorial', 'luxury', 'nature']);
 

@@ -12,7 +12,7 @@ const https = require('https');
 const http = require('http');
 const config = require('../settings/config');
 
-const SFX_DIR = path.join(__dirname, '..', 'assets', 'sfx');
+const SFX_DIR = path.join(__dirname, '..', '..', 'assets', 'sfx');
 
 // ============================================================
 // SFX CATALOG — What to search for each sound effect file

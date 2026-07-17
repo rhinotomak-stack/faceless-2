@@ -14,7 +14,7 @@ const { execSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
-const ROOT = path.join(__dirname, '..');
+const ROOT = path.join(__dirname, '..', '..');
 
 // ── Cache (1 hour TTL for catalog + git data) ──
 let _catalogCache = null;
