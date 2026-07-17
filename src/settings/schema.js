@@ -67,7 +67,6 @@
         { key: 'footageSources', el: null, env: 'FOOTAGE_SOURCES', build: 'json', def: null, persist: ['ls', 'fvp'], group: 'Media' },
         { key: 'clipAnalyzer', el: 'clip-analyzer-toggle', env: 'CLIP_ANALYZER_ENABLED', build: 'bool', def: true, persist: ['ls', 'fvp'], group: 'Media' },
         { key: 'fastMedia', el: 'fast-media-toggle', env: 'BUILD_FAST_MEDIA', build: 'trueIf', def: false, persist: ['ls', 'fvp'], group: 'Media' },
-        { key: 'buildResume', el: 'build-resume-toggle', env: 'BUILD_RESUME', build: 'custom', def: false, persist: ['ls', 'fvp'], group: 'Build' },
         { key: 'repeatFromStep', el: 'repeat-from-step', env: 'BUILD_REPEAT_FROM', build: 'custom', def: 'visual-planner', persist: ['ls', 'fvp'], group: 'Build' },
         { key: 'forceFreshFootage', el: 'force-fresh-footage-toggle', env: 'BUILD_FORCE_FRESH_FOOTAGE', build: 'custom', def: false, persist: ['ls', 'fvp'], group: 'Media' },
 
@@ -76,7 +75,6 @@
         { key: 'aiInstructions', el: null, env: 'AI_INSTRUCTIONS', build: 'str', def: '', persist: ['fvp'], group: 'Project' },
 
         // ── Editor/render settings (state-backed; not passed to build env) ──
-        { key: 'transitionStyle', el: 'transition-style', env: null, build: null, def: 'auto', persist: ['ls', 'fvp'], special: true, group: 'Editor' },
         { key: 'mutedTracks', el: null, env: null, build: null, def: null, persist: ['ls', 'fvp'], group: 'Editor' },
     ];
 

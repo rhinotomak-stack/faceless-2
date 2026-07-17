@@ -51,7 +51,6 @@ const collected = SettingsIO.collect('ls', { getEl: getSrc });
 // Excluded correctly?
 ok('deprecated ollamaModel NOT collected', !('ollamaModel' in collected) && !('ollamaVisionModel' in collected));
 ok('special buildStyleProfile NOT collected', !('buildStyleProfile' in collected));
-ok('special transitionStyle NOT collected', !('transitionStyle' in collected));
 
 // Included the expected 'ls' element settings (non-special, non-deprecated).
 const expectLs = schema.SETTINGS.filter(s => s.el && !s.deprecated && !s.special && (s.persist || []).includes('ls')).map(s => s.key);

@@ -112,20 +112,15 @@ try {
 }
 
 
-// Expose Map Provider to renderer (geocoding + tile stitching for map test preview)
+// Expose country boundary GeoJSON to renderer (production map-scene polygon fills in MGRenderer)
 try {
-    const mapProvider = require('./src/map/map-provider');
-    const appConfig = require('./src/settings/config');
-    window._mapProvider = mapProvider;
-    window._appConfig = appConfig;
-    // Load country boundary GeoJSON for polygon highlighting
     const geoPath = _nodePath.join(__dirname, 'assets', 'geo', 'countries-slim.json');
     if (_nodeFs.existsSync(geoPath)) {
         window._countryGeoJSON = JSON.parse(_nodeFs.readFileSync(geoPath, 'utf8'));
         console.log(`[Geo] Loaded ${window._countryGeoJSON.features.length} country boundaries`);
     }
 } catch (e) {
-    console.warn('Map Provider not available:', e.message);
+    console.warn('Country GeoJSON not available:', e.message);
 }
 
 // Expose Electron IPC methods to the renderer process
@@ -414,24 +409,9 @@ window.electronAPI = {
         return ipcRenderer.invoke('mux-audio', videoFile, outputFile, audioTrimStartSec, audioTrimEndSec);
     },
 
-    // Scout Lab — isolated per-scene test harness
     // HyperFrames bridge render path
     hyperframesGenerateProject: (payload) => ipcRenderer.invoke('hyperframes-generate-project', payload || {}),
     hyperframesRender: (payload) => ipcRenderer.invoke('hyperframes-render', payload || {}),
-    openHyperframesLab: () => ipcRenderer.invoke('open-hyperframes-lab'),
-    hyperframesLabRegistry: () => ipcRenderer.invoke('hyperframes-lab-registry'),
-    hyperframesLabGenerate: (payload) => ipcRenderer.invoke('hyperframes-lab-generate', payload || {}),
-    hyperframesLabOpenFolder: (folder) => ipcRenderer.invoke('hyperframes-lab-open-folder', folder),
-
-    openScoutLab: () => ipcRenderer.invoke('open-scout-lab'),
-    scoutLabLoadBuild: (buildDir) => ipcRenderer.invoke('scout-lab-load-build', buildDir),
-    scoutLabTestScene: (buildDir, sceneId, options) => ipcRenderer.invoke('scout-lab-test-scene', buildDir, sceneId, options || {}),
-    scoutLabTestBatch: (buildDir, sceneId, options) => ipcRenderer.invoke('scout-lab-test-batch', buildDir, sceneId, options || {}),
-    scoutLabExportSceneLog: (payload) => ipcRenderer.invoke('scout-lab-export-scene-log', payload || {}),
-    onScoutLabEvent: (callback) => {
-        ipcRenderer.removeAllListeners('scout-lab-event');
-        ipcRenderer.on('scout-lab-event', (event, data) => callback(data));
-    },
 
     // Open QA Studio in a separate window
     openQAStudio: () => ipcRenderer.invoke('open-qa-studio'),

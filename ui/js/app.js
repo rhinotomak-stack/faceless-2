@@ -439,9 +439,9 @@ const state = {
     audioClipTrack: 'audio-track',
     // Preview zoom ('fit' or number like 25, 50, 100, 200)
     previewZoom: 'fit',
-    // Transition system - disabled (hard cut only)
+    // Transition system — legacy WebGL2 preview only; 'auto' defers to the AI transition-director (the final HyperFrames render owns transitions)
     transition: {
-        style: 'crossfade',
+        style: 'auto',
         duration: 0.5,
         isTransitioning: false,
         activeVideoIndex: 0,
@@ -572,8 +572,6 @@ const elements = {
     btnRender: document.getElementById('btn-render'),
     btnQAStudio: document.getElementById('btn-qa-studio'),
     btnQAChat:   document.getElementById('btn-qa-chat'),
-    btnHyperframesLab: document.getElementById('btn-hyperframes-lab'),
-    btnScoutLab: document.getElementById('btn-scout-lab'),
     openFootageResources: document.getElementById('open-footage-resources-btn'),
     footageResourceSummary: document.getElementById('footage-resource-summary'),
     btnGenerate: document.getElementById('btn-generate'),
@@ -629,33 +627,6 @@ const elements = {
     styleComparisonReport: document.getElementById('style-comparison-report'),
     styleComparisonText: document.getElementById('style-comparison-text'),
     styleComparisonClose: document.getElementById('style-comparison-close'),
-    mapTestLocations: document.getElementById('map-test-locations'),
-    mapTestStyle: document.getElementById('map-test-style'),
-    mapTestTitle: document.getElementById('map-test-title'),
-    btnMapTest: document.getElementById('btn-map-test'),
-    mapTestStatus: document.getElementById('map-test-status'),
-    mapZoomSpeed: document.getElementById('map-zoom-speed'),
-    mapZoomSpeedVal: document.getElementById('map-zoom-speed-val'),
-    mapPolySpeed: document.getElementById('map-poly-speed'),
-    mapPolySpeedVal: document.getElementById('map-poly-speed-val'),
-    mapEasing: document.getElementById('map-easing'),
-    mapPolyColor: document.getElementById('map-poly-color'),
-    mapTiltStart: document.getElementById('map-tilt-start'),
-    mapTiltEnd: document.getElementById('map-tilt-end'),
-    mapTiltVal: document.getElementById('map-tilt-val'),
-    mapZoomStart: document.getElementById('map-zoom-start'),
-    mapZoomEnd: document.getElementById('map-zoom-end'),
-    mapZoomKfVal: document.getElementById('map-zoom-kf-val'),
-    mapDuration: document.getElementById('map-duration'),
-    mapDurationVal: document.getElementById('map-duration-val'),
-    mapPanXStart: document.getElementById('map-pan-x-start'),
-    mapPanXEnd: document.getElementById('map-pan-x-end'),
-    mapPanXVal: document.getElementById('map-pan-x-val'),
-    mapPanYStart: document.getElementById('map-pan-y-start'),
-    mapPanYEnd: document.getElementById('map-pan-y-end'),
-    mapPanYVal: document.getElementById('map-pan-y-val'),
-    mapVariant: document.getElementById('map-variant'),
-    mapCinematic: document.getElementById('map-cinematic'),
     // Clip analyzer toggle
     clipAnalyzerToggle: document.getElementById('clip-analyzer-toggle'),
     // Resume build toggle (skip completed steps + reuse cached scene media)
@@ -671,7 +642,6 @@ const elements = {
     srcReddit: document.getElementById('src-reddit'),
     srcBing: document.getElementById('src-bing'),
     srcBrave: document.getElementById('src-brave'),
-    transitionStyle: document.getElementById('transition-style'),
     previewPlaceholder: document.getElementById('preview-placeholder'),
     hyperframesPreviewFrame: document.getElementById('hyperframes-preview-frame'),
     // Multi-track video system
@@ -766,8 +736,6 @@ const elements = {
     sfxEnabled: document.getElementById('sfx-enabled'),
     sfxVolume: document.getElementById('sfx-volume'),
     sfxVolumeLabel: document.getElementById('sfx-volume-label'),
-    // Motion Graphics controls
-    mgEnabled: document.getElementById('mg-enabled'),
     // Subtitles
     subtitlesEnabled: document.getElementById('subtitles-enabled'),
 };
@@ -863,7 +831,6 @@ function initCaptureMode() {
             state.transitions = plan.transitions || [];
             state.totalDuration = plan.totalDuration || 0;
             state.fps = plan.fps || 30;
-            state.mgEnabled = plan.mgEnabled !== false; // enable MGs by default
             state.mgStyle = plan.mgStyle || 'clean';
             _hydrateMgOverlayShadow(plan);
 
@@ -1131,8 +1098,6 @@ function setupEventListeners() {
     elements.btnRender.addEventListener('click', renderVideo);
     if (elements.btnQAStudio) elements.btnQAStudio.addEventListener('click', () => window.electronAPI.openQAStudio());
     if (elements.btnQAChat)   elements.btnQAChat.addEventListener('click',   () => window.electronAPI.openQAChat());
-    if (elements.btnHyperframesLab) elements.btnHyperframesLab.addEventListener('click', () => window.electronAPI.openHyperframesLab());
-    if (elements.btnScoutLab) elements.btnScoutLab.addEventListener('click', () => window.electronAPI.openScoutLab());
     if (elements.openFootageResources) {
         elements.openFootageResources.addEventListener('click', () => window.electronAPI?.openFootageResources?.());
     }
@@ -1592,27 +1557,6 @@ function setupEventListeners() {
 
     // Style Learner — populate dropdown, wire learn dialog
     setupStyleLearner();
-    // Transition style + duration listeners
-    if (elements.transitionStyle) {
-        elements.transitionStyle.addEventListener('change', () => {
-            state.transition.style = elements.transitionStyle.value;
-            state.transition.duration = state.transition.style === 'cut' ? 0 : parseFloat(document.getElementById('transition-duration')?.value || 0.5);
-            renderTimeline();
-            if (state.compositorActive) loadPlanIntoCompositor();
-            saveSettings();
-        });
-    }
-    const transDurEl = document.getElementById('transition-duration');
-    const transDurVal = document.getElementById('transition-duration-val');
-    if (transDurEl) {
-        transDurEl.addEventListener('input', () => {
-            const val = parseFloat(transDurEl.value);
-            state.transition.duration = val;
-            if (transDurVal) transDurVal.textContent = `${val.toFixed(1)}s`;
-            if (state.compositorActive) loadPlanIntoCompositor();
-            saveSettings();
-        });
-    }
     // SFX controls
     if (elements.sfxEnabled) {
         elements.sfxEnabled.addEventListener('change', () => {
@@ -1663,15 +1607,6 @@ function setupEventListeners() {
             }
             btnDownloadSfx.disabled = false;
             btnDownloadSfx.textContent = '🎵 Download Real SFX';
-        });
-    }
-    // Motion Graphics controls
-    if (elements.mgEnabled) {
-        elements.mgEnabled.addEventListener('change', () => {
-            state.mgEnabled = elements.mgEnabled.checked;
-            state.mutedTracks['mg-track'] = !state.mgEnabled;
-            renderTimeline();
-            saveSettings();
         });
     }
     // Subtitles toggle
@@ -4879,7 +4814,6 @@ function syncVideoPlanFromEditor() {
         .map(s => ({ ..._normalizeTemplateSceneBackground(s) }));
     state.videoPlan.mutedTracks = { ...state.mutedTracks };
     state.videoPlan.totalDuration = state.totalDuration;
-    state.videoPlan.transitionStyle = elements.transitionStyle?.value || state.videoPlan.transitionStyle || 'crossfade';
 
     // Preserve an AI-designed SFX track (hydrated from the plan on open) instead
     // of clobbering it with the mechanical floor. Only (re)generate the floor when
@@ -4897,7 +4831,6 @@ function syncVideoPlanFromEditor() {
     }));
 
     state.videoPlan.subtitlesEnabled = state.subtitlesEnabled;
-    state.videoPlan.mgEnabled = state.mgEnabled;
     state.videoPlan.mgStyle = state.mgStyle;
     state.videoPlan.motionGraphics = state.motionGraphics.filter(mg => !mg.disabled).map(mg => {
         const base = {
@@ -4979,13 +4912,10 @@ async function saveProject(silent = false) {
             // now includes quality/format/theme/etc. that the old list silently dropped.
             ...SettingsIO.collect('fvp'),
             // State-backed + special settings (no simple element control) stay explicit.
-            transitionStyle: elements.transitionStyle.value,
-            transitionDuration: state.transition.duration,
             volume: state.volume,
             footageSources: getEnabledSources(),
             sfxEnabled: state.sfxEnabled,
             sfxVolume: state.sfxVolume,
-            mgEnabled: state.mgEnabled,
             subtitlesEnabled: state.subtitlesEnabled,
             aiInstructions: state.aiInstructions,
             videoTitle: state.videoTitle,
@@ -6509,7 +6439,6 @@ async function generateVideo(options = {}) {
             // All element-backed settings from the schema (single source of truth).
             ...SettingsIO.collect(null),
             // Special (schema-excluded) + state-backed + runtime fields:
-            transitionStyle: elements.transitionStyle.value,
             buildStyleProfile: elements.buildStyleProfile ? elements.buildStyleProfile.value : 'none',
             audioFileName,
             footageSources: getEnabledSources(),
@@ -7814,7 +7743,6 @@ function renderTracks() {
             // Sync MG track mute with MG enable flag
             if (trackId === 'mg-track') {
                 state.mgEnabled = !isMuted;
-                if (elements.mgEnabled) elements.mgEnabled.checked = !isMuted;
                 saveSettings();
             }
         });
@@ -9524,8 +9452,6 @@ function getHyperframesPreviewSignature() {
     return JSON.stringify({
         hfPreviewRuntime: 6,
         totalDuration: state.totalDuration,
-        transitionStyle: elements.transitionStyle?.value,
-        mgEnabled: state.mgEnabled,
         mgStyle: state.mgStyle,
         mgOverlayShadow: state.mgOverlayShadow,
         scenes: compactScenes,
@@ -10990,1770 +10916,6 @@ function setupStyleLearner() {
     // Initial population
     refreshStyleProfileDropdown();
 
-    // ── Map Preview Test handler ──
-    if (elements.btnMapTest) {
-        elements.btnMapTest.addEventListener('click', async () => {
-            const locStr = (elements.mapTestLocations?.value || '').trim();
-            if (!locStr) {
-                elements.mapTestStatus.textContent = 'Enter at least one location';
-                return;
-            }
-            // Parse waypoint format: "United States 0-3 z1.0, Texas 3-8 z3.0 t0.3 b15 o20"
-            // z<zoom>    = per-waypoint camera zoom level
-            // t<tilt>    = per-waypoint 3D perspective tilt (0-0.6)
-            // b<bearing>  = static bearing/rotation in degrees (e.g. b15 = 15°)
-            // o<orbit>   = orbit speed in deg/sec (camera slowly rotates around the point)
-            // Or plain: "Berlin, Tokyo, Moscow"
-            const parts = locStr ? locStr.split(',').map(s => s.trim()).filter(Boolean) : [];
-            const waypoints = [];
-            const locations = [];
-            const wpRegex = /^(.+?)\s+(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*(.*)$/;
-            let hasWaypoints = false;
-            // Preserve user casing exactly when ANY uppercase char is present
-            // (so "Bab-el-Mandeb Strait" survives intact). Auto-title-case only
-            // all-lowercase input as a convenience.
-            const normalizeName = (s) => {
-                const t = s.trim();
-                if (/[A-Z]/.test(t)) return t;
-                return t.split(/\s+/).map(w =>
-                    w.split('-').map(sub => sub ? sub.charAt(0).toUpperCase() + sub.slice(1) : sub).join('-')
-                ).join(' ');
-            };
-            for (const part of parts) {
-                const m = part.match(wpRegex);
-                if (m) {
-                    hasWaypoints = true;
-                    const name = normalizeName(m[1]);
-                    const extras = m[4] || '';
-                    const zMatch = extras.match(/z(\d+(?:\.\d+)?)/);
-                    const tMatch = extras.match(/t(\d+(?:\.\d+)?)/);
-                    const bMatch = extras.match(/b(-?\d+(?:\.\d+)?)/);
-                    const oMatch = extras.match(/o(-?\d+(?:\.\d+)?)/);
-                    waypoints.push({
-                        name,
-                        startTime: parseFloat(m[2]),
-                        endTime: parseFloat(m[3]),
-                        zoom: zMatch ? parseFloat(zMatch[1]) : null,
-                        tilt: tMatch ? parseFloat(tMatch[1]) : null,
-                        bearing: bMatch ? parseFloat(bMatch[1]) : null,
-                        orbit: oMatch ? parseFloat(oMatch[1]) : null,
-                    });
-                    locations.push(name);
-                } else {
-                    locations.push(normalizeName(part));
-                }
-            }
-            const mapStyle = elements.mapTestStyle?.value || 'dark';
-            const title = elements.mapTestTitle?.value || '';
-
-            // Slice 4 (Apr 23): AI Planner mode removed. Waypoints are now
-            // materialized deterministically from MapScene inside map-provider.js
-            // — a UI-level AI planner emulation no longer matches the real
-            // pipeline, so the Map Test tool runs in pure manual/locations mode.
-            _injectMapTest(locations, mapStyle, title, hasWaypoints ? waypoints : null);
-        });
-    }
-
-    // ── Map slider live-update labels ──
-    if (elements.mapDuration) {
-        elements.mapDuration.addEventListener('input', () => {
-            elements.mapDurationVal.textContent = elements.mapDuration.value + 's';
-        });
-    }
-    if (elements.mapZoomSpeed) {
-        elements.mapZoomSpeed.addEventListener('input', () => {
-            elements.mapZoomSpeedVal.textContent = parseFloat(elements.mapZoomSpeed.value).toFixed(1) + '×';
-        });
-    }
-    if (elements.mapPolySpeed) {
-        elements.mapPolySpeed.addEventListener('input', () => {
-            elements.mapPolySpeedVal.textContent = parseFloat(elements.mapPolySpeed.value).toFixed(1) + '×';
-        });
-    }
-    // Keyframe slider labels
-    const _updateTiltLabel = () => {
-        const s = Math.round(parseFloat(elements.mapTiltStart?.value || 0) * 100);
-        const e = Math.round(parseFloat(elements.mapTiltEnd?.value || 0) * 100);
-        if (elements.mapTiltVal) elements.mapTiltVal.textContent = `${s}→${e}%`;
-    };
-    const _updateZoomKfLabel = () => {
-        const s = parseFloat(elements.mapZoomStart?.value || 0.8).toFixed(1);
-        const e = parseFloat(elements.mapZoomEnd?.value || 1.0).toFixed(1);
-        if (elements.mapZoomKfVal) elements.mapZoomKfVal.textContent = `${s}→${e}`;
-    };
-    if (elements.mapTiltStart) elements.mapTiltStart.addEventListener('input', _updateTiltLabel);
-    if (elements.mapTiltEnd) elements.mapTiltEnd.addEventListener('input', _updateTiltLabel);
-    if (elements.mapZoomStart) elements.mapZoomStart.addEventListener('input', _updateZoomKfLabel);
-    if (elements.mapZoomEnd) elements.mapZoomEnd.addEventListener('input', _updateZoomKfLabel);
-    const _updatePanXLabel = () => {
-        const s = parseInt(elements.mapPanXStart?.value || 0);
-        const e = parseInt(elements.mapPanXEnd?.value || 0);
-        if (elements.mapPanXVal) elements.mapPanXVal.textContent = `${s}→${e}`;
-    };
-    const _updatePanYLabel = () => {
-        const s = parseInt(elements.mapPanYStart?.value || 0);
-        const e = parseInt(elements.mapPanYEnd?.value || 0);
-        if (elements.mapPanYVal) elements.mapPanYVal.textContent = `${s}→${e}`;
-    };
-    if (elements.mapPanXStart) elements.mapPanXStart.addEventListener('input', _updatePanXLabel);
-    if (elements.mapPanXEnd) elements.mapPanXEnd.addEventListener('input', _updatePanXLabel);
-    if (elements.mapPanYStart) elements.mapPanYStart.addEventListener('input', _updatePanYLabel);
-    if (elements.mapPanYEnd) elements.mapPanYEnd.addEventListener('input', _updatePanYLabel);
-}
-
-/**
- * Find a country feature from GeoJSON by name (case-insensitive, partial match).
- * Returns the GeoJSON feature or null.
- */
-function _findCountryFeature(locationName) {
-    const geo = window._countryGeoJSON;
-    if (!geo || !geo.features) return null;
-    const lower = locationName.toLowerCase();
-    // Exact name match first
-    let feat = geo.features.find(f =>
-        f.properties.name?.toLowerCase() === lower ||
-        f.properties.nameLong?.toLowerCase() === lower ||
-        f.properties.sov?.toLowerCase() === lower
-    );
-    if (feat) return feat;
-    // Partial match (e.g. "USA" → "United States of America")
-    const ALIASES = {
-        'usa': 'United States of America', 'us': 'United States of America', 'united states': 'United States of America',
-        'uk': 'United Kingdom', 'britain': 'United Kingdom', 'england': 'United Kingdom',
-        'uae': 'United Arab Emirates', 'south korea': 'South Korea', 'north korea': 'North Korea',
-        'czech republic': 'Czechia', 'czechia': 'Czechia',
-    };
-    const alias = ALIASES[lower];
-    if (alias) return geo.features.find(f => f.properties.name === alias || f.properties.nameLong === alias);
-    // Contains match
-    feat = geo.features.find(f => f.properties.name?.toLowerCase().includes(lower) || f.properties.nameLong?.toLowerCase().includes(lower));
-    return feat || null;
-}
-
-/**
- * Draw a filled country polygon on a canvas context.
- * toX/toY convert lon/lat to canvas pixel coordinates.
- */
-function _drawCountryPolygon(ctx, feature, toX, toY, fillColor, strokeColor, strokeWidth) {
-    if (!feature || !feature.geometry) return;
-    const geom = feature.geometry;
-    const rings = geom.type === 'Polygon' ? [geom.coordinates] : geom.type === 'MultiPolygon' ? geom.coordinates : [];
-
-    for (const polygon of rings) {
-        for (const ring of polygon) {
-            if (ring.length < 3) continue;
-            ctx.beginPath();
-            const startX = toX(ring[0][0]);
-            const startY = toY(ring[0][1]);
-            ctx.moveTo(startX, startY);
-            for (let i = 1; i < ring.length; i++) {
-                ctx.lineTo(toX(ring[i][0]), toY(ring[i][1]));
-            }
-            ctx.closePath();
-            if (fillColor) {
-                ctx.fillStyle = fillColor;
-                ctx.fill();
-            }
-            if (strokeColor) {
-                ctx.strokeStyle = strokeColor;
-                ctx.lineWidth = strokeWidth || 1.5;
-                ctx.stroke();
-            }
-        }
-    }
-}
-
-/**
- * Inject a temporary mapChart MG scene at the current playhead for testing.
- * Uses geocoded pins from the build pipeline if available, otherwise
- * creates a mapChart with subtext for the renderer to resolve.
- */
-function _injectMapTest(locations, mapStyle, title, waypoints, swarms) {
-    const statusEl = document.getElementById('map-test-status');
-    const setStatus = (msg) => { if (statusEl) statusEl.textContent = msg; };
-
-    // Read slider values
-    const zoomSpeed = parseFloat(elements.mapZoomSpeed?.value) || 1;
-    const polySpeed = parseFloat(elements.mapPolySpeed?.value) || 1;
-    const easing = elements.mapEasing?.value || 'cubic';
-    const variantOverride = elements.mapVariant?.value || 'auto';
-    const polyColorChoice = elements.mapPolyColor?.value || 'auto';
-    const tiltStart = parseFloat(elements.mapTiltStart?.value) || 0;
-    const tiltEnd = parseFloat(elements.mapTiltEnd?.value) || 0;
-    const zoomKfStart = parseFloat(elements.mapZoomStart?.value) || 0.8;
-    const zoomKfEnd = parseFloat(elements.mapZoomEnd?.value) || 1.0;
-    const panXStart = parseInt(elements.mapPanXStart?.value) || 0;
-    const panXEnd = parseInt(elements.mapPanXEnd?.value) || 0;
-    const panYStart = parseInt(elements.mapPanYStart?.value) || 0;
-    const panYEnd = parseInt(elements.mapPanYEnd?.value) || 0;
-    const cinematic = elements.mapCinematic?.checked || false;
-
-    // Duration: from slider, or auto-detect from waypoint max endTime
-    let sceneDur = parseInt(elements.mapDuration?.value) || 7;
-    if (waypoints && waypoints.length > 0) {
-        const maxEnd = Math.max(...waypoints.map(w => w.endTime));
-        if (maxEnd > sceneDur) sceneDur = Math.ceil(maxEnd);
-        // Auto-update duration slider to reflect waypoint range
-        if (elements.mapDuration) {
-            elements.mapDuration.value = sceneDur;
-            if (elements.mapDurationVal) elements.mapDurationVal.textContent = sceneDur + 's';
-        }
-    }
-
-    // Build subtext in the format the mapChart renderer expects: "Berlin: 1, Tokyo: 2, ..."
-    const subtext = locations.map((loc, i) => `${loc}: #${i + 1}`).join(', ');
-    const playhead = state.currentTime || 0;
-
-    // Remove any previous map test scene
-    state.scenes = (state.scenes || []).filter(s => s.id !== '__map_test__');
-
-    // Determine variant
-    const effectiveVariant = variantOverride !== 'auto' ? variantOverride : null;
-
-    // Create a fullscreen V3 scene for the map
-    const testScene = {
-        id: '__map_test__',
-        startTime: playhead,
-        endTime: playhead + sceneDur,
-        duration: sceneDur * 30, // frames
-        trackId: 'video-track-3',
-        type: 'mapChart',
-        mapStyle: mapStyle,
-        text: title || `${locations.slice(0, 3).join(', ')}`,
-        subtext: subtext,
-        position: 'center',
-        subType: effectiveVariant,
-        _animationSpeed: 1,
-        _durationFrames: sceneDur * 30,
-        _mapZoomSpeed: zoomSpeed,
-        _mapPolySpeed: polySpeed,
-        _mapEasing: easing,
-        _mapTiltStart: tiltStart,
-        _mapTiltEnd: tiltEnd,
-        _mapZoomKfStart: zoomKfStart,
-        _mapZoomKfEnd: zoomKfEnd,
-        _mapPanXStart: panXStart,
-        _mapPanXEnd: panXEnd,
-        _mapPanYStart: panYStart,
-        _mapPanYEnd: panYEnd,
-        _mapPolyColor: polyColorChoice,
-        _mapCinematic: cinematic,
-        _mapWaypoints: waypoints || null,
-        _mapSwarms: (swarms && swarms.length > 0) ? swarms : null,
-        _mapBigMap: !!(waypoints && waypoints.length > 0),
-        mgData: {
-            type: 'mapChart',
-            mapStyle: mapStyle,
-            text: title || `${locations.slice(0, 3).join(', ')}`,
-            subtext: subtext,
-            position: 'center',
-            subType: effectiveVariant,
-            _animationSpeed: 1,
-            _durationFrames: sceneDur * 30,
-            _mapZoomSpeed: zoomSpeed,
-            _mapPolySpeed: polySpeed,
-            _mapEasing: easing,
-            _mapTiltStart: tiltStart,
-            _mapTiltEnd: tiltEnd,
-            _mapZoomKfStart: zoomKfStart,
-            _mapZoomKfEnd: zoomKfEnd,
-            _mapPanXStart: panXStart,
-            _mapPanXEnd: panXEnd,
-            _mapPanYStart: panYStart,
-            _mapPanYEnd: panYEnd,
-            _mapPolyColor: polyColorChoice,
-            _mapCinematic: cinematic,
-            _mapWaypoints: waypoints || null,
-            _mapSwarms: (swarms && swarms.length > 0) ? swarms : null,
-            _mapBigMap: !!(waypoints && waypoints.length > 0),
-        },
-    };
-
-    // Try to geocode via the backend for real pin placement
-    const mapProvider = window._mapProvider;
-    const config = window._appConfig || {};
-    const apiKey = config.maptiler?.apiKey;
-
-    if (mapProvider && mapProvider.geocodePlaces && apiKey) {
-        setStatus('Geocoding locations...');
-        mapProvider.geocodePlaces(locations, apiKey).then(async (pins) => {
-            if (!pins || pins.length === 0) {
-                setStatus('No geocoding results — using fallback');
-                _finalizeMapTest(testScene, setStatus);
-                return;
-            }
-
-            testScene._mapPins = pins;
-            testScene.mgData._mapPins = pins;
-            setStatus(`Geocoded ${pins.length}/${locations.length} — fetching OSM boundaries...`);
-
-            // Resolve boundaries: only for locations the user actually typed
-            // Natural Earth for countries, OSM for cities — don't auto-add parent countries
-            const countryFeatures = [];
-            const cityNames = [];
-            for (const loc of locations) {
-                const feat = _findCountryFeature(loc);
-                if (feat) {
-                    countryFeatures.push({ name: loc, feature: feat, level: 'country' });
-                    console.log(`[Map Test] Country boundary: "${feat.properties.name}"`);
-                } else {
-                    cityNames.push(loc);
-                }
-            }
-
-            // OSM boundaries for cities (municipal admin polygons)
-            if (cityNames.length > 0 && mapProvider.fetchOSMBoundary) {
-                setStatus(`Fetching city boundaries for ${cityNames.join(', ')}...`);
-                for (const cityName of cityNames) {
-                    try {
-                        const feat = await mapProvider.fetchOSMBoundary(cityName);
-                        if (feat?.geometry) {
-                            countryFeatures.push({ name: cityName, feature: feat, level: 'city' });
-                            console.log(`[Map Test] City boundary: "${cityName}" (${feat.geometry.type})`);
-                        }
-                    } catch (e) {
-                        console.warn(`[Map Test] City boundary fetch failed for "${cityName}":`, e.message);
-                    }
-                }
-            }
-
-            if (countryFeatures.length > 0) {
-                testScene._countryFeatures = countryFeatures;
-                testScene.mgData._countryFeatures = countryFeatures;
-                setStatus(`${countryFeatures.length} boundaries loaded — downloading tiles...`);
-            }
-
-            // Compute view from pins
-            const lons = pins.map(p => p.lon);
-            const lats = pins.map(p => p.lat);
-
-            if (waypoints && waypoints.length > 0) {
-                // ═══ SINGLE BIG MAP FOR ALL WAYPOINTS ═══
-                // Like GEOlayers: one large map image covering all locations,
-                // camera pans across it. No tile switching, no hard edges.
-
-                // Resolve waypoint coordinates
-                const wpCoords = [];
-                for (let wi = 0; wi < waypoints.length; wi++) {
-                    const wp = waypoints[wi];
-                    const wpLower = wp.name.toLowerCase();
-                    let pin = pins.find(p => p.name.toLowerCase() === wpLower);
-                    if (!pin) pin = pins.find(p => p.name.toLowerCase().includes(wpLower) || wpLower.includes(p.name.toLowerCase()));
-                    if (pin) {
-                        wpCoords.push({ name: wp.name, lon: pin.lon, lat: pin.lat, wpIdx: wi });
-                    } else {
-                        const cf = countryFeatures.find(c => c.name.toLowerCase() === wpLower);
-                        if (cf && cf.feature) {
-                            const geom = cf.feature.geometry;
-                            const ring = geom.type === 'Polygon' ? geom.coordinates[0] : geom.type === 'MultiPolygon' ? geom.coordinates[0][0] : [];
-                            if (ring.length > 0) {
-                                let sLon = 0, sLat = 0;
-                                for (const c of ring) { sLon += c[0]; sLat += c[1]; }
-                                wpCoords.push({ name: wp.name, lon: sLon / ring.length, lat: sLat / ring.length, wpIdx: wi });
-                            }
-                        }
-                    }
-                }
-
-                if (wpCoords.length > 0) {
-                    // Compute bounding box of all waypoints with padding
-                    const wpLons = wpCoords.map(w => w.lon);
-                    const wpLats = wpCoords.map(w => w.lat);
-                    const minLon = Math.min(...wpLons), maxLon = Math.max(...wpLons);
-                    const minLat = Math.min(...wpLats), maxLat = Math.max(...wpLats);
-                    const centerLon = (minLon + maxLon) / 2;
-                    const centerLat = (minLat + maxLat) / 2;
-
-                    // Tile zoom: must be LOW enough that at the minimum per-wp zoom (camScale),
-                    // the entire country/region fits in the 1920x1080 viewport.
-                    // At tile zoom z, world = 2^z * 512 px. Viewport shows 1920/camScale px of world.
-                    // US ≈ 60° lon → need 60/360 * worldPx ≤ viewportPx
-                    // For waypoint maps: use zoom 4 (good country-level detail, allows state zoom-ins)
-                    // Higher per-wp camScale values handle the close-up views.
-                    const hasPerWpZoom = waypoints.some(w => w.zoom != null);
-                    let bigZoom;
-                    if (hasPerWpZoom) {
-                        // Per-waypoint zoom: tile zoom should show full continent at lowest camScale
-                        // Find the lowest per-wp zoom to determine needed coverage
-                        const minWpZoom = Math.min(...waypoints.map(w => w.zoom ?? 1.0));
-                        // At camScale = minWpZoom, viewport = 1920/minWpZoom px
-                        // We want ~80° of longitude visible (enough for large countries + margin)
-                        // 80/360 * 2^z * 512 = 1920/minWpZoom → 2^z = 1920/(minWpZoom * 512 * 80/360)
-                        const neededDeg = 80;
-                        bigZoom = Math.floor(Math.log2(1920 / (minWpZoom * 512 * neededDeg / 360)));
-                        bigZoom = Math.max(3, Math.min(bigZoom, 5)); // clamp 3-5 for waypoint maps
-                    } else {
-                        const lonSpan = Math.max(maxLon - minLon, 5);
-                        bigZoom = Math.floor(Math.log2(360 / lonSpan * 2));
-                        bigZoom = Math.max(3, Math.min(bigZoom, 7));
-                    }
-
-                    // Canvas size: 3x frame in each dimension for panning headroom
-                    const BIG_W = 1920 * 3;  // 5760
-                    const BIG_H = 1080 * 3;  // 3240
-
-                    const bigView = { lon: centerLon, lat: centerLat, zoom: bigZoom };
-                    testScene._mapView = bigView;
-                    testScene.mgData._mapView = bigView;
-                    testScene._bigMapSize = { w: BIG_W, h: BIG_H };
-                    testScene.mgData._bigMapSize = { w: BIG_W, h: BIG_H };
-                    // Store waypoint coords for camera panning
-                    testScene._wpCoords = wpCoords;
-                    testScene.mgData._wpCoords = wpCoords;
-
-                    // Download single big map
-                    _downloadMapTestTilesBig(testScene, bigView, BIG_W, BIG_H, apiKey, mapStyle, setStatus);
-                } else {
-                    _finalizeMapTest(testScene, setStatus);
-                }
-            } else if (pins.length === 1) {
-                testScene._mapView = { lon: pins[0].lon, lat: pins[0].lat, zoom: pins[0].zoom, pins };
-                testScene.mgData._mapView = testScene._mapView;
-                _downloadMapTestTiles(testScene, pins, apiKey, mapStyle, setStatus);
-            } else {
-                const minLon = Math.min(...lons), maxLon = Math.max(...lons);
-                const minLat = Math.min(...lats), maxLat = Math.max(...lats);
-                const span = Math.max(maxLon - minLon, maxLat - minLat);
-                let zoom = span > 100 ? 2 : span > 60 ? 2.5 : span > 30 ? 3 : span > 15 ? 4 : span > 8 ? 5 : span > 4 ? 6 : 7;
-                testScene._mapView = { lon: (minLon + maxLon) / 2, lat: (minLat + maxLat) / 2, zoom, pins };
-                testScene.mgData._mapView = testScene._mapView;
-                _downloadMapTestTiles(testScene, pins, apiKey, mapStyle, setStatus);
-            }
-        }).catch(e => {
-            setStatus(`Geocoding failed: ${e.message} — using fallback`);
-            _finalizeMapTest(testScene, setStatus);
-        });
-        return;
-    }
-
-    // No geocoding available — just inject with subtext and let renderer handle it
-    setStatus('No geocoding — using built-in coordinates');
-    _finalizeMapTest(testScene, setStatus);
-}
-
-async function _downloadMapTestTiles(testScene, pins, apiKey, mapStyle, setStatus) {
-    try {
-        const mapProvider = window._mapProvider;
-        if (mapProvider && mapProvider.stitchMapTilerTiles && testScene._mapView) {
-            setStatus('Downloading map tiles...');
-            const STYLE_MAP = mapProvider.MAPTILER_STYLE_MAP || { dark: 'dataviz-dark', natural: 'outdoor-v2', satellite: 'satellite', light: 'dataviz-light', political: 'streets-v2' };
-            const style = STYLE_MAP[mapStyle] || STYLE_MAP.dark;
-
-            // Stitch tiles into a buffer, then convert to a blob URL for the renderer
-            const buffer = await mapProvider.stitchMapTilerTiles(testScene._mapView, mapStyle, apiKey);
-            if (buffer && buffer.length > 5000) {
-                // Convert Node Buffer → Blob → URL for HTMLImageElement
-                const blob = new Blob([buffer], { type: 'image/png' });
-                const blobUrl = URL.createObjectURL(blob);
-                const filename = `__map_test_${Date.now()}.png`;
-                testScene.mapImageFile = filename;
-                testScene.mgData.mapImageFile = filename;
-                testScene._mapImageUrl = blobUrl;
-                testScene.mgData._mapImageUrl = blobUrl;
-                setStatus(`Map tiles loaded (${(buffer.length / 1024).toFixed(0)} KB) — injecting scene...`);
-            }
-        }
-    } catch (e) {
-        setStatus(`Tile download failed: ${e.message} — using polygon fallback`);
-    }
-    _finalizeMapTest(testScene, setStatus);
-}
-
-async function _downloadMapTestTilesWaypoints(testScene, wpViews, apiKey, mapStyle, setStatus) {
-    const mapProvider = window._mapProvider;
-    if (!mapProvider || !mapProvider.stitchMapTilerTiles || wpViews.length === 0) {
-        _finalizeMapTest(testScene, setStatus);
-        return;
-    }
-    try {
-        const wpTileUrls = {};
-        const wpTileViews = {};
-        for (let vi = 0; vi < wpViews.length; vi++) {
-            const wv = wpViews[vi];
-            const idx = wv.wpIdx != null ? wv.wpIdx : vi; // Use waypoint index, not array position
-            setStatus(`Downloading tiles for "${wv.name}" (${vi + 1}/${wpViews.length})...`);
-            const buffer = await mapProvider.stitchMapTilerTiles(wv, mapStyle, apiKey);
-            if (buffer && buffer.length > 5000) {
-                const blob = new Blob([buffer], { type: 'image/png' });
-                wpTileUrls[idx] = URL.createObjectURL(blob);
-                wpTileViews[idx] = wv;
-            }
-        }
-        testScene._wpTileUrls = wpTileUrls;
-        testScene.mgData._wpTileUrls = wpTileUrls;
-        testScene._wpTileViews = wpTileViews;
-        testScene.mgData._wpTileViews = wpTileViews;
-        // Set first waypoint as the default mapImageUrl for fallback
-        if (wpTileUrls[0]) {
-            testScene._mapImageUrl = wpTileUrls[0];
-            testScene.mgData._mapImageUrl = wpTileUrls[0];
-            testScene.mapImageFile = `__map_wp_0.png`;
-            testScene.mgData.mapImageFile = testScene.mapImageFile;
-        }
-        const count = Object.keys(wpTileUrls).length;
-        setStatus(`${count} waypoint tile sets loaded — injecting scene...`);
-    } catch (e) {
-        setStatus(`Waypoint tiles failed: ${e.message} — using polygon fallback`);
-    }
-    _finalizeMapTest(testScene, setStatus);
-}
-
-async function _downloadMapTestTilesBig(testScene, bigView, bigW, bigH, apiKey, mapStyle, setStatus) {
-    const mapProvider = window._mapProvider;
-    if (!mapProvider || !mapProvider.stitchMapTilerTiles) {
-        _finalizeMapTest(testScene, setStatus);
-        return;
-    }
-    try {
-        setStatus(`Downloading large map (${bigW}×${bigH} at z${Math.floor(bigView.zoom)})...`);
-        const buffer = await mapProvider.stitchMapTilerTiles(bigView, mapStyle, apiKey, bigW, bigH);
-        if (buffer && buffer.length > 5000) {
-            const blob = new Blob([buffer], { type: 'image/png' });
-            const blobUrl = URL.createObjectURL(blob);
-            const filename = `__map_big_${Date.now()}.png`;
-            testScene.mapImageFile = filename;
-            testScene.mgData.mapImageFile = filename;
-            testScene._mapImageUrl = blobUrl;
-            testScene.mgData._mapImageUrl = blobUrl;
-            setStatus(`Big map loaded (${(buffer.length / 1024).toFixed(0)} KB) — injecting scene...`);
-        }
-    } catch (e) {
-        setStatus(`Big map download failed: ${e.message} — using polygon fallback`);
-    }
-    _finalizeMapTest(testScene, setStatus);
-}
-
-function _finalizeMapTest(testScene, setStatus) {
-    // If a project is loaded with scenes, inject onto timeline
-    const hasProject = state.scenes && state.scenes.length > 0;
-
-    if (hasProject) {
-        state.scenes = state.scenes.filter(s => s.id !== '__map_test__');
-        state.scenes.push(testScene);
-        state.currentTime = testScene.startTime;
-        try {
-            renderTracks();
-            loadActiveScenes();
-            resetTimelineDomCache();
-        } catch (e) {
-            console.warn('[Map Test] renderTracks failed:', e.message);
-        }
-        setStatus(`✓ Map injected at ${testScene.startTime.toFixed(1)}s — seek to preview`);
-        showNotification('Map Test', `Injected mapChart with ${testScene.subtext.split(',').length} locations`, 'success');
-    } else {
-        // No project loaded — show map in a popup preview window
-        _showMapTestPopup(testScene, setStatus);
-    }
-}
-
-function _showMapTestPopup(testScene, setStatus) {
-    // Remove previous popup
-    const old = document.getElementById('map-test-popup');
-    if (old) old.remove();
-
-    const popup = document.createElement('div');
-    popup.id = 'map-test-popup';
-    popup.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999;background:rgba(0,0,0,0.85);display:flex;flex-direction:column;align-items:center;justify-content:center;';
-
-    // Close button
-    const closeBtn = document.createElement('div');
-    closeBtn.textContent = '✕ Close';
-    closeBtn.style.cssText = 'position:absolute;top:16px;right:24px;color:#aaa;font-size:14px;cursor:pointer;padding:8px 16px;background:rgba(255,255,255,0.08);border-radius:6px;';
-    closeBtn.onclick = () => { popup.remove(); cancelAnimationFrame(popup._raf); };
-    popup.appendChild(closeBtn);
-
-    // Canvas
-    const canvas = document.createElement('canvas');
-    canvas.width = 1920;
-    canvas.height = 1080;
-    canvas.style.cssText = 'width:80vw;max-width:1280px;aspect-ratio:16/9;border-radius:8px;box-shadow:0 8px 40px rgba(0,0,0,0.6);';
-    popup.appendChild(canvas);
-
-    // Transport controls bar
-    const controls = document.createElement('div');
-    controls.style.cssText = 'display:flex;align-items:center;gap:10px;margin-top:10px;width:80vw;max-width:1280px;';
-
-    const playBtn = document.createElement('div');
-    playBtn.textContent = '⏸';
-    playBtn.style.cssText = 'color:#fff;font-size:18px;cursor:pointer;padding:4px 10px;background:rgba(255,255,255,0.1);border-radius:4px;user-select:none;min-width:28px;text-align:center;';
-    controls.appendChild(playBtn);
-
-    const restartBtn = document.createElement('div');
-    restartBtn.textContent = '⏮';
-    restartBtn.style.cssText = 'color:#aaa;font-size:16px;cursor:pointer;padding:4px 8px;background:rgba(255,255,255,0.06);border-radius:4px;user-select:none;';
-    controls.appendChild(restartBtn);
-
-    const scrub = document.createElement('input');
-    scrub.type = 'range'; scrub.min = '0'; scrub.max = '1000'; scrub.value = '0';
-    scrub.style.cssText = 'flex:1;accent-color:#00d4ff;height:14px;cursor:pointer;';
-    controls.appendChild(scrub);
-
-    const timeLabel = document.createElement('span');
-    timeLabel.style.cssText = 'color:#00d4ff;font-size:12px;min-width:80px;text-align:right;font-family:monospace;';
-    timeLabel.textContent = '0.0 / 0.0s';
-    controls.appendChild(timeLabel);
-
-    popup.appendChild(controls);
-
-    // Info text
-    const info = document.createElement('div');
-    info.style.cssText = 'color:#888;font-size:12px;margin-top:6px;';
-    info.textContent = `${testScene.text} — ${testScene.subtext} — ${testScene.mgData.mapStyle} style`;
-    popup.appendChild(info);
-
-    document.body.appendChild(popup);
-
-    // Render the map using MGRenderer directly
-    const ctx = canvas.getContext('2d');
-    const mgData = { ...testScene.mgData };
-
-    // Playback state
-    let mapImg = null;
-    let playing = true;
-    let frame = 0;
-    const fps = 30;
-    const totalFrames = (mgData._durationFrames || 7 * fps);
-    const totalDurSec = totalFrames / fps;
-
-    // Play/pause
-    playBtn.onclick = () => {
-        playing = !playing;
-        playBtn.textContent = playing ? '⏸' : '▶';
-        if (playing) requestAnimationFrame(animate);
-    };
-    // Restart
-    restartBtn.onclick = () => { frame = 0; scrub.value = '0'; if (!playing) drawFrame(); };
-    // Scrub
-    let scrubbing = false;
-    scrub.addEventListener('input', () => {
-        scrubbing = true;
-        frame = Math.round((parseInt(scrub.value) / 1000) * totalFrames);
-        drawFrame();
-    });
-    scrub.addEventListener('change', () => { scrubbing = false; });
-    // Space to toggle play
-    const onKey = (e) => { if (e.code === 'Space' && document.getElementById('map-test-popup')) { e.preventDefault(); playBtn.click(); } };
-    document.addEventListener('keydown', onKey);
-    const origClose = closeBtn.onclick;
-    closeBtn.onclick = () => { document.removeEventListener('keydown', onKey); origClose(); };
-
-    function drawFrame() {
-        ctx.clearRect(0, 0, 1920, 1080);
-        const elapsed = frame / fps;
-        const enterProgress = Math.min(1, elapsed / 1.5);
-        _renderMapTestFrame(ctx, frame, fps, mgData, mapImg, { opacity: 1, enterProgress });
-        timeLabel.textContent = `${elapsed.toFixed(1)} / ${totalDurSec.toFixed(1)}s`;
-        if (!scrubbing) scrub.value = String(Math.round((frame / totalFrames) * 1000));
-    }
-
-    function animate() {
-        if (!document.getElementById('map-test-popup') || !playing) return;
-        drawFrame();
-        frame = (frame + 1) % totalFrames;
-        popup._raf = requestAnimationFrame(animate);
-    }
-
-    function loadAndRender() {
-        if (mgData._mapImageUrl) {
-            const img = new Image();
-            img.onload = () => { mapImg = img; requestAnimationFrame(animate); };
-            img.onerror = () => requestAnimationFrame(animate);
-            img.src = mgData._mapImageUrl;
-        } else {
-            requestAnimationFrame(animate);
-        }
-    }
-
-    loadAndRender();
-    setStatus('✓ Map preview — Space to play/pause, drag to scrub');
-}
-
-// Icon image cache for map waypoints (keyword/name → HTMLImageElement)
-const _mapIconImgCache = {};
-
-function _renderMapTestFrame(ctx, frame, fps, mg, mapImg, anim) {
-    // Resolve map data from mgData if not on the scene object directly
-    const _mgd = mg.mgData || mg;
-    const _ra = mg._mapScene?.renderAssets || _mgd._mapScene?.renderAssets || null;
-    if (!mg._bigMapSize && _mgd._bigMapSize) mg._bigMapSize = _mgd._bigMapSize;
-    if (!mg._mapWaypoints && _mgd._mapWaypoints) mg._mapWaypoints = _mgd._mapWaypoints;
-    if (!mg._wpCoords && _mgd._wpCoords) mg._wpCoords = _mgd._wpCoords;
-    if (!mg._mapBigMap && _mgd._mapBigMap) mg._mapBigMap = _mgd._mapBigMap;
-    if (!mg._mapIcons && _mgd._mapIcons) mg._mapIcons = _mgd._mapIcons;
-    if (!mg._osmBoundaries && _mgd._osmBoundaries) mg._osmBoundaries = _mgd._osmBoundaries;
-    if (!mg._mapRoutePath && (_mgd._mapRoutePath || _ra?.routePath != null)) mg._mapRoutePath = _mgd._mapRoutePath || !!_ra.routePath;
-    if (!mg._mapRouteGeometry && (_mgd._mapRouteGeometry || _ra?.routeGeometry)) mg._mapRouteGeometry = _mgd._mapRouteGeometry || _ra.routeGeometry;
-    if (!mg._mapAlternateRouteGeometry && (_mgd._mapAlternateRouteGeometry || _ra?.alternateRouteGeometry)) mg._mapAlternateRouteGeometry = _mgd._mapAlternateRouteGeometry || _ra.alternateRouteGeometry;
-    if (!mg.subType && _mgd.subType) mg.subType = _mgd.subType;
-    if (!mg.mapVariant && _mgd.mapVariant) mg.mapVariant = _mgd.mapVariant;
-    const W = 1920, H = 1080;
-    const elapsed = frame / fps;
-    const totalDur = (mg._durationFrames || 7 * fps) / fps;
-    const { opacity, enterProgress } = anim;
-
-    // ── Palette ──
-    const PALS = {
-        dark: { pin: '#00d4ff', pinGlow: 'rgba(0,212,255,0.35)', pinRing: 'rgba(0,212,255,0.5)', label: '#fff', labelBg: 'rgba(8,18,35,0.92)', route: 'rgba(0,212,255,0.6)', routeGlow: 'rgba(0,212,255,0.18)', titleBg: 'rgba(8,18,35,0.88)', titleBorder: '#00d4ff', titleText: '#fff', vignette: 'rgba(0,0,0,0.35)', highlight: 'rgba(0,212,255,0.12)', highlightRing: 'rgba(0,212,255,0.3)', arc: '#00d4ff', arcGlow: 'rgba(0,212,255,0.25)', radius: 'rgba(0,212,255,0.08)', radiusRing: 'rgba(0,212,255,0.35)', borderGlow: 'rgba(0,212,255,0.5)' },
-        natural: { pin: '#f0c040', pinGlow: 'rgba(240,192,64,0.35)', pinRing: 'rgba(240,192,64,0.5)', label: '#fff', labelBg: 'rgba(12,28,18,0.9)', route: 'rgba(240,192,64,0.6)', routeGlow: 'rgba(240,192,64,0.18)', titleBg: 'rgba(12,28,18,0.88)', titleBorder: '#90d070', titleText: '#fff', vignette: 'rgba(0,15,5,0.3)', highlight: 'rgba(240,192,64,0.1)', highlightRing: 'rgba(240,192,64,0.25)', arc: '#f0c040', arcGlow: 'rgba(240,192,64,0.25)', radius: 'rgba(240,192,64,0.06)', radiusRing: 'rgba(240,192,64,0.3)', borderGlow: 'rgba(240,192,64,0.5)' },
-        satellite: { pin: '#00ffaa', pinGlow: 'rgba(0,255,170,0.35)', pinRing: 'rgba(0,255,170,0.5)', label: '#e0f0e8', labelBg: 'rgba(3,8,12,0.92)', route: 'rgba(0,255,170,0.55)', routeGlow: 'rgba(0,255,170,0.15)', titleBg: 'rgba(3,8,12,0.9)', titleBorder: '#00ffaa', titleText: '#e0f0e8', vignette: 'rgba(0,0,0,0.45)', highlight: 'rgba(0,255,170,0.1)', highlightRing: 'rgba(0,255,170,0.25)', arc: '#00ffaa', arcGlow: 'rgba(0,255,170,0.2)', radius: 'rgba(0,255,170,0.06)', radiusRing: 'rgba(0,255,170,0.3)', borderGlow: 'rgba(0,255,170,0.5)' },
-        light: { pin: '#d04030', pinGlow: 'rgba(208,64,48,0.3)', pinRing: 'rgba(208,64,48,0.45)', label: '#1a2a3a', labelBg: 'rgba(255,255,255,0.95)', route: 'rgba(208,64,48,0.5)', routeGlow: 'rgba(208,64,48,0.15)', titleBg: 'rgba(255,255,255,0.92)', titleBorder: '#2060a0', titleText: '#1a2a3a', vignette: 'rgba(100,120,140,0.12)', highlight: 'rgba(208,64,48,0.08)', highlightRing: 'rgba(208,64,48,0.2)', arc: '#d04030', arcGlow: 'rgba(208,64,48,0.2)', radius: 'rgba(208,64,48,0.06)', radiusRing: 'rgba(208,64,48,0.25)', borderGlow: 'rgba(208,64,48,0.4)' },
-        political: { pin: '#b83020', pinGlow: 'rgba(184,48,32,0.35)', pinRing: 'rgba(184,48,32,0.5)', label: '#1c1008', labelBg: 'rgba(240,228,208,0.94)', route: 'rgba(184,48,32,0.55)', routeGlow: 'rgba(184,48,32,0.15)', titleBg: 'rgba(240,228,208,0.92)', titleBorder: '#8b4513', titleText: '#1c1008', vignette: 'rgba(60,40,20,0.18)', highlight: 'rgba(184,48,32,0.08)', highlightRing: 'rgba(184,48,32,0.2)', arc: '#b83020', arcGlow: 'rgba(184,48,32,0.2)', radius: 'rgba(184,48,32,0.06)', radiusRing: 'rgba(184,48,32,0.25)', borderGlow: 'rgba(184,48,32,0.4)' },
-    };
-    const pal = PALS[mg.mapStyle || 'dark'] || PALS.dark;
-
-    // ── Polygon color palettes ──
-    const POLY_COLORS = {
-        dark:      { fill: '#00d4ff', fillEdge: '#0088cc', stroke: '#00d4ff', glow: 'rgba(0,212,255,0.6)' },
-        natural:   { fill: '#f0c040', fillEdge: '#c09020', stroke: '#d0a830', glow: 'rgba(240,192,64,0.5)' },
-        satellite: { fill: '#00ffaa', fillEdge: '#009966', stroke: '#00ffaa', glow: 'rgba(0,255,170,0.5)' },
-        light:     { fill: '#d04030', fillEdge: '#a02820', stroke: '#c03828', glow: 'rgba(208,64,48,0.5)' },
-        political: { fill: '#b83020', fillEdge: '#801810', stroke: '#a02818', glow: 'rgba(184,48,32,0.5)' },
-    };
-    const POLY_COLOR_OVERRIDES = {
-        cyan:    { fill: '#00d4ff', fillEdge: '#0088cc', stroke: '#00d4ff', glow: 'rgba(0,212,255,0.6)' },
-        red:     { fill: '#ff3030', fillEdge: '#cc1818', stroke: '#ff3030', glow: 'rgba(255,48,48,0.6)' },
-        green:   { fill: '#30ff60', fillEdge: '#18cc40', stroke: '#30ff60', glow: 'rgba(48,255,96,0.6)' },
-        gold:    { fill: '#f0c040', fillEdge: '#c09020', stroke: '#f0c040', glow: 'rgba(240,192,64,0.6)' },
-        magenta: { fill: '#ff40ff', fillEdge: '#cc20cc', stroke: '#ff40ff', glow: 'rgba(255,64,255,0.6)' },
-        orange:  { fill: '#ff8020', fillEdge: '#cc6010', stroke: '#ff8020', glow: 'rgba(255,128,32,0.6)' },
-        white:   { fill: '#ffffff', fillEdge: '#bbbbbb', stroke: '#ffffff', glow: 'rgba(255,255,255,0.5)' },
-        blue:    { fill: '#4080ff', fillEdge: '#2050cc', stroke: '#4080ff', glow: 'rgba(64,128,255,0.6)' },
-    };
-    const polyColorKey = mg._mapPolyColor || 'auto';
-    const polyPal = (polyColorKey !== 'auto' && POLY_COLOR_OVERRIDES[polyColorKey])
-        ? POLY_COLOR_OVERRIDES[polyColorKey]
-        : (POLY_COLORS[mg.mapStyle || 'dark'] || POLY_COLORS.dark);
-
-    // ── Slider-driven speed + easing ──
-    const zoomSpd = mg._mapZoomSpeed || 1;
-    const polySpd = mg._mapPolySpeed || 1;
-    const easingMode = mg._mapEasing || 'cubic';
-
-    // Easing functions
-    const _ease = (t, mode) => {
-        t = Math.min(1, Math.max(0, t));
-        switch (mode) {
-            case 'elastic': { const c4 = (2 * Math.PI) / 3; return t === 0 ? 0 : t === 1 ? 1 : Math.pow(2, -10 * t) * Math.sin((t * 10 - 0.75) * c4) + 1; }
-            case 'expo':    return t === 1 ? 1 : 1 - Math.pow(2, -10 * t);
-            case 'linear':  return t;
-            default:        return 1 - Math.pow(1 - t, 3); // cubic
-        }
-    };
-
-    // ── Cinematic mode flag ──
-    const cinematicMode = mg._mapCinematic || false;
-
-    // ── Keyframe time (shared by tilt + zoom) ──
-    const kfT = Math.min(1, elapsed / totalDur);
-    const kfEased = _ease(kfT, easingMode);
-
-    // ── Projection: single map for everything (including waypoints) ──
-    // Big map mode: image is larger than 1920x1080, camera pans across it
-    const bigMapSize = mg._bigMapSize || null;
-    const IMG_W = bigMapSize ? bigMapSize.w : W;
-    const IMG_H = bigMapSize ? bigMapSize.h : H;
-    const mapView = mg._mapView || null;
-
-    const _projCache = _renderMapTestFrame._projCache || (_renderMapTestFrame._projCache = {});
-    let toX, toY;
-    if (mapView) {
-        const cacheKey = `${mapView.lon}_${mapView.lat}_${mapView.zoom}_${IMG_W}_${IMG_H}`;
-        if (_projCache[cacheKey]) {
-            toX = _projCache[cacheKey].toX;
-            toY = _projCache[cacheKey].toY;
-        } else {
-            const TILE_SZ = 512;
-            const z = Math.max(2, Math.floor(mapView.zoom));
-            const n = Math.pow(2, z);
-            const cTileX = ((mapView.lon + 180) / 360) * n;
-            const cLatRad = mapView.lat * Math.PI / 180;
-            const cTileY = (1 - Math.log(Math.tan(cLatRad) + 1 / Math.cos(cLatRad)) / Math.PI) / 2 * n;
-            const originPx = cTileX * TILE_SZ - IMG_W / 2;
-            const originPy = cTileY * TILE_SZ - IMG_H / 2;
-            const proj = {
-                toX: (lon) => ((lon + 180) / 360) * n * TILE_SZ - originPx,
-                toY: (lat) => { const latR = lat * Math.PI / 180; return (1 - Math.log(Math.tan(latR) + 1 / Math.cos(latR)) / Math.PI) / 2 * n * TILE_SZ - originPy; },
-            };
-            _projCache[cacheKey] = proj;
-            toX = proj.toX;
-            toY = proj.toY;
-        }
-    } else {
-        toX = (lon) => ((lon + 180) / 360) * W * 0.88 + W * 0.06;
-        toY = (lat) => ((90 - lat) / 180) * H * 0.82 + H * 0.06;
-    }
-
-    // ═══ WAYPOINT SYSTEM ═══
-    // Single big map: camera pans between waypoint positions on the same image
-    const _waypoints = mg._mapWaypoints || null;
-    const _wpPins = mg._mapPins || [];
-    const _wpCoords = mg._wpCoords || [];
-    let activeWpIdx = -1, wpTransition = 0, wpCamX = IMG_W / 2, wpCamY = IMG_H / 2;
-    let prevWpIdx = -1;
-
-    const hasWaypoints = _waypoints && _waypoints.length > 0;
-    const wpPositions = [];
-    if (hasWaypoints) {
-        // Resolve waypoint pixel positions on the big map
-        for (const wp of _waypoints) {
-            const wpLower = wp.name.toLowerCase();
-            // Try _wpCoords first (set during big map creation), then geocoded pins
-            let coord = _wpCoords.find(c => c.name.toLowerCase() === wpLower);
-            if (!coord) {
-                let pin = _wpPins.find(p => p.name.toLowerCase() === wpLower);
-                if (!pin) pin = _wpPins.find(p => p.name.toLowerCase().includes(wpLower) || wpLower.includes(p.name.toLowerCase()));
-                if (pin) coord = { lon: pin.lon, lat: pin.lat };
-            }
-            if (coord) {
-                wpPositions.push({ ...wp, lon: coord.lon, lat: coord.lat, px: toX(coord.lon), py: toY(coord.lat) });
-            } else {
-                wpPositions.push({ ...wp, lon: 0, lat: 0, px: IMG_W / 2, py: IMG_H / 2 });
-            }
-        }
-
-        // Find active waypoint
-        for (let wi = wpPositions.length - 1; wi >= 0; wi--) {
-            if (elapsed >= wpPositions[wi].startTime) { activeWpIdx = wi; break; }
-        }
-        if (activeWpIdx < 0) activeWpIdx = 0;
-        prevWpIdx = activeWpIdx > 0 ? activeWpIdx - 1 : -1;
-
-        const awp = wpPositions[activeWpIdx];
-        const wpElapsed = elapsed - awp.startTime;
-        const transitionDur = 1.2 / zoomSpd;
-        wpTransition = Math.min(1, wpElapsed / transitionDur);
-        const wpEase = _ease(wpTransition, easingMode);
-
-        // Camera pans smoothly between waypoint positions on the big map
-        if (prevWpIdx >= 0 && wpTransition < 1) {
-            const prev = wpPositions[prevWpIdx];
-            wpCamX = prev.px + (awp.px - prev.px) * wpEase;
-            wpCamY = prev.py + (awp.py - prev.py) * wpEase;
-        } else {
-            wpCamX = awp.px;
-            wpCamY = awp.py;
-        }
-    }
-
-    // ── Camera ──
-    const multiPin = (mg._mapPins || []).length >= 2;
-    const sceneVariant = mg._mapScene?.mapMode === 'region' ? 'regionHighlight' : mg._mapScene?.mapMode;
-    const variant = mg.subType || mg.mapVariant || _mgd.subType || _mgd.mapVariant || sceneVariant || 'standard';
-    let camScale, driftX, driftY, tiltAmount;
-
-    // Flag for waypoint-on-big-map transform (used below)
-    let wpBigMapCamera = false;
-
-    if (hasWaypoints && wpPositions.length > 0) {
-        // ═══ WAYPOINT CAMERA ═══
-        // Per-waypoint zoom: each waypoint can have its own zoom level (z parameter)
-        // Falls back to global keyframes if no per-wp zoom set
-        const globalZS = mg._mapZoomKfStart ?? (bigMapSize ? 1.2 : 0.8);
-        const globalZE = mg._mapZoomKfEnd ?? (bigMapSize ? 1.8 : 1.2);
-        const awp = wpPositions[activeWpIdx];
-        const hasPerWpZoom = wpPositions.some(wp => wp.zoom != null);
-
-        const isRoute = variant === 'route';
-        const isComparison = variant === 'comparison';
-        const wideCap = isRoute ? 1.1 : (isComparison ? 1.5 : null);
-        const clampWpZoom = (z) => wideCap != null ? Math.min(z, wideCap) : z;
-
-        if (hasPerWpZoom && bigMapSize) {
-            // Per-waypoint zoom: interpolate between waypoint zoom levels during transitions
-            const curZoom = clampWpZoom(awp.zoom ?? globalZS);
-            if (prevWpIdx >= 0 && wpTransition < 1) {
-                const prevZoom = clampWpZoom(wpPositions[prevWpIdx].zoom ?? globalZS);
-                camScale = prevZoom + (curZoom - prevZoom) * _ease(wpTransition, easingMode);
-            } else {
-                // Within a waypoint, apply subtle zoom animation (5% range)
-                const wpDur = awp.endTime - awp.startTime;
-                const wpLocalT = Math.min(1, (elapsed - awp.startTime) / Math.max(0.1, wpDur));
-                camScale = curZoom + curZoom * 0.05 * wpLocalT;
-            }
-        } else {
-            camScale = globalZS + (globalZE - globalZS) * kfEased;
-            if (wideCap != null) camScale = Math.min(camScale, wideCap);
-        }
-
-        if (bigMapSize) {
-            wpBigMapCamera = true;
-            driftX = 0;
-            driftY = 0;
-            if (wideCap != null && wpPositions.length > 1) {
-                const xs = wpPositions.map(p => p.px);
-                const ys = wpPositions.map(p => p.py);
-                const minX = Math.min(...xs), maxX = Math.max(...xs);
-                const minY = Math.min(...ys), maxY = Math.max(...ys);
-                const headroom = isRoute ? 1.6 : 1.4;
-                const rawSpanX = Math.max(1, maxX - minX);
-                const rawSpanY = Math.max(1, maxY - minY);
-                const paddedFit = Math.min(W / (rawSpanX * headroom), H / (rawSpanY * headroom));
-                const endpointFit = Math.min(W / rawSpanX, H / rawSpanY);
-                const fillScale = Math.max(W / IMG_W, H / IMG_H);
-                const fitScale = Math.min(Math.max(paddedFit, fillScale), endpointFit);
-                wpCamX = (minX + maxX) / 2;
-                wpCamY = (minY + maxY) / 2;
-                camScale = isRoute ? fitScale : Math.min(camScale, fitScale);
-                if (!_renderMapTestFrame._bboxFitLogged) _renderMapTestFrame._bboxFitLogged = new Set();
-                const bboxKey = `${mg.sceneIndex ?? mg.startTime ?? 'preview'}:${variant}`;
-                if (!_renderMapTestFrame._bboxFitLogged.has(bboxKey)) {
-                    _renderMapTestFrame._bboxFitLogged.add(bboxKey);
-                    console.log(`[MapPreview] bbox-fit variant=${variant} wp=${wpPositions.length} camScale=${camScale.toFixed(3)} fit=${fitScale.toFixed(3)}`);
-                }
-            }
-        } else {
-            driftX = (W / 2 - wpCamX);
-            driftY = (H / 2 - wpCamY);
-        }
-
-        // Per-waypoint tilt: interpolate between waypoint tilt values
-        const hasPerWpTilt = wpPositions.some(wp => wp.tilt != null);
-        if (hasPerWpTilt) {
-            const curTilt = awp.tilt ?? 0;
-            if (prevWpIdx >= 0 && wpTransition < 1) {
-                const prevTilt = wpPositions[prevWpIdx].tilt ?? 0;
-                tiltAmount = prevTilt + (curTilt - prevTilt) * _ease(wpTransition, easingMode);
-            } else {
-                tiltAmount = curTilt;
-            }
-        } else {
-            const tiltS = mg._mapTiltStart || 0;
-            const tiltE2 = mg._mapTiltEnd ?? tiltS;
-            tiltAmount = tiltS + (tiltE2 - tiltS) * kfEased;
-        }
-
-    } else if (cinematicMode) {
-        // ═══ CINEMATIC 3-PHASE CAMERA ═══
-        const p1End = 0.20, p2End = 0.50;
-        const progress = kfT;
-
-        if (progress <= p1End) {
-            const t1 = progress / p1End;
-            const e1 = _ease(t1, easingMode);
-            camScale = 0.7 + e1 * 0.05;
-            driftX = (1 - e1) * 15;
-            driftY = (1 - e1) * 8;
-            tiltAmount = 0;
-        } else if (progress <= p2End) {
-            const t2 = (progress - p1End) / (p2End - p1End);
-            const e2 = _ease(t2, easingMode);
-            camScale = 0.75 + e2 * 0.75;
-            driftX = e2 * -10;
-            driftY = e2 * -5;
-            tiltAmount = e2 * 0.15;
-        } else {
-            const t3 = (progress - p2End) / (1 - p2End);
-            const e3 = _ease(t3, easingMode);
-            camScale = 1.5 + e3 * 0.15;
-            tiltAmount = 0.15 + e3 * 0.45;
-            const orbitAngle = t3 * Math.PI * 0.6;
-            const orbitRadius = 30 + e3 * 15;
-            driftX = -10 + Math.sin(orbitAngle) * orbitRadius;
-            driftY = -5 + Math.cos(orbitAngle) * orbitRadius * 0.4;
-        }
-    } else {
-        // ═══ STANDARD KEYFRAME CAMERA ═══
-        const zKfS = mg._mapZoomKfStart ?? 0.8;
-        const zKfE = mg._mapZoomKfEnd ?? 1.0;
-        camScale = zKfS + (zKfE - zKfS) * kfEased;
-
-        if (variant === 'locator' || variant === 'regionHighlight') {
-            const driftT = Math.min(1, elapsed / (0.8 / zoomSpd));
-            driftX = (1 - _ease(driftT, easingMode)) * 30;
-            driftY = (1 - _ease(driftT, easingMode)) * 18;
-        } else if (variant === 'route') {
-            const ZOOM_DUR = 1.0 / zoomSpd;
-            const panT = Math.min(1, Math.max(0, (elapsed - ZOOM_DUR) / Math.max(1, totalDur - ZOOM_DUR)));
-            const panE = panT * panT * (3 - 2 * panT);
-            driftX = panE * 15 - 8;
-            driftY = panE * 10 - 5;
-        } else {
-            const driftT = Math.min(1, elapsed / (1.2 / zoomSpd));
-            const dE = _ease(driftT, easingMode);
-            driftX = (1 - dE) * 20;
-            driftY = (1 - dE) * 12;
-        }
-
-        const tiltS = mg._mapTiltStart || 0;
-        const tiltE2 = mg._mapTiltEnd ?? tiltS;
-        tiltAmount = tiltS + (tiltE2 - tiltS) * kfEased;
-    }
-
-    // ── Pan keyframes: interpolate X/Y offset and add to drift ──
-    const panXS = mg._mapPanXStart || 0;
-    const panXE = mg._mapPanXEnd || 0;
-    const panYS = mg._mapPanYStart || 0;
-    const panYE = mg._mapPanYEnd || 0;
-    if (panXS !== 0 || panXE !== 0 || panYS !== 0 || panYE !== 0) {
-        driftX += panXS + (panXE - panXS) * kfEased;
-        driftY += panYS + (panYE - panYS) * kfEased;
-    }
-
-    // ── Per-waypoint bearing & orbit ──
-    let bearingDeg = 0;
-    if (hasWaypoints && wpPositions.length > 0) {
-        const hasPerWpBearing = wpPositions.some(wp => wp.bearing != null || wp.orbit != null);
-        if (hasPerWpBearing) {
-            const awpCam = wpPositions[activeWpIdx];
-            // Static bearing (b parameter)
-            const curBearing = awpCam.bearing ?? 0;
-            // Orbit: continuous rotation (o parameter = deg/sec)
-            const curOrbit = awpCam.orbit ?? 0;
-            const wpLocalElapsed = elapsed - awpCam.startTime;
-            let targetBearing = curBearing + curOrbit * wpLocalElapsed;
-
-            if (prevWpIdx >= 0 && wpTransition < 1) {
-                const prevWp = wpPositions[prevWpIdx];
-                const prevBearing = prevWp.bearing ?? 0;
-                const prevOrbit = prevWp.orbit ?? 0;
-                const prevLocalElapsed = elapsed - prevWp.startTime;
-                const prevTotal = prevBearing + prevOrbit * prevLocalElapsed;
-                bearingDeg = prevTotal + (targetBearing - prevTotal) * _ease(wpTransition, easingMode);
-            } else {
-                bearingDeg = targetBearing;
-            }
-        }
-    }
-    const bearingRad = bearingDeg * Math.PI / 180;
-    const useBearing = Math.abs(bearingDeg) > 0.1;
-
-    // ── 3D PERSPECTIVE TILT ──
-    const useTilt = tiltAmount > 0.01;
-    const _mainCtxP = ctx;
-    let _tiltOffscreen = null;
-
-    if (useTilt || useBearing) {
-        if (!_renderMapTestFrame._tiltCanvas) {
-            _renderMapTestFrame._tiltCanvas = document.createElement('canvas');
-            _renderMapTestFrame._tiltCanvas.width = W;
-            _renderMapTestFrame._tiltCanvas.height = H;
-        }
-        _tiltOffscreen = _renderMapTestFrame._tiltCanvas;
-        _tiltOffscreen.getContext('2d').clearRect(0, 0, W, H);
-        ctx = _tiltOffscreen.getContext('2d');
-    }
-
-    ctx.save();
-    if (wpBigMapCamera) {
-        // Big map waypoint: scale + rotate around waypoint, centered on screen
-        ctx.translate(W / 2, H / 2);
-        if (useBearing) ctx.rotate(bearingRad);
-        ctx.scale(camScale, camScale);
-        ctx.translate(-wpCamX, -wpCamY);
-    } else {
-        ctx.translate(W / 2 + driftX, H / 2 + driftY);
-        if (useBearing) ctx.rotate(bearingRad);
-        ctx.scale(camScale, camScale);
-        ctx.translate(-W / 2, -H / 2);
-    }
-
-    // ── Background ──
-    if (mapImg) {
-        ctx.globalAlpha = opacity * Math.min(1, enterProgress * 2);
-        ctx.drawImage(mapImg, 0, 0, IMG_W, IMG_H);
-        ctx.globalAlpha = opacity;
-    } else {
-        ctx.fillStyle = '#0b1426';
-        ctx.fillRect(0, 0, IMG_W, IMG_H);
-    }
-
-    // ── Parse pins ──
-    const pins = [];
-    if (mg._mapPins && mg._mapPins.length) {
-        const pairs = (mg.subtext || '').split(',').map(s => s.trim());
-        mg._mapPins.forEach((gp, i) => {
-            const pairVal = pairs[i] ? pairs[i].split(':')[1]?.trim() || '' : '';
-            pins.push({ x: toX(gp.lon), y: toY(gp.lat), label: gp.name, value: pairVal, i, type: gp.type || 'city' });
-        });
-    } else {
-        const pairs = (mg.subtext || '').split(',').map(s => s.trim()).filter(Boolean);
-        pairs.forEach((pair, i) => {
-            const [label] = pair.split(':');
-            const val = pair.split(':')[1]?.trim() || '';
-            const hash = (label || '').split('').reduce((a, c) => a + c.charCodeAt(0), 0);
-            pins.push({ x: W * 0.15 + ((hash * 7 + i * 137) % 70) / 100 * W, y: H * 0.2 + ((hash * 13 + i * 89) % 55) / 100 * H, label: label.trim(), value: val, i, type: 'unknown' });
-        });
-    }
-
-    // ══ 1. COUNTRY POLYGON FILLS (gradient + mask reveal + stroke animation) ══
-    const cFeats = mg._countryFeatures || [];
-    // Helpers
-    const _tracePolyP = (polys) => {
-        for (const polygon of polys) { for (const ring of polygon) { if (ring.length < 3) continue; ctx.moveTo(toX(ring[0][0]), toY(ring[0][1])); for (let i = 1; i < ring.length; i++) ctx.lineTo(toX(ring[i][0]), toY(ring[i][1])); ctx.closePath(); } }
-    };
-    const _polyBoundsP = (polys) => {
-        let mnX = Infinity, mnY = Infinity, mxX = -Infinity, mxY = -Infinity;
-        for (const polygon of polys) { for (const ring of polygon) { for (const pt of ring) { const px = toX(pt[0]), py = toY(pt[1]); if (px < mnX) mnX = px; if (py < mnY) mnY = py; if (px > mxX) mxX = px; if (py > mxY) mxY = py; } } }
-        return { x: mnX, y: mnY, w: mxX - mnX, h: mxY - mnY, cx: (mnX + mxX) / 2, cy: (mnY + mxY) / 2 };
-    };
-
-    // Helper: match a name to a waypoint (exact then partial)
-    const _findWpMatch = (name) => {
-        if (!wpPositions.length) return null;
-        const lower = (name || '').toLowerCase();
-        let m = wpPositions.find(wp => wp.name.toLowerCase() === lower);
-        if (!m) m = wpPositions.find(wp => wp.name.toLowerCase().includes(lower) || lower.includes(wp.name.toLowerCase()));
-        return m || null;
-    };
-
-    const routePathPositions = [];
-    if (Array.isArray(mg._mapRouteGeometry) && mg._mapRouteGeometry.length >= 2) {
-        for (const g of mg._mapRouteGeometry) {
-            if (!g || typeof g.lon !== 'number' || typeof g.lat !== 'number') continue;
-            routePathPositions.push({
-                name: g.name || '',
-                px: toX(g.lon),
-                py: toY(g.lat),
-                startTime: Number.isFinite(g.startTime) ? g.startTime : 0,
-                endTime: Number.isFinite(g.endTime) ? g.endTime : totalDur,
-            });
-        }
-    }
-    const alternateRoutePathPositions = [];
-    if (Array.isArray(mg._mapAlternateRouteGeometry) && mg._mapAlternateRouteGeometry.length >= 2) {
-        for (const g of mg._mapAlternateRouteGeometry) {
-            if (!g || typeof g.lon !== 'number' || typeof g.lat !== 'number') continue;
-            alternateRoutePathPositions.push({
-                name: g.name || '',
-                px: toX(g.lon),
-                py: toY(g.lat),
-                startTime: Number.isFinite(g.startTime) ? g.startTime : 0,
-                endTime: Number.isFinite(g.endTime) ? g.endTime : totalDur,
-            });
-        }
-    }
-
-    const _drawPreviewRoute = (pts, opts = {}) => {
-        const routePts = (pts || []).filter(p => p && p.px != null && p.py != null);
-        if (routePts.length < 2) return;
-        let totalLen = 0;
-        const segments = [];
-        for (let ri = 1; ri < routePts.length; ri++) {
-            const dx = routePts[ri].px - routePts[ri - 1].px;
-            const dy = routePts[ri].py - routePts[ri - 1].py;
-            const len = Math.max(1, Math.sqrt(dx * dx + dy * dy));
-            segments.push({ from: routePts[ri - 1], to: routePts[ri], len });
-            totalLen += len;
-        }
-        const start = Number.isFinite(opts.startTime) ? opts.startTime : Math.min(...routePts.map(p => Number(p.startTime)).filter(Number.isFinite), 0);
-        const dur = Number.isFinite(opts.duration) ? opts.duration : Math.max(1.4, Math.min(3.2, totalDur * 0.55));
-        const t = Math.min(1, Math.max(0, (elapsed - start) / dur));
-        const eased = 1 - Math.pow(1 - t, 2);
-        const drawLen = totalLen * eased;
-        if (drawLen <= 0) return;
-
-        const strokePartial = () => {
-            ctx.beginPath();
-            ctx.moveTo(routePts[0].px, routePts[0].py);
-            let accumulated = 0;
-            for (const seg of segments) {
-                const remain = drawLen - accumulated;
-                if (remain <= 0) break;
-                const frac = Math.min(1, remain / seg.len);
-                ctx.lineTo(seg.from.px + (seg.to.px - seg.from.px) * frac, seg.from.py + (seg.to.py - seg.from.py) * frac);
-                accumulated += seg.len;
-                if (frac < 1) break;
-            }
-            ctx.stroke();
-        };
-
-        ctx.save();
-        ctx.globalAlpha = opacity * (opts.glowAlpha ?? 0.25);
-        ctx.strokeStyle = pal.routeGlow || pal.arcGlow || pal.pin;
-        ctx.lineWidth = opts.glowWidth || 9;
-        ctx.setLineDash([]);
-        strokePartial();
-        ctx.globalAlpha = opacity * (opts.alpha ?? 0.85);
-        ctx.strokeStyle = opts.color || pal.route || pal.arc || pal.pin;
-        ctx.lineWidth = opts.width || 3;
-        ctx.setLineDash(opts.dash || [12, 8]);
-        ctx.lineDashOffset = (opts.reverseDash ? 1 : -1) * elapsed * 28;
-        ctx.shadowColor = pal.pin;
-        ctx.shadowBlur = opts.shadowBlur || 6;
-        strokePartial();
-        ctx.shadowBlur = 0;
-        ctx.setLineDash([]);
-        ctx.restore();
-        ctx.globalAlpha = opacity;
-    };
-
-    // ── Per-polygon color cycle for multiple locations ──
-    const POLY_CYCLE = [
-        { fill: '#00d4ff', fillEdge: '#0088cc', stroke: '#00d4ff', glow: 'rgba(0,212,255,0.6)' },   // cyan
-        { fill: '#ff6040', fillEdge: '#cc3820', stroke: '#ff6040', glow: 'rgba(255,96,64,0.6)' },    // coral-red
-        { fill: '#40ff90', fillEdge: '#20cc60', stroke: '#40ff90', glow: 'rgba(64,255,144,0.6)' },   // emerald
-        { fill: '#f0c040', fillEdge: '#c09020', stroke: '#f0c040', glow: 'rgba(240,192,64,0.6)' },   // gold
-        { fill: '#a060ff', fillEdge: '#7030cc', stroke: '#a060ff', glow: 'rgba(160,96,255,0.6)' },   // purple
-        { fill: '#ff40a0', fillEdge: '#cc2070', stroke: '#ff40a0', glow: 'rgba(255,64,160,0.6)' },   // magenta-pink
-        { fill: '#40c0ff', fillEdge: '#2090cc', stroke: '#40c0ff', glow: 'rgba(64,192,255,0.6)' },   // sky blue
-        { fill: '#ff8020', fillEdge: '#cc6010', stroke: '#ff8020', glow: 'rgba(255,128,32,0.6)' },   // orange
-    ];
-    const usePolyCycle = cFeats.length > 1 && polyColorKey === 'auto';
-
-    if (cFeats.length > 0) {
-        for (let ci = 0; ci < cFeats.length; ci++) {
-            const cf = cFeats[ci];
-            if (!cf.feature || !cf.feature.geometry) continue;
-            // Per-polygon color: cycle through distinct colors when multiple places
-            const cpPal = usePolyCycle ? POLY_CYCLE[ci % POLY_CYCLE.length] : polyPal;
-            // Waypoint-aware timing: polygon appears at its waypoint's startTime
-            let polyDelay;
-            const wpMatch = _findWpMatch(cf.name);
-            if (wpPositions.length > 0) {
-                if (wpMatch) {
-                    polyDelay = wpMatch.startTime + 0.2;
-                    // Big map: show all polygons (they're on the same image, camera handles centering)
-                    // Per-tile mode: only show polygon when its waypoint is active
-                    if (!bigMapSize) {
-                        const wpIdx = wpPositions.indexOf(wpMatch);
-                        if (wpIdx !== activeWpIdx && wpIdx !== prevWpIdx) continue;
-                    }
-                } else {
-                    polyDelay = (0.15 + ci * 0.25) / polySpd;
-                }
-            } else {
-                polyDelay = (0.15 + ci * 0.25) / polySpd;
-            }
-            const polyT = Math.min(1, Math.max(0, (elapsed - polyDelay) / (0.7 / polySpd)));
-            if (polyT <= 0) continue;
-            const polyEase = _ease(polyT, easingMode);
-            const pulse = (Math.sin(elapsed * 1.5 * polySpd + ci * 0.8) + 1) / 2;
-            const geom = cf.feature.geometry;
-            const polys = geom.type === 'Polygon' ? [geom.coordinates] : geom.type === 'MultiPolygon' ? geom.coordinates : [];
-            const bounds = _polyBoundsP(polys);
-
-            // ── Mask reveal: circular wipe from polygon center ──
-            ctx.save();
-            if (polyEase < 1) {
-                const maxR = Math.sqrt(bounds.w * bounds.w + bounds.h * bounds.h) * 0.6;
-                ctx.beginPath();
-                ctx.arc(bounds.cx, bounds.cy, maxR * polyEase, 0, Math.PI * 2);
-                ctx.clip();
-            }
-            // Clip to polygon boundary
-            ctx.beginPath();
-            _tracePolyP(polys);
-            ctx.clip('evenodd');
-
-            // ── Gradient fill (radial from center) ──
-            const gradR = Math.max(bounds.w, bounds.h) * 0.7;
-            const fillGrad = ctx.createRadialGradient(bounds.cx, bounds.cy, 0, bounds.cx, bounds.cy, gradR);
-            fillGrad.addColorStop(0, cpPal.fill);
-            fillGrad.addColorStop(1, cpPal.fillEdge);
-            ctx.globalAlpha = opacity * polyEase * (0.25 + pulse * 0.08);
-            ctx.fillStyle = fillGrad;
-            ctx.fillRect(0, 0, IMG_W, IMG_H);
-
-            // Inner shimmer
-            const shimX = bounds.cx + Math.sin(elapsed * 0.7 * polySpd + ci) * bounds.w * 0.3;
-            const shimY = bounds.cy + Math.cos(elapsed * 0.5 * polySpd + ci) * bounds.h * 0.2;
-            const shimGrad = ctx.createRadialGradient(shimX, shimY, 0, shimX, shimY, gradR * 0.5);
-            shimGrad.addColorStop(0, 'rgba(255,255,255,0.08)');
-            shimGrad.addColorStop(1, 'rgba(255,255,255,0.0)');
-            ctx.globalAlpha = opacity * polyEase * 0.6;
-            ctx.fillStyle = shimGrad;
-            ctx.fillRect(0, 0, IMG_W, IMG_H);
-            ctx.restore();
-
-            // ── Progressive stroke animation ──
-            ctx.save();
-            ctx.globalAlpha = opacity * polyEase * (0.5 + pulse * 0.25);
-            ctx.strokeStyle = cpPal.stroke;
-            ctx.lineWidth = 3;
-            ctx.shadowColor = cpPal.glow;
-            ctx.shadowBlur = 10 + pulse * 10;
-
-            const strokeProgress = Math.min(1, Math.max(0, (elapsed - polyDelay - 0.2 / polySpd) / (1.0 / polySpd)));
-            const strokeEase = _ease(strokeProgress, easingMode);
-
-            if (strokeEase >= 1) {
-                ctx.beginPath(); _tracePolyP(polys); ctx.stroke();
-            } else if (strokeEase > 0) {
-                let totalLen = 0;
-                for (const polygon of polys) { for (const ring of polygon) { for (let ri = 1; ri < ring.length; ri++) { const dx = toX(ring[ri][0]) - toX(ring[ri-1][0]); const dy = toY(ring[ri][1]) - toY(ring[ri-1][1]); totalLen += Math.sqrt(dx*dx + dy*dy); } } }
-                ctx.setLineDash([totalLen * strokeEase, totalLen]);
-                ctx.lineDashOffset = 0;
-                ctx.beginPath(); _tracePolyP(polys); ctx.stroke();
-                ctx.setLineDash([]);
-            }
-
-            // Second glow pass (neon effect)
-            if (strokeEase > 0.3) {
-                ctx.globalAlpha = opacity * polyEase * pulse * 0.15;
-                ctx.lineWidth = 8;
-                ctx.shadowBlur = 25;
-                ctx.beginPath(); _tracePolyP(polys); ctx.stroke();
-            }
-            ctx.shadowBlur = 0;
-            ctx.restore();
-            ctx.globalAlpha = opacity;
-        }
-    }
-
-    // ══ 2. RADIUS / IMPACT CIRCLES (expanding concentric rings) ══
-    for (const pin of pins) {
-        let hlDelay;
-        if (wpPositions.length > 0) {
-            const wpMatch = _findWpMatch(pin.label);
-            if (wpMatch) {
-                hlDelay = wpMatch.startTime + 0.3;
-                if (!bigMapSize) {
-                    const wpIdx = wpPositions.indexOf(wpMatch);
-                    if (wpIdx !== activeWpIdx && wpIdx !== prevWpIdx) continue;
-                }
-            } else {
-                hlDelay = 0.2 + pin.i * 0.12;
-            }
-        } else {
-            hlDelay = 0.2 + pin.i * 0.12;
-        }
-        const hlT = Math.min(1, Math.max(0, (elapsed - hlDelay) / 0.8));
-        if (hlT <= 0) continue;
-        const eHL = 1 - Math.pow(1 - hlT, 2);
-        const baseR = pin.type === 'city' ? 40 : pin.type === 'landmark' ? 30 : 60;
-        const hlR = baseR * eHL;
-        const pulse = (Math.sin(elapsed * 2 + pin.i) + 1) / 2;
-        // Outer expanding ring (radar-style)
-        const radarT = ((elapsed * 0.6 + pin.i * 0.4) % 2) / 2;
-        const radarR = hlR * 0.5 + hlR * 1.5 * radarT;
-        const radarAlpha = (1 - radarT) * 0.3;
-        ctx.globalAlpha = opacity * eHL * radarAlpha;
-        ctx.strokeStyle = pal.radiusRing;
-        ctx.lineWidth = 2;
-        ctx.beginPath(); ctx.arc(pin.x, pin.y, radarR, 0, Math.PI * 2); ctx.stroke();
-        // Inner filled glow
-        const outerR = hlR + pulse * 12;
-        ctx.globalAlpha = opacity * eHL * 0.5;
-        const g = ctx.createRadialGradient(pin.x, pin.y, hlR * 0.2, pin.x, pin.y, outerR);
-        g.addColorStop(0, pal.radius);
-        g.addColorStop(0.5, pal.radius);
-        g.addColorStop(1, 'transparent');
-        ctx.fillStyle = g;
-        ctx.beginPath(); ctx.arc(pin.x, pin.y, outerR, 0, Math.PI * 2); ctx.fill();
-        // Static highlight ring
-        ctx.strokeStyle = pal.highlightRing;
-        ctx.lineWidth = 1.5;
-        ctx.globalAlpha = opacity * eHL * 0.4;
-        ctx.beginPath(); ctx.arc(pin.x, pin.y, hlR, 0, Math.PI * 2); ctx.stroke();
-        ctx.globalAlpha = opacity;
-    }
-
-    if (variant === 'route' && (mg._mapRoutePath || routePathPositions.length >= 2)) {
-        if (alternateRoutePathPositions.length >= 2) {
-            _drawPreviewRoute(alternateRoutePathPositions, {
-                startTime: 0.25,
-                duration: Math.max(1.6, Math.min(3.0, totalDur * 0.45)),
-                alpha: 0.42,
-                glowAlpha: 0.18,
-                width: 2.5,
-                glowWidth: 8,
-                dash: [8, 14],
-                reverseDash: true,
-                shadowBlur: 2,
-            });
-        }
-        _drawPreviewRoute(routePathPositions.length >= 2 ? routePathPositions : wpPositions, {
-            startTime: 0.15,
-            duration: Math.max(1.8, Math.min(3.4, totalDur * 0.55)),
-            alpha: 0.88,
-            glowAlpha: 0.25,
-            width: 3,
-            glowWidth: 10,
-            dash: [12, 8],
-        });
-    }
-
-    // ══ 3. FLIGHT ARCS (curved 3D-style arcs between locations) ══
-    // Only route/comparison variants get arcs — locator/regionHighlight should NOT connect pins.
-    const _arcVariants = new Set(['route', 'comparison']);
-    const _hasSemanticRoutePath = variant === 'route' && (mg._mapRoutePath || routePathPositions.length >= 2);
-    if (_arcVariants.has(variant) && pins.length >= 2 && !_hasSemanticRoutePath) {
-        for (let i = 0; i < pins.length - 1; i++) {
-            const a = pins[i], b = pins[i + 1];
-            const dist = Math.hypot(b.x - a.x, b.y - a.y);
-            const arcHeight = dist * 0.35; // arc rises proportional to distance
-            const midX = (a.x + b.x) / 2;
-            const midY = (a.y + b.y) / 2 - arcHeight;
-
-            // Arc reveal: progressive draw from A to B
-            let arcDelay;
-            if (wpPositions.length > 0) {
-                const wpB = _findWpMatch(b.label);
-                arcDelay = wpB ? wpB.startTime + 0.3 : 0.8 + i * 0.5;
-            } else {
-                arcDelay = 0.8 + i * 0.5;
-            }
-            const arcDur = 1.0;
-            const arcT = Math.min(1, Math.max(0, (elapsed - arcDelay) / arcDur));
-            if (arcT <= 0) continue;
-            const arcE = 1 - Math.pow(1 - arcT, 2); // ease-out
-
-            // Draw arc progressively using line segments
-            const SEGS = 60;
-            const drawSegs = Math.ceil(SEGS * arcE);
-
-            // Glow layer
-            ctx.globalAlpha = opacity * 0.3;
-            ctx.strokeStyle = pal.arcGlow;
-            ctx.lineWidth = 10;
-            ctx.beginPath();
-            for (let s = 0; s <= drawSegs; s++) {
-                const t = s / SEGS;
-                const px = (1-t)*(1-t)*a.x + 2*(1-t)*t*midX + t*t*b.x;
-                const py = (1-t)*(1-t)*a.y + 2*(1-t)*t*midY + t*t*b.y;
-                if (s === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
-            }
-            ctx.stroke();
-
-            // Main arc line
-            ctx.globalAlpha = opacity * 0.85;
-            ctx.strokeStyle = pal.arc;
-            ctx.lineWidth = 3;
-            ctx.shadowColor = pal.pin;
-            ctx.shadowBlur = 8;
-            ctx.beginPath();
-            for (let s = 0; s <= drawSegs; s++) {
-                const t = s / SEGS;
-                const px = (1-t)*(1-t)*a.x + 2*(1-t)*t*midX + t*t*b.x;
-                const py = (1-t)*(1-t)*a.y + 2*(1-t)*t*midY + t*t*b.y;
-                if (s === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
-            }
-            ctx.stroke();
-            ctx.shadowBlur = 0;
-
-            // Traveling dot along arc (only after arc fully drawn)
-            if (arcE >= 0.99) {
-                const dotT = ((elapsed - arcDelay - arcDur) * 0.5 + i * 0.3) % 1;
-                const dt = dotT;
-                const dx = (1-dt)*(1-dt)*a.x + 2*(1-dt)*dt*midX + dt*dt*b.x;
-                const dy = (1-dt)*(1-dt)*a.y + 2*(1-dt)*dt*midY + dt*dt*b.y;
-                const tg = ctx.createRadialGradient(dx, dy, 0, dx, dy, 14);
-                tg.addColorStop(0, pal.pin); tg.addColorStop(1, 'transparent');
-                ctx.globalAlpha = opacity * 0.8;
-                ctx.fillStyle = tg; ctx.beginPath(); ctx.arc(dx, dy, 14, 0, Math.PI * 2); ctx.fill();
-                ctx.fillStyle = pal.pin; ctx.shadowColor = pal.pin; ctx.shadowBlur = 12;
-                ctx.beginPath(); ctx.arc(dx, dy, 5, 0, Math.PI * 2); ctx.fill(); ctx.shadowBlur = 0;
-            }
-            ctx.globalAlpha = opacity;
-        }
-    }
-
-    // ══ 4. PIN MARKERS + LEADER LINES + LABELS ══
-    for (const pin of pins) {
-        let pinDelay;
-        if (wpPositions.length > 0) {
-            const wpMatch = _findWpMatch(pin.label);
-            if (wpMatch) {
-                pinDelay = wpMatch.startTime + 0.5;
-                if (!bigMapSize) {
-                    const wpIdx = wpPositions.indexOf(wpMatch);
-                    if (wpIdx !== activeWpIdx && wpIdx !== prevWpIdx) continue;
-                }
-            } else {
-                pinDelay = 0.5 + pin.i * 0.22;
-            }
-        } else {
-            pinDelay = 0.5 + pin.i * 0.22;
-        }
-        const pT = Math.min(1, Math.max(0, (elapsed - pinDelay) / 0.4));
-        if (pT <= 0) continue;
-        const eased = 1 - Math.pow(1 - pT, 3);
-        const bounce = pT < 1 ? (1 - pT) * 16 : 0;
-        const py = pin.y - bounce;
-        ctx.globalAlpha = eased * opacity;
-
-        // Pulse rings
-        if (pT >= 1) {
-            const p1 = (Math.sin(elapsed * 3 + pin.i * 1.5) + 1) / 2;
-            ctx.strokeStyle = pal.pinRing; ctx.lineWidth = 2;
-            ctx.globalAlpha = eased * opacity * (0.15 + p1 * 0.25);
-            ctx.beginPath(); ctx.arc(pin.x, py, 20 + p1 * 16, 0, Math.PI * 2); ctx.stroke();
-            ctx.globalAlpha = eased * opacity;
-        }
-
-        // Glow
-        const glowR = pin.type === 'city' || pin.type === 'landmark' ? 36 : 28;
-        const gg = ctx.createRadialGradient(pin.x, py, 0, pin.x, py, glowR);
-        gg.addColorStop(0, pal.pinGlow); gg.addColorStop(1, 'transparent');
-        ctx.fillStyle = gg; ctx.beginPath(); ctx.arc(pin.x, py, glowR, 0, Math.PI * 2); ctx.fill();
-
-        // Pin dot or icon
-        const dotR = pin.type === 'city' || pin.type === 'landmark' ? 9 : 7;
-        // Check for icon — look up by pin label, then try waypoint match
-        let _iconKey = pin.label || pin.name;
-        let _iconImg = _mapIconImgCache[_iconKey];
-        if (!_iconImg) {
-            const _wps = mg._mapWaypoints || [];
-            for (const _wp of _wps) {
-                if (!_wp.icon) continue;
-                const _wL = (_wp.name || '').toLowerCase();
-                const _pL = (pin.label || '').toLowerCase();
-                if (_wL === _pL || _wL.includes(_pL) || _pL.includes(_wL)) {
-                    _iconImg = _mapIconImgCache[_wp.name];
-                    if (_iconImg) { _iconKey = _wp.name; break; }
-                }
-            }
-        }
-        // Lazy-load ALL icons from _mapIcons (bulk preload once)
-        if (mg._mapIcons && !mg._mapIconsPreloaded) {
-            mg._mapIconsPreloaded = true;
-            for (const [iName, iconPath] of Object.entries(mg._mapIcons)) {
-                if (_mapIconImgCache[iName] || _mapIconImgCache['__loading_' + iName]) continue;
-                _mapIconImgCache['__loading_' + iName] = true;
-                const img = new Image();
-                img.onload = () => { _mapIconImgCache[iName] = img; };
-                img.onerror = () => { _mapIconImgCache['__loading_' + iName] = false; };
-                if (iconPath.startsWith('http') || iconPath.startsWith('data:') || iconPath.startsWith('file:')) {
-                    img.src = iconPath;
-                } else if (window.electronAPI?.getFileUrl) {
-                    window.electronAPI.getFileUrl(iconPath).then(url => { if (url) img.src = url; });
-                } else {
-                    img.src = `file:///${iconPath.replace(/\\/g, '/')}`;
-                }
-            }
-        }
-
-        if (_iconImg && _iconImg.complete && _iconImg.naturalWidth > 0) {
-            // Draw icon with circular background
-            const iconSize = 40 * eased;
-            ctx.save();
-            ctx.shadowColor = pal.pin; ctx.shadowBlur = 14;
-            ctx.fillStyle = 'rgba(10,15,30,0.7)';
-            ctx.beginPath(); ctx.arc(pin.x, py, iconSize / 2 + 4, 0, Math.PI * 2); ctx.fill();
-            ctx.strokeStyle = pal.pin; ctx.lineWidth = 2;
-            ctx.beginPath(); ctx.arc(pin.x, py, iconSize / 2 + 4, 0, Math.PI * 2); ctx.stroke();
-            ctx.shadowBlur = 0;
-            ctx.beginPath(); ctx.arc(pin.x, py, iconSize / 2 + 2, 0, Math.PI * 2); ctx.clip();
-            ctx.drawImage(_iconImg, pin.x - iconSize / 2, py - iconSize / 2, iconSize, iconSize);
-            ctx.restore();
-        } else {
-            // Standard pin dot
-            ctx.fillStyle = pal.pin; ctx.shadowColor = pal.pin; ctx.shadowBlur = 18;
-            ctx.beginPath(); ctx.arc(pin.x, py, dotR * eased, 0, Math.PI * 2); ctx.fill(); ctx.shadowBlur = 0;
-        }
-
-        // Outer ring
-        ctx.strokeStyle = pal.pin; ctx.lineWidth = 2;
-        ctx.globalAlpha = eased * opacity * eased;
-        ctx.beginPath(); ctx.arc(pin.x, py, 14 + (1 - eased) * 14, 0, Math.PI * 2); ctx.stroke();
-        ctx.globalAlpha = eased * opacity;
-
-        // Leader line + label tag (GEOlayers-style: compact pill, small font, anchored to pin)
-        const lDelay = pinDelay + 0.15;
-        const lT = Math.min(1, Math.max(0, (elapsed - lDelay) / 0.35));
-        if (lT <= 0) continue;
-        const lE = 1 - Math.pow(1 - lT, 3);
-        ctx.globalAlpha = eased * opacity * lE;
-
-        // Compact label: small font, tight pill shape, offset to the right of pin
-        const labelFont = 'bold 13px "Segoe UI", Arial, sans-serif';
-        ctx.font = labelFont;
-        const lW = ctx.measureText(pin.label).width;
-        const tagH = 22;
-        const tagPad = 8;
-        const tagW = lW + tagPad * 2;
-        const tagX = pin.x + 16; // offset right of pin dot
-        const tagY = py - tagH / 2 - 2; // vertically centered on pin
-
-        // Thin leader line from pin to tag
-        ctx.strokeStyle = pal.pin;
-        ctx.lineWidth = 1;
-        ctx.globalAlpha = eased * opacity * lE * 0.5;
-        ctx.beginPath();
-        ctx.moveTo(pin.x + dotR + 2, py);
-        ctx.lineTo(tagX, py - 1);
-        ctx.stroke();
-        ctx.globalAlpha = eased * opacity * lE;
-
-        // Tag background (dark pill with slight transparency)
-        ctx.fillStyle = 'rgba(10,15,30,0.75)';
-        ctx.shadowColor = 'rgba(0,0,0,0.3)';
-        ctx.shadowBlur = 6;
-        ctx.shadowOffsetY = 2;
-        const r = tagH / 2; // full round corners
-        ctx.beginPath();
-        ctx.moveTo(tagX + r, tagY);
-        ctx.lineTo(tagX + tagW - r, tagY);
-        ctx.arc(tagX + tagW - r, tagY + r, r, -Math.PI / 2, Math.PI / 2);
-        ctx.lineTo(tagX + r, tagY + tagH);
-        ctx.arc(tagX + r, tagY + r, r, Math.PI / 2, -Math.PI / 2);
-        ctx.fill();
-        ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
-
-        // Subtle left accent (thin vertical bar inside pill)
-        ctx.fillStyle = pal.pin;
-        ctx.globalAlpha = eased * opacity * lE * 0.7;
-        ctx.fillRect(tagX + 3, tagY + 4, 2, tagH - 8);
-        ctx.globalAlpha = eased * opacity * lE;
-
-        // Label text
-        ctx.fillStyle = '#e8ecf0';
-        ctx.textAlign = 'left';
-        ctx.textBaseline = 'middle';
-        ctx.font = labelFont;
-        ctx.fillText(pin.label, tagX + tagPad, tagY + tagH / 2 + 1);
-
-        // Value (if any) — small, below the tag
-        if (pin.value) {
-            ctx.font = '11px "Segoe UI", Arial, sans-serif';
-            ctx.fillStyle = pal.pin;
-            ctx.globalAlpha = eased * opacity * lE * 0.8;
-            ctx.fillText(pin.value, tagX + tagPad, tagY + tagH + 12);
-            ctx.globalAlpha = eased * opacity * lE;
-        }
-    }
-
-    ctx.restore(); // end camera transform
-
-    // ── Bearing-only (no tilt): just composite the rotated offscreen ──
-    if (useBearing && !useTilt && _tiltOffscreen) {
-        ctx = _mainCtxP;
-        ctx.drawImage(_tiltOffscreen, 0, 0);
-    }
-
-    // ── PERSPECTIVE WARP: After Effects-style 3D camera tilt ──
-    // Pivot at BOTTOM edge, camera looks down at an angle.
-    // Bottom of map stays wide & anchored, top recedes to vanishing point.
-    if (useTilt && _tiltOffscreen) {
-        ctx = _mainCtxP;
-        const src = _tiltOffscreen;
-        const tilt = tiltAmount;
-        const STRIPS = 220;
-        const srcStripH = H / STRIPS;
-
-        // AE-style: plane pivots at bottom edge, tilts away from camera.
-        // Camera is at (0, camY, 0) looking toward the plane.
-        // Plane bottom edge at y=0, top edge at y=1 (which tilts INTO the screen).
-        // After rotation around bottom edge by angle A:
-        //   row at t (0=bottom, 1=top): y3d = t * cos(A), z3d = t * sin(A)
-        // Camera projects with focal length f.
-        const angle = tilt * 70 * (Math.PI / 180); // tilt 0→1 = 0→70°
-        const cosA = Math.cos(angle);
-        const sinA = Math.sin(angle);
-        const focalLen = 1.4; // focal length — lower = stronger perspective
-
-        const projY = new Float32Array(STRIPS + 1);
-        const projScale = new Float32Array(STRIPS + 1);
-
-        for (let i = 0; i <= STRIPS; i++) {
-            // t=0 is bottom of source (stays anchored), t=1 is top (recedes)
-            const t = 1 - (i / STRIPS); // invert: strip 0 = top of source = t=1 (far)
-            const z = t * sinA + focalLen; // depth: bottom (t=0) = focalLen, top (t=1) = sinA + focalLen
-            const scale = focalLen / z; // perspective scale: bottom ≈ 1.0, top < 1.0
-            const yProj = t * cosA / z; // projected Y (bottom=0, top compresses)
-            projScale[i] = scale;
-            projY[i] = yProj;
-        }
-
-        // Map projected Y to screen pixels.
-        // Bottom of map anchored near screen bottom, top compresses upward.
-        const bottomScreen = H; // anchor at actual bottom edge
-        const projMax = projY[0]; // top of source = farthest = smallest projected extent
-        const projMin = projY[STRIPS]; // bottom of source = closest = 0
-        const projRange = projMax - projMin;
-        // Fill full frame height — no black bar at top
-        const visibleH = H;
-
-        const screenY = new Float32Array(STRIPS + 1);
-        for (let i = 0; i <= STRIPS; i++) {
-            // Map from projY range to screen: bottom anchored, top floats up
-            const norm = (projY[i] - projMin) / projRange; // 0=bottom, 1=top
-            screenY[i] = bottomScreen - norm * visibleH;
-        }
-
-        // Background
-        const bgColor = (mg.mapStyle === 'light' || mg.mapStyle === 'political') ? '#b8c4d0' : '#060a14';
-        ctx.fillStyle = bgColor;
-        ctx.fillRect(0, 0, W, H);
-
-        // Draw strips — all strips fill full width (no black edges)
-        for (let i = 0; i < STRIPS; i++) {
-            const srcY = i * srcStripH;
-            const dstY = screenY[i];
-            const dstH = Math.abs(screenY[i + 1] - screenY[i]) + 0.5;
-            const avgScale = (projScale[i] + projScale[i + 1]) / 2;
-            // Always fill full width — scale source crop wider for narrowed strips
-            const dstW = W;
-            const srcCropW = W / avgScale;
-            const srcX = (W - srcCropW) / 2;
-
-            ctx.drawImage(src, Math.max(0, srcX), srcY, Math.min(srcCropW, W), srcStripH + 1,
-                0, dstY, dstW, dstH);
-        }
-
-        // Horizon haze — atmospheric fade at the top (where map recedes)
-        const hazeBottom = screenY[0]; // top-most strip position
-        const hazeH = Math.max(hazeBottom * 0.6, 30);
-        if (tilt > 0.1) {
-            const haze = ctx.createLinearGradient(0, hazeBottom - hazeH * 0.3, 0, hazeBottom + hazeH);
-            const hazeBase = (mg.mapStyle === 'light' || mg.mapStyle === 'political') ? '180,190,200' : '8,14,28';
-            haze.addColorStop(0, `rgba(${hazeBase},${0.6 * tilt})`);
-            haze.addColorStop(0.4, `rgba(${hazeBase},${0.25 * tilt})`);
-            haze.addColorStop(1, `rgba(${hazeBase},0)`);
-            ctx.fillStyle = haze;
-            ctx.fillRect(0, 0, W, hazeBottom + hazeH);
-        }
-
-        // Subtle ground shadow at bottom edge
-        const floorH = H * 0.04;
-        const floor = ctx.createLinearGradient(0, H - floorH, 0, H);
-        floor.addColorStop(0, 'rgba(0,0,0,0)');
-        floor.addColorStop(1, `rgba(0,0,0,${0.15 * tilt})`);
-        ctx.fillStyle = floor;
-        ctx.fillRect(0, H - floorH, W, floorH);
-    }
-
-    // ══ 5. TITLE BAR (outside camera) ══
-    const title = mg.text || '';
-    if (title) {
-        const tT = Math.min(1, Math.max(0, (elapsed - 0.1) / 0.5));
-        const tE = 1 - Math.pow(1 - tT, 3);
-        if (tT > 0) {
-            ctx.globalAlpha = opacity * tE;
-            ctx.font = 'bold 42px Arial';
-            const tw = ctx.measureText(title).width;
-            const bW = tw + 80, bH = 68;
-            const bX = (W - bW) / 2, bY = 24 - (1 - tE) * 30;
-            ctx.shadowColor = 'rgba(0,0,0,0.5)'; ctx.shadowBlur = 20; ctx.shadowOffsetY = 5;
-            ctx.fillStyle = pal.titleBg;
-            ctx.beginPath();
-            ctx.moveTo(bX + 14, bY); ctx.lineTo(bX + bW - 14, bY); ctx.quadraticCurveTo(bX + bW, bY, bX + bW, bY + 14);
-            ctx.lineTo(bX + bW, bY + bH - 14); ctx.quadraticCurveTo(bX + bW, bY + bH, bX + bW - 14, bY + bH);
-            ctx.lineTo(bX + 14, bY + bH); ctx.quadraticCurveTo(bX, bY + bH, bX, bY + bH - 14);
-            ctx.lineTo(bX, bY + 14); ctx.quadraticCurveTo(bX, bY, bX + 14, bY);
-            ctx.fill();
-            ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
-            ctx.fillStyle = pal.titleBorder;
-            ctx.fillRect(bX + 14, bY + bH - 4, bW - 28, 4);
-            ctx.fillStyle = pal.titleText; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-            ctx.fillText(title, W / 2, bY + bH / 2);
-        }
-    }
-
-    // ── Location count badge (bottom-left) ──
-    if (pins.length > 0) {
-        const iT = Math.min(1, Math.max(0, (elapsed - 0.8) / 0.4));
-        if (iT > 0) {
-            const iE = 1 - Math.pow(1 - iT, 2);
-            ctx.globalAlpha = opacity * iE * 0.7;
-            const locText = `${pins.length} location${pins.length > 1 ? 's' : ''}`;
-            ctx.font = '600 16px Arial';
-            const ltw = ctx.measureText(locText).width;
-            ctx.fillStyle = pal.titleBg;
-            ctx.beginPath();
-            ctx.moveTo(38, H - 38); ctx.lineTo(38 + ltw + 24, H - 38);
-            ctx.lineTo(38 + ltw + 24, H - 10); ctx.lineTo(38, H - 10); ctx.closePath(); ctx.fill();
-            ctx.fillStyle = pal.pin; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-            ctx.fillText(locText, 50, H - 24);
-        }
-    }
-
-    // ── Vignette ──
-    const vg = ctx.createRadialGradient(W / 2, H / 2, W * 0.25, W / 2, H / 2, W * 0.7);
-    vg.addColorStop(0, 'transparent'); vg.addColorStop(1, pal.vignette);
-    ctx.fillStyle = vg; ctx.globalAlpha = opacity;
-    ctx.fillRect(0, 0, W, H);
-    ctx.globalAlpha = 1;
 }
 
 // Show/hide the presenter-image picker based on production mode + reflect the stored path.
@@ -12791,6 +10953,45 @@ function _initSettingsTabs() {
     try { saved = localStorage.getItem('faceless-settings-tab') || 'setup'; } catch (_) {}
     if (!btns.some(b => b.dataset.stab === saved)) saved = 'setup';
     show(saved);
+    _initSettingsKeyScroll();
+}
+
+// Keyboard scrolling for the settings panel: click empty space (or a tab) to focus it,
+// then Arrow/PageUp/PageDown/Home/End scroll it. Text fields, selects, number inputs and
+// sliders keep their own arrow behavior (we don't hijack keys while they're focused).
+function _initSettingsKeyScroll() {
+    const lp = document.getElementById('left-panel');
+    if (!lp || lp.dataset.keyScroll) return;
+    lp.dataset.keyScroll = '1';
+    lp.setAttribute('tabindex', '0');
+    lp.style.outline = 'none';
+    lp.addEventListener('mousedown', (e) => {
+        if (!e.target.closest('input,select,textarea,button,a,[contenteditable]')) {
+            lp.focus({ preventScroll: true });
+        }
+    });
+    lp.addEventListener('keydown', (e) => {
+        const t = e.target;
+        if (t !== lp) {
+            const tag = t.tagName;
+            if (tag === 'TEXTAREA' || tag === 'SELECT' || t.isContentEditable) return;
+            if (tag === 'INPUT') {
+                const ty = (t.type || '').toLowerCase();
+                if (['range', 'number', 'text', 'search', 'url', 'email', 'password'].includes(ty)) return;
+            }
+        }
+        const pageStep = Math.max(120, lp.clientHeight * 0.9), lineStep = 48;
+        switch (e.key) {
+            case 'ArrowDown': lp.scrollTop += lineStep; break;
+            case 'ArrowUp': lp.scrollTop -= lineStep; break;
+            case 'PageDown': lp.scrollTop += pageStep; break;
+            case 'PageUp': lp.scrollTop -= pageStep; break;
+            case 'Home': lp.scrollTop = 0; break;
+            case 'End': lp.scrollTop = lp.scrollHeight; break;
+            default: return;
+        }
+        e.preventDefault();
+    });
 }
 
 function saveSettings() {
@@ -12798,13 +10999,10 @@ function saveSettings() {
         // Element-backed settings come from the schema (single source of truth).
         ...SettingsIO.collect('ls'),
         // State-backed + special settings (no simple element control) stay explicit.
-        transitionStyle: elements.transitionStyle.value,
-        transitionDuration: state.transition.duration,
         volume: state.volume,
         footageSources: getEnabledSources(),
         sfxEnabled: state.sfxEnabled,
         sfxVolume: state.sfxVolume,
-        mgEnabled: state.mgEnabled,
         subtitlesEnabled: state.subtitlesEnabled,
         mutedTracks: state.mutedTracks,
         presenterImage: state.presenterImage || '',
@@ -12901,22 +11099,6 @@ function loadSettings() {
             if (elements.ollamaModelRow) {
                 elements.ollamaModelRow.style.display = (s.aiProvider || 'bedrock') === 'ollama' ? 'block' : 'none';
             }
-            // Restore transition settings
-            // Ignore old saved 'cut' with duration 0 — that was the hardcoded default before transitions were enabled
-            // Also migrate old 'crossfade' defaults to 'auto' for AI-driven transitions
-            const savedTransDur = s.transitionDuration !== undefined ? s.transitionDuration : -1;
-            if (s.transitionStyle && !(s.transitionStyle === 'cut' && savedTransDur <= 0)) {
-                state.transition.style = s.transitionStyle;
-                state.transition.duration = savedTransDur > 0 ? savedTransDur : 0.5;
-            } else {
-                state.transition.style = 'auto';
-                state.transition.duration = 0.5;
-            }
-            if (elements.transitionStyle) elements.transitionStyle.value = state.transition.style;
-            const _tdEl = document.getElementById('transition-duration');
-            const _tdVal = document.getElementById('transition-duration-val');
-            if (_tdEl) _tdEl.value = state.transition.duration;
-            if (_tdVal) _tdVal.textContent = `${state.transition.duration.toFixed(1)}s`;
             state.volume = s.volume !== undefined ? s.volume : 1;
             if (elements.volumeSlider) {
                 elements.volumeSlider.value = state.volume;
@@ -12927,9 +11109,6 @@ function loadSettings() {
             if (elements.sfxEnabled) elements.sfxEnabled.checked = state.sfxEnabled;
             if (elements.sfxVolume) elements.sfxVolume.value = state.sfxVolume;
             if (elements.sfxVolumeLabel) elements.sfxVolumeLabel.textContent = `${Math.round(state.sfxVolume * 100)}%`;
-            // Restore Motion Graphics settings
-            state.mgEnabled = s.mgEnabled !== undefined ? s.mgEnabled : true;
-            if (elements.mgEnabled) elements.mgEnabled.checked = state.mgEnabled;
             // Restore Subtitles setting
             state.subtitlesEnabled = s.subtitlesEnabled !== undefined ? s.subtitlesEnabled : false;
             if (elements.subtitlesEnabled) elements.subtitlesEnabled.checked = state.subtitlesEnabled;
@@ -12994,20 +11173,6 @@ function applyProjectSettings(s) {
         if (elements.ollamaModelRow) {
             elements.ollamaModelRow.style.display = (s.aiProvider || 'bedrock') === 'ollama' ? 'block' : 'none';
         }
-        // Restore transition settings (detect old 'cut' defaults and override)
-        const savedTransDur2 = s.transitionDuration !== undefined ? s.transitionDuration : -1;
-        if (s.transitionStyle && !(s.transitionStyle === 'cut' && savedTransDur2 <= 0)) {
-            state.transition.style = s.transitionStyle;
-            state.transition.duration = savedTransDur2 > 0 ? savedTransDur2 : 0.5;
-        } else {
-            state.transition.style = 'auto';
-            state.transition.duration = 0.5;
-        }
-        if (elements.transitionStyle) elements.transitionStyle.value = state.transition.style;
-        const _tdEl2 = document.getElementById('transition-duration');
-        const _tdVal2 = document.getElementById('transition-duration-val');
-        if (_tdEl2) _tdEl2.value = state.transition.duration;
-        if (_tdVal2) _tdVal2.textContent = `${state.transition.duration.toFixed(1)}s`;
         state.volume = s.volume !== undefined ? s.volume : 1;
         if (elements.volumeSlider) elements.volumeSlider.value = state.volume;
         // SFX
@@ -13016,9 +11181,6 @@ function applyProjectSettings(s) {
         if (elements.sfxEnabled) elements.sfxEnabled.checked = state.sfxEnabled;
         if (elements.sfxVolume) elements.sfxVolume.value = state.sfxVolume;
         if (elements.sfxVolumeLabel) elements.sfxVolumeLabel.textContent = `${Math.round(state.sfxVolume * 100)}%`;
-        // MG
-        state.mgEnabled = s.mgEnabled !== undefined ? s.mgEnabled : true;
-        if (elements.mgEnabled) elements.mgEnabled.checked = state.mgEnabled;
         // Subtitles
         state.subtitlesEnabled = s.subtitlesEnabled !== undefined ? s.subtitlesEnabled : false;
         if (elements.subtitlesEnabled) elements.subtitlesEnabled.checked = state.subtitlesEnabled;
@@ -13387,7 +11549,6 @@ if (!window.electronAPI) {
         openExistingProjectFile: async () => ({ success: false, cancelled: true }),
         hyperframesGenerateProject: async () => ({ success: false, error: 'HyperFrames bridge not available' }),
         hyperframesRender: async () => ({ success: false, error: 'HyperFrames bridge not available' }),
-        openHyperframesLab: async () => ({ success: false, error: 'HyperFrames lab not available' }),
         onBuildProgress: () => { }, onRenderProgress: () => { },
         cancelProcess: async () => ({ success: true, message: 'Cancelled' }),
         showNotification: () => { }

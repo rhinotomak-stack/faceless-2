@@ -51,6 +51,26 @@ if (!BROWSER_WS) { console.error('usage: node runtime-ui-probe.js <browserWsEndp
   const orphanPanels = [...panelIds].filter(id => !btnIds.has(id));
   check('no orphan tabs/panels', orphanBtns.length === 0 && orphanPanels.length === 0, `orphanBtns=${orphanBtns} orphanPanels=${orphanPanels}`);
 
+  // 3b. Fully-tabbed: no settings .panel-section may sit OUTSIDE a .stab-panel in the
+  // left panel. Only the top Import Audio importer and the bottom action buttons are
+  // allowed outside the tabs — everything else must live in a tab (no leftover scroll).
+  const stray = await page.evaluate(() => {
+    const panel = document.getElementById('left-panel');
+    if (!panel) return { err: 'no #left-panel' };
+    const out = [];
+    for (const sec of panel.querySelectorAll(':scope > .panel-section')) {
+      // The tab container itself is a .panel-section — it's SUPPOSED to be a direct child.
+      if (sec.classList.contains('settings-tabbed')) continue;
+      // A section is "settings" if it holds form controls; the Import Audio dropzone has none.
+      const hasControls = sec.querySelector('input,select,textarea');
+      const h3 = (sec.querySelector('h3')?.textContent || '').trim();
+      const isImport = /import audio/i.test(h3);
+      if (hasControls && !isImport) out.push(h3 || sec.className);
+    }
+    return { stray: out };
+  });
+  check('fully tabbed (no settings section outside tabs)', stray.stray && stray.stray.length === 0, stray.err || (stray.stray.length ? 'stray: ' + stray.stray.join(' | ') : 'none'));
+
   // 4. Real interaction: click a non-active tab and confirm the switch
   const target = tabs.btns.find(b => !b.active);
   let switchOk = false, switchDetail = '';
