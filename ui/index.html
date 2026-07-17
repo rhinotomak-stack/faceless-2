@@ -1383,7 +1383,7 @@
     <script src="js/compositor/SceneGraph.js"></script>
     <script src="js/compositor/TransitionRenderer.js"></script>
     <script src="js/mg-theme-bridge.js"></script>
-    <script src="../src/map-style-packs.js"></script>
+    <script src="../src/map/map-style-packs.js"></script>
     <script src="js/compositor/MGRenderer.js"></script>
     <script src="js/compositor/Compositor.js"></script>
     <script src="js/compositor/VideoFrameSource.js"></script>
@@ -1430,6 +1430,9 @@
       </div>
     </div>
 
+    <!-- Settings single-source-of-truth (schema) + IO helper — loaded before app.js -->
+    <script src="../src/settings/schema.js"></script>
+    <script src="js/settings-io.js"></script>
     <script src="js/app.js"></script>
 </body>
 

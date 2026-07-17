@@ -585,9 +585,7 @@ const elements = {
     audioName: document.getElementById('audio-name'),
     smartAiToggle: document.getElementById('smart-ai-toggle'),
     aiProvider: document.getElementById('ai-provider'),
-    ollamaModelRow: document.getElementById('ollama-model-row'),
-    ollamaModel: document.getElementById('ollama-model'),
-    ollamaVisionModel: document.getElementById('ollama-vision-model'),
+    // ollama* controls removed (non-bedrock providers dropped 2026-05-25; pruned in P2)
     aiThinking: document.getElementById('ai-thinking'),
     aiInstructions: document.getElementById('ai-instructions'),
     videoTitle: document.getElementById('video-title'),
@@ -4976,7 +4974,10 @@ async function saveProject(silent = false) {
 
         // Collect current editor settings
         const settings = {
-            aiProvider: elements.aiProvider.value,
+            // Element-backed settings from the schema (single source of truth) —
+            // now includes quality/format/theme/etc. that the old list silently dropped.
+            ...SettingsIO.collect('fvp'),
+            // State-backed + special settings (no simple element control) stay explicit.
             transitionStyle: elements.transitionStyle.value,
             transitionDuration: state.transition.duration,
             volume: state.volume,
@@ -4987,24 +4988,8 @@ async function saveProject(silent = false) {
             subtitlesEnabled: state.subtitlesEnabled,
             aiInstructions: state.aiInstructions,
             videoTitle: state.videoTitle,
-            buildNiche: elements.buildNiche ? elements.buildNiche.value : 'auto',
-            buildLanguage: elements.buildLanguage ? elements.buildLanguage.value : 'auto',
-            buildProductionMode: elements.buildProductionMode ? elements.buildProductionMode.value : 'faceless',
             presenterImage: state.presenterImage || '',
-            klingAvatar: elements.klingAvatarEnabled ? elements.klingAvatarEnabled.checked : false,
-            klingResolution: elements.klingResolution ? elements.klingResolution.value : '1080p',
-            klingAvatarPrompt: elements.klingAvatarPrompt ? elements.klingAvatarPrompt.value.trim() : '',
-            veoAiVideo: elements.veoAiVideoEnabled ? elements.veoAiVideoEnabled.checked : false,
-            veoScope: elements.veoScope ? elements.veoScope.value : 'directives',
-            veoResolution: elements.veoResolution ? elements.veoResolution.value : '720p',
-            veoBackend: elements.veoBackend ? elements.veoBackend.value : 'kling',
-            clipAnalyzer: elements.clipAnalyzerToggle?.checked !== false,
-            // These are restored by applyProjectSettings() but were never saved here
-            // → reopening a .fvp silently lost them. Save them so the round-trip works.
-            buildMapStylePack: elements.buildMapStylePack ? elements.buildMapStylePack.value : 'auto',
-            buildVisionBackend: elements.buildVisionBackend ? elements.buildVisionBackend.value : 'aws',
-            repeatFromStep: elements.repeatFromStep ? elements.repeatFromStep.value : 'visual-planner',
-            forceFreshFootage: elements.forceFreshFootage?.checked === true,
+            buildStyleProfile: elements.buildStyleProfile ? elements.buildStyleProfile.value : 'none',
             mutedTracks: state.mutedTracks
         };
 
@@ -6520,38 +6505,19 @@ async function generateVideo(options = {}) {
         updateProgress(10, '🎙️ Transcribing audio with Whisper...');
         const audioFileName = state.audioFile.name || state.audioFile.path?.split(/[\\/]/).pop();
         const result = await window.electronAPI.runBuild({
-            aiProvider: elements.aiProvider.value,
-            ollamaModel: elements.ollamaModel?.value || 'gemma3:12b',
-            ollamaVisionModel: elements.ollamaVisionModel?.value || 'llava',
+            // All element-backed settings from the schema (single source of truth).
+            ...SettingsIO.collect(null),
+            // Special (schema-excluded) + state-backed + runtime fields:
             transitionStyle: elements.transitionStyle.value,
+            buildStyleProfile: elements.buildStyleProfile ? elements.buildStyleProfile.value : 'none',
             audioFileName,
             footageSources: getEnabledSources(),
             aiInstructions: state.aiInstructions,
             videoTitle: state.videoTitle,
-            buildQuality: elements.buildQuality.value,
-            buildFormat: elements.buildFormat.value,
-            buildNiche: elements.buildNiche ? elements.buildNiche.value : 'auto',
-            buildTheme: elements.buildTheme.value,
-            buildMapStylePack: elements.buildMapStylePack ? elements.buildMapStylePack.value : 'auto',
-            buildProductionMode: elements.buildProductionMode ? elements.buildProductionMode.value : 'faceless',
             presenterImage: state.presenterImage || '',
-            klingAvatar: elements.klingAvatarEnabled ? elements.klingAvatarEnabled.checked : false,
-            klingResolution: elements.klingResolution ? elements.klingResolution.value : '1080p',
-            klingAvatarPrompt: elements.klingAvatarPrompt ? elements.klingAvatarPrompt.value.trim() : '',
-            veoAiVideo: elements.veoAiVideoEnabled ? elements.veoAiVideoEnabled.checked : false,
-            veoScope: elements.veoScope ? elements.veoScope.value : 'directives',
-            veoResolution: elements.veoResolution ? elements.veoResolution.value : '720p',
-            veoBackend: elements.veoBackend ? elements.veoBackend.value : 'kling',
-            visionBackend: elements.buildVisionBackend ? elements.buildVisionBackend.value : 'aws',
-            buildLanguage: elements.buildLanguage ? elements.buildLanguage.value : 'auto',
-            buildStyleProfile: elements.buildStyleProfile ? elements.buildStyleProfile.value : 'none',
-            smartAI: elements.smartAiToggle ? elements.smartAiToggle.checked : true,
-            clipAnalyzer: elements.clipAnalyzerToggle ? elements.clipAnalyzerToggle.checked : true,
-            buildResume: elements.buildResumeToggle ? elements.buildResumeToggle.checked : false,
-            fastMedia: elements.fastMediaToggle ? elements.fastMediaToggle.checked : false,
+            // Conditional: only sent when the Repeat button was used — override collect's raw values.
             repeatFromStep,
             forceFreshFootage,
-            aiThinking: elements.aiThinking ? elements.aiThinking.value : 'off'
         });
         if (result.success) {
             updateProgress(90, '📋 Loading video plan...'); await loadVideoPlan({ freshBuild: true });
@@ -12810,10 +12776,9 @@ function _syncVeoRow() {
 
 function saveSettings() {
     localStorage.setItem('faceless-settings', JSON.stringify({
-        smartAI: elements.smartAiToggle?.checked !== false,
-        aiProvider: elements.aiProvider.value,
-        ollamaModel: elements.ollamaModel?.value || 'gemma3:12b',
-        ollamaVisionModel: elements.ollamaVisionModel?.value || 'llava',
+        // Element-backed settings come from the schema (single source of truth).
+        ...SettingsIO.collect('ls'),
+        // State-backed + special settings (no simple element control) stay explicit.
         transitionStyle: elements.transitionStyle.value,
         transitionDuration: state.transition.duration,
         volume: state.volume,
@@ -12823,25 +12788,8 @@ function saveSettings() {
         mgEnabled: state.mgEnabled,
         subtitlesEnabled: state.subtitlesEnabled,
         mutedTracks: state.mutedTracks,
-        buildNiche: elements.buildNiche ? elements.buildNiche.value : 'auto',
-        buildMapStylePack: elements.buildMapStylePack ? elements.buildMapStylePack.value : 'auto',
-        buildProductionMode: elements.buildProductionMode ? elements.buildProductionMode.value : 'faceless',
         presenterImage: state.presenterImage || '',
-        klingAvatar: elements.klingAvatarEnabled ? elements.klingAvatarEnabled.checked : false,
-        klingResolution: elements.klingResolution ? elements.klingResolution.value : '1080p',
-        klingAvatarPrompt: elements.klingAvatarPrompt ? elements.klingAvatarPrompt.value.trim() : '',
-        veoAiVideo: elements.veoAiVideoEnabled ? elements.veoAiVideoEnabled.checked : false,
-        veoScope: elements.veoScope ? elements.veoScope.value : 'directives',
-        veoResolution: elements.veoResolution ? elements.veoResolution.value : '720p',
-        veoBackend: elements.veoBackend ? elements.veoBackend.value : 'kling',
-        buildVisionBackend: elements.buildVisionBackend ? elements.buildVisionBackend.value : 'aws',
-        buildLanguage: elements.buildLanguage ? elements.buildLanguage.value : 'auto',
         buildStyleProfile: elements.buildStyleProfile ? elements.buildStyleProfile.value : 'none',
-        clipAnalyzer: elements.clipAnalyzerToggle?.checked !== false,
-        buildResume: elements.buildResumeToggle?.checked === true,
-        fastMedia: elements.fastMediaToggle?.checked === true,
-        repeatFromStep: elements.repeatFromStep ? elements.repeatFromStep.value : 'visual-planner',
-        forceFreshFootage: elements.forceFreshFootage?.checked === true
     }));
     // Also trigger .fvp auto-save so settings persist per-project
     triggerAutoSave();
@@ -12921,6 +12869,7 @@ function loadSettings() {
     try {
         const s = JSON.parse(localStorage.getItem('faceless-settings'));
         if (s) {
+            SettingsIO.apply(s, 'ls'); // baseline: restore every element-backed setting from the schema
             if (elements.smartAiToggle) elements.smartAiToggle.checked = s.smartAI !== false;
             elements.aiProvider.value = s.aiProvider || 'bedrock';
             // Sync the restored brain choice into the main process env
@@ -13019,6 +12968,7 @@ function loadSettings() {
 function applyProjectSettings(s) {
     if (!s) return;
     try {
+        SettingsIO.apply(s, 'fvp'); // baseline: restore every element-backed setting from the schema
         elements.aiProvider.value = s.aiProvider || 'bedrock';
         if (elements.ollamaModel) elements.ollamaModel.value = s.ollamaModel || 'gemma3:12b';
         if (elements.ollamaVisionModel) elements.ollamaVisionModel.value = s.ollamaVisionModel || 'llava';

@@ -48,7 +48,7 @@
         // buildProductionMode = the CATEGORY axis (faceless / talking-head / ai-stories). P4 adds allowedFormats.
         { key: 'buildProductionMode', el: 'build-production-mode', env: 'BUILD_PRODUCTION_MODE', build: 'if', def: 'faceless', persist: ['ls', 'fvp'], projEnv: true, group: 'Category' },
         { key: 'buildLanguage', el: 'build-language', env: 'BUILD_LANGUAGE', build: 'if', def: 'auto', persist: ['ls', 'fvp'], group: 'Build' },
-        { key: 'buildStyleProfile', el: 'build-style-profile', env: 'BUILD_STYLE_PROFILE', build: 'style', def: 'none', persist: ['ls', 'fvp'], projEnv: true, group: 'Build' },
+        { key: 'buildStyleProfile', el: 'build-style-profile', env: 'BUILD_STYLE_PROFILE', build: 'style', def: 'none', persist: ['ls', 'fvp'], projEnv: true, special: true, group: 'Build' },
         { key: 'visionBackend', el: 'build-vision-backend', env: null, build: null, def: 'aws', persist: ['ls', 'fvp'], group: 'Vision' },
 
         // ── Presenter (talking-head category) ──
@@ -76,7 +76,7 @@
         { key: 'aiInstructions', el: null, env: 'AI_INSTRUCTIONS', build: 'str', def: '', persist: ['fvp'], group: 'Project' },
 
         // ── Editor/render settings (state-backed; not passed to build env) ──
-        { key: 'transitionStyle', el: 'transition-style', env: null, build: null, def: 'auto', persist: ['ls', 'fvp'], group: 'Editor' },
+        { key: 'transitionStyle', el: 'transition-style', env: null, build: null, def: 'auto', persist: ['ls', 'fvp'], special: true, group: 'Editor' },
         { key: 'mutedTracks', el: null, env: null, build: null, def: null, persist: ['ls', 'fvp'], group: 'Editor' },
     ];
 
