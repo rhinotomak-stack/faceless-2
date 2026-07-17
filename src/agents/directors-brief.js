@@ -120,8 +120,10 @@ function createDirectorsBrief() {
     // In talkingHead mode a recurring presenter appears at a few high-value beats.
     // The presenter media is a swappable source — a static image now, a per-scene avatar
     // clip later — so we only resolve the image path here; selection/compositing is downstream.
-    const rawMode = (process.env.BUILD_PRODUCTION_MODE || 'faceless').trim().toLowerCase();
-    const productionMode = ['talkinghead', 'talking-head', 'talking_head'].includes(rawMode) ? 'talkingHead' : 'faceless';
+    // Category registry resolves the mode (faceless | talkingHead | aiStories).
+    // Unknown/empty → faceless exactly like the old ternary, but a known 'aiStories'
+    // value is no longer silently collapsed to faceless.
+    const productionMode = require('../categories').resolveMode(process.env.BUILD_PRODUCTION_MODE);
     let presenter = null;
     if (productionMode === 'talkingHead') {
         const userImg = (process.env.BUILD_PRESENTER_IMAGE || '').trim();

@@ -1842,9 +1842,13 @@ const applySceneDirectives = directiveUtil.applySceneDirectives;
 // stamps NOTHING — AI video only happens where the creator explicitly asked).
 //   VEO_SCOPE = 'directives' (default) | 'hero' | 'all'
 function _applyVeoScope(scenes, scriptContext) {
-    const on = /^(1|true|yes|on)$/i.test(String(process.env.VEO_AI_VIDEO || '').trim());
+    // The "Pure AI Stories" category generates ALL eligible B-roll via the ai-video
+    // lane — equivalent to VEO_AI_VIDEO on + VEO_SCOPE='all'. Any other category
+    // (faceless / talkingHead) keeps the exact env-driven behavior below.
+    const aiStoriesCat = !!(scriptContext && require('../categories').usesAiVideo(scriptContext.productionMode));
+    const on = aiStoriesCat || /^(1|true|yes|on)$/i.test(String(process.env.VEO_AI_VIDEO || '').trim());
     if (!on || !Array.isArray(scenes)) return 0;
-    const scope = String(process.env.VEO_SCOPE || 'directives').trim().toLowerCase();
+    const scope = aiStoriesCat ? 'all' : String(process.env.VEO_SCOPE || 'directives').trim().toLowerCase();
     if (scope === 'directives' || scope === 'off' || scope === 'none') return 0;
 
     const eligible = (s) => {
