@@ -13059,6 +13059,14 @@ async function loadProjectInfo() {
                     window.electronAPI.openFile(info.projectDir);
                 }
             };
+        } else if (elements.projectNameLabel) {
+            // Workspace mode (no named project yet) — Premiere-style. Everything is
+            // usable; guide the user to create/open a project when they're ready.
+            elements.projectNameLabel.textContent = '— No project · click New Project to start one';
+            elements.projectNameLabel.title = 'You are in the default workspace. Create or open a project to save your work.';
+            elements.projectNameLabel.style.cursor = 'pointer';
+            elements.projectNameLabel.style.opacity = '0.7';
+            elements.projectNameLabel.onclick = () => { if (typeof newProject === 'function') newProject(); };
         }
     } catch (e) {
         console.warn('Could not load project info:', e);

@@ -728,15 +728,12 @@ app.whenReady().then(async () => {
         }
         return net.fetch('file:///' + filePath);
     });
-    // If app launched without an explicit project argument, ask user at startup.
-    if (!hasExplicitProject) {
-        const selectedProjectPath = await promptStartupProjectPath();
-        if (!selectedProjectPath) {
-            app.quit();
-            return;
-        }
-        applyProjectDir(selectedProjectPath);
-    }
+    // Premiere-style startup: open straight to the WORKSPACE (default project = app
+    // root). The full UI + all settings are usable immediately for review — no folder
+    // has to be chosen first. The user creates or opens a named project on demand via
+    // the New / Open Project buttons in the header (which spawn a project instance).
+    // A --project=<dir> or .fvp launch arg still loads that project directly.
+    // (Previously this forced a startup project chooser and quit if none was picked.)
 
     const lockAcquired = acquireProjectLock();
 
