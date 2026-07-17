@@ -4,6 +4,8 @@
 // injectable getEl, so it runs headless.
 'use strict';
 const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
 const schema = require('../src/settings/schema');
 const SettingsIO = require('../ui/js/settings-io');
 
@@ -20,6 +22,25 @@ function mkEls(fill) {
         if (fill) { if (cb) els[s.el].checked = true; else els[s.el].value = 'val-' + s.key; }
     }
     return els;
+}
+
+// ── Static schema ↔ index.html id parity ──────────────────────────────────
+// Every non-deprecated schema `el` MUST exist as an id="…" in the real markup,
+// or SettingsIO silently drops that setting (it can't find the control) and
+// save/persist break with no error. This is exactly what a mocked DOM can't
+// catch — the mock is self-consistent with whatever id the schema declares.
+console.log('\n=== schema ↔ index.html id parity ===');
+{
+    const html = fs.readFileSync(path.join(__dirname, '..', 'ui', 'index.html'), 'utf8');
+    const htmlIds = new Set([...html.matchAll(/\bid=["']([^"']+)["']/g)].map(m => m[1]));
+    const need = schema.SETTINGS.filter(s => s.el && !s.deprecated);
+    const missing = need.filter(s => !htmlIds.has(s.el)).map(s => `${s.key}#${s.el}`);
+    ok(`all ${need.length} live schema controls exist in index.html`, missing.length === 0);
+    if (missing.length) console.log('     missing: ' + missing.join(', '));
+    // Deprecated controls SHOULD have been pruned from the markup (dead settings).
+    const zombieDeprecated = schema.SETTINGS.filter(s => s.el && s.deprecated && htmlIds.has(s.el)).map(s => s.key);
+    ok('deprecated controls pruned from index.html', zombieDeprecated.length === 0);
+    if (zombieDeprecated.length) console.log('     still present: ' + zombieDeprecated.join(', '));
 }
 
 console.log('\n=== SettingsIO round-trip (mocked DOM) ===');

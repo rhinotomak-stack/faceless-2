@@ -69,7 +69,7 @@
         { key: 'fastMedia', el: 'fast-media-toggle', env: 'BUILD_FAST_MEDIA', build: 'trueIf', def: false, persist: ['ls', 'fvp'], group: 'Media' },
         { key: 'buildResume', el: 'build-resume-toggle', env: 'BUILD_RESUME', build: 'custom', def: false, persist: ['ls', 'fvp'], group: 'Build' },
         { key: 'repeatFromStep', el: 'repeat-from-step', env: 'BUILD_REPEAT_FROM', build: 'custom', def: 'visual-planner', persist: ['ls', 'fvp'], group: 'Build' },
-        { key: 'forceFreshFootage', el: 'force-fresh-footage', env: 'BUILD_FORCE_FRESH_FOOTAGE', build: 'custom', def: false, persist: ['ls', 'fvp'], group: 'Media' },
+        { key: 'forceFreshFootage', el: 'force-fresh-footage-toggle', env: 'BUILD_FORCE_FRESH_FOOTAGE', build: 'custom', def: false, persist: ['ls', 'fvp'], group: 'Media' },
 
         // ── Project-scoped (from state, not a control) ──
         { key: 'videoTitle', el: null, env: 'VIDEO_TITLE', build: 'str', def: '', persist: ['fvp'], group: 'Project' },
