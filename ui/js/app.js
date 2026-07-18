@@ -408,6 +408,7 @@ const state = {
     isProcessing: false,
     videoPlan: null,
     hasProjectFile: false, // True once a .fvp file exists (enables auto-save)
+    hasProject: false, // True when this window booted with a real project (not the default workspace). Audio import is gated on it.
     currentSceneIndex: 0,
     activeSceneIndices: [], // Active media scene indices (non-overlay, non-MG)
     activeOverlaySceneIndices: [], // Active overlay scene indices
@@ -1074,15 +1075,16 @@ async function init() {
 }
 
 function setupEventListeners() {
-    elements.dropZone.addEventListener('click', () => elements.fileInput.click());
-    elements.dropZone.addEventListener('dragover', (e) => { e.preventDefault(); elements.dropZone.classList.add('drag-over'); });
+    elements.dropZone.addEventListener('click', () => { if (!_requireProject()) return; elements.fileInput.click(); });
+    elements.dropZone.addEventListener('dragover', (e) => { e.preventDefault(); if (state.hasProject) elements.dropZone.classList.add('drag-over'); });
     elements.dropZone.addEventListener('dragleave', () => elements.dropZone.classList.remove('drag-over'));
     elements.dropZone.addEventListener('drop', (e) => {
         e.preventDefault();
         elements.dropZone.classList.remove('drag-over');
+        if (!_requireProject()) return;
         if (e.dataTransfer.files.length > 0) handleFileSelect(e.dataTransfer.files[0]);
     });
-    elements.fileInput.addEventListener('change', (e) => { if (e.target.files.length > 0) handleFileSelect(e.target.files[0]); });
+    elements.fileInput.addEventListener('change', (e) => { if (!_requireProject()) return; if (e.target.files.length > 0) handleFileSelect(e.target.files[0]); });
     elements.btnRemoveAudio.addEventListener('click', removeAudio);
     elements.btnGenerate.addEventListener('click', generateVideo);
     if (elements.btnRepeatStep) elements.btnRepeatStep.addEventListener('click', () => generateVideo({ repeatStep: true }));
@@ -11227,10 +11229,40 @@ function applyProjectSettings(s) {
     }
 }
 
+// Audio import (and therefore building) requires a project, so the build has a real
+// home on disk. In the default workspace the drop zone is locked and points the user
+// at "New Project"; once a project is open it works normally.
+function _requireProject() {
+    if (state.hasProject) return true;
+    showToast('📁 Create or open a project first — then import your voiceover', 'info');
+    return false;
+}
+
+function _syncAudioGate() {
+    const dz = elements.dropZone;
+    if (!dz || state.audioFile) return; // don't clobber the loaded-audio display
+    if (state.hasProject) {
+        dz.classList.remove('locked');
+        dz.style.opacity = '';
+        dz.style.cursor = 'pointer';
+        dz.innerHTML = '<p>Drag &amp; drop your voiceover here</p><p class="small">or click to browse</p>';
+    } else {
+        dz.classList.add('locked');
+        dz.style.opacity = '0.55';
+        dz.style.cursor = 'not-allowed';
+        dz.title = 'Create or open a project first';
+        dz.innerHTML = '<p>📁 Create or open a project first</p><p class="small">Import unlocks once you have a project</p>';
+    }
+}
+
 async function loadProjectInfo() {
     try {
         if (!window.electronAPI.getProjectInfo) return;
         const info = await window.electronAPI.getProjectInfo();
+        // A real project has a name; the default workspace does not. Audio import is
+        // gated on this — you create/open a project first, then bring in your audio.
+        state.hasProject = !!(info && info.projectName);
+        _syncAudioGate();
         if (info && info.projectName && elements.projectNameLabel) {
             elements.projectNameLabel.textContent = `— ${info.projectName}`;
             elements.projectNameLabel.title = `Project: ${info.projectDir}\nClick to open folder`;
