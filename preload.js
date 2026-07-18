@@ -140,6 +140,9 @@ window.electronAPI = {
         return ipcRenderer.invoke('run-build', options);
     },
 
+    // Run the isolated AI Videos pipeline (script → plan)
+    runAiVideos: (opts) => ipcRenderer.invoke('run-ai-videos', opts || {}),
+
     // Switch the creative brain (AI Provider dropdown) live
     setAiProvider: (value) => {
         return ipcRenderer.invoke('set-ai-provider', value);

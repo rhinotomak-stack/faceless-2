@@ -945,6 +945,31 @@ async function _prepareVisionForBuild(options) {
     }
 }
 
+// Run the isolated AI Videos pipeline (script-first — no audio/transcription).
+// Writes a renderer-ready plan to public/video-plan.json. generate:false = dry-run
+// (scenes + prompts, no credits/browser); generate:true = real Kling/Veo clips.
+// Deliberately separate from run-build so the normal pipeline is untouched.
+ipcMain.handle('run-ai-videos', async (_event, opts = {}) => {
+    try {
+        const script = String((opts && opts.script) || '').trim();
+        if (!script) return { success: false, error: 'No script provided' };
+        const { buildAiVideosProject } = require('./src/categories/ai-videos/pipeline');
+        if (!fs.existsSync(PUBLIC_PATH)) fs.mkdirSync(PUBLIC_PATH, { recursive: true });
+        const ctx = await buildAiVideosProject(
+            { script },
+            { generate: !!opts.generate, outDir: PUBLIC_PATH, aspectRatio: opts.aspectRatio || '16:9', log: (m) => console.log(m) }
+        );
+        if (!ctx.plan) return { success: false, error: 'Pipeline produced no plan (empty script?)' };
+        const planPath = path.join(PUBLIC_PATH, 'video-plan.json');
+        fs.writeFileSync(planPath, JSON.stringify(ctx.plan, null, 2));
+        console.log(`✅ AI Videos: ${ctx.plan.scenes.length} scene(s), ${ctx.plan.totalDuration}s → ${planPath}${opts.generate ? '' : ' (dry-run)'}`);
+        return { success: true, sceneCount: ctx.plan.scenes.length, totalDuration: ctx.plan.totalDuration, planPath, dryRun: !opts.generate };
+    } catch (e) {
+        console.error('AI Videos pipeline failed:', e);
+        return { success: false, error: e.message || String(e) };
+    }
+});
+
 // Run the build pipeline
 ipcMain.handle('run-build', async (event, options) => {
     try {

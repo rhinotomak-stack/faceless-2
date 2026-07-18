@@ -6428,7 +6428,39 @@ async function cancelProcess() {
 // ========================================
 // Video Generation
 // ========================================
+// AI Videos (script-first): run the isolated ai-videos pipeline instead of the audio
+// build. Dry-run by default — turns the script into scenes + prompts + a plan without
+// spending credits; loads the resulting scenes onto the timeline.
+async function generateAiVideos() {
+    if (state.isProcessing) return;
+    const script = (state.aiVideosScript || '').trim();
+    if (!script) { showToast('📝 Paste a story/script first (AI Videos mode)', 'error'); return; }
+    if (!state.hasProject) { _requireProject(); return; }
+    state.isProcessing = true;
+    if (elements.btnGenerate) elements.btnGenerate.disabled = true;
+    try {
+        showToast('🤖 AI Videos: planning scenes from your script…', 'info');
+        const res = await window.electronAPI.runAiVideos({ script, generate: false });
+        if (res && res.success) {
+            await loadVideoPlan({ freshBuild: true });
+            state.hasProjectFile = true;
+            showToast(`✅ AI Videos: ${res.sceneCount} scene(s) ready — dry-run preview (turn on generation for real clips)`, 'success');
+        } else {
+            showToast('AI Videos failed: ' + ((res && res.error) || 'unknown'), 'error');
+        }
+    } catch (e) {
+        showToast('AI Videos error: ' + ((e && e.message) || e), 'error');
+    } finally {
+        state.isProcessing = false;
+        if (elements.btnGenerate) elements.btnGenerate.disabled = false;
+    }
+}
+
 async function generateVideo(options = {}) {
+    // AI Videos is script-first — no audio/transcription. Route to the isolated pipeline.
+    if (elements.buildProductionMode && elements.buildProductionMode.value === 'aiVideos') {
+        return generateAiVideos();
+    }
     if (!state.audioFile || state.isProcessing) return;
     if (!state.audioFile.path) {
         showToast('Audio file path is missing. Please re-import the audio file.', 'error'); return;
