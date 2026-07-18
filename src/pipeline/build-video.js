@@ -2569,7 +2569,9 @@ async function buildVideo() {
     // VEO_AI_VIDEO is on with a non-'directives' scope.
     const _veoStamped = _applyVeoScope(scenesWithKeywords, scriptContext);
     if (_veoStamped > 0) {
-        log.ok(`🤖 AI video (Veo) scope='${process.env.VEO_SCOPE}' → ${_veoStamped} scene(s) will be AI-generated`);
+        const _aiStoriesCat = require('../categories').usesAiVideo(scriptContext.productionMode);
+        const _veoLabel = _aiStoriesCat ? "Pure AI Stories (all eligible scenes)" : `Veo scope='${process.env.VEO_SCOPE}'`;
+        log.ok(`🤖 AI video → ${_veoLabel} → ${_veoStamped} scene(s) will be AI-generated`);
     }
 
     // Step 4.7: Compositor Planner — DISABLED (V2 overlay system needs rework)

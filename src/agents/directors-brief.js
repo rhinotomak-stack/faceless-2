@@ -124,6 +124,7 @@ function createDirectorsBrief() {
     // Unknown/empty → faceless exactly like the old ternary, but a known 'aiStories'
     // value is no longer silently collapsed to faceless.
     const productionMode = require('../categories').resolveMode(process.env.BUILD_PRODUCTION_MODE);
+    console.log(`[DirectorsBrief] Production mode: ${productionMode}${productionMode === 'aiStories' ? ' — all B-roll will be AI-generated (Kling/Veo)' : ''}`);
     let presenter = null;
     if (productionMode === 'talkingHead') {
         const userImg = (process.env.BUILD_PRESENTER_IMAGE || '').trim();
