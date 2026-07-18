@@ -1842,13 +1842,13 @@ const applySceneDirectives = directiveUtil.applySceneDirectives;
 // stamps NOTHING — AI video only happens where the creator explicitly asked).
 //   VEO_SCOPE = 'directives' (default) | 'hero' | 'all'
 function _applyVeoScope(scenes, scriptContext) {
-    // The "Pure AI Stories" category generates ALL eligible B-roll via the ai-video
+    // The "AI Videos" category generates ALL eligible B-roll via the ai-video
     // lane — equivalent to VEO_AI_VIDEO on + VEO_SCOPE='all'. Any other category
     // (faceless / talkingHead) keeps the exact env-driven behavior below.
-    const aiStoriesCat = !!(scriptContext && require('../categories').usesAiVideo(scriptContext.productionMode));
-    const on = aiStoriesCat || /^(1|true|yes|on)$/i.test(String(process.env.VEO_AI_VIDEO || '').trim());
+    const aiVideosCat = !!(scriptContext && require('../categories').usesAiVideo(scriptContext.productionMode));
+    const on = aiVideosCat || /^(1|true|yes|on)$/i.test(String(process.env.VEO_AI_VIDEO || '').trim());
     if (!on || !Array.isArray(scenes)) return 0;
-    const scope = aiStoriesCat ? 'all' : String(process.env.VEO_SCOPE || 'directives').trim().toLowerCase();
+    const scope = aiVideosCat ? 'all' : String(process.env.VEO_SCOPE || 'directives').trim().toLowerCase();
     if (scope === 'directives' || scope === 'off' || scope === 'none') return 0;
 
     const eligible = (s) => {
@@ -2569,8 +2569,8 @@ async function buildVideo() {
     // VEO_AI_VIDEO is on with a non-'directives' scope.
     const _veoStamped = _applyVeoScope(scenesWithKeywords, scriptContext);
     if (_veoStamped > 0) {
-        const _aiStoriesCat = require('../categories').usesAiVideo(scriptContext.productionMode);
-        const _veoLabel = _aiStoriesCat ? "Pure AI Stories (all eligible scenes)" : `Veo scope='${process.env.VEO_SCOPE}'`;
+        const _aiVideosCat = require('../categories').usesAiVideo(scriptContext.productionMode);
+        const _veoLabel = _aiVideosCat ? "AI Videos (all eligible scenes)" : `Veo scope='${process.env.VEO_SCOPE}'`;
         log.ok(`🤖 AI video → ${_veoLabel} → ${_veoStamped} scene(s) will be AI-generated`);
     }
 

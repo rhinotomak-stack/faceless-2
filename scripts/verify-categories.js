@@ -2,7 +2,7 @@
 // Proves the P4 category registry is behavior-preserving for faceless + talkingHead:
 // resolveMode() must be byte-identical to the OLD directors-brief ternary for every
 // input EXCEPT the newly-recognized ai-stories aliases (which used to collapse to
-// faceless and now resolve to 'aiStories'). Also checks the registry metadata.
+// faceless and now resolve to 'aiVideos'). Also checks the registry metadata.
 'use strict';
 const assert = require('assert');
 const cats = require('../src/categories');
@@ -16,13 +16,13 @@ function oldResolve(raw) {
     return ['talkinghead', 'talking-head', 'talking_head'].includes(rawMode) ? 'talkingHead' : 'faceless';
 }
 
-const AI_ALIASES = new Set(['aistories', 'ai-stories', 'ai_stories', 'pureai', 'purelyai']);
+const AI_ALIASES = new Set(['aivideos', 'ai-videos', 'ai_videos', 'aistories', 'ai-stories', 'ai_stories', 'pureai', 'purelyai']);
 
 console.log('\n=== resolveMode parity with the old ternary (faceless/talkingHead byte-identical) ===');
 const inputs = [
     'faceless', 'Faceless', 'FACELESS', 'b-roll', 'broll',
     'talkingHead', 'talkinghead', 'talking-head', 'talking_head', 'TalkingHead', ' talkingHead ',
-    'aiStories', 'ai-stories', 'AI_STORIES', 'pureai',
+    'aiVideos', 'ai-stories', 'AI_STORIES', 'pureai',
     '', ' ', 'garbage', 'documentary', undefined, null, 'listicle',
 ];
 let parityOk = true;
@@ -31,20 +31,20 @@ for (const inp of inputs) {
     const old = oldResolve(inp);
     const key = String(inp || '').trim().toLowerCase();
     if (AI_ALIASES.has(key)) {
-        // Intended divergence: used to be 'faceless', now 'aiStories'.
-        if (got !== 'aiStories') { parityOk = false; console.log(`     ai-stories input "${inp}" → ${got} (expected aiStories)`); }
+        // Intended divergence: used to be 'faceless', now 'aiVideos'.
+        if (got !== 'aiVideos') { parityOk = false; console.log(`     ai-stories input "${inp}" → ${got} (expected aiVideos)`); }
     } else if (got !== old) {
         parityOk = false; console.log(`     PARITY BREAK "${inp}": new=${got} old=${old}`);
     }
 }
 ok('faceless/talkingHead resolution byte-identical to old ternary', parityOk);
-ok('ai-stories aliases now resolve to aiStories (no longer collapsed)', cats.resolveMode('ai-stories') === 'aiStories' && cats.resolveMode('aiStories') === 'aiStories');
+ok('ai-stories aliases now resolve to aiVideos (no longer collapsed)', cats.resolveMode('ai-stories') === 'aiVideos' && cats.resolveMode('aiVideos') === 'aiVideos');
 ok('empty/unknown → faceless (historical default preserved)', cats.resolveMode('') === 'faceless' && cats.resolveMode(undefined) === 'faceless' && cats.resolveMode('garbage') === 'faceless');
 
 console.log('\n=== registry metadata ===');
-ok('getCategoryIds = [faceless, talkingHead, aiStories]', JSON.stringify(cats.getCategoryIds()) === JSON.stringify(['faceless', 'talkingHead', 'aiStories']));
-ok('usesAiVideo: aiStories=true, faceless=false, talkingHead=false',
-    cats.usesAiVideo('aiStories') === true && cats.usesAiVideo('faceless') === false && cats.usesAiVideo('talkingHead') === false);
+ok('getCategoryIds = [faceless, talkingHead, aiVideos]', JSON.stringify(cats.getCategoryIds()) === JSON.stringify(['faceless', 'talkingHead', 'aiVideos']));
+ok('usesAiVideo: aiVideos=true, faceless=false, talkingHead=false',
+    cats.usesAiVideo('aiVideos') === true && cats.usesAiVideo('faceless') === false && cats.usesAiVideo('talkingHead') === false);
 ok('faceless/talkingHead have no presenter drift', cats.get('faceless').hasPresenter === false && cats.get('talkingHead').hasPresenter === true);
 ok('every category declares allowedFormats', cats.CATEGORIES.every(c => Array.isArray(c.allowedFormats) && c.allowedFormats.length));
 ok('get(unknown) falls back to faceless descriptor', cats.get('nope').id === 'faceless');

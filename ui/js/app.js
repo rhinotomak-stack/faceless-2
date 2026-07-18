@@ -10924,12 +10924,14 @@ function setupStyleLearner() {
 
 // Adapt the settings to the selected production mode — hide controls that don't apply.
 // Mirrors the src/categories descriptors' allowedFormats (the renderer can't require the
-// Node registry): Pure AI Stories has its own format, so the documentary/listicle Format
+// Node registry): AI Videos has its own format, so the documentary/listicle Format
 // control is hidden. Extend _MODE_HIDE + the id loop as categories gain more rules.
 const _MODE_HIDE = {
-    aiStories: ['format-group'], // Pure AI Stories → no documentary/listicle format choice
+    // AI Videos generates all footage, so the documentary/listicle Format choice and the
+    // stock-footage settings (Vision scoring + Resource Control providers) don't apply.
+    aiVideos: ['format-group', 'vision-backend-group', 'resource-control-group'],
 };
-const _MODE_TOGGLEABLE = ['format-group']; // every group a mode may hide
+const _MODE_TOGGLEABLE = ['format-group', 'vision-backend-group', 'resource-control-group']; // every group a mode may hide
 function _syncProductionModeUI() {
     const mode = elements.buildProductionMode ? elements.buildProductionMode.value : 'faceless';
     const hide = new Set(_MODE_HIDE[mode] || []);
