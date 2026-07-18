@@ -26,15 +26,18 @@ const ok = (n, c) => c ? (pass++, console.log(`  ✅ ${n}`)) : (fail++, console.
     ok('detects file path', scriptInput.isLink('/tmp/story.txt') === true && scriptInput.isLink('C:\\a\\story.md') === true);
     ok('multi-word text is NOT a link', scriptInput.isLink('once upon a time') === false);
 
-    console.log('\n=== pipeline.buildAiVideosProject (INPUT stage) ===');
-    const ctx = await buildAiVideosProject({ script: '# My Story\n\nA hero rises.\n\nThen falls.' });
-    ok('stage reached "input"', ctx.stage === 'input');
-    ok('scriptText normalized', ctx.scriptText === 'My Story\n\nA hero rises.\n\nThen falls.');
-    ok('paragraphs extracted', ctx.paragraphs.length === 3);
-    ok('wordCount on ctx', ctx.wordCount === 7);
-    ok('unbuilt stages no-op (scenes/prompts empty, no throw)', Array.isArray(ctx.scenes) && ctx.scenes.length === 0 && Array.isArray(ctx.prompts));
+    console.log('\n=== pipeline.buildAiVideosProject (full flow, dry-run) ===');
+    const ctx = await buildAiVideosProject({ script: '# My Story\n\nA hero rises from nothing. He trains for years in the cold. Then he falls hard and loses it all.\n\nBut he gets back up and wins.' });
+    ok('runs all stages → stage "plan"', ctx.stage === 'plan');
+    ok('scriptText normalized', ctx.scriptText.startsWith('My Story'));
+    ok('scenes planned (≥ 2, each with text + duration)', ctx.scenes.length >= 2 && ctx.scenes.every((s) => s.text && s.duration > 0));
+    ok('scene timings are sequential', ctx.scenes.every((s, i) => i === 0 ? s.startTime === 0 : s.startTime === ctx.scenes[i - 1].startTime + ctx.scenes[i - 1].duration));
+    ok('one prompt per scene (B-roll style)', ctx.prompts.length === ctx.scenes.length && ctx.prompts.every((p) => /B-roll/i.test(p.prompt)));
+    ok('dry-run clips: no files, marked dryRun', ctx.clips.length === ctx.scenes.length && ctx.clips.every((c) => c.file === null && c.dryRun === true));
+    ok('plan assembled + renderer-shaped', !!ctx.plan && ctx.plan.productionMode === 'aiVideos' && ctx.plan.scenes.length === ctx.scenes.length && ctx.plan.totalDuration > 0);
+    ok('plan scenes carry sourceHint=ai-video + prompt', ctx.plan.scenes.every((s) => s.sourceHint === 'ai-video' && s._aiVideoPrompt && s.trackId === 'video-track-1'));
     const empty = await buildAiVideosProject({ script: '   ' });
-    ok('empty script → stage "empty"', empty.stage === 'empty');
+    ok('empty script → stage "empty" (no crash)', empty.stage === 'empty' && !empty.plan);
 
     console.log('\n=== category wiring ===');
     ok('registry exposes aiVideos with scriptFirst + pipeline', cats.get('aiVideos').scriptFirst === true && typeof cats.get('aiVideos').pipeline.buildAiVideosProject === 'function');

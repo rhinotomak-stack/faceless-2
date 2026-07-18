@@ -52,21 +52,37 @@ async function buildAiVideosProject(input = {}, opts = {}) {
     log(`  [AI Videos] script normalized: ${ctx.wordCount} words, ${ctx.paragraphs.length} paragraph(s)${ctx.isLink ? ' (input looks like a link — fetch TBD)' : ''}`);
     if (!ctx.scriptText) { ctx.stage = 'empty'; return ctx; }
 
-    // ── Stage 2: SCENES (P7 next) ───────────────────────────────────────────
+    // ── Stage 2: SCENES ─────────────────────────────────────────────────────
     const scenePlanner = optional('./scene-planner');
     if (scenePlanner && typeof scenePlanner.planScenes === 'function') {
         ctx.scenes = await scenePlanner.planScenes(ctx, opts);
         ctx.stage = 'scenes';
+        log(`  [AI Videos] planned ${ctx.scenes.length} scene(s)`);
     }
 
-    // ── Stage 3: PROMPTS (P7 next) ──────────────────────────────────────────
+    // ── Stage 3: PROMPTS ────────────────────────────────────────────────────
     const promptGen = optional('./prompt-generator');
     if (promptGen && typeof promptGen.generateScenePrompts === 'function' && ctx.scenes.length) {
         ctx.prompts = await promptGen.generateScenePrompts(ctx, opts);
         ctx.stage = 'prompts';
     }
 
-    // ── Stage 4: GENERATE + Stage 5: PLAN (P7 next) — added as their modules land.
+    // ── Stage 4: GENERATE ── dry-run by default (opts.generate === true → real Kling/Veo)
+    const generate = optional('./generate');
+    if (generate && typeof generate.generateClips === 'function' && ctx.prompts.length) {
+        ctx.clips = await generate.generateClips(ctx, opts);
+        ctx.stage = 'generate';
+        const made = ctx.clips.filter((c) => c.file).length;
+        log(`  [AI Videos] ${opts.generate ? `generated ${made}/${ctx.clips.length} clip(s)` : `dry-run: ${ctx.clips.length} clip(s) to generate`}`);
+    }
+
+    // ── Stage 5: PLAN ── assemble a renderer-ready video-plan
+    const planBuilder = optional('./plan-builder');
+    if (planBuilder && typeof planBuilder.buildPlan === 'function' && ctx.scenes.length) {
+        ctx.plan = planBuilder.buildPlan(ctx, opts);
+        ctx.stage = 'plan';
+        log(`  [AI Videos] plan assembled: ${ctx.plan.scenes.length} scene(s), ${ctx.plan.totalDuration}s`);
+    }
 
     return ctx;
 }
