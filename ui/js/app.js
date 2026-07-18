@@ -1642,6 +1642,7 @@ function setupEventListeners() {
     if (elements.buildProductionMode) {
         elements.buildProductionMode.addEventListener('change', () => {
             _syncPresenterRow();
+            _syncProductionModeUI();
             saveSettings();
         });
     }
@@ -1687,6 +1688,7 @@ function setupEventListeners() {
     if (elements.veoBackend) elements.veoBackend.addEventListener('change', saveSettings);
     _syncVeoRow();
     _syncPresenterRow();
+    _syncProductionModeUI();
     _initSettingsTabs();
     // Vision backend dropdown — persist immediately to .env (main process) so the choice
     // survives restart AND the live build/retry pick it up, then save UI settings.
@@ -10920,6 +10922,23 @@ function setupStyleLearner() {
 
 }
 
+// Adapt the settings to the selected production mode — hide controls that don't apply.
+// Mirrors the src/categories descriptors' allowedFormats (the renderer can't require the
+// Node registry): Pure AI Stories has its own format, so the documentary/listicle Format
+// control is hidden. Extend _MODE_HIDE + the id loop as categories gain more rules.
+const _MODE_HIDE = {
+    aiStories: ['format-group'], // Pure AI Stories → no documentary/listicle format choice
+};
+const _MODE_TOGGLEABLE = ['format-group']; // every group a mode may hide
+function _syncProductionModeUI() {
+    const mode = elements.buildProductionMode ? elements.buildProductionMode.value : 'faceless';
+    const hide = new Set(_MODE_HIDE[mode] || []);
+    for (const id of _MODE_TOGGLEABLE) {
+        const el = document.getElementById(id);
+        if (el) el.style.display = hide.has(id) ? 'none' : '';
+    }
+}
+
 // Show/hide the presenter-image picker based on production mode + reflect the stored path.
 function _syncPresenterRow() {
     if (!elements.presenterImageRow) return;
@@ -11134,6 +11153,7 @@ function loadSettings() {
             if (elements.veoBackend && s.veoBackend) elements.veoBackend.value = s.veoBackend;
             _syncPresenterRow();
             _syncVeoRow();
+            _syncProductionModeUI();
             if (elements.buildVisionBackend && s.buildVisionBackend) elements.buildVisionBackend.value = s.buildVisionBackend;
             if (elements.buildLanguage && s.buildLanguage) elements.buildLanguage.value = s.buildLanguage;
             if (elements.buildStyleProfile && s.buildStyleProfile) {
@@ -11206,6 +11226,7 @@ function applyProjectSettings(s) {
         if (elements.veoBackend && s.veoBackend) elements.veoBackend.value = s.veoBackend;
         _syncPresenterRow();
         _syncVeoRow();
+        _syncProductionModeUI();
         if (elements.buildVisionBackend && s.buildVisionBackend) elements.buildVisionBackend.value = s.buildVisionBackend;
         if (elements.buildLanguage && s.buildLanguage) elements.buildLanguage.value = s.buildLanguage;
         if (elements.repeatFromStep && s.repeatFromStep) elements.repeatFromStep.value = s.repeatFromStep;

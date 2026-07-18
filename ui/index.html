@@ -103,31 +103,7 @@
                         <button type="button" class="stab-btn" data-stab="build">Build</button>
                     </div>
                     <div class="stab-panel active" data-stab="setup">
-                    <label>Quality Tier:</label>
-                    <select id="build-quality">
-                        <option value="standard" selected>Standard (Balanced)</option>
-                        <option value="mini">Mini (Fast, Images Only)</option>
-                        <option value="pro">Pro (Best Quality)</option>
-                    </select>
-                    <small style="display:block; margin-top:4px; color:#888">Controls scene count, transitions, MG density</small>
-                    <label style="margin-top:12px">Video Format:</label>
-                    <select id="build-format">
-                        <option value="auto" selected>Auto (AI Decides)</option>
-                        <option value="documentary">Documentary</option>
-                        <option value="listicle">Listicle</option>
-                    </select>
-                    <small style="display:block; margin-top:4px; color:#888">Affects pacing and transition style</small>
-                    <label style="margin-top:8px">Video Title:</label>
-                    <input type="text" id="video-title" placeholder="e.g., How Monolithic Domes Are Built" style="width:100%;padding:6px 8px;border:1px solid #555;border-radius:4px;background:#2a2a2a;color:#eee;font-size:13px">
-                    <small class="ai-instructions-hint">Guides AI niche detection, keyword generation &amp; visual planning</small>
-                    <label style="margin-top:12px">Language:</label>
-                    <select id="build-language">
-                        <option value="auto" selected>🌐 Auto-Detect (from audio)</option>
-                        <!-- Options populated dynamically from src/languages.js registry.
-                             Adding a language = add one entry to languages.js; dropdown
-                             updates automatically on app reload. -->
-                    </select>
-                    <small style="display:block; margin-top:4px; color:#888">Auto-detect reads the language from your narration audio. Override to force a specific language or re-run a build in another language.</small>
+                    <!-- Production Mode FIRST — it gates which downstream settings apply -->
                     <label style="margin-top:12px">Production Mode:</label>
                     <select id="build-production-mode">
                         <option value="faceless" selected>🎞️ Faceless (B-roll only)</option>
@@ -161,6 +137,33 @@
                             </div>
                         </div>
                     </div>
+                    <label>Quality Tier:</label>
+                    <select id="build-quality">
+                        <option value="standard" selected>Standard (Balanced)</option>
+                        <option value="mini">Mini (Fast, Images Only)</option>
+                        <option value="pro">Pro (Best Quality)</option>
+                    </select>
+                    <small style="display:block; margin-top:4px; color:#888">Controls scene count, transitions, MG density</small>
+                    <div id="format-group">
+                    <label style="margin-top:12px">Video Format:</label>
+                    <select id="build-format">
+                        <option value="auto" selected>Auto (AI Decides)</option>
+                        <option value="documentary">Documentary</option>
+                        <option value="listicle">Listicle</option>
+                    </select>
+                    <small style="display:block; margin-top:4px; color:#888">Affects pacing and transition style</small>
+                    </div><!-- /format-group -->
+                    <label style="margin-top:8px">Video Title:</label>
+                    <input type="text" id="video-title" placeholder="e.g., How Monolithic Domes Are Built" style="width:100%;padding:6px 8px;border:1px solid #555;border-radius:4px;background:#2a2a2a;color:#eee;font-size:13px">
+                    <small class="ai-instructions-hint">Guides AI niche detection, keyword generation &amp; visual planning</small>
+                    <label style="margin-top:12px">Language:</label>
+                    <select id="build-language">
+                        <option value="auto" selected>🌐 Auto-Detect (from audio)</option>
+                        <!-- Options populated dynamically from src/languages.js registry.
+                             Adding a language = add one entry to languages.js; dropdown
+                             updates automatically on app reload. -->
+                    </select>
+                    <small style="display:block; margin-top:4px; color:#888">Auto-detect reads the language from your narration audio. Override to force a specific language or re-run a build in another language.</small>
                 <div class="panel-section">
                     <h3>🔊 Sound Effects</h3>
                     <label class="source-toggle">
