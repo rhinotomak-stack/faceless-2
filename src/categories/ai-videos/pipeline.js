@@ -1,0 +1,74 @@
+// src/categories/ai-videos/pipeline.js
+// ============================================================================
+// The AI Videos pipeline — the isolated "script → generated clips" flow, kept in
+// ONE place so the whole feature is self-contained. Every stage is a named seam
+// backed by its own module, so "add a feature to AI Videos" means editing one file
+// in this folder, never the shared build pipeline.
+//
+// Stages (buildAiVideosProject runs them in order):
+//   1. INPUT      script-input.js   — normalize pasted story/link → clean script   [DONE]
+//   2. SCENES     scene-planner.js  — script → scene beats (text + timing)          [P7 next]
+//   3. PROMPTS    prompt-generator.js — per-scene → generation prompt               [P7 next]
+//   4. GENERATE   (reuses the Kling/Veo engine via the media layer)                 [P7 next]
+//   5. PLAN       assemble a renderer-ready video-plan.json                          [P7 next]
+//
+// Each not-yet-built stage is a clearly-marked no-op that passes the context
+// through, so the pipeline runs end-to-end today (returning after INPUT) and each
+// stage lights up as it's implemented — no rewrites.
+// ============================================================================
+'use strict';
+
+const scriptInput = require('./script-input');
+
+// Optional stage modules — loaded only if present, so the pipeline never breaks as
+// stages are added one at a time.
+function optional(mod) {
+    try { return require(mod); } catch (_) { return null; }
+}
+
+// ctx is a single object threaded through every stage (the AI Videos BuildContext).
+// Stages mutate/extend it and return it. Keeping ONE ctx makes adding a stage that
+// needs data from an earlier one trivial.
+async function buildAiVideosProject(input = {}, opts = {}) {
+    const log = typeof opts.log === 'function' ? opts.log : (m) => console.log(m);
+    const ctx = {
+        rawInput: input.script != null ? input.script : input,
+        opts,
+        scriptText: '',
+        paragraphs: [],
+        scenes: [],
+        prompts: [],
+        clips: [],
+        plan: null,
+        stage: 'start',
+    };
+
+    // ── Stage 1: INPUT ──────────────────────────────────────────────────────
+    ctx.scriptText = scriptInput.normalizeScript(ctx.rawInput);
+    ctx.paragraphs = scriptInput.toParagraphs(ctx.scriptText);
+    ctx.isLink = scriptInput.isLink(ctx.rawInput);
+    ctx.wordCount = scriptInput.wordCount(ctx.scriptText);
+    ctx.stage = 'input';
+    log(`  [AI Videos] script normalized: ${ctx.wordCount} words, ${ctx.paragraphs.length} paragraph(s)${ctx.isLink ? ' (input looks like a link — fetch TBD)' : ''}`);
+    if (!ctx.scriptText) { ctx.stage = 'empty'; return ctx; }
+
+    // ── Stage 2: SCENES (P7 next) ───────────────────────────────────────────
+    const scenePlanner = optional('./scene-planner');
+    if (scenePlanner && typeof scenePlanner.planScenes === 'function') {
+        ctx.scenes = await scenePlanner.planScenes(ctx, opts);
+        ctx.stage = 'scenes';
+    }
+
+    // ── Stage 3: PROMPTS (P7 next) ──────────────────────────────────────────
+    const promptGen = optional('./prompt-generator');
+    if (promptGen && typeof promptGen.generateScenePrompts === 'function' && ctx.scenes.length) {
+        ctx.prompts = await promptGen.generateScenePrompts(ctx, opts);
+        ctx.stage = 'prompts';
+    }
+
+    // ── Stage 4: GENERATE + Stage 5: PLAN (P7 next) — added as their modules land.
+
+    return ctx;
+}
+
+module.exports = { buildAiVideosProject };

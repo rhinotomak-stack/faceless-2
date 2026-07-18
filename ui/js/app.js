@@ -409,6 +409,7 @@ const state = {
     videoPlan: null,
     hasProjectFile: false, // True once a .fvp file exists (enables auto-save)
     hasProject: false, // True when this window booted with a real project (not the default workspace). Audio import is gated on it.
+    aiVideosScript: '', // AI Videos mode: the pasted story/script (script-first pipeline input).
     currentSceneIndex: 0,
     activeSceneIndices: [], // Active media scene indices (non-overlay, non-MG)
     activeOverlaySceneIndices: [], // Active overlay scene indices
@@ -594,6 +595,7 @@ const elements = {
     buildTheme: document.getElementById('build-theme'),
     buildMapStylePack: document.getElementById('build-map-style-pack'),
     buildProductionMode: document.getElementById('build-production-mode'),
+    aiVideosScript: document.getElementById('ai-videos-script'),
     presenterImageRow: document.getElementById('presenter-image-row'),
     presenterImagePath: document.getElementById('presenter-image-path'),
     btnPickPresenter: document.getElementById('btn-pick-presenter'),
@@ -1643,6 +1645,12 @@ function setupEventListeners() {
         elements.buildProductionMode.addEventListener('change', () => {
             _syncPresenterRow();
             _syncProductionModeUI();
+            saveSettings();
+        });
+    }
+    if (elements.aiVideosScript) {
+        elements.aiVideosScript.addEventListener('input', () => {
+            state.aiVideosScript = elements.aiVideosScript.value;
             saveSettings();
         });
     }
@@ -10931,13 +10939,23 @@ const _MODE_HIDE = {
     // stock-footage settings (Vision scoring + Resource Control providers) don't apply.
     aiVideos: ['format-group', 'vision-backend-group', 'resource-control-group'],
 };
-const _MODE_TOGGLEABLE = ['format-group', 'vision-backend-group', 'resource-control-group']; // every group a mode may hide
+const _MODE_TOGGLEABLE = ['format-group', 'vision-backend-group', 'resource-control-group']; // groups a mode may hide
+// Groups shown ONLY for a given mode (hidden otherwise) — e.g. AI Videos' script box.
+const _MODE_SHOW = {
+    aiVideos: ['ai-videos-script-group'],
+};
+const _MODE_SHOW_ONLY = ['ai-videos-script-group'];
 function _syncProductionModeUI() {
     const mode = elements.buildProductionMode ? elements.buildProductionMode.value : 'faceless';
     const hide = new Set(_MODE_HIDE[mode] || []);
     for (const id of _MODE_TOGGLEABLE) {
         const el = document.getElementById(id);
         if (el) el.style.display = hide.has(id) ? 'none' : '';
+    }
+    const show = new Set(_MODE_SHOW[mode] || []);
+    for (const id of _MODE_SHOW_ONLY) {
+        const el = document.getElementById(id);
+        if (el) el.style.display = show.has(id) ? '' : 'none';
     }
 }
 
@@ -11029,6 +11047,7 @@ function saveSettings() {
         subtitlesEnabled: state.subtitlesEnabled,
         mutedTracks: state.mutedTracks,
         presenterImage: state.presenterImage || '',
+        aiVideosScript: state.aiVideosScript || '',
         buildStyleProfile: elements.buildStyleProfile ? elements.buildStyleProfile.value : 'none',
     }));
     // Also trigger .fvp auto-save so settings persist per-project
@@ -11146,6 +11165,8 @@ function loadSettings() {
             if (elements.buildMapStylePack && s.buildMapStylePack) elements.buildMapStylePack.value = s.buildMapStylePack;
             if (elements.buildProductionMode && s.buildProductionMode) elements.buildProductionMode.value = s.buildProductionMode;
             state.presenterImage = s.presenterImage || '';
+        state.aiVideosScript = s.aiVideosScript || '';
+        if (elements.aiVideosScript) elements.aiVideosScript.value = state.aiVideosScript;
             if (elements.klingAvatarEnabled) elements.klingAvatarEnabled.checked = !!s.klingAvatar;
             if (elements.klingResolution && s.klingResolution) elements.klingResolution.value = s.klingResolution;
             if (elements.klingAvatarPrompt) elements.klingAvatarPrompt.value = s.klingAvatarPrompt || '';
@@ -11219,6 +11240,8 @@ function applyProjectSettings(s) {
         if (elements.buildMapStylePack && s.buildMapStylePack) elements.buildMapStylePack.value = s.buildMapStylePack;
         if (elements.buildProductionMode && s.buildProductionMode) elements.buildProductionMode.value = s.buildProductionMode;
         state.presenterImage = s.presenterImage || '';
+        state.aiVideosScript = s.aiVideosScript || '';
+        if (elements.aiVideosScript) elements.aiVideosScript.value = state.aiVideosScript;
         if (elements.klingAvatarEnabled) elements.klingAvatarEnabled.checked = !!s.klingAvatar;
         if (elements.klingResolution && s.klingResolution) elements.klingResolution.value = s.klingResolution;
         if (elements.klingAvatarPrompt) elements.klingAvatarPrompt.value = s.klingAvatarPrompt || '';

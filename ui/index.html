@@ -137,6 +137,12 @@
                             </div>
                         </div>
                     </div>
+                    <!-- AI Videos: paste a story/script (shown only in AI Videos mode) -->
+                    <div id="ai-videos-script-group" style="display:none">
+                        <label style="margin-top:12px">Story / Script:</label>
+                        <textarea id="ai-videos-script" rows="6" placeholder="Paste your story or script here. Each paragraph becomes a scene the AI generates a clip for — no voiceover needed." style="width:100%;padding:8px;background:#12121a;border:1px solid #3a3a4a;border-radius:6px;color:#ddd;font-size:12px;box-sizing:border-box;resize:vertical;font-family:inherit"></textarea>
+                        <small style="display:block; margin-top:4px; color:#888">Split into scenes; each gets an AI-generated clip on the timeline. (Generation is being wired up — for now this captures & saves your script.)</small>
+                    </div>
                     <label>Quality Tier:</label>
                     <select id="build-quality">
                         <option value="standard" selected>Standard (Balanced)</option>
