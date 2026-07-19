@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob: asset: file:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; media-src 'self' data: blob: asset: file:; img-src 'self' data: blob: asset: file: https:; connect-src 'self' data: blob: asset: file: https: http://34.198.52.220:8000 http://localhost:8000; font-src 'self' data: asset: file:;">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob: asset: file:; script-src 'self'; style-src 'self' 'unsafe-inline'; media-src 'self' data: blob: asset: file:; img-src 'self' data: blob: asset: file: https:; connect-src 'self' data: blob: asset: file: https: http://34.198.52.220:8000 http://localhost:8000; font-src 'self' data: asset: file:; frame-src 'self' hf-preview:; object-src 'none'; base-uri 'none';">
     <title>YTA Empire WEBGL</title>
     <link rel="stylesheet" href="css/style.css?v=16">
     <!-- ── Multi-language font declarations ──
@@ -38,7 +38,7 @@
     <div class="app-container">
         <!-- Header -->
         <header class="header">
-            <h1><img src="../assets/icon.png" alt="" class="app-logo" onerror="this.src='../assets/icon.ico'">YTA Empire WEBGL <span id="project-name-label" class="project-name-label"></span></h1>
+            <h1><img src="../assets/icon.png" alt="" class="app-logo">YTA Empire WEBGL <span id="project-name-label" class="project-name-label"></span></h1>
             <div class="header-actions">
                 <div class="notif-center" id="notif-center">
                     <button class="notif-bell" id="notif-bell" title="Notifications">
@@ -458,7 +458,7 @@
                             <button id="btn-fullscreen" class="control-btn">⛶</button>
                         </div>
                     </div>
-                    <iframe id="hyperframes-preview-frame" class="hyperframes-preview-frame hidden" title="HyperFrames preview"></iframe>
+                    <iframe id="hyperframes-preview-frame" class="hyperframes-preview-frame hidden" title="HyperFrames preview" sandbox="allow-scripts allow-same-origin"></iframe>
                     <audio id="preview-audio" class="hidden"></audio>
                 </div>
                 <!-- Preview zoom toolbar -->
@@ -1183,6 +1183,8 @@
 
     <!-- MP4 demuxer for WebCodecs export optimization (local copy, no CDN needed) -->
     <script src="js/lib/mp4box.all.min.js"></script>
+    <script src="../src/project/timeline-contract.js"></script>
+    <script src="../src/render/render-spec.js"></script>
 
     <!-- WebGL2 Compositor Engine modules (loaded before app.js) -->
     <script src="js/compositor/ShaderLib.js"></script>
@@ -1190,6 +1192,12 @@
     <script src="js/compositor/AnimationUtils.js"></script>
     <script src="js/compositor/SceneGraph.js"></script>
     <script src="js/compositor/TransitionRenderer.js"></script>
+    <script src="../src/data/languages.js"></script>
+    <script src="../src/data/language-helper.js"></script>
+    <script src="../src/data/themes.js"></script>
+    <script src="../src/render/mg-registry.js"></script>
+    <script src="../src/render/effect-presets.js"></script>
+    <script src="js/renderer-data.js"></script>
     <script src="js/mg-theme-bridge.js"></script>
     <script src="../src/map/map-style-packs.js"></script>
     <script src="js/compositor/MGRenderer.js"></script>
