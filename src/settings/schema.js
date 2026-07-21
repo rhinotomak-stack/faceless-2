@@ -24,7 +24,6 @@
 //   persist   where it's saved: 'ls'=localStorage(global), 'fvp'=project file
 //   projEnv   true = a project .env may override its env var (legacy PROJECT_OVERRIDE set)
 //   group     UI grouping label
-//   deprecated true = dead setting kept only for back-compat cleanup (prune target)
 // ============================================================================
 (function (root, factory) {
     const mod = factory();
@@ -36,8 +35,6 @@
         { key: 'smartAI', el: 'smart-ai-toggle', env: 'SMART_AI', build: 'bool', def: true, persist: ['ls', 'fvp'], projEnv: true, group: 'AI' },
         { key: 'aiProvider', el: 'ai-provider', env: null, build: null, def: 'bedrock', persist: ['ls', 'fvp'], group: 'AI' },
         { key: 'aiThinking', el: 'ai-thinking', env: 'AI_THINKING', build: 'custom', def: 'off', persist: ['ls'], group: 'AI' },
-        { key: 'ollamaModel', el: 'ollama-model', env: null, build: null, def: 'gemma3:12b', persist: [], group: 'AI', deprecated: true },
-        { key: 'ollamaVisionModel', el: 'ollama-vision-model', env: null, build: null, def: 'llava', persist: [], group: 'AI', deprecated: true },
 
         // ── Build config ──
         { key: 'buildQuality', el: 'build-quality', env: 'BUILD_QUALITY_TIER', build: 'if', def: 'standard', persist: ['ls', 'fvp'], projEnv: true, group: 'Build' },
@@ -66,7 +63,9 @@
         // ── Media / pipeline toggles ──
         { key: 'footageSources', el: null, env: 'FOOTAGE_SOURCES', build: 'json', def: null, persist: ['ls', 'fvp'], group: 'Media' },
         { key: 'clipAnalyzer', el: 'clip-analyzer-toggle', env: 'CLIP_ANALYZER_ENABLED', build: 'bool', def: true, persist: ['ls', 'fvp'], group: 'Media' },
-        { key: 'fastMedia', el: 'fast-media-toggle', env: 'BUILD_FAST_MEDIA', build: 'trueIf', def: false, persist: ['ls', 'fvp'], group: 'Media' },
+        // Deliberately not persisted: this is a destructive one-shot pipeline diagnostic,
+        // not a production preference. Every app/project load returns it to OFF.
+        { key: 'fastMedia', el: 'fast-media-toggle', env: 'BUILD_FAST_MEDIA', build: 'trueIf', def: false, persist: [], group: 'Diagnostics' },
         { key: 'repeatFromStep', el: 'repeat-from-step', env: 'BUILD_REPEAT_FROM', build: 'custom', def: 'visual-planner', persist: ['ls', 'fvp'], group: 'Build' },
         { key: 'forceFreshFootage', el: 'force-fresh-footage-toggle', env: 'BUILD_FORCE_FRESH_FOOTAGE', build: 'custom', def: false, persist: ['ls', 'fvp'], group: 'Media' },
 

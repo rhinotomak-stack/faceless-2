@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 
 const APP_ROOT = path.join(__dirname, '..', '..');
-const ENV_PATH = path.join(APP_ROOT, '.env');
+const ENV_PATH = process.env.YTA_USER_ENV_PATH || path.join(APP_ROOT, '.env');
 const DEFAULT_BASE_URL = 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1';
 const DEFAULT_REGISTRY_PATH = process.env.QWEN_MODEL_REGISTRY_PATH || path.join(__dirname, '..', 'qwen-vision-generated-pools.json');
 

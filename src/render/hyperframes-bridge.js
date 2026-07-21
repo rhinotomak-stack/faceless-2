@@ -1,7 +1,11 @@
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 const { fileURLToPath } = require('url');
+const timelineContract = require('../project/timeline-contract');
+const { normalizeTextColor, textStyleSegments } = require('./text-style-ranges');
+const { prefersFixedRenderer } = require('./authored-composition-policy');
 
 let themeRuntime = {};
 let mgRegistryRuntime = {};
@@ -59,6 +63,17 @@ function ensureDir(dir) {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 
+function resolveGsapRuntime() {
+    for (const ref of ['gsap/dist/gsap.min.js', 'hyperframes/node_modules/gsap/dist/gsap.min.js']) {
+        try {
+            return require.resolve(ref);
+        } catch (_) {
+            // Try the next installed runtime.
+        }
+    }
+    throw new Error('Local GSAP runtime is missing. Install the gsap package before generating HyperFrames projects.');
+}
+
 function cleanName(value, fallback = 'asset') {
     const base = String(value == null || value === '' ? fallback : value)
         .replace(/[<>:"/\\|?*\x00-\x1F]/g, '-')
@@ -96,17 +111,21 @@ function toSeconds(value, fallback = 0) {
 }
 
 function getDuration(item, fallback = 3) {
-    const explicit = toSeconds(item?.duration, NaN);
     const start = toSeconds(item?.startTime, 0);
     const end = toSeconds(item?.endTime, NaN);
     const span = Number.isFinite(end) && end > start ? end - start : NaN;
     if (Number.isFinite(span) && span > 0 && span < 3600) return span;
-    if (Number.isFinite(explicit) && explicit > 0 && explicit < 3600) {
-        // Some plan entries store duration in frames. Without an endTime span,
-        // convert obvious frame counts to seconds instead of treating them as
-        // multi-minute visual durations.
-        return explicit > 90 ? explicit / 30 : explicit;
+    const explicitSeconds = toSeconds(item?.durationSeconds ?? item?.durationSec, NaN);
+    if (Number.isFinite(explicitSeconds) && explicitSeconds > 0 && explicitSeconds < 3600) return explicitSeconds;
+    const durationFrames = toSeconds(item?.durationFrames, NaN);
+    const fps = Math.max(1, toSeconds(item?.fps, 30));
+    if (Number.isFinite(durationFrames) && durationFrames > 0) return durationFrames / fps;
+    const explicit = toSeconds(item?.duration, NaN);
+    if (String(item?.durationUnit || item?.timingUnit || '').toLowerCase() === 'frames'
+        && Number.isFinite(explicit) && explicit > 0) {
+        return explicit / fps;
     }
+    if (Number.isFinite(explicit) && explicit > 0 && explicit < 3600) return explicit;
     return fallback;
 }
 
@@ -376,6 +395,17 @@ function displayValue(...values) {
         }
     }
     return '';
+}
+
+function firstBoolean(...values) {
+    for (const value of values) {
+        if (typeof value === 'boolean') return value;
+        if (typeof value === 'string') {
+            if (/^(?:true|on|yes|show|visible)$/i.test(value.trim())) return true;
+            if (/^(?:false|off|no|hide|hidden|none)$/i.test(value.trim())) return false;
+        }
+    }
+    return undefined;
 }
 
 function stringValue(value) {
@@ -657,6 +687,13 @@ function resolveHyperframeVisual(mg, kind, type, plan = {}) {
     }
 
     const colors = tokens?.colors || {};
+    const explicitColors = (
+        mg?.colors && typeof mg.colors === 'object'
+            ? mg.colors
+            : (mg?.mgData?.colors && typeof mg.mgData.colors === 'object'
+                ? mg.mgData.colors
+                : {})
+    );
     const overrideColors = themeOverride?.colors || {};
     const typography = tokens?.typography || {};
     const speed = clampNumber(firstFiniteNumber(
@@ -672,6 +709,12 @@ function resolveHyperframeVisual(mg, kind, type, plan = {}) {
         plan?.scriptContext?.mgOverlayShadow,
         plan?.mgOverlayShadow
     ), 0, 1, 0.55);
+    const accentRuleVisible = firstBoolean(
+        mg?.accentRuleVisible,
+        mg?.mgData?.accentRuleVisible,
+        mg?.agenticComposition?.style?.accentRule,
+        mg?.mgData?.agenticComposition?.style?.accentRule
+    ) !== false;
 
     return {
         themeId,
@@ -682,9 +725,19 @@ function resolveHyperframeVisual(mg, kind, type, plan = {}) {
         animation: cleanName(animation, 'fadeSlide'),
         speed,
         shadowStrength,
-        cardStyle: cleanName(stylePreset?.cardStyle || 'filled', 'filled'),
+        accentRuleVisible,
+        cardStyle: cleanName(displayValue(
+            mg?.transparentBackground ? 'transparent' : '',
+            mg?.cardStyle,
+            mg?.mgData?.cardStyle,
+            stylePreset?.cardStyle,
+            'filled'
+        ), 'filled'),
         chrome: {
-            bg: normalizeCssColor(overrideColors.bgFill, stylePreset?.bg || colors.surface || 'rgba(2,6,23,0.78)'),
+            bg: normalizeCssColor(
+                explicitColors.surface || explicitColors.background,
+                overrideColors.bgFill || stylePreset?.bg || colors.surface || 'rgba(2,6,23,0.78)'
+            ),
             radius: clampNumber(stylePreset?.borderRadius, 0, 40, 12),
             strokeWidth: clampNumber(stylePreset?.strokeWidth, 0, 8, 2),
             shadowBlur: clampNumber(stylePreset?.shadowBlur, 0, 60, 18),
@@ -692,13 +745,16 @@ function resolveHyperframeVisual(mg, kind, type, plan = {}) {
             glow: !!stylePreset?.glow,
         },
         colors: {
-            primary: normalizeCssColor(overrideColors.primaryFill || overrideColors.accentFill, colors.mgPrimary || colors.primary || '#22d3ee'),
-            accent: normalizeCssColor(overrideColors.accentFill, colors.mgAccent || colors.accent || '#8b5cf6'),
-            text: normalizeCssColor(overrideColors.textFill, colors.textPrimary || '#f8fafc'),
-            textMuted: normalizeCssColor(colors.textSecondary, 'rgba(226,232,240,0.88)'),
-            surface: normalizeCssColor(overrideColors.cardFill, colors.surface || stylePreset?.bg || 'rgba(2,6,23,0.78)'),
+            primary: normalizeCssColor(explicitColors.primary, overrideColors.primaryFill || overrideColors.accentFill || colors.mgPrimary || colors.primary || '#22d3ee'),
+            accent: normalizeCssColor(explicitColors.accent, overrideColors.accentFill || colors.mgAccent || colors.accent || '#8b5cf6'),
+            text: normalizeCssColor(explicitColors.text, overrideColors.textFill || colors.textPrimary || '#f8fafc'),
+            textMuted: normalizeCssColor(explicitColors.textMuted, colors.textSecondary || 'rgba(226,232,240,0.88)'),
+            surface: normalizeCssColor(
+                explicitColors.surface || explicitColors.background,
+                overrideColors.cardFill || colors.surface || stylePreset?.bg || 'rgba(2,6,23,0.78)'
+            ),
             shadow: normalizeCssColor(colors.shadow, 'rgba(0,0,0,0.46)'),
-            background: normalizeCssColor(colors.background, '#050505'),
+            background: normalizeCssColor(explicitColors.background, colors.background || '#050505'),
         },
         fonts: {
             heading: displayValue(typography.headingFont, 'Inter, Arial, Helvetica, sans-serif'),
@@ -877,6 +933,46 @@ function renderItemList(items, className = 'hf-items') {
           <span class="hf-item-label">${html(item.label || '')}</span>
           ${item.subtext ? `<span class="hf-item-subtext">${html(item.subtext)}</span>` : ''}
         </div>`).join('')}</div>`;
+}
+
+function normalizeDisplaySemantics(value) {
+    return String(value || '')
+        .toLowerCase()
+        .replace(/([$€£¥])\s+/g, '$1')
+        .replace(/[^a-z0-9$€£¥%]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function displayNumbers(value) {
+    return (String(value || '').match(/[-+]?\d[\d,]*(?:\.\d+)?(?:\s*%)?/g) || [])
+        .map(raw => {
+            const percent = /%/.test(raw);
+            const number = Number(raw.replace(/[%\s,]/g, ''));
+            return Number.isFinite(number) ? `${number}${percent ? '%' : ''}` : null;
+        })
+        .filter(Boolean);
+}
+
+function semanticallyRepeatsDisplay(a, b) {
+    const left = normalizeDisplaySemantics(a);
+    const right = normalizeDisplaySemantics(b);
+    if (!left || !right) return false;
+    if (left === right) return true;
+
+    const leftNumbers = new Set(displayNumbers(left));
+    const rightNumbers = new Set(displayNumbers(right));
+    const sharesNumber = [...leftNumbers].some(value => rightNumbers.has(value));
+    if (!sharesNumber) return false;
+
+    const words = value => new Set(
+        value.split(' ').filter(word => word.length > 1 && !/^\d/.test(word))
+    );
+    const leftWords = words(left);
+    const rightWords = words(right);
+    return [...leftWords].some(word => rightWords.has(word))
+        || leftWords.size === 0
+        || rightWords.size === 0;
 }
 
 function templateKicker(_type, mg = null) {
@@ -1748,6 +1844,33 @@ function buildAgenticItems(items = []) {
         </div>`).join('')}</div>`;
 }
 
+function _graphicTextStyleRanges(mg) {
+    return mg?.textStyleRanges || mg?.mgData?.textStyleRanges || [];
+}
+
+function buildStyledTextMarkup(value, mg, options = {}) {
+    const source = options.kinetic
+        ? String(value == null ? '' : value).split(/\s+/).filter(Boolean).slice(0, 14).join(' ')
+        : String(value == null ? '' : value);
+    const segments = textStyleSegments(source, _graphicTextStyleRanges(mg));
+    if (options.kinetic) {
+        return segments.map((segment) => (
+            String(segment.text).split(/(\s+)/).filter((part) => part !== '').map((part) => {
+                if (/^\s+$/.test(part)) return html(part);
+                const styled = segment.color
+                    ? ` hf-agentic-text-range" data-hf-text-range="${html(part)}" data-hf-text-range-color="${html(segment.color)}" style="--hf-text-range-color:${html(segment.color)}`
+                    : '';
+                return `<span class="hf-agentic-word${styled}">${html(part)}</span>`;
+            }).join('')
+        )).join('');
+    }
+    return segments.map((segment) => (
+        segment.color
+            ? `<span class="hf-agentic-text-range" data-hf-text-range="${html(segment.text)}" data-hf-text-range-color="${html(segment.color)}" style="--hf-text-range-color:${html(segment.color)}">${html(segment.text)}</span>`
+            : html(segment.text)
+    )).join('');
+}
+
 function buildAgenticMarkup({ mg, id, baseAttrs, spec, asset, fallbackMarkup = '', start, duration, track, text, subtext, kicker, type }) {
     const title = displayValue(spec?.title, text, mg?.text, mg?.templateText, mg?.keyword) || 'Motion Graphic';
     const subtitle = displayValue(spec?.subtitle, subtext, mg?.subtext, mg?.templateSubtext) || '';
@@ -1768,10 +1891,19 @@ function buildAgenticMarkup({ mg, id, baseAttrs, spec, asset, fallbackMarkup = '
     // stagger them in (real kinetic typography) instead of fading the whole
     // line as one block (which reads as a static headline).
     const isKinetic = type === 'kinetic-text';
-    const titleInner = isKinetic
-        ? String(title).split(/\s+/).filter(Boolean).slice(0, 14).map(w => `<span class="hf-agentic-word">${html(w)}</span>`).join(' ')
-        : html(title);
-    const titleClass = isKinetic ? 'hf-agentic-title hf-agentic-kinetic' : 'hf-agentic-title hf-agentic-part';
+    const isTypewriterMotion = (
+        type === 'typewriter'
+        || cleanName(mg?._hfVisual?.variant || mg?.subType || mg?.variant || '', '') === 'typewriter'
+        || cleanName(spec?.motion?.entrance || mg?._hfVisual?.animation || mg?.animation || '', '') === 'typewriter'
+    );
+    const titleInner = buildStyledTextMarkup(title, mg, { kinetic: isKinetic });
+    const titleClass = isKinetic
+        ? 'hf-agentic-title hf-agentic-kinetic'
+        : (
+            isTypewriterMotion
+                ? 'hf-agentic-title hf-agentic-typewriter'
+                : 'hf-agentic-title hf-agentic-part'
+        );
     return `
     ${bg}
     <div ${baseAttrs} data-hf-composition="agentic" data-hf-layout="${html(spec.layout)}" data-hf-safe-zone="${html(spec.safeZone)}" data-hf-media-treatment="${html(mediaTreatment)}" data-hf-text-strategy="${html(spec?.textStrategy || '')}" data-hf-motion-emphasis="${html(spec?.motion?.emphasis || '')}" data-hf-motion-exit="${html(spec?.motion?.exit || '')}" data-hf-composition-source="${html(spec?.source || '')}">
@@ -1807,7 +1939,11 @@ function getAgenticCompositionSpec(mg, context = {}) {
 
 function allocateGraphicTrack(isFull, order = 0) {
     const index = Number.isFinite(Number(order)) ? Math.max(0, Math.floor(Number(order))) : 0;
-    const base = isFull ? 500 : 100;
+    // Stage visuals replace the footage, while overlay graphics must remain
+    // visible above that stage (templateHint + mgHint is a supported lane).
+    // The old ordering put overlays below fullscreen/template tracks, silently
+    // hiding lower thirds and callouts whenever both occupied the same scene.
+    const base = isFull ? 500 : 1000;
     return base + index;
 }
 
@@ -1851,7 +1987,7 @@ function buildMgMarkup(mg, id, kind, dirs, mediaDir, assetCache, visual = null, 
     const effectiveAnimation = displayValue(useAgenticRenderer ? agenticSpec?.motion?.entrance : null, resolvedVisual.animation, 'fadeSlide');
     const effectiveSpeed = normalizeMotionSpeed(useAgenticRenderer ? agenticSpec?.motion?.speed : null, resolvedVisual.speed);
     const animationClass = classToken(effectiveAnimation, 'fadeSlide');
-    const extra = `${isTemplateKind ? ' hf-template' : ''}${isFull ? ' hf-fullscreen' : ''}${transparentTemplateBg ? ' hf-transparent-bg' : ''}${asset ? ' hf-has-bg' : ' hf-no-bg'}${useAgenticRenderer ? ` ${agenticClasses(agenticSpec)}` : ''}`;
+    const extra = `${isTemplateKind ? ' hf-template' : ''}${isFull ? ' hf-fullscreen' : ''}${transparentTemplateBg ? ' hf-transparent-bg' : ''}${asset ? ' hf-has-bg' : ' hf-no-bg'}${resolvedVisual.accentRuleVisible === false ? ' hf-no-accent-rule' : ''}${useAgenticRenderer ? ` ${agenticClasses(agenticSpec)}` : ''}`;
     const baseAttrs = `id="${id}" data-start="${start}" data-duration="${duration}" data-track-index="${track}" class="clip hf-mg hf-type-${classToken(type, 'graphic')}${extra} hf-theme-${themeClass} hf-style-${styleClass} hf-card-${cardClass} hf-variant-${variantClass} hf-anim-${animationClass} pos-${classToken(position, 'center')}" data-hf-anim="${id}" data-hf-type="${html(type)}" data-hf-style="${html(resolvedVisual.styleName)}" data-hf-theme="${html(resolvedVisual.themeId)}" data-hf-variant="${html(variant)}" data-hf-animation="${html(effectiveAnimation)}" data-hf-speed="${effectiveSpeed}" style="${html(hyperframeStyleVars({ ...resolvedVisual, speed: effectiveSpeed }))}"`;
 
     // ── Agent-authored composition path (composition-author worker) ──
@@ -1860,7 +1996,7 @@ function buildMgMarkup(mg, id, kind, dirs, mediaDir, assetCache, visual = null, 
     // html/css and feeds its GSAP fragment into the master timeline. This
     // MUST come before the agentic-spec early return — overlay types take
     // that path and were silently losing their authored comps.
-    const authored = mg._authoredComposition;
+    const authored = prefersFixedRenderer(mg) ? null : mg._authoredComposition;
     const authoredOverlay = kind === 'overlay';
     if (authored && authored.html && authored.timeline && (isFull || authoredOverlay)) {
         // v9 asset pipe: the author wrote __HF_ASSET_i__ tokens; substitute
@@ -2056,6 +2192,12 @@ function buildMgMarkup(mg, id, kind, dirs, mediaDir, assetCache, visual = null, 
             ? items
             : (itemDrivenTemplate ? parseItemsFromText(subtext || text).slice(0, 6) : []);
         const stage = type.replace(/-card$/, '').replace(/-/g, '-');
+        const singleStatSummary = type === 'stat-card' && list.length === 1
+            ? `${list[0].value || ''} ${list[0].label || ''} ${list[0].subtext || ''}`.trim()
+            : '';
+        const titleText = singleStatSummary && semanticallyRepeatsDisplay(text, singleStatSummary)
+            ? ''
+            : text;
         return `
     ${renderAssetFill(asset, id, start, duration, track, { template: isTemplateKind, preRoll: isTemplateKind ? 0.12 : 0 })}
     <div ${baseAttrs}>
@@ -2063,7 +2205,7 @@ function buildMgMarkup(mg, id, kind, dirs, mediaDir, assetCache, visual = null, 
       <div class="hf-template-shade"></div>
       <div class="hf-template-stage hf-template-stage-${stage}">
         ${type === 'person-intro' && kicker ? `<div class="hf-person-label">${html(kicker)}</div>` : ''}
-        ${buildTitleBits(text, subtext, { kicker: type === 'person-intro' ? '' : kicker })}
+        ${buildTitleBits(titleText, subtext, { kicker: type === 'person-intro' ? '' : kicker })}
         ${list.length ? renderItemList(list, 'hf-template-items') : ''}
       </div>
     </div>`;
@@ -2220,12 +2362,18 @@ function collectTransitionOverlays(sceneAnims, plan) {
 function collectGraphics(plan) {
     const graphics = [];
     const scenes = Array.isArray(plan?.scenes) ? plan.scenes : [];
-    for (const mg of plan.motionGraphics || []) {
-        if (!mg || mg.disabled) continue;
-        graphics.push({ ...mg, _hfOwnerScene: findOwnerSceneForGraphic(scenes, mg), _hfKind: 'overlay' });
-    }
-    for (const mg of plan.mgScenes || []) {
-        if (!mg || mg.disabled) continue;
+    (plan.motionGraphics || []).forEach((mg, sourceIndex) => {
+        if (!mg || mg.disabled) return;
+        graphics.push({
+            ...mg,
+            _hfOwnerScene: findOwnerSceneForGraphic(scenes, mg),
+            _hfKind: 'overlay',
+            _hfSourceGroup: 'motionGraphics',
+            _hfSourceIndex: sourceIndex,
+        });
+    });
+    (plan.mgScenes || []).forEach((mg, sourceIndex) => {
+        if (!mg || mg.disabled) return;
         graphics.push({
             ...mg,
             type: mg.type || mg.mgType || 'fullscreenMG',
@@ -2233,10 +2381,12 @@ function collectGraphics(plan) {
             subtext: getMgSubtext(mg) || '',
             _hfOwnerScene: findOwnerSceneForGraphic(scenes, mg),
             _hfKind: 'fullscreen',
+            _hfSourceGroup: 'mgScenes',
+            _hfSourceIndex: sourceIndex,
         });
-    }
-    for (const mg of plan.templateScenes || []) {
-        if (!mg || mg.disabled) continue;
+    });
+    (plan.templateScenes || []).forEach((mg, sourceIndex) => {
+        if (!mg || mg.disabled) return;
         graphics.push({
             ...mg,
             type: resolveVisualType(mg, 'template'),
@@ -2244,8 +2394,10 @@ function collectGraphics(plan) {
             subtext: getMgSubtext(mg) || mg.templateSubtext || '',
             _hfOwnerScene: findOwnerSceneForGraphic(scenes, mg),
             _hfKind: 'template',
+            _hfSourceGroup: 'templateScenes',
+            _hfSourceIndex: sourceIndex,
         });
-    }
+    });
     return graphics.sort((a, b) => toSeconds(a.startTime, 0) - toSeconds(b.startTime, 0));
 }
 
@@ -2408,7 +2560,8 @@ function sceneBaseTransform(scene) {
 // screen. Video footage already moves, so leave it alone. Deterministic direction
 // from the scene index so it's stable across renders.
 function kenBurnsFor(scene, isImage) {
-    if (!isImage || scene?.kenBurns === false) return null;
+    if (!isImage || scene?.kenBurns === false || scene?.kenBurnsEnabled === false) return null;
+    const speed = clampNumber(scene?.kenBurnsSpeed, 0.25, 2, 1);
     // Floating clips normally sit still (the card element itself carries the motion),
     // but a floating PRESENTER still (talking-head framed insert) needs subtle idle
     // life so a held photo isn't dead. Normal floating clips stay still.
@@ -2435,7 +2588,12 @@ function kenBurnsFor(scene, isImage) {
     // exposed a ~30px black strip at every image scene start that slowly
     // closed as the zoom reached 1.09 — "the image animates but the black
     // box doesn't". 1.06 covers ±3% pan with margin from frame one.
-    return { fromScale: 1.06, toScale: 1.15, fromX: -dir * 1.6, toX: dir * 1.6 };
+    return {
+        fromScale: 1.06,
+        toScale: +(1.06 + 0.09 * speed).toFixed(4),
+        fromX: +(-dir * 1.6 * speed).toFixed(3),
+        toX: +(dir * 1.6 * speed).toFixed(3),
+    };
 }
 
 // Word-timed captions. The pipeline aligns scene.words[] = {word,start,end} to the
@@ -2445,7 +2603,11 @@ function buildCaptionCues(plan) {
     if (!plan || !plan.subtitlesEnabled) return [];
     // Karaoke (word-by-word highlight) is OPT-IN. Default OFF → cues are exactly
     // as before (no `words` field), so caption markup/animation are unchanged.
-    const karaoke = /^(1|true|on|yes)$/i.test(String(process.env.KARAOKE_CAPTIONS || '').trim());
+    const karaoke = typeof plan.captionKaraoke === 'boolean'
+        ? plan.captionKaraoke
+        : /^(1|true|on|yes)$/i.test(String(process.env.KARAOKE_CAPTIONS || '').trim());
+    const wordsPerCue = Math.max(2, Math.min(12, Math.round(Number(plan.captionWordsPerCue) || 7)));
+    const maxDuration = Math.max(0.8, Math.min(5, Number(plan.captionMaxDuration) || 3.2));
     const cues = [];
     let idx = 0;
     for (const scene of plan.scenes || []) {
@@ -2473,14 +2635,55 @@ function buildCaptionCues(plan) {
             group.push(w);
             const txt = String(w.word ?? w.text ?? '');
             const span = toSeconds(w.end, 0) - toSeconds(group[0].start, 0);
-            if (group.length >= 7 || span >= 3.2 || /[.!?]$/.test(txt)) flush();
+            if (group.length >= wordsPerCue || span >= maxDuration || /[.!?]$/.test(txt)) flush();
         }
         flush();
     }
     return cues;
 }
 
+function resolveCaptionVisual(plan) {
+    const source = plan?.captionStyle && typeof plan.captionStyle === 'object'
+        ? plan.captionStyle
+        : {};
+    const position = ['top', 'center', 'bottom'].includes(source.position)
+        ? source.position
+        : 'bottom';
+    const background = ['box', 'pill', 'none'].includes(source.background)
+        ? source.background
+        : 'box';
+    const color = normalizeTextColor(source.color) || '#ffffff';
+    const backgroundColor = normalizeTextColor(source.backgroundColor) || 'rgba(4,8,16,0.64)';
+    const activeColor = normalizeTextColor(source.activeColor) || '#facc15';
+    const fontSize = clampNumber(source.fontSize, 24, 84, 46);
+    const maxWidth = clampNumber(source.maxWidth, 720, 1760, 1560);
+    const fontWeight = clampNumber(source.fontWeight, 400, 950, 800);
+    const placement = position === 'top'
+        ? 'top: 72px; bottom: auto; align-items: flex-start;'
+        : position === 'center'
+            ? 'top: 0; bottom: 0; align-items: center;'
+            : 'top: auto; bottom: 92px; align-items: flex-end;';
+    const shell = background === 'none'
+        ? 'padding: 0; background: transparent; border-radius: 0;'
+        : background === 'pill'
+            ? `padding: 12px 32px 14px; background: ${backgroundColor}; border-radius: 999px;`
+            : `padding: 10px 28px 12px; background: ${backgroundColor}; border-radius: 14px;`;
+    return {
+        position,
+        background,
+        color,
+        backgroundColor,
+        activeColor,
+        fontSize,
+        maxWidth,
+        fontWeight,
+        placement,
+        shell,
+    };
+}
+
 function buildComposition({ plan, dirs, projectDir, options = {} }) {
+    plan = timelineContract.normalizePlan(plan);
     const mediaDir = path.join(projectDir, 'media');
     ensureDir(mediaDir);
     const grainTextureRel = writeGrainTexture(mediaDir) || '';
@@ -2573,7 +2776,7 @@ function buildComposition({ plan, dirs, projectDir, options = {} }) {
         const start = toSeconds(scene.startTime, 0);
         const duration = getDuration(scene, Math.max(0.5, toSeconds(scene.endTime, start + 3) - start));
         const durationForTimeline = renderDuration(duration, 0.5);
-        const id = `scene-${cleanName(scene.index ?? sceneTags.length)}`;
+        const id = `scene-${cleanName(scene.clipId ?? `${scene.index ?? sceneTags.length}-${sceneTags.length}`)}`;
         const trackIndex = parseTrackIndex(scene.trackId, 0);
         const mediaStartOffset = options?.preview ? getSceneVideoOffset(scene) : 0;
         const mediaStartAttr = mediaStartOffset > 0.001 ? ` data-media-start="${mediaStartOffset.toFixed(3)}"` : '';
@@ -2725,8 +2928,18 @@ function buildComposition({ plan, dirs, projectDir, options = {} }) {
                     inner = m.svg;
                 } else return;
                 const iconId = `${id}-icon-${j}`;
+                const iconColor = normalizeTextColor(m.color)
+                    || normalizeTextColor(iconAccent)
+                    || '#38bdf8';
+                const iconScale = clampNumber(m.scale, 0.25, 3, 1);
+                const iconWidth = Math.round((framedClass ? 400 : 260) * iconScale);
+                const iconHeight = Math.round((framedClass ? 270 : 260) * iconScale);
+                const iconPosition = classToken(m.position, 'top-right');
+                const centerOffset = iconPosition === 'center-left' || iconPosition === 'center-right'
+                    ? `;margin-top:-${Math.round(iconHeight / 2)}px`
+                    : '';
                 iconMarkup += `
-      <div id="${iconId}" class="hf-scene-icon${framedClass} hf-icon-pos-${classToken(m.position, 'top-right')}" style="color:${iconAccent}">${inner}</div>`;
+      <div id="${iconId}" class="hf-scene-icon${framedClass} hf-icon-pos-${iconPosition}" style="color:${iconColor};width:${iconWidth}px;height:${iconHeight}px${centerOffset}">${inner}</div>`;
                 iconAnims.push({ id: iconId, start: start + toSeconds(m.at, 0.5), duration: Math.max(1, toSeconds(m.dur, 2)) });
             });
             // Keyword-glow overlays (#18) — word-synced emphasis inside the wrap so
@@ -2801,11 +3014,15 @@ function buildComposition({ plan, dirs, projectDir, options = {} }) {
                         if (!irel) return;
                         inner = `<img src="${html(irel)}" alt="">`;
                     } else if (m.kind === 'svg' && m.svg) {
-                        inner = `<div class="hf-pexplain-svg" style="color:${iconAccent}">${m.svg}</div>`;
+                        const iconColor = normalizeTextColor(m.color)
+                            || normalizeTextColor(iconAccent)
+                            || '#38bdf8';
+                        inner = `<div class="hf-pexplain-svg" style="color:${iconColor}">${m.svg}</div>`;
                     } else return;
                     const exId = `${id}-ex-${j}`;
+                    const explainScale = clampNumber(m.scale, 0.25, 3, 1);
                     explainHtml += `
-        <div id="${exId}" class="hf-pexplain">${inner}</div>`;
+        <div id="${exId}" class="hf-pexplain" style="--hf-explain-scale:${explainScale}">${inner}</div>`;
                     explainAnims.push({ id: exId, start: start + toSeconds(m.at, 0.6), duration: Math.max(1.6, toSeconds(m.dur, 2.8)), from: hostSide === 'left' ? 'right' : 'left' });
                 });
                 frameExtraClass = ' hf-pstage is-host-' + hostSide;
@@ -2823,7 +3040,7 @@ function buildComposition({ plan, dirs, projectDir, options = {} }) {
     </div>`);
             sceneHoldSources.push({
                 sourceId: id,
-                sourceSceneIndex: scene.index,
+                sourceSceneIndex: scene.sourceSceneIndex ?? scene.index,
                 start,
                 end: start + durationForTimeline,
                 rel,
@@ -2902,6 +3119,7 @@ function buildComposition({ plan, dirs, projectDir, options = {} }) {
     </div>`);
 
     const captionCues = buildCaptionCues(plan);
+    const captionVisual = resolveCaptionVisual(plan);
     const captionTags = captionCues.map(c => {
         // Karaoke: when the cue carries per-word timings, emit one span per word
         // (highlighted on the timeline). Otherwise render the single text span
@@ -2948,13 +3166,14 @@ function buildComposition({ plan, dirs, projectDir, options = {} }) {
         const visual = mg._hfVisual || resolveHyperframeVisual(mg, mg._hfKind, type, plan);
         const text = getMgText(mg);
         const subtext = getMgSubtext(mg);
+        const resolvedItems = itemsFromMg(mg, text, subtext);
         const spec = getAgenticCompositionSpec(mg, {
             kind: mg._hfKind,
             type,
             visual,
             text,
             subtext,
-            items: itemsFromMg(mg, text, subtext),
+            items: resolvedItems,
             kicker: templateKicker(type, mg),
             hasAsset: hasResolvedMgAsset(mg, type, dirs),
         });
@@ -2964,12 +3183,24 @@ function buildComposition({ plan, dirs, projectDir, options = {} }) {
         graphicTags.push(buildMgMarkup(mg, id, mg._hfKind, dirs, mediaDir, assetCache, visual, i));
         graphicAnims.push({
             id,
+            selector: `#${id}`,
             start: timing.start,
             duration: timing.duration,
+            rawStart: timing.rawStart,
+            rawDuration: timing.rawDuration,
+            timingClamped: Boolean(
+                timing.clamped
+                || Math.abs(timing.start - Math.max(0, Number(timing.rawStart) || 0)) > 0.01
+                || Math.abs(timing.duration - Math.max(MIN_VISUAL_DURATION, Number(timing.rawDuration) || MIN_VISUAL_DURATION)) > 0.01
+            ),
             kind: mg._hfKind,
+            sourceGroup: mg._hfSourceGroup || '',
+            sourceIndex: Number.isInteger(mg._hfSourceIndex) ? mg._hfSourceIndex : null,
+            sourceClipId: mg.clipId || mg.id || '',
+            ownerSceneIndex: mg?._hfOwnerScene?.index ?? mg?.sceneIndex ?? null,
             // set by buildMgMarkup when the authored markup actually rendered
             // (false when it fell back to the fixed renderer)
-            authored: Boolean(mg._authoredRendered),
+            authored: Boolean(mg._authoredRendered && !prefersFixedRenderer(mg)),
             // seamless stage-visual chain boundaries (no container pop)
             seamIn: _seamIn.has(i),
             seamOut: _seamOut.has(i),
@@ -2989,6 +3220,15 @@ function buildComposition({ plan, dirs, projectDir, options = {} }) {
             speed: effectiveSpeed,
             styleName: visual.styleName,
             themeId: visual.themeId,
+            cardStyle: visual.cardStyle,
+            transparentBackground: visual.cardStyle === 'transparent',
+            textColor: visual.colors?.text || '',
+            accentRuleVisible: visual.accentRuleVisible !== false,
+            fixedRendererOverride: prefersFixedRenderer(mg),
+            textPreview: String(text || '').replace(/\s+/g, ' ').trim().slice(0, 180),
+            charCount: String(text || '').length,
+            wordCount: String(`${text || ''} ${subtext || ''}`).trim().split(/\s+/).filter(Boolean).length,
+            itemCount: resolvedItems.length,
             transparentTemplateBg,
         });
     });
@@ -3105,7 +3345,8 @@ function buildComposition({ plan, dirs, projectDir, options = {} }) {
     const audioSrc = resolveMaybeFile(plan.audio, dirs);
     if (audioSrc) {
         const rel = copyAsset(audioSrc, mediaDir, 'voiceover', assetCache);
-        audioTags.push(`    <audio id="voiceover" data-start="0" data-duration="${totalDuration.toFixed(3)}" data-track-index="30" class="clip" src="${html(rel)}" data-volume="1"></audio>`);
+        const narrationVolume = clampNumber(plan.narrationVolume, 0, 1, 1);
+        audioTags.push(`    <audio id="voiceover" data-start="0" data-duration="${totalDuration.toFixed(3)}" data-track-index="30" class="clip" src="${html(rel)}" data-volume="${narrationVolume}"></audio>`);
     }
     for (const [i, sfx] of (plan.sfxClips || []).entries()) {
         if (!sfx || !sfx.file) continue;
@@ -3121,6 +3362,57 @@ function buildComposition({ plan, dirs, projectDir, options = {} }) {
     if (glowAnims.length) _timing.glowAnims = glowAnims;
     if (explainAnims.length) _timing.explainAnims = explainAnims;
     const timelineData = JSON.stringify(_timing, null, 2);
+    // Machine-readable motion contract for the automatic Motion QA agent.
+    // HyperFrames' keyframes command statically sees literal authored tweens,
+    // while the fixed renderer intentionally builds many tweens through
+    // seek-safe loops/helpers. This sidecar preserves exact resolved subjects,
+    // timings and source-plan identities so both paths are inspectable.
+    const motionManifest = {
+        version: 1,
+        compositionId: 'yta-hyperframes',
+        duration: totalDuration,
+        scenes: sceneAnims.map((item) => ({
+            id: item.id,
+            selector: `#${item.id}`,
+            start: item.start,
+            duration: item.duration,
+            hold: Boolean(item.hold),
+            motionIn: Boolean(item._motionIn),
+            motionOut: Boolean(item._motionOut),
+            coveredOut: Boolean(item._coveredOut),
+            hasKenBurns: Boolean(item.kenBurns),
+            hasFocusPan: Boolean(item.focusPan),
+        })),
+        graphics: graphicAnims,
+        transitions: transitionOverlays.map((item) => ({
+            id: item.id,
+            selector: `#${item.id}`,
+            start: item.start,
+            duration: item.duration,
+            boundary: item.boundary,
+            type: item.type,
+            mode: item.mode,
+            outId: item.outId || null,
+            inId: item.inId || null,
+        })),
+        captions: captionCues.map((item) => ({
+            id: item.id,
+            selector: `#${item.id}`,
+            start: item.start,
+            duration: item.duration,
+        })),
+        icons: iconAnims.map((item) => ({
+            id: item.id,
+            selector: `#${item.id}`,
+            start: item.start,
+            duration: item.duration,
+        })),
+    };
+    fs.writeFileSync(
+        path.join(projectDir, 'hyperframes-motion-manifest.json'),
+        JSON.stringify(motionManifest, null, 2),
+        'utf8'
+    );
     // Global background treatment (user-tuned): a medium edge vignette painted over
     // the WHOLE composition. Footage/packs stay true-color (neutral darken only); the
     // flat cream template cards gain depth instead of reading as stark empty canvas.
@@ -3204,6 +3496,7 @@ ${bgPackCss}
     .hf-agentic-kinetic { display: flex; flex-wrap: wrap; gap: 0.26em 0.32em; justify-content: inherit; }
     .hf-agentic-safe-center .hf-agentic-kinetic { justify-content: center; }
     .hf-agentic-word { display: inline-block; }
+    .hf-agentic-text-range { color: var(--hf-text-range-color, currentColor); }
     .hf-agentic-layout-focus-panel .hf-agentic-stage { align-content: center; justify-items: center; text-align: center; }
     .hf-agentic-layout-focus-panel .hf-agentic-rule { display: none; }
     .hf-agentic-layout-focus-panel .hf-agentic-copy { padding: 38px 58px 44px; max-width: 1180px; background: color-mix(in srgb, var(--hf-bg), transparent 12%); border: var(--hf-stroke) solid color-mix(in srgb, var(--hf-primary), transparent 42%); border-left: 12px solid var(--hf-primary); border-radius: var(--hf-radius); box-shadow: var(--hf-shadow); backdrop-filter: blur(20px) saturate(1.1); }
@@ -3213,6 +3506,8 @@ ${bgPackCss}
     .hf-agentic-safe-center .hf-agentic-stage { align-content: center; justify-items: center; text-align: center; }
     .hf-agentic-safe-center .hf-agentic-copy { justify-items: center; }
     .hf-agentic-rule { width: 8px; min-height: 132px; border-radius: 999px; background: linear-gradient(180deg, var(--hf-primary), var(--hf-accent)); box-shadow: 0 0 34px color-mix(in srgb, var(--hf-primary), transparent 58%); }
+    .hf-no-accent-rule .hf-agentic-rule { display: none !important; }
+    .hf-no-accent-rule .hf-agentic-stage { grid-template-columns: minmax(0, 1fr) !important; }
     .hf-agentic-copy { display: grid; gap: 12px; max-width: var(--hf-agentic-copy-max); position: relative; }
     .hf-agentic-kicker { color: var(--hf-accent); font-family: var(--hf-caption-font); font-size: 24px; font-weight: 900; text-transform: uppercase; letter-spacing: 0; }
     .hf-agentic-title { font-family: var(--hf-heading-font); font-size: clamp(58px, 5.8vw, 110px); line-height: 0.98; font-weight: 950; letter-spacing: 0; text-wrap: balance; }
@@ -3251,9 +3546,10 @@ ${bgPackCss}
     .hf-type-lower-third.hf-variant-box .hf-agentic-stage { grid-template-columns: minmax(0, 1fr); }
     .hf-type-lower-third.hf-variant-box .hf-agentic-rule { display: none; }
     .hf-type-lower-third.hf-variant-box .hf-agentic-copy { border: var(--hf-stroke) solid color-mix(in srgb, var(--hf-primary), transparent 38%); background: color-mix(in srgb, var(--hf-bg), transparent 6%); }
-    .hf-type-lower-third.hf-variant-underline .hf-agentic-stage { grid-template-columns: minmax(0, 1fr); }
+    .hf-type-lower-third.hf-variant-underline .hf-agentic-stage { grid-template-columns: minmax(0, 1fr); justify-items: start; }
     .hf-type-lower-third.hf-variant-underline .hf-agentic-rule { display: none; }
-    .hf-type-lower-third.hf-variant-underline .hf-agentic-copy { padding: 16px 6px 18px; background: transparent; box-shadow: none; backdrop-filter: none; border-radius: 0; border-bottom: 7px solid var(--hf-accent); }
+    .hf-type-lower-third.hf-variant-underline .hf-agentic-copy { justify-self: start; width: fit-content; max-width: min(1180px, 100%); padding: 14px 8px 28px; background: transparent; box-shadow: none; backdrop-filter: none; border-radius: 0; border-bottom: 5px solid var(--hf-accent); }
+    .hf-type-lower-third.hf-variant-underline .hf-agentic-title { line-height: 1.04; }
     .hf-type-lower-third.hf-variant-banner.hf-agentic-layout-lower-third { left: 0; right: 0; bottom: 74px; }
     .hf-type-lower-third.hf-variant-banner .hf-agentic-stage { grid-template-columns: minmax(0, 1fr); }
     .hf-type-lower-third.hf-variant-banner .hf-agentic-rule { display: none; }
@@ -3295,6 +3591,8 @@ ${bgPackCss}
     .hf-agentic-emphasis-urgent .hf-agentic-rule { box-shadow: 0 0 42px color-mix(in srgb, var(--hf-accent), transparent 36%); }
     .hf-agentic-emphasis-elegant .hf-agentic-copy { gap: 18px; }
     .hf-card-outline .hf-copy-shell, .hf-card-outline .hf-stat-card, .hf-card-outline .hf-item { background: transparent; border-color: color-mix(in srgb, var(--hf-primary), transparent 38%); box-shadow: none; backdrop-filter: none; }
+    .hf-card-transparent .hf-agentic-copy, .hf-card-transparent .hf-copy-shell, .hf-card-transparent .hf-stat-card, .hf-card-transparent .hf-item { background: transparent !important; border-color: transparent !important; box-shadow: none !important; backdrop-filter: none !important; }
+    .hf-agentic-typewriter { display: inline-block; max-width: 100%; clip-path: inset(0 100% 0 0); }
     .hf-card-glass .hf-copy-shell, .hf-card-glass .hf-stat-card, .hf-card-glass .hf-item { background: color-mix(in srgb, var(--hf-bg), transparent 30%); border-color: rgba(255,255,255,0.18); box-shadow: var(--hf-shadow); backdrop-filter: blur(28px) saturate(1.18); }
     .hf-style-minimal { text-shadow: none; }
     .hf-style-minimal .hf-copy-shell, .hf-style-minimal .hf-template-stage, .hf-style-minimal .hf-grid-stage, .hf-style-minimal .hf-data-stage, .hf-style-minimal .hf-list-stage { background: color-mix(in srgb, var(--hf-bg), transparent 42%); box-shadow: none; }
@@ -3306,7 +3604,7 @@ ${bgPackCss}
     .hf-type-lower-third { left: 126px; right: 126px; bottom: 92px; }
     .hf-type-lower-third .hf-copy-shell { border-left-color: var(--hf-accent); background: linear-gradient(90deg, var(--hf-bg), rgba(15,23,42,0.58), rgba(15,23,42,0.18)); }
     .hf-type-lower-third .hf-title { font-size: 72px; }
-    .hf-type-lower-third.hf-variant-underline .hf-copy-shell { padding: 20px 0 18px; border-left: 0; border-bottom: 7px solid var(--hf-accent); border-radius: 0; background: transparent; box-shadow: none; backdrop-filter: none; }
+    .hf-type-lower-third.hf-variant-underline .hf-copy-shell { display: inline-grid; width: fit-content; max-width: 100%; box-sizing: border-box; padding: 18px 0 28px; border-left: 0; border-bottom: 5px solid var(--hf-accent); border-radius: 0; background: transparent; box-shadow: none; backdrop-filter: none; }
     .hf-type-lower-third.hf-variant-underline .hf-title { font-size: 68px; }
     .hf-type-lower-third.hf-variant-box { left: 116px; right: auto; width: 980px; }
     .hf-type-lower-third.hf-variant-box .hf-copy-shell { border: var(--hf-stroke) solid color-mix(in srgb, var(--hf-primary), transparent 35%); }
@@ -3446,8 +3744,8 @@ ${bgPackCss}
     .hf-pstage.is-host-left .hf-pstage-slot { right: 4%; }
     .hf-pstage.is-host-right .hf-pstage-slot { left: 4%; }
     .hf-pexplain { position: absolute; inset: 0; opacity: 0; visibility: hidden; border-radius: 14px; overflow: hidden; border: 3px solid rgba(255,255,255,0.92); box-shadow: 0 18px 50px rgba(0,0,0,0.55); background: #0a0d13; }
-    .hf-pexplain > img { width: 100%; height: 100%; object-fit: cover; }
-    .hf-pexplain-svg { display: flex; align-items: center; justify-content: center; width: 100%; height: 100%; }
+    .hf-pexplain > img { width: 100%; height: 100%; object-fit: cover; transform: scale(var(--hf-explain-scale, 1)); }
+    .hf-pexplain-svg { display: flex; align-items: center; justify-content: center; width: 100%; height: 100%; transform: scale(var(--hf-explain-scale, 1)); }
     .hf-pexplain-svg svg { width: 70%; height: 70%; }
     /* Keyword glow (#18): word-synced emphasis phrase. opacity/visibility default hidden = frame-0 safe. */
     .hf-kw-glow { position: absolute; opacity: 0; visibility: hidden; z-index: 7; pointer-events: none; font-family: var(--hf-heading-font, Inter, sans-serif); font-weight: 900; font-size: 64px; letter-spacing: -0.01em; text-transform: uppercase; white-space: nowrap; }
@@ -3481,21 +3779,21 @@ ${bgPackCss}
     /* Anamorphic lens flare: a bright vertical light core streaks across; the flare is a thin horizontal blue-white streak flashing through the middle. */
     .hf-transition-lens-flare .hf-transition-slab { background: radial-gradient(ellipse 11% 92% at 50% 50%, rgba(255,255,255,0.98), rgba(150,200,255,0.5) 42%, transparent 70%); transform: translateX(-130%); mix-blend-mode: screen; }
     .hf-transition-lens-flare .hf-transition-flare { background: linear-gradient(0deg, transparent 47%, rgba(120,180,255,0.5) 49%, rgba(255,255,255,0.96) 50%, rgba(120,180,255,0.5) 51%, transparent 53%); mix-blend-mode: screen; }
-    .hf-caption { position: absolute; left: 7%; right: 7%; bottom: 92px; display: flex; justify-content: center; align-items: flex-end; text-align: center; opacity: 0; z-index: 60; pointer-events: none; }
-    .hf-caption-text { display: inline-block; padding: 10px 28px 12px; background: rgba(4,8,16,0.64); border-radius: 14px; color: #ffffff; font-family: Inter, 'Segoe UI', Arial, sans-serif; font-weight: 800; font-size: 46px; line-height: 1.22; letter-spacing: -0.01em; text-shadow: 0 2px 16px rgba(0,0,0,0.7); max-width: 1560px; }
+    .hf-caption { position: absolute; left: 7%; right: 7%; ${captionVisual.placement} display: flex; justify-content: center; text-align: center; opacity: 0; z-index: 60; pointer-events: none; }
+    .hf-caption-text { display: inline-block; ${captionVisual.shell} color: ${captionVisual.color}; font-family: var(--hf-caption-font), Inter, 'Segoe UI', Arial, sans-serif; font-weight: ${captionVisual.fontWeight}; font-size: ${captionVisual.fontSize}px; line-height: 1.22; letter-spacing: -0.01em; text-shadow: 0 2px 16px rgba(0,0,0,0.7); max-width: ${captionVisual.maxWidth}px; }
     /* Karaoke word spans (KARAOKE_CAPTIONS opt-in; inert when captions are single-span). Active word lit by the timeline. */
     .hf-cap-word { display: inline; opacity: 0.5; }
   </style>
 </head>
 <body>
-  <div id="yta-hyperframes" data-composition-id="yta-hyperframes" data-width="1920" data-height="1080" data-start="0" data-duration="${totalDuration.toFixed(3)}">
+  <div id="yta-hyperframes" data-composition-id="yta-hyperframes" data-width="1920" data-height="1080" data-start="0" data-duration="${totalDuration.toFixed(3)}" data-visible-transition-count="${transitionOverlays.length}" data-motion-transition-count="${_txMotion}" data-overlay-transition-count="${transitionOverlays.length - _txMotion}">
 ${sceneTags.join('\n')}
 ${transitionTags.join('\n')}
 ${graphicTags.join('\n')}
 ${captionTags.join('\n')}
 ${audioTags.join('\n')}
   </div>
-  <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  <script src="vendor/gsap.min.js"></script>
   <script>
     window.__timelines = window.__timelines || {};
     const timing = ${timelineData};
@@ -3564,8 +3862,8 @@ ${audioTags.join('\n')}
         for (let i = 0; i < item.words.length; i++) {
           const wsel = sel + '-w' + i;
           if (!hfHas(wsel)) continue;
-          hfSet(wsel, { opacity: 0.5 }, item.start);
-          hfTo(wsel, { opacity: 1, duration: 0.12, ease: 'power1.out' }, Math.max(item.start, Number(item.words[i].t) || item.start));
+          hfSet(wsel, { opacity: 0.5, color: ${JSON.stringify(captionVisual.color)} }, item.start);
+          hfTo(wsel, { opacity: 1, color: ${JSON.stringify(captionVisual.activeColor)}, duration: 0.12, ease: 'power1.out' }, Math.max(item.start, Number(item.words[i].t) || item.start));
         }
       }
     }
@@ -3787,7 +4085,11 @@ ${audioTags.join('\n')}
           hfFromTo(sel + ' .hf-agentic-item', hfChildEnterState(item), hfChildShowState(item), item.start + 0.22);
         }
       }
-      if (type === 'typewriter') {
+      const usesTypewriterMotion = type === 'typewriter' || item.animation === 'typewriter' || item.variant === 'typewriter';
+      if (usesTypewriterMotion) {
+        const steps = Math.max(8, Math.min(80, Number(item.charCount) || Math.max(12, Number(item.wordCount || 1) * 6)));
+        const typeDuration = hfDuration(Math.min(2.4, Math.max(0.65, item.duration * 0.45)), item, 0.3, 2.4);
+        hfFromTo(sel + ' .hf-agentic-typewriter', { opacity: 1, clipPath: 'inset(0 100% 0 0)' }, { opacity: 1, clipPath: 'inset(0 0% 0 0)', duration: typeDuration, ease: 'steps(' + steps + ')' }, item.start + 0.12);
         hfFromTo(sel + ' .hf-typewriter-line span', { clipPath: 'inset(0 100% 0 0)' }, { clipPath: 'inset(0 0% 0 0)', duration: hfDuration(Math.min(1.4, Math.max(0.45, item.duration * 0.35)), item, 0.18, 1.4), ease: 'steps(18)' }, item.start + 0.12);
       }
       if (type === 'kinetic-text') {
@@ -4137,7 +4439,10 @@ ${fxTimelineScript}
       });
 
       seek(Number(params.get('t') || 0), false);
-      window.parent?.postMessage({ type: 'hf-preview-ready' }, '*');
+      window.parent?.postMessage({
+        type: 'hf-preview-ready',
+        rev: String(params.get('rev') || '')
+      }, '*');
     })();
     /*HF_PREVIEW_END*/
   </script>
@@ -4177,11 +4482,20 @@ ${theme}
 
 function generateHyperframesProject({ plan, projectDir, appRoot, tempDir, publicDir, inputDir, outputRoot, options = {} }) {
     if (!plan || typeof plan !== 'object') throw new Error('Missing video plan');
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    plan = timelineContract.normalizePlan(plan);
+    // Preview regeneration can happen several times inside one second (Agent
+    // apply/undo/redo). A second-resolution directory name made those runs
+    // overwrite the document currently loaded by Electron, leaving the iframe
+    // visually stale even though the canonical plan was already correct.
+    const stamp = `${new Date().toISOString().replace(/[:.]/g, '-')}-${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
+    const projectName = `yta-hf-${stamp}`;
     const root = outputRoot || path.join(projectDir, 'hyperframes');
     ensureDir(root);
-    const hfDir = path.join(root, `yta-hf-${stamp}`);
+    const hfDir = path.join(root, projectName);
     ensureDir(hfDir);
+    const vendorDir = path.join(hfDir, 'vendor');
+    ensureDir(vendorDir);
+    fs.copyFileSync(resolveGsapRuntime(), path.join(vendorDir, 'gsap.min.js'));
 
     // Auto-prune older generated projects. Each yta-hf-* dir carries a full
     // copy of all scene media (~hundreds of MB); a busy project accumulated
@@ -4190,7 +4504,7 @@ function generateHyperframesProject({ plan, projectDir, appRoot, tempDir, public
     try {
         const keepN = Math.max(1, parseInt(process.env.HF_KEEP_PROJECTS || '3', 10) || 3);
         const siblings = fs.readdirSync(root)
-            .filter(name => /^yta-hf-/.test(name) && name !== `yta-hf-${stamp}`)
+            .filter(name => /^yta-hf-/.test(name) && name !== projectName)
             .sort()
             .reverse();
         for (const old of siblings.slice(Math.max(0, keepN - 1))) {
@@ -4221,7 +4535,7 @@ function generateHyperframesProject({ plan, projectDir, appRoot, tempDir, public
     let freeGB = _freeGB(root);
     if (freeGB !== null && freeGB < minFreeGB) {
         try {
-            const stale = fs.readdirSync(root).filter(name => /^yta-hf-/.test(name) && name !== `yta-hf-${stamp}`);
+            const stale = fs.readdirSync(root).filter(name => /^yta-hf-/.test(name) && name !== projectName);
             for (const old of stale) fs.rmSync(path.join(root, old), { recursive: true, force: true });
             if (stale.length) console.warn(`[HyperFrames] Low disk (${freeGB.toFixed(1)} GB free) — reclaimed ALL ${stale.length} old project dir(s) to make room.`);
         } catch (e) { console.warn(`[HyperFrames] low-disk reclaim skipped: ${e.message}`); }
@@ -4247,12 +4561,17 @@ function generateHyperframesProject({ plan, projectDir, appRoot, tempDir, public
     const indexHtml = buildComposition({ plan, dirs, projectDir: hfDir, options });
     fs.writeFileSync(path.join(hfDir, 'index.html'), indexHtml, 'utf8');
     fs.writeFileSync(path.join(hfDir, 'video-plan.snapshot.json'), JSON.stringify(plan, null, 2), 'utf8');
+    const hyperframesCli = require.resolve('hyperframes/dist/cli.js').replace(/\\/g, '/');
+    const localCliCommand = `node "${hyperframesCli}"`;
     fs.writeFileSync(path.join(hfDir, 'package.json'), JSON.stringify({
         scripts: {
-            lint: 'npx --yes hyperframes lint',
-            inspect: 'npx --yes hyperframes inspect',
-            preview: 'npx --yes hyperframes preview',
-            render: 'npx --yes hyperframes render --gpu --workers 2 --browser-gpu',
+            lint: `${localCliCommand} lint`,
+            check: `${localCliCommand} check`,
+            keyframes: `${localCliCommand} keyframes . --json --runtime all`,
+            snapshot: `${localCliCommand} snapshot`,
+            inspect: `${localCliCommand} inspect`,
+            preview: `${localCliCommand} preview`,
+            render: `${localCliCommand} render --gpu --workers 2 --browser-gpu`,
         },
         devDependencies: {},
     }, null, 2), 'utf8');
@@ -4263,6 +4582,7 @@ function generateHyperframesProject({ plan, projectDir, appRoot, tempDir, public
         projectDir: hfDir,
         indexPath: path.join(hfDir, 'index.html'),
         mediaDir: path.join(hfDir, 'media'),
+        motionManifestPath: path.join(hfDir, 'hyperframes-motion-manifest.json'),
     };
 }
 

@@ -13,6 +13,63 @@
  *   5. (Export mode): readPixels -> Uint8Array
  */
 
+let _effectColorProbeContext = null;
+
+/**
+ * Convert a CSS color into normalized RGB values for shader uniforms.
+ * Agent-authored effect properties are normally stored as hex, but this also
+ * keeps older projects and manually edited plans compatible with rgb()/names.
+ */
+function _effectColorToRgb(value, fallback = [0, 0, 0]) {
+    if (Array.isArray(value) && value.length >= 3) {
+        const components = value.slice(0, 3).map(Number);
+        if (components.every(Number.isFinite)) {
+            const scale = components.some((component) => component > 1) ? 255 : 1;
+            return components.map((component) => Math.max(0, Math.min(1, component / scale)));
+        }
+    }
+
+    const raw = String(value || '').trim();
+    const hexMatch = raw.match(/^#([0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i);
+    if (hexMatch) {
+        let hex = hexMatch[1];
+        if (hex.length === 3 || hex.length === 4) {
+            hex = hex.split('').map((part) => part + part).join('');
+        }
+        return [
+            parseInt(hex.slice(0, 2), 16) / 255,
+            parseInt(hex.slice(2, 4), 16) / 255,
+            parseInt(hex.slice(4, 6), 16) / 255,
+        ];
+    }
+
+    const rgbMatch = raw.match(/^rgba?\(\s*([+-]?\d*\.?\d+)%?\s*,\s*([+-]?\d*\.?\d+)%?\s*,\s*([+-]?\d*\.?\d+)%?/i);
+    if (rgbMatch) {
+        const usesPercent = raw.slice(0, raw.indexOf(')')).includes('%');
+        const divisor = usesPercent ? 100 : 255;
+        return rgbMatch.slice(1, 4).map((part) => (
+            Math.max(0, Math.min(1, Number(part) / divisor))
+        ));
+    }
+
+    // Let the browser resolve named colors, hsl(), and other valid CSS forms.
+    if (raw && typeof document !== 'undefined') {
+        if (!_effectColorProbeContext) {
+            _effectColorProbeContext = document.createElement('canvas').getContext('2d');
+        }
+        const ctx = _effectColorProbeContext;
+        if (ctx) {
+            ctx.fillStyle = '#010203';
+            ctx.fillStyle = raw;
+            if (ctx.fillStyle !== '#010203' || /^#010203$/i.test(raw)) {
+                return _effectColorToRgb(ctx.fillStyle, fallback);
+            }
+        }
+    }
+
+    return fallback.slice(0, 3);
+}
+
 class Compositor {
     /**
      * @param {HTMLCanvasElement} canvas - The target canvas element
@@ -54,7 +111,7 @@ class Compositor {
 
         // EXPORT-ONLY: WebCodecs VideoFrame overrides for optimized export.
         // - null during preview (default) — _getSceneTexture ignores it
-        // - Set to Map<sceneIndex, VideoFrame> ONLY by ExportPipeline._runOptimizedFrameLoop()
+        // - Set to Map<clipKey, VideoFrame> ONLY by ExportPipeline._runOptimizedFrameLoop()
         // - Guarded by this._exporting in _getSceneTexture (never checked in preview)
         // - Cleared to null by _resetVideosForPreview() and ExportPipeline finally block
         this._exportFrameSources = null;
@@ -254,7 +311,7 @@ class Compositor {
         // Use track-aware keys to avoid collisions when V1 and V2 scenes share the same index
         const urlMap = {};
         const urlPromises = scenes.map(async (scene) => {
-            const idx = scene.index;
+            const idx = this._sourceSceneIndex(scene);
             if (idx == null) return;
             const key = this._sceneKey(scene);
             const ext = scene.mediaExtension || '.mp4';
@@ -277,7 +334,7 @@ class Compositor {
         const videoScenes = [];
 
         for (const scene of scenes) {
-            const idx = scene.index;
+            const idx = this._sourceSceneIndex(scene);
             if (idx == null) continue;
             const key = this._sceneKey(scene);
             if (!urlMap[key]) continue;
@@ -358,7 +415,13 @@ class Compositor {
      */
     _sceneKey(scene) {
         const track = scene.trackId || 'video-track-1';
-        return `${track}-${scene.index}`;
+        const identity = scene.clipId
+            || `${this._sourceSceneIndex(scene)}-${scene.startTime ?? 0}-${scene.endTime ?? 0}`;
+        return `${track}-${identity}`;
+    }
+
+    _sourceSceneIndex(scene) {
+        return scene?.sourceSceneIndex ?? scene?.index;
     }
 
     async _resolveUrl(sceneIndex, ext) {
@@ -523,7 +586,8 @@ class Compositor {
 
             // Also render non-transitioning scenes on other tracks
             for (const { scene, trackNum } of activeScenes) {
-                if (scene.index === transition.sceneA.index || scene.index === transition.sceneB.index) continue;
+                const key = this._sceneKey(scene);
+                if (key === this._sceneKey(transition.sceneA) || key === this._sceneKey(transition.sceneB)) continue;
                 const tex = this._getSceneTexture(scene, frame);
                 if (tex) {
                     gl.enable(gl.BLEND);
@@ -622,13 +686,12 @@ class Compositor {
      * For images: uses cached texture (or creates one).
      */
     _getSceneTexture(scene, frame) {
-        const idx = scene.index;
         const key = this._sceneKey(scene);
         const texId = `scene-${key}`;
 
         // EXPORT-ONLY: use WebCodecs VideoFrame if provided by optimized export loop
-        if (this._exporting && this._exportFrameSources && this._exportFrameSources.has(idx)) {
-            const vf = this._exportFrameSources.get(idx);
+        if (this._exporting && this._exportFrameSources && this._exportFrameSources.has(key)) {
+            const vf = this._exportFrameSources.get(key);
             if (vf) return this.textureManager.createOrUpdate(texId, vf);
         }
 
@@ -966,6 +1029,8 @@ class Compositor {
         prog.set1f('u_vignetteIntensity', _p('vignette', 'intensity', 0.6));
         prog.set1f('u_vignetteRadius', _p('vignette', 'radius', 0.4));
         prog.set1f('u_vignetteSoftness', _p('vignette', 'softness', 0.5));
+        const vignetteColor = _effectColorToRgb(_p('vignette', 'color', '#000000'));
+        prog.set3f('u_vignetteColor', vignetteColor[0], vignetteColor[1], vignetteColor[2]);
 
         // -- BlurVignette --
         prog.set1f('u_blurVignetteOn', effectSet.has('blurVignette') ? 1.0 : 0.0);
@@ -1472,7 +1537,7 @@ class Compositor {
         const none = { scale: 1, translateX: 0, translateY: 0 };
         if (!scene || scene.kenBurnsEnabled === false) return none;
 
-        const originalIndex = scene.index !== undefined ? scene.index : 0;
+        const originalIndex = this._sourceSceneIndex(scene) ?? 0;
         const kbTypes = [
             'zoomIn', 'zoomOut',
             'panLeft', 'panRight', 'panUp', 'panDown',

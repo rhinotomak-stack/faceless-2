@@ -4,14 +4,14 @@
 // The FOLDER-REORG GUARDRAIL. After moving files, every relative sibling import
 // must still resolve, and every file must still parse. Require resolution is done
 // STATICALLY (files are read, never executed → zero side effects); syntax is
-// checked with `node --check`. Run before AND after any file move:
+// checked in-process with Node's parser. Run before AND after any file move:
 //     node scripts/verify/require-paths.js
 // Exit 0 = clean; exit 1 = broken require or syntax error (with the list).
 // ============================================================================
 'use strict';
 const fs = require('fs');
 const path = require('path');
-const { execFileSync } = require('child_process');
+const vm = require('vm');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 
@@ -39,9 +39,80 @@ function collectFiles() {
     return files;
 }
 
-// Match relative require specifiers (starting with ./ or ../) — the ones moves break.
-const REQ_RE = /require\(\s*(['"])(\.\.?\/[^'"]+)\1\s*\)/g;
+// Match relative require/require.resolve specifiers (starting with ./ or ../) —
+// the ones folder moves break. `require.resolve()` is used for modules that must
+// be loaded fresh at runtime, so missing it can let a broken production path pass.
+const REQ_RE = /require(?:\.resolve)?\(\s*(['"])(\.\.?\/[^'"]+)\1\s*\)/g;
 
+// The regex above deliberately stays simple, but only matches whose `require`
+// token starts in executable code are valid. This mask filters examples inside
+// comments and strings (including verifier assertions that mention source text).
+function buildCodeMask(src) {
+    const mask = new Uint8Array(src.length);
+    let state = 'code';
+
+    for (let i = 0; i < src.length; i++) {
+        const ch = src[i];
+        const next = src[i + 1];
+
+        if (state === 'code') {
+            if (ch === '/' && next === '/') {
+                state = 'line-comment';
+                i++;
+                continue;
+            }
+            if (ch === '/' && next === '*') {
+                state = 'block-comment';
+                i++;
+                continue;
+            }
+            if (ch === "'") {
+                state = 'single-quote';
+                continue;
+            }
+            if (ch === '"') {
+                state = 'double-quote';
+                continue;
+            }
+            if (ch === '`') {
+                state = 'template';
+                continue;
+            }
+            mask[i] = 1;
+            continue;
+        }
+
+        if (state === 'line-comment') {
+            if (ch === '\n' || ch === '\r') {
+                state = 'code';
+                mask[i] = 1;
+            }
+            continue;
+        }
+
+        if (state === 'block-comment') {
+            if (ch === '*' && next === '/') {
+                state = 'code';
+                i++;
+            }
+            continue;
+        }
+
+        if (ch === '\\') {
+            i++;
+            continue;
+        }
+        if (
+            (state === 'single-quote' && ch === "'")
+            || (state === 'double-quote' && ch === '"')
+            || (state === 'template' && ch === '`')
+        ) {
+            state = 'code';
+        }
+    }
+
+    return mask;
+}
 function resolvesTo(fromFile, rel) {
     const base = path.resolve(path.dirname(fromFile), rel);
     const cands = [base, base + '.js', base + '.json', base + '.node', path.join(base, 'index.js')];
@@ -60,14 +131,16 @@ let brokenReq = 0, syntaxErr = 0, esmSkipped = 0;
 
 for (const f of files) {
     const src = fs.readFileSync(f, 'utf8');
+    const codeMask = buildCodeMask(src);
     let m; REQ_RE.lastIndex = 0;
     while ((m = REQ_RE.exec(src))) {
+        if (!codeMask[m.index]) continue;
         const rel = m[2];
-        if (!resolvesTo(f, rel)) { brokenReq++; problems.push(`BROKEN REQUIRE  ${path.relative(ROOT, f)}  →  require('${rel}')`); }
+        if (!resolvesTo(f, rel)) { brokenReq++; problems.push(`BROKEN REQUIRE  ${path.relative(ROOT, f)}  →  ${m[0]}`); }
     }
     if (looksEsm(src)) { esmSkipped++; continue; }
-    try { execFileSync(process.execPath, ['--check', f], { stdio: 'pipe' }); }
-    catch (e) { syntaxErr++; problems.push(`SYNTAX ERROR    ${path.relative(ROOT, f)}: ${String(e.stderr || e.message).split('\n')[0]}`); }
+    try { new vm.Script(src, { filename: f }); }
+    catch (e) { syntaxErr++; problems.push(`SYNTAX ERROR    ${path.relative(ROOT, f)}: ${String(e.message).split('\n')[0]}`); }
 }
 
 console.log(`[require-paths] scanned ${files.length} files (${esmSkipped} ESM syntax-skipped)`);

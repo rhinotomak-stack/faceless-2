@@ -4,12 +4,17 @@
  * Answers "what layers are active at frame N?" for the compositor.
  */
 
+let _timelineContract = typeof window !== 'undefined' ? window.YtaTimelineContract : null;
+if (!_timelineContract && typeof module !== 'undefined' && module.exports) {
+    try { _timelineContract = require('../../../src/project/timeline-contract'); } catch (_) { }
+}
+
 class SceneGraph {
     constructor(fps) {
         this.fps = fps || 30;
         this._scenes = [];        // { ...scene, _startFrame, _endFrame, _trackNum }
         this._mgs = [];           // { ...mg, _startFrame, _endFrame, _totalFrames }
-        this._transitions = [];   // { fromIndex, toIndex, type, _startFrame, _endFrame, durationFrames }
+        this._transitions = [];   // { fromClipId, toClipId, type, _startFrame, _endFrame, durationFrames }
         this._totalFrames = 0;
     }
 
@@ -28,21 +33,33 @@ class SceneGraph {
         const allScenes = [];
 
         // Regular scenes
-        if (plan.scenes && plan.scenes.length) {
-            for (const scene of plan.scenes) {
+        const regularScenes = _timelineContract?.normalizeScenes
+            ? _timelineContract.normalizeScenes(plan.scenes || [], {
+                fps,
+                totalDuration: plan.totalDuration,
+            })
+            : (plan.scenes || []);
+        if (regularScenes.length) {
+            for (const scene of regularScenes) {
                 allScenes.push(this._parseScene(scene, fps));
             }
         }
 
         // Full-screen MG scenes (from mgScenes array)
-        if (plan.mgScenes && plan.mgScenes.length) {
-            for (const mg of plan.mgScenes) {
+        const fullscreenMGs = _timelineContract?.normalizeVisualScenes
+            ? _timelineContract.normalizeVisualScenes(plan.mgScenes || [], {
+                fps,
+                totalDuration: plan.totalDuration,
+                prefix: 'mg',
+            })
+            : (plan.mgScenes || []);
+        if (fullscreenMGs.length) {
+            for (const mg of fullscreenMGs) {
                 const s = this._parseScene({
                     ...mg,
                     isMGScene: true,
                     trackId: mg.trackId || 'video-track-3',
                     mediaType: 'motion-graphic',
-                    endTime: mg.endTime != null ? mg.endTime : (mg.startTime || 0) + (mg.duration || 3),
                 }, fps);
                 allScenes.push(s);
             }
@@ -74,14 +91,16 @@ class SceneGraph {
                 const durationFrames = Math.round(dur * fps);
                 const halfDur = Math.round(durationFrames / 2);
                 // Transition straddles the cut point: half in sceneA, half in sceneB
-                const fromScene = allScenes.find(s => s.index === t.fromSceneIndex);
-                const toScene = allScenes.find(s => s.index === t.toSceneIndex);
+                const fromScene = this._resolveTransitionScene(allScenes, t.fromClipId, t.fromSceneIndex);
+                const toScene = this._resolveTransitionScene(allScenes, t.toClipId, t.toSceneIndex);
                 if (!fromScene || !toScene) continue;
                 const cutFrame = toScene._startFrame; // = fromScene._endFrame for adjacent scenes
                 const transStart = Math.max(fromScene._startFrame, cutFrame - halfDur);
                 const transEnd = Math.min(toScene._endFrame, cutFrame + halfDur);
                 if (transEnd <= transStart) continue;
                 this._transitions.push({
+                    fromClipId: fromScene.clipId,
+                    toClipId: toScene.clipId,
                     fromIndex: t.fromSceneIndex,
                     toIndex: t.toSceneIndex,
                     type: t.type,
@@ -113,8 +132,14 @@ class SceneGraph {
      * Parse a single scene object into frame-based internal format.
      */
     _parseScene(scene, fps) {
-        const start = scene.startTime || 0;
-        const end = scene.endTime || (start + (scene.duration || 0));
+        const timing = _timelineContract?.normalizeTiming
+            ? _timelineContract.normalizeTiming(scene, { fps })
+            : {
+                startTime: Number(scene.startTime) || 0,
+                endTime: Number(scene.endTime) || ((Number(scene.startTime) || 0) + (Number(scene.duration) || 0)),
+            };
+        const start = timing.startTime;
+        const end = timing.endTime;
         const trackId = scene.trackId || 'video-track-1';
         const trackNum = parseInt(trackId.match(/\d+/)?.[0] || '1', 10);
 
@@ -122,12 +147,21 @@ class SceneGraph {
         const endFrame = Math.round(end * fps);
         return {
             ...scene,
+            ...timing,
             _startFrame: startFrame,
             _endFrame: endFrame,
             _totalFrames: endFrame - startFrame,
             _trackNum: trackNum,
             _animationSpeed: scene.animationSpeed || 1.0,
         };
+    }
+
+    _resolveTransitionScene(scenes, clipId, legacyIndex) {
+        if (clipId != null && String(clipId)) {
+            return scenes.find((scene) => scene.clipId === clipId) || null;
+        }
+        const matches = scenes.filter((scene) => scene.index === legacyIndex);
+        return matches.length === 1 ? matches[0] : null;
     }
 
     /**
@@ -181,8 +215,8 @@ class SceneGraph {
                 // Smooth ease-in-out (cubic bezier approximation)
                 // Accelerates gently, decelerates gently — no abrupt start/end
                 const progress = clamped * clamped * (3 - 2 * clamped); // smoothstep
-                const sceneA = this._scenes.find(s => s.index === t.fromIndex);
-                const sceneB = this._scenes.find(s => s.index === t.toIndex);
+                const sceneA = this._resolveTransitionScene(this._scenes, t.fromClipId, t.fromIndex);
+                const sceneB = this._resolveTransitionScene(this._scenes, t.toClipId, t.toIndex);
                 if (sceneA && sceneB) {
                     return {
                         sceneA,
@@ -201,4 +235,5 @@ class SceneGraph {
     get motionGraphics() { return this._mgs; }
 }
 
-window.SceneGraph = SceneGraph;
+if (typeof window !== 'undefined') window.SceneGraph = SceneGraph;
+if (typeof module !== 'undefined' && module.exports) module.exports = SceneGraph;

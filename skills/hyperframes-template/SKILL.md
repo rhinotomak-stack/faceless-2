@@ -193,6 +193,10 @@ Hard content rules:
   never restate the headline in different words. If you have nothing to add,
   omit the supporting text; negative space beats redundancy. Footers and
   captions may not repeat words already in the headline.
+- ONE FACT, ONE VISUAL ROLE. A hero number/headline may appear only once in
+  the composition. Never repeat it in a lower third, footer, ticker, badge,
+  chip, caption, small stat row, or decorative echo. For a single-item stat
+  scene, show the value once and its label once; hierarchy replaces repetition.
 - FACTUAL SAFETY: every fact, number, date, and claim you display must come
   from the scene brief (narration, text, data items) — NEVER from your own
   knowledge. This is news content; an invented statistic ships to viewers.

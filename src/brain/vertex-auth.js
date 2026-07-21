@@ -426,8 +426,8 @@ async function uploadToGCS(filePath, mimeType) {
                 'Content-Length': fileData.length,
             },
             timeout: 300000,
-            maxBodyLength: Infinity,
-            maxContentLength: Infinity,
+            maxBodyLength: 2 * 1024 * 1024 * 1024,
+            maxContentLength: 2 * 1024 * 1024 * 1024,
         });
     } catch (uploadErr) {
         // Don't dump the entire video buffer into the error log
@@ -546,8 +546,8 @@ async function createCache({ model, contents, systemInstruction, tools, ttlSecon
     const resp = await axios.post(url, body, {
         headers,
         timeout: 600000,
-        maxBodyLength: Infinity,
-        maxContentLength: Infinity,
+        maxBodyLength: 2 * 1024 * 1024 * 1024,
+        maxContentLength: 2 * 1024 * 1024 * 1024,
     });
 
     const name = resp.data?.name;

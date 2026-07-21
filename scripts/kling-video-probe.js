@@ -22,7 +22,7 @@ function findChrome() {
     const raw = JSON.parse(fs.readFileSync(COOKIE_FILE, 'utf8'));
     console.log(`cookies: ${raw.length} loaded from ${COOKIE_FILE}`);
     const puppeteer = require('puppeteer-core');
-    const browser = await puppeteer.launch({ executablePath: findChrome(), headless: false, defaultViewport: null, args: ['--no-sandbox','--disable-blink-features=AutomationControlled','--lang=en-US,en','--start-maximized'] });
+    const browser = await puppeteer.launch({ executablePath: findChrome(), headless: false, defaultViewport: null, args: ['--disable-blink-features=AutomationControlled','--lang=en-US,en','--start-maximized'] });
     try {
         const page = await browser.newPage();
         await page.evaluateOnNewDocument(() => Object.defineProperty(navigator, 'webdriver', { get: () => undefined }));

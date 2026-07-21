@@ -12,6 +12,42 @@
 const fs   = require('fs');
 const path = require('path');
 const { sanitizeSourceHint } = require('../media/source-policy');
+const { requestSafeBuffer } = require('../security/safe-download');
+
+function _isPathWithin(rootPath, candidatePath) {
+    const root = path.resolve(rootPath);
+    const candidate = path.resolve(candidatePath);
+    if (process.platform === 'win32') {
+        const rootLower = root.toLowerCase();
+        const candidateLower = candidate.toLowerCase();
+        return candidateLower === rootLower || candidateLower.startsWith(rootLower + path.sep);
+    }
+    return candidate === root || candidate.startsWith(root + path.sep);
+}
+
+function _resolveAllowedMediaDestination(mediaFile) {
+    const projectDir = path.resolve(process.env.PROJECT_DIR || process.cwd());
+    const roots = [
+        path.join(projectDir, 'public'),
+        path.join(projectDir, 'temp'),
+        path.join(projectDir, 'assets'),
+    ].filter((root) => fs.existsSync(root));
+    const candidates = path.isAbsolute(String(mediaFile || ''))
+        ? [String(mediaFile)]
+        : roots.map((root) => path.join(root, String(mediaFile || '')));
+
+    for (const candidate of candidates) {
+        try {
+            if (!fs.existsSync(candidate) || !fs.statSync(candidate).isFile()) continue;
+            const realCandidate = fs.realpathSync.native(candidate);
+            const allowed = roots.some((root) => _isPathWithin(fs.realpathSync.native(root), realCandidate));
+            if (allowed) return realCandidate;
+        } catch (_) {
+            // Try the next candidate.
+        }
+    }
+    return null;
+}
 
 // Lazy-require to avoid loading heavy provider modules until needed
 let _footageManagerLoaded = false;
@@ -39,9 +75,13 @@ function _ensureLoaded() {
  * @returns {Promise<{success: boolean, newFile?: string, error?: string}>}
  */
 async function replaceSceneMedia({ mediaFile, keyword, sourceHint, mediaType = 'video', sceneDuration = 8, scriptContext = {}, scene = null, onProgress }) {
-    _ensureLoaded();
-
     const log = onProgress || (() => {});
+    const allowedMediaFile = _resolveAllowedMediaDestination(mediaFile);
+    if (!allowedMediaFile) {
+        return { success: false, error: 'Replacement destination must be an existing media file inside the active project' };
+    }
+    mediaFile = allowedMediaFile;
+    _ensureLoaded();
     const ext = mediaType === 'video' ? '.mp4' : '.jpg';
     const tmpBase = 'qa-replacement-' + Date.now();
     const safeSourceHint = sanitizeSourceHint(sourceHint || '', 'youtube') || '';
@@ -136,7 +176,6 @@ async function rescreenhotArticle({ imageFile, keyword, headline, subtext, mgSce
     const log = onProgress || (() => {});
     const fs   = require('fs');
     const path = require('path');
-    const axios = require('axios');
 
     try {
         const articleImage = require('../media/article-image');
@@ -163,14 +202,12 @@ async function rescreenhotArticle({ imageFile, keyword, headline, subtext, mgSce
             for (let attempt = 1; attempt <= 2; attempt++) {
                 try {
                     if (attempt > 1) log(`thum.io timed out — retrying…`);
-                    response = await axios({
-                        url: screenshotUrl,
+                    response = await requestSafeBuffer(screenshotUrl, {
                         method: 'GET',
-                        responseType: 'arraybuffer',
                         adapter: 'http',
                         timeout: 90000,
                         headers: { 'User-Agent': 'Mozilla/5.0' },
-                    });
+                    }, { maxRedirects: 5, maxBytes: 40 * 1024 * 1024 });
                     break;
                 } catch (_) { if (attempt === 2) { response = null; } }
             }

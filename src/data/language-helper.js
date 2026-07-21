@@ -1,3 +1,4 @@
+(() => {
 /**
  * Language Helper — all language-aware logic lives here.
  *
@@ -20,7 +21,15 @@
  *   const code = getWhisperLanguage(scriptContext.language);
  */
 
-const { getLanguage, isValidLanguage, DEFAULT_LANGUAGE } = require('./languages');
+const languageRegistry = typeof module !== 'undefined' && module.exports
+    ? require('./languages')
+    : globalThis._languages;
+if (!languageRegistry) {
+    throw new Error('Language registry must load before language-helper.js');
+}
+const _languageGet = languageRegistry.getLanguage;
+const _languageIsValid = languageRegistry.isValidLanguage;
+const _languageDefault = languageRegistry.DEFAULT_LANGUAGE;
 
 /**
  * Build the language instruction block to append to any AI prompt that
@@ -36,7 +45,7 @@ const { getLanguage, isValidLanguage, DEFAULT_LANGUAGE } = require('./languages'
  * @returns {string} — a \n\n-prefixed instruction block, or '' if English and no reinforcement wanted
  */
 function getLanguageBlock(lang) {
-    const language = getLanguage(lang);
+    const language = _languageGet(lang);
     return `\n\n━━━ OUTPUT LANGUAGE ━━━\n${language.promptInstruction}\n━━━━━━━━━━━━━━━━━━━━━━━`;
 }
 
@@ -57,7 +66,7 @@ function getLanguageBlock(lang) {
  * @returns {{heading: string, body: string}} — resolved font chains ready for ctx.font
  */
 function resolveLanguageFonts(themeFonts, lang) {
-    const language = getLanguage(lang);
+    const language = _languageGet(lang);
     const fallback = {
         heading: themeFonts?.heading || 'Arial, sans-serif',
         body: themeFonts?.body || 'Arial, sans-serif',
@@ -86,8 +95,8 @@ function resolveLanguageFonts(themeFonts, lang) {
  * to let Whisper auto-detect.
  */
 function getWhisperLanguage(lang) {
-    if (!isValidLanguage(lang)) return null;
-    return getLanguage(lang).whisperCode;
+    if (!_languageIsValid(lang)) return null;
+    return _languageGet(lang).whisperCode;
 }
 
 /**
@@ -102,15 +111,15 @@ function getWhisperLanguage(lang) {
  */
 function resolveBuildLanguage(override, detected) {
     // Explicit override wins (as long as it's valid and not 'auto')
-    if (override && override !== 'auto' && isValidLanguage(override)) {
+    if (override && override !== 'auto' && _languageIsValid(override)) {
         return override;
     }
     // Auto-detect from Whisper if the detected lang is one we support
-    if (detected && isValidLanguage(detected)) {
+    if (detected && _languageIsValid(detected)) {
         return detected;
     }
     // Fallback to English
-    return DEFAULT_LANGUAGE;
+    return _languageDefault;
 }
 
 /**
@@ -122,7 +131,7 @@ function resolveBuildLanguage(override, detected) {
  * @returns {string|null} — full Google Fonts URL or null
  */
 function getGoogleFontsUrl(lang) {
-    const language = getLanguage(lang);
+    const language = _languageGet(lang);
     if (!language.googleFontsImport || language.googleFontsImport.length === 0) return null;
     const families = language.googleFontsImport.map(f => `family=${f}`).join('&');
     return `https://fonts.googleapis.com/css2?${families}&display=swap`;
@@ -133,10 +142,10 @@ function getGoogleFontsUrl(lang) {
  * Arabic/Hebrew/etc. Currently none of our 6 supported languages are RTL.)
  */
 function isRTL(lang) {
-    return getLanguage(lang).direction === 'rtl';
+    return _languageGet(lang).direction === 'rtl';
 }
 
-module.exports = {
+const LANGUAGE_HELPER_API = {
     getLanguageBlock,
     resolveLanguageFonts,
     getWhisperLanguage,
@@ -144,3 +153,10 @@ module.exports = {
     getGoogleFontsUrl,
     isRTL,
 };
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = LANGUAGE_HELPER_API;
+}
+if (typeof window !== 'undefined') {
+    window._languageHelper = LANGUAGE_HELPER_API;
+}
+})();

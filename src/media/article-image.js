@@ -12,6 +12,7 @@ const fs = require('fs');
 const path = require('path');
 const config = require('../settings/config');
 const { searchWeb } = require('./web-search-client');
+const { createByteLimitTransform, requestSafeStream } = require('../security/safe-download');
 
 // Domains to skip in search results
 const SKIP_DOMAINS = [
@@ -142,17 +143,15 @@ function getScreenshotUrl(articleUrl) {
  * Download screenshot to file
  */
 async function downloadImage(url, outputPath) {
-    const response = await axios({
-        url,
+    const maxBytes = 40 * 1024 * 1024;
+    const response = await requestSafeStream(url, {
         method: 'GET',
-        responseType: 'stream',
         timeout: 60000,
         headers: {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
             Accept: 'image/*,*/*;q=0.8',
         },
-        maxRedirects: 5,
-    });
+    }, { maxRedirects: 5, maxBytes });
 
     const contentType = response.headers['content-type'] || '';
     if (contentType.includes('text/html') && !contentType.includes('image')) {
@@ -160,7 +159,9 @@ async function downloadImage(url, outputPath) {
     }
 
     const writer = fs.createWriteStream(outputPath);
-    response.data.pipe(writer);
+    const limiter = createByteLimitTransform(maxBytes);
+    response.data.pipe(limiter).pipe(writer);
+    limiter.on('error', (error) => writer.destroy(error));
 
     return new Promise((resolve, reject) => {
         writer.on('finish', () => {

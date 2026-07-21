@@ -44,7 +44,7 @@ async function download(url, outFile, ck) {
     const ck = cookieHeader(raw);
     const headed = /^(1|true|on|yes)$/i.test(String(process.env.KLING_DEBUG || ''));
     const puppeteer = require('puppeteer-core');
-    const browser = await puppeteer.launch({ executablePath: findChrome(), headless: headed ? false : 'new', defaultViewport: headed ? null : { width: 1440, height: 1000 }, args: ['--no-sandbox', '--disable-blink-features=AutomationControlled', '--lang=en-US,en', headed ? '--start-maximized' : ''].filter(Boolean) });
+    const browser = await puppeteer.launch({ executablePath: findChrome(), headless: headed ? false : 'new', defaultViewport: headed ? null : { width: 1440, height: 1000 }, args: ['--disable-blink-features=AutomationControlled', '--lang=en-US,en', headed ? '--start-maximized' : ''].filter(Boolean) });
     let resultUrl = null;
     try {
         const page = await browser.newPage();

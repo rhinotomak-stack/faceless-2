@@ -2,8 +2,19 @@
 // clean-respect + single-grade) WITHOUT a render/AI call. Pure functions only.
 // Run: node scripts/verify-effects.js
 'use strict';
+const fs = require('fs');
+const path = require('path');
 const LOOK = require('../src/render/hf-look-ruleset');
-const { GRADES, GRADE_IDS, EFFECT_IDS, recipeFromScene, mergeBaseLook, buildSceneEffects } = require('../src/render/hf-effects');
+const {
+    GRADES,
+    GRADE_IDS,
+    EFFECT_IDS,
+    EFFECT_PARAMETER_SCHEMA,
+    normalizeEffectProperties,
+    recipeFromScene,
+    mergeBaseLook,
+    buildSceneEffects,
+} = require('../src/render/hf-effects');
 const { enforceEra } = require('../src/agents/workers/effects-director');
 
 const GRADE_SET = new Set(GRADE_IDS);
@@ -112,6 +123,65 @@ console.log('[8] era only on flashback scenes');
     ok(!present._effectRecipe.some(e => e.id === 'filmScratches'), 'in-family era id STRIPPED from present-day (non-flashback) scene');
     ok(present._effectRecipe.some(e => e.id === 'grain'), 'non-era effect survives on present-day scene');
     ok(flash._effectRecipe.some(e => e.id === 'filmScratches'), 'in-family era id KEPT on flashback scene');
+}
+
+// (9) live parameter schema + explicit user authority on framed clips
+console.log('[9] dynamic effect properties');
+{
+    ok(EFFECT_PARAMETER_SCHEMA.vignette.color.type === 'color', 'vignette exposes a renderer-backed color property');
+    ok(EFFECT_PARAMETER_SCHEMA.fogDrift.color.type === 'color', 'fog exposes the same generic color-edit contract');
+    const normalized = normalizeEffectProperties('vignette', {
+        color: 'black',
+        intensity: 4,
+        madeUp: 'ignored',
+    });
+    ok(normalized.color === '#000000', 'named effect colors normalize safely');
+    ok(normalized.intensity === 1, 'numeric effect properties are bounded by the live schema');
+    ok(!Object.prototype.hasOwnProperty.call(normalized, 'madeUp'), 'unknown effect properties are rejected');
+    const renderedDefaults = normalizeEffectProperties('vignette', {
+        intensity: 0.3,
+    }, {
+        withDefaults: true,
+    });
+    ok(renderedDefaults.color === '#000000', 'inspection materializes the renderer default vignette color');
+    ok(renderedDefaults.radius === 0.5, 'inspection materializes renderer-backed shape defaults');
+
+    const automatic = buildSceneEffects({
+        _effectRecipe: [{ id: 'vignette', intensity: 0.3, color: '#000000' }],
+    }, 'auto-framed', 0, 4, { framed: true });
+    ok(!automatic, 'automatic edge effects remain suppressed on framed clips');
+
+    const directed = buildSceneEffects({
+        _effectRecipe: [{
+            id: 'vignette',
+            intensity: 0.3,
+            color: '#000000',
+            userDirected: true,
+        }],
+    }, 'directed-framed', 0, 4, { framed: true });
+    ok(directed?.html.includes('rgba(0,0,0,'), 'explicit user vignette color renders even on a framed clip');
+
+    const fog = buildSceneEffects({
+        _effectRecipe: [{
+            id: 'fogDrift',
+            intensity: 0.2,
+            color: '#3b82f6',
+            userDirected: true,
+        }],
+    }, 'blue-fog', 0, 4);
+    ok(fog?.html.includes('rgba(59,130,246,'), 'generic color properties reach non-vignette renderers');
+
+    const shaderSource = fs.readFileSync(
+        path.join(__dirname, '../ui/js/compositor/ShaderLib.js'),
+        'utf8'
+    );
+    const compositorSource = fs.readFileSync(
+        path.join(__dirname, '../ui/js/compositor/Compositor.js'),
+        'utf8'
+    );
+    ok(shaderSource.includes('uniform vec3 u_vignetteColor'), 'WebGL shader exposes the live vignette color property');
+    ok(shaderSource.includes('mix(color, u_vignetteColor'), 'WebGL shader renders the requested edge color');
+    ok(compositorSource.includes("prog.set3f('u_vignetteColor'"), 'WebGL compositor sends project effect color to the shader');
 }
 
 console.log(`\n${checks} checks.`);

@@ -30,6 +30,7 @@
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
+const { createByteLimitTransform, requestSafeStream } = require('../../security/safe-download');
 
 // Force the Node http adapter (same reason as base-provider.js): in an Electron
 // renderer/preload context axios would otherwise pick the XHR adapter and break
@@ -95,17 +96,17 @@ function _clampDuration(durationSec) {
 async function _downloadTo(url, outFile, signal) {
     const dir = path.dirname(outFile);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    const res = await axios.get(url, {
-        responseType: 'stream',
+    const maxBytes = 2 * 1024 * 1024 * 1024;
+    const res = await requestSafeStream(url, {
         adapter: _HTTP_ADAPTER,
         timeout: 120000,
-        maxContentLength: Infinity,
-        maxBodyLength: Infinity,
         signal,
-    });
+    }, { maxRedirects: 5, maxBytes });
     await new Promise((resolve, reject) => {
         const w = fs.createWriteStream(outFile);
-        res.data.pipe(w);
+        const limiter = createByteLimitTransform(maxBytes);
+        res.data.pipe(limiter).pipe(w);
+        limiter.on('error', reject);
         w.on('finish', resolve);
         w.on('error', reject);
         res.data.on('error', reject);

@@ -1,7 +1,6 @@
 // scripts/verify-settings.js
-// Proves the P2 settings refactor is behavior-preserving:
-//  1) build-env.js produces byte-identical env to main.js's ORIGINAL inline logic
-//     (frozen below as referenceBuildEnv) across a matrix of option combos.
+// Proves the settings contract:
+//  1) build-env.js produces the expected child-process env across option combos.
 //  2) the schema covers every build-bound env var the old PROJECT_OVERRIDE_KEYS had.
 'use strict';
 const path = require('path');
@@ -12,9 +11,10 @@ const schema = require('../src/settings/schema');
 let pass = 0, fail = 0;
 const ok = (n, c) => c ? (pass++, console.log(`  ✅ ${n}`)) : (fail++, console.log(`  ❌ ${n}`));
 
-// ── FROZEN REFERENCE: main.js's original options→buildEnv block, verbatim ──
+// ── REFERENCE CONTRACT: options → build environment ──
 function referenceBuildEnv(options, PROJECT_DIR) {
     const buildEnv = { FORCE_COLOR: '0', PROJECT_DIR };
+    const aiVideosMode = String(options.buildProductionMode || '').toLowerCase() === 'aivideos';
     if (options.audioFileName) buildEnv.BUILD_AUDIO_FILE = options.audioFileName;
     if (options.footageSources) buildEnv.FOOTAGE_SOURCES = JSON.stringify(options.footageSources);
     buildEnv.VIDEO_TITLE = String(options.videoTitle || '').trim();
@@ -25,15 +25,16 @@ function referenceBuildEnv(options, PROJECT_DIR) {
     if (options.buildTheme) buildEnv.BUILD_THEME = options.buildTheme;
     if (options.buildMapStylePack) buildEnv.BUILD_MAP_STYLE_PACK = options.buildMapStylePack;
     if (options.buildProductionMode) buildEnv.BUILD_PRODUCTION_MODE = options.buildProductionMode;
+    if (aiVideosMode) buildEnv.BUILD_FORMAT = 'auto';
     if (options.presenterImage) buildEnv.BUILD_PRESENTER_IMAGE = options.presenterImage;
     if (options.klingAvatar) {
         buildEnv.KLING_AVATAR = '1';
         buildEnv.KLING_RESOLUTION = options.klingResolution || '1080p';
         if (options.klingAvatarPrompt) buildEnv.KLING_AVATAR_PROMPT = options.klingAvatarPrompt;
     }
-    if (options.veoAiVideo) {
+    if (options.veoAiVideo || aiVideosMode) {
         buildEnv.VEO_AI_VIDEO = '1';
-        buildEnv.VEO_SCOPE = options.veoScope || 'directives';
+        buildEnv.VEO_SCOPE = aiVideosMode ? 'all' : (options.veoScope || 'directives');
         const gen = String(options.veoBackend || 'kling').toLowerCase();
         if (gen === 'veo-fal') { buildEnv.AI_VIDEO_BACKEND = 'veo'; buildEnv.VEO_BACKEND = 'fal'; }
         else if (gen === 'veo-gemini') { buildEnv.AI_VIDEO_BACKEND = 'veo'; buildEnv.VEO_BACKEND = 'gemini'; }
@@ -43,15 +44,14 @@ function referenceBuildEnv(options, PROJECT_DIR) {
             buildEnv.KLING_VIDEO_RESOLUTION = options.veoResolution;
         }
     }
-    if (options.fastMedia) buildEnv.BUILD_FAST_MEDIA = 'true';
+    if (options.fastMedia && !aiVideosMode) buildEnv.BUILD_FAST_MEDIA = 'true';
     if (options.buildLanguage) buildEnv.BUILD_LANGUAGE = options.buildLanguage;
     if (options.buildStyleProfile && options.buildStyleProfile !== 'none') buildEnv.BUILD_STYLE_PROFILE = options.buildStyleProfile;
     const isSmartAI = options.smartAI !== false && options.smartAI !== 'false';
     buildEnv.SMART_AI = isSmartAI ? 'true' : 'false';
     const clipAnalyzerOn = options.clipAnalyzer !== false && options.clipAnalyzer !== 'false';
     buildEnv.CLIP_ANALYZER_ENABLED = clipAnalyzerOn ? 'true' : 'false';
-    const resumeOn = options.buildResume === true || options.buildResume === 'true';
-    buildEnv.BUILD_RESUME = resumeOn ? 'true' : 'false';
+    buildEnv.BUILD_RESUME = 'false';
     const repeatFromStep = String(options.repeatFromStep || '').trim();
     if (repeatFromStep) {
         buildEnv.BUILD_REPEAT_FROM = repeatFromStep;
@@ -72,6 +72,7 @@ const COMBOS = [
     { audioFileName: 'a.mp3', videoTitle: 'T', aiInstructions: 'hard cuts', footageSources: { pexels: true, youtube: false } },
     { buildQuality: 'pro', buildFormat: 'documentary', buildNiche: 'crime', buildTheme: 'crime', buildMapStylePack: 'neon', buildProductionMode: 'faceless', buildLanguage: 'en' },
     { buildProductionMode: 'talkingHead', presenterImage: 'C:/p.png', klingAvatar: true, klingResolution: '720p', klingAvatarPrompt: 'calm' },
+    { buildProductionMode: 'aiVideos', buildFormat: 'listicle', veoAiVideo: false, veoBackend: 'veo-fal', veoResolution: '1080p', fastMedia: true },
     { klingAvatar: true }, // resolution default
     { veoAiVideo: true, veoBackend: 'veo-fal', veoScope: 'all', veoResolution: '1080p' },
     { veoAiVideo: true, veoBackend: 'veo-gemini', veoResolution: '720p' },
@@ -81,13 +82,12 @@ const COMBOS = [
     { buildStyleProfile: '/x/style.json' },
     { smartAI: false, clipAnalyzer: false },
     { smartAI: 'false', clipAnalyzer: 'false' },
-    { buildResume: true },
     { repeatFromStep: 'media', forceFreshFootage: true },
     { repeatFromStep: 'media', forceFreshFootage: false },
     { repeatFromStep: 'visual-planner', forceFreshFootage: true },
     { aiThinking: 'high' },
     { geminiThinking: 'low' },
-    { veoAiVideo: false, klingAvatar: false, smartAI: true, clipAnalyzer: true, buildResume: false },
+    { veoAiVideo: false, klingAvatar: false, smartAI: true, clipAnalyzer: true },
 ];
 
 console.log('\n=== build-env.js === main.js reference (across ' + COMBOS.length + ' option combos) ===');

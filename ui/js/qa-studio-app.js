@@ -3,10 +3,10 @@
  *
  * Standalone window. Loads video-plan.json, renders each scene to a real video
  * clip (audio + animations + effects) via ExportPipeline with in/out points,
- * then sends each clip to Gemini via window._qaStudioAgent.analyzeSceneClip().
+ * then sends each clip to the main-process QA agent through validated IPC.
  *
  * Gemini sees and hears the full composited output — not screenshots.
- * READ-ONLY — no writes to video-plan.json.
+ * Analysis is read-only until the user explicitly applies reviewed fixes.
  */
 
 (function () {
@@ -15,6 +15,8 @@
     // ── STATE ──────────────────────────────────────────────────────────────
     const state = {
         videoPlan: null,
+        projectRevision: 0,
+        projectPlanHash: null,
         scenes: [],          // all scenes from plan (footage + templates + MGs)
         projectDir: null,
         compositor: null,
@@ -73,17 +75,23 @@
             document.title = `QA Studio — ${projectName}`;
 
             // Init QA Studio log
-            if (window._qaStudioAgent?.initLog) {
-                window._qaStudioAgent.initLog(state.projectDir);
+            if (window.electronAPI?.qaAgentInitLog) {
+                await window.electronAPI.qaAgentInitLog();
             }
+            window.electronAPI?.onQAReplaceProgress?.((message) => {
+                log(`[Replace] ${message}`);
+            });
 
             // Load video plan
-            const plan = await window.electronAPI.loadVideoPlan();
+            const projectState = await window.electronAPI.loadProjectFile();
+            const plan = projectState?.videoPlan || await window.electronAPI.loadVideoPlan();
             if (!plan || !plan.scenes || plan.scenes.length === 0) {
                 showError('No video plan found. Build a video first.');
                 return;
             }
             state.videoPlan = plan;
+            state.projectRevision = Number(projectState?.revision) || 0;
+            state.projectPlanHash = projectState?.planHash || null;
             window._mgBridgeVideoPlan = plan; // sync with mg-theme-bridge.js for MG style resolution
 
             // Collect ALL scenes: footage + templates + MG scenes
@@ -463,20 +471,32 @@
             antialias: false,
         });
 
-        const urlResolver = (filePath) => {
+        const resolveProjectFile = async (filePath) => {
             if (!filePath) return null;
-            if (filePath.startsWith('http')) return filePath;
-            try {
-                const url = new URL('file:///' + filePath.replace(/\\/g, '/'));
-                return url.href;
-            } catch (e) { return filePath; }
+            const value = String(filePath);
+            if (/^(https?:|data:|blob:|asset:)/i.test(value)) return value;
+
+            let candidate = value;
+            const isAbsolute = /^[a-z]:[\\/]/i.test(candidate)
+                || candidate.startsWith('/')
+                || candidate.startsWith('\\\\')
+                || /^file:/i.test(candidate);
+            if (!isAbsolute && state.projectDir) {
+                const relative = candidate.replace(/\\/g, '/').replace(/^public\//i, '');
+                candidate = `${state.projectDir}/public/${relative}`;
+            }
+            return window.electronAPI.getFileUrl(candidate).catch(() => null);
+        };
+        const resolveSceneUrl = async (sceneIndex, extension) => {
+            const mediaPath = await window.electronAPI.getSceneMediaPath(sceneIndex, extension);
+            return resolveProjectFile(mediaPath);
         };
 
         // SceneGraph.loadFromPlan only reads plan.mgScenes — it does NOT read plan.templateScenes.
         // The main app merges templateScenes into mgScenes before loading. We must do the same.
-        const augmentedPlan = _augmentPlanForCompositor(plan);
+        const augmentedPlan = await _augmentPlanForCompositor(plan, resolveProjectFile);
 
-        await state.compositor.loadPlan(augmentedPlan, urlResolver, urlResolver);
+        await state.compositor.loadPlan(augmentedPlan, resolveSceneUrl, resolveProjectFile);
         log('Compositor initialized and plan loaded');
     }
 
@@ -485,39 +505,45 @@
      * (isMGScene:true, trackId:video-track-3, mediaType:template, mgData unwrapped).
      * SceneGraph.loadFromPlan ignores plan.templateScenes entirely.
      *
-     * Also resolves _itemThumbnails → _itemThumbnailUrls using file:// paths,
+     * Also resolves _itemThumbnails → _itemThumbnailUrls using confined asset:// URLs,
      * which is required for MGRenderer to display portrait/context images.
      */
-    function _augmentPlanForCompositor(plan) {
+    async function _augmentPlanForCompositor(plan, resolveProjectFile) {
         const templateScenes = plan.templateScenes || [];
         if (templateScenes.length === 0) return plan; // nothing to do
 
         const publicDir = state.projectDir ? state.projectDir.replace(/\\/g, '/') + '/public' : null;
 
-        const toFileUrl = (filePath) => {
+        const toAssetUrl = async (filePath) => {
             if (!filePath) return null;
-            if (filePath.startsWith('http') || filePath.startsWith('file:')) return filePath;
-            try {
-                // If it's just a filename (tpl-item-0.jpg), prefix with public/
-                const fullPath = filePath.includes('/') || filePath.includes('\\')
-                    ? filePath
-                    : (publicDir ? `${publicDir}/${filePath}` : filePath);
-                return new URL('file:///' + fullPath.replace(/\\/g, '/')).href;
-            } catch (e) { return filePath; }
+            const value = String(filePath);
+            if (/^(https?:|data:|blob:|asset:)/i.test(value)) return value;
+            // If it's just a filename (tpl-item-0.jpg), prefix with public/.
+            const fullPath = value.includes('/') || value.includes('\\')
+                ? value
+                : (publicDir ? `${publicDir}/${value}` : value);
+            return resolveProjectFile(fullPath);
         };
 
-        const extraMGs = templateScenes.map(mg => {
+        const extraMGs = await Promise.all(templateScenes.map(async (mg) => {
             const { mgData: _nested, ...mgFlat } = mg;
             let core = mg;
             while (core.mgData) core = core.mgData;
+            const startTime = Number(mg.startTime) || 0;
+            const endTime = Number(mg.endTime) > startTime
+                ? Number(mg.endTime)
+                : startTime + (Number(mg.duration) || 4);
+            const duration = endTime - startTime;
             const sceneObj = {
                 isMGScene:  true,
                 trackId:    'video-track-3',
                 mediaType:  'template',
                 templateType: true,
-                startTime:  mg.startTime,
-                endTime:    mg.endTime || (mg.startTime + (mg.duration || 4)),
-                duration:   Math.round((mg.duration || ((mg.endTime || (mg.startTime + 4)) - mg.startTime)) * (plan.fps || 30)),
+                startTime,
+                endTime,
+                duration,
+                durationFrames: Math.max(1, Math.round(duration * (plan.fps || 30))),
+                durationUnit: 'seconds',
                 text:       mg.text    || '',
                 subtext:    mg.subtext || mg.subText || '',
                 type:       mg.type,
@@ -538,11 +564,10 @@
             if (mg.value !== undefined) sceneObj.value = mg.value;
 
             // _itemThumbnails — portrait/context image filenames (e.g. tpl-item-0.jpg).
-            // MGRenderer uses _itemThumbnailUrls (file:// absolute URLs) to load them.
-            // The main app resolves these via Electron IPC; we do it directly here.
+            // MGRenderer uses _itemThumbnailUrls to load them.
             if (core._itemThumbnails) {
                 sceneObj._itemThumbnails = core._itemThumbnails;
-                sceneObj._itemThumbnailUrls = core._itemThumbnails.map(toFileUrl);
+                sceneObj._itemThumbnailUrls = await Promise.all(core._itemThumbnails.map(toAssetUrl));
                 if (sceneObj.mgData) {
                     sceneObj.mgData._itemThumbnails    = core._itemThumbnails;
                     sceneObj.mgData._itemThumbnailUrls = sceneObj._itemThumbnailUrls;
@@ -552,7 +577,7 @@
             if (core.articleImageFile) { sceneObj.articleImageFile = core.articleImageFile; if (sceneObj.mgData) sceneObj.mgData.articleImageFile = core.articleImageFile; }
             if (core.mapImageFile)     { sceneObj.mapImageFile = core.mapImageFile; if (sceneObj.mgData) sceneObj.mgData.mapImageFile = core.mapImageFile; }
             return sceneObj;
-        });
+        }));
 
         return {
             ...plan,
@@ -681,7 +706,7 @@
     async function runSingleScene(sceneIndex) {
         if (state.isRunning) return;
         if (!state.compositor)     { alert('Compositor not ready'); return; }
-        if (!window._qaStudioAgent) { alert('QA Studio Agent not available'); return; }
+        if (!window.electronAPI?.qaAgentAnalyzeScene) { alert('QA Studio Agent not available'); return; }
         if (typeof ExportPipeline === 'undefined') { alert('ExportPipeline not loaded'); return; }
 
         const scene = state.scenes.find(s => s.sceneIndex === sceneIndex);
@@ -718,7 +743,7 @@
         els.btnStop.textContent = '■ Stop';
 
         const provider = els.providerSelect.value;
-        window._qaStudioAgent.setProvider(provider);
+        await window.electronAPI.qaAgentSetProvider(provider);
 
         const ctx = {
             title:    state.videoPlan?.scriptContext?.title    || state.videoPlan?.scriptContext?.summary || '',
@@ -747,7 +772,7 @@
             // Inject fix history so agent knows what happened before
             _injectFixHistory(scene);
 
-            const result = await window._qaStudioAgent.analyzeSceneClip(clipPath, scene, ctx);
+            const result = await window.electronAPI.qaAgentAnalyzeScene(clipPath, scene, ctx);
 
             if (result) {
                 state.results.set(sceneIndex, result);
@@ -852,7 +877,7 @@
     async function runQA() {
         if (state.isRunning) return;
         if (!state.compositor) { alert('Compositor not ready'); return; }
-        if (!window._qaStudioAgent) { alert('QA Studio Agent not available'); return; }
+        if (!window.electronAPI?.qaAgentAnalyzeScene) { alert('QA Studio Agent not available'); return; }
         if (typeof ExportPipeline === 'undefined') { alert('ExportPipeline not loaded'); return; }
 
         state.isRunning = true;
@@ -864,7 +889,7 @@
         els.btnStop.textContent = '■ Stop';
 
         const provider = els.providerSelect.value;
-        window._qaStudioAgent.setProvider(provider);
+        await window.electronAPI.qaAgentSetProvider(provider);
 
         const ctx = {
             title:    state.videoPlan?.scriptContext?.title    || state.videoPlan?.scriptContext?.summary || '',
@@ -954,7 +979,7 @@
                 // Inject fix history so agent knows what happened before
                 _injectFixHistory(scene);
 
-                const result = await window._qaStudioAgent.analyzeSceneClip(clipPath, scene, ctx);
+                const result = await window.electronAPI.qaAgentAnalyzeScene(clipPath, scene, ctx);
 
                 if (state.isCancelled) break;
 
@@ -1070,7 +1095,7 @@
                 <div>
                     <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
                         <span class="analysis-verdict ${v}">${v.toUpperCase()}</span>
-                        <button onclick="window._qaStudioAppRunSingle&&window._qaStudioAppRunSingle(${result.sceneIndex})" style="font-size:9px;padding:2px 7px;background:var(--bg4);color:var(--text2);border:1px solid var(--border);border-radius:4px;cursor:pointer;" title="Re-analyze this scene">↺ Re-run</button>
+                        <button id="btn-rerun-analysis" type="button" style="font-size:9px;padding:2px 7px;background:var(--bg4);color:var(--text2);border:1px solid var(--border);border-radius:4px;cursor:pointer;" title="Re-analyze this scene">↺ Re-run</button>
                     </div>
                     <div class="analysis-keyword">${_escHtml(scene.keyword || 'Scene ' + result.sceneIndex)}</div>
                     <div class="analysis-time">#${result.sceneIndex} · ${scene.startTime.toFixed(1)}s–${scene.endTime.toFixed(1)}s · ${scene.sceneType}</div>
@@ -1143,6 +1168,9 @@
                 <div class="value">${_escHtml(result.notes)}</div>
             </div>` : ''}
         `;
+        document.getElementById('btn-rerun-analysis')?.addEventListener('click', () => {
+            if (!state.isRunning) runSingleScene(result.sceneIndex);
+        });
     }
 
     // ── SCENE CARD UPDATES ─────────────────────────────────────────────────
@@ -1235,8 +1263,8 @@
     }
 
     function log(...args) {
-        if (window._qaStudioAgent?.qaLog) {
-            window._qaStudioAgent.qaLog('[App]', ...args);
+        if (window.electronAPI?.qaAgentLog) {
+            window.electronAPI.qaAgentLog('[App]', ...args).catch(() => {});
         } else {
             console.log('[QA Studio App]', ...args);
         }
@@ -1372,44 +1400,14 @@
         return Object.keys(result).length > 0 ? result : null;
     }
 
-    // Pre-crop a media file (image or video) with FFmpeg in-place.
-    // Writes to a temp file first, then replaces the original so the compositor
-    // loads the same filename — no plan update needed.
+    // Pre-crop a project media file in-place through the narrow main-process
+    // FFmpeg IPC. The renderer never receives process or filesystem access.
     async function _ffmpegPreCrop(mediaFile, crop) {
-        const config = await window.electronAPI.getExportConfig({});
-        const ffmpegPath = config?.ffmpegPath || 'C:\\ffmg\\bin\\ffmpeg.exe';
-
-        const dotIdx  = mediaFile.lastIndexOf('.');
-        const ext     = mediaFile.slice(dotIdx); // e.g. ".mp4" or ".jpg"
-        const tmpFile = mediaFile.slice(0, dotIdx) + '-qatmp' + ext;
-
-        const t = crop.cropTop    || 0;
-        const b = crop.cropBottom || 0;
-        const l = crop.cropLeft   || 0;
-        const r = crop.cropRight  || 0;
-
-        // FFmpeg crop filter: w:h:x:y expressed as fractions of input dimensions
-        const cropExpr = `crop=iw*(1-${l}/100-${r}/100):ih*(1-${t}/100-${b}/100):iw*${l}/100:ih*${t}/100`;
-
-        const isImage = /\.(jpe?g|png|webp|gif|bmp)$/i.test(ext);
-        const args = isImage
-            ? ['-y', '-i', mediaFile, '-vf', cropExpr, tmpFile]
-            : ['-y', '-i', mediaFile, '-vf', cropExpr, '-c:v', 'libx264', '-crf', '18', '-preset', 'fast', '-c:a', 'copy', tmpFile];
-
-        await new Promise((resolve, reject) => {
-            const proc = window._nodeSpawn(ffmpegPath, args, { windowsHide: true });
-            const stderr = [];
-            proc.stderr?.on('data', d => stderr.push(d.toString()));
-            proc.on('close', code => {
-                if (code === 0) resolve();
-                else reject(new Error(`FFmpeg pre-crop failed (code ${code}): ${stderr.slice(-3).join('')}`));
-            });
-            proc.on('error', reject);
-        });
-
-        // Replace original with cropped version
-        window._nodeFs.renameSync(tmpFile, mediaFile);
-        return mediaFile; // same path, clean content
+        const result = await window.electronAPI.qaPreCropMedia({ mediaFile, crop });
+        if (!result?.success) {
+            throw new Error(result?.error || 'FFmpeg pre-crop failed');
+        }
+        return result.mediaFile || mediaFile;
     }
 
     async function applyFixes() {
@@ -1595,7 +1593,7 @@
 
             if (isAlreadyFloating && Object.keys(fix.crop).length > 0) {
                 // Scene is already floating — pre-crop the source file with FFmpeg
-                if (planScene.mediaFile && window._nodeSpawn) {
+                if (planScene.mediaFile && window.electronAPI?.qaPreCropMedia) {
                     try {
                         setProgress(null, `Scene #${fix.scene.sceneIndex}: FFmpeg pre-crop ${fix.cropFixStr}…`);
                         log(`[Fix] Scene ${fix.scene.sceneIndex} floating → FFmpeg pre-crop ${fix.cropFixStr}`);
@@ -1678,7 +1676,7 @@
 
             const result = state.results.get(flag.scene.sceneIndex);
 
-            if (result?.replacementKeyword && planScene.mediaFile && window._qaReplacer) {
+            if (result?.replacementKeyword && planScene.mediaFile && window.electronAPI?.qaReplaceSceneMedia) {
                 // Auto-replacement: download new footage, overwrite mediaFile in-place
                 const mediaType = planScene.mediaType || (planScene.mediaFile?.match(/\.(jpg|jpeg|png|webp)$/i) ? 'image' : 'video');
                 const sceneDur  = Math.round((flag.scene.endTime || 10) - (flag.scene.startTime || 0)) || 8;
@@ -1686,14 +1684,13 @@
                 setProgress(null, `Scene #${flag.scene.sceneIndex}: downloading "${result.replacementKeyword}" via ${result.replacementSource || 'auto'}…`);
                 log(`[Replace] Scene ${flag.scene.sceneIndex} "${flag.scene.keyword}" → downloading "${result.replacementKeyword}" via ${result.replacementSource || 'auto'}…`);
 
-                const replResult = await window._qaReplacer.replaceSceneMedia({
+                const replResult = await window.electronAPI.qaReplaceSceneMedia({
                     mediaFile:     planScene.mediaFile,
                     keyword:       result.replacementKeyword,
                     sourceHint:    result.replacementSource || '',
                     mediaType,
                     sceneDuration: sceneDur,
                     scriptContext: state.videoPlan.scriptContext || {},
-                    onProgress:    (msg) => log(`[Replace] ${msg}`),
                 });
 
                 if (replResult.success) {
@@ -1740,18 +1737,14 @@
         for (const fix of templateFixes) {
             const { scene, tplScene, result } = fix;
             const portraitFile = tplScene._itemThumbnails?.[0]; // first item = portrait
-            if (!portraitFile || !window._qaReplacer) {
+            if (!portraitFile || !window.electronAPI?.qaReplaceSceneMedia) {
                 log(`[Replace] Scene #${scene.sceneIndex}: no portrait file or replacer unavailable`);
                 continue;
             }
 
-            // Resolve absolute path: portraits are in public/ folder
-            const projectDir = state.projectDir || state.videoPlan?.scriptContext?.projectDir || '';
-            const absPortrait = (portraitFile.includes('/') || portraitFile.includes('\\'))
-                ? portraitFile
-                : (projectDir ? window._nodePath.join(projectDir, 'public', portraitFile) : null);
-
-            if (!absPortrait) {
+            // QA replacer resolves relative paths against the active project's
+            // public/temp/assets roots and rejects anything outside them.
+            if (typeof portraitFile !== 'string' || !portraitFile.trim()) {
                 log(`[Replace] Scene #${scene.sceneIndex}: cannot resolve portrait path for "${portraitFile}"`);
                 continue;
             }
@@ -1759,14 +1752,13 @@
             setProgress(null, `Scene #${scene.sceneIndex}: downloading portrait "${result.replacementKeyword}"…`);
             log(`[Replace] Scene #${scene.sceneIndex} personIntro portrait → "${result.replacementKeyword}" via ${result.replacementSource || 'stock'}`);
 
-            const replResult = await window._qaReplacer.replaceSceneMedia({
-                mediaFile:     absPortrait,
+            const replResult = await window.electronAPI.qaReplaceSceneMedia({
+                mediaFile:     portraitFile,
                 keyword:       result.replacementKeyword,
                 sourceHint:    result.replacementSource || 'stock',
                 mediaType:     'image',
                 sceneDuration: 5,
                 scriptContext: state.videoPlan.scriptContext || {},
-                onProgress:    (msg) => log(`[Replace] ${msg}`),
             });
 
             if (replResult.success) {
@@ -1784,10 +1776,21 @@
 
         try {
             setProgress(95, 'Saving video-plan.json…');
-            await window.electronAPI.saveVideoPlan(state.videoPlan);
+            const saveResult = await window.electronAPI.saveVideoPlan(
+                state.videoPlan,
+                state.projectRevision,
+                state.projectPlanHash
+            );
+            if (!saveResult?.success) throw new Error(saveResult?.error || 'Unified project save failed');
+            state.projectRevision = Number(saveResult.revision) || state.projectRevision;
+            state.projectPlanHash = saveResult.planHash || state.projectPlanHash;
             log(`[Fix] Saved video-plan.json — ${cropFixes.length} crops, ${flagged.length} flags`);
 
-            window.electronAPI.pushPlanToMain?.(state.videoPlan)?.catch?.(() => {});
+            window.electronAPI.pushPlanToMain?.({
+                videoPlan: state.videoPlan,
+                revision: state.projectRevision,
+                planHash: state.projectPlanHash,
+            })?.catch?.(() => {});
 
             if (els.readonlyBadge) {
                 els.readonlyBadge.textContent = 'FIXES APPLIED';
@@ -1848,8 +1851,19 @@
 
         if (cleared === 0) { alert('No QA data found in plan — nothing to reset.'); return; }
 
-        await window.electronAPI.saveVideoPlan(state.videoPlan);
-        window.electronAPI.pushPlanToMain?.(state.videoPlan)?.catch?.(() => {});
+        const saveResult = await window.electronAPI.saveVideoPlan(
+            state.videoPlan,
+            state.projectRevision,
+            state.projectPlanHash
+        );
+        if (!saveResult?.success) throw new Error(saveResult?.error || 'Unified project save failed');
+        state.projectRevision = Number(saveResult.revision) || state.projectRevision;
+        state.projectPlanHash = saveResult.planHash || state.projectPlanHash;
+        window.electronAPI.pushPlanToMain?.({
+            videoPlan: state.videoPlan,
+            revision: state.projectRevision,
+            planHash: state.projectPlanHash,
+        })?.catch?.(() => {});
         state.results.clear();
         _saveResults(); // clear saved results file too
         _renderSceneList();
@@ -1858,15 +1872,10 @@
     });
 
     els.providerSelect.addEventListener('change', () => {
-        if (window._qaStudioAgent?.setProvider) {
-            window._qaStudioAgent.setProvider(els.providerSelect.value);
+        if (window.electronAPI?.qaAgentSetProvider) {
+            window.electronAPI.qaAgentSetProvider(els.providerSelect.value).catch(() => {});
         }
     });
-
-    // Expose runSingleScene globally for inline button calls
-    window._qaStudioAppRunSingle = (sceneIndex) => {
-        if (!state.isRunning) runSingleScene(sceneIndex);
-    };
 
     // ── AGENT CHAT ─────────────────────────────────────────────────────────
 
@@ -2029,8 +2038,8 @@
     async function _chatSend() {
         const api = window.electronAPI || {};
         const canAct = typeof api.qaPreviewOrder === 'function';
-        if (!window._qaChatAgent && !canAct) {
-            _chatAddSys('Agent not available (window._qaChatAgent missing).');
+        if (!window.electronAPI?.qaChatSend && !canAct) {
+            _chatAddSys('Agent not available.');
             return;
         }
         const text = chatEls.input.value.trim();
@@ -2082,11 +2091,11 @@
                 } else {
                     _chatAddSys('Cancelled — nothing changed.');
                 }
-            } else if (window._qaChatAgent) {
+            } else if (window.electronAPI?.qaChatSend) {
                 // Not an order → normal Q&A.
                 const t2 = _chatAddTyping();
                 const projectContext = _buildProjectContext();
-                const reply = await window._qaChatAgent.sendMessageWithProject(chatState.history, projectContext);
+                const reply = await window.electronAPI.qaChatSend(chatState.history, projectContext);
                 t2.remove();
                 _chatAddMsg('model', reply);
                 chatState.history.push({ role: 'model', text: reply });

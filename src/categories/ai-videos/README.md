@@ -9,8 +9,9 @@ AI-Videos capability, you should only ever touch files in here.
 | File | Responsibility |
 |---|---|
 | `index.js` | The category descriptor (id/label/allowedFormats/generation) + `pipeline` entry. Registered in `src/categories/index.js`. |
-| `pipeline.js` | The isolated **script → generated clips** flow. Ordered, named stages; runs end-to-end today (stops after INPUT) and lights up as stages are added. |
-| `script-input.js` | Stage 1 — normalize pasted story/link into clean script text. Pure, unit-tested. |
+| `pipeline.js` | The isolated **script → generated clips** flow. Ordered, named stages; runs end-to-end. |
+| `source-loader.js` | Secure TXT/Markdown/RTF/JSON/subtitle/HTML/DOCX/ODT/EPUB and public-URL text import. |
+| `script-input.js` | Stage 1 — normalize imported/pasted story text. Pure, unit-tested. |
 | `scene-planner.js` | Stage 2 — split the script into scene beats (deterministic; AI splitter is a drop-in tweak). |
 | `prompt-generator.js` | Stage 3 — write a generation prompt per scene (template; AI writer is a drop-in tweak). |
 | `generate.js` | Stage 4 — one clip per prompt. Dry-run by default; real Kling/Veo behind `opts.generate`. |
@@ -26,10 +27,13 @@ AI-Videos capability, you should only ever touch files in here.
 5. PLAN      plan-builder.js       scenes + clips → video-plan object       [done]
 ```
 
-The whole flow runs end-to-end in **dry-run** today (no credits/browser) and is unit-
-tested (`scripts/verify-ai-videos.js`). Turning on real generation is `opts.generate=true`.
-Still to CONNECT: invoke the pipeline from the app's build flow (script-first, bypass
-audio) and load its plan onto the timeline.
+The whole flow is unit-tested in **dry-run** (`scripts/verify-ai-videos.js`) and the
+app invokes it with real generation enabled. Generator, resolution, quality, niche,
+theme, title, and creator instructions are carried into the script build.
+
+AI Videos also supports a narration-first route: when narration audio is selected,
+the normal build pipeline runs transcription, Director, Visual Planner, subtitles,
+and audio timing, then forces every eligible visual scene through the AI-video lane.
 
 A single `ctx` object is threaded through every stage, so a new stage that needs data
 from an earlier one just reads `ctx`.

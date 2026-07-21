@@ -2,30 +2,21 @@
  * ExportPipeline.js — Offline render loop for WebGL2 compositor export
  *
  * Drives the compositor frame-by-frame:
- *   renderFrame(f) -> readPixels() -> FFmpeg stdin (direct pipe, no IPC)
+ *   renderFrame(f) -> readPixels() -> bounded IPC batches -> FFmpeg stdin
  *
- * FFmpeg is spawned directly in the renderer process via require('child_process').
- * This bypasses Electron IPC entirely for frame data, eliminating the ~8MB
- * structured clone per frame that caused GC pauses.
- *
- * Audio is muxed via a lightweight IPC call after all frames are written.
+ * FFmpeg stays in Electron's main process. The renderer only receives a narrow
+ * export API and sends at most three ordered frames per request.
  *
  * Two export paths:
  *   - Legacy: per-frame HTMLVideoElement seeking + RAF yield + sync readPixels
  *   - Optimized: WebCodecs sequential decode + PBO async readback
  */
 
-// Node.js modules — exposed by preload.js (contextIsolation: false + sandbox: false)
-const _spawn = window._nodeSpawn;
-const _path  = window._nodePath;
-const _fs    = window._nodeFs;
-
-// FFmpeg executable — same path as main.js uses
-const FFMPEG_PATH = (typeof process !== 'undefined' && process.env && process.env.FFMPEG_PATH)
-    || ((typeof process !== 'undefined' && process.platform === 'win32') ? 'C:\\ffmg\\bin\\ffmpeg.exe' : 'ffmpeg');
-
 // Max PBO frames in-flight before draining. Independent of pboCount.
 const MAX_INFLIGHT_PBOS = 3;
+// Must stay below the four-buffer readback pool so no queued buffer can be
+// reused before Electron has serialized and acknowledged the batch.
+const IPC_FRAME_BATCH_SIZE = 3;
 
 class ExportPipeline {
     /**
@@ -42,8 +33,10 @@ class ExportPipeline {
         this._poolIndex = 0;
         // PBO async readback state
         this._pboEnabled = false;
-        // Direct FFmpeg process
-        this._ffmpegProc = null;
+        this._exportStarted = false;
+        this._exportId = null;
+        this._cancelPromise = null;
+        this._pendingFrameBatch = [];
         this._framesWritten = 0;
         this._bytesWritten = 0;
         this._lastLogTime = 0;
@@ -73,19 +66,25 @@ class ExportPipeline {
             return { success: false, error: 'Export already in progress' };
         }
 
-        const width = (options && options.width) || this.compositor.width;
-        const height = (options && options.height) || this.compositor.height;
-        const fps = (options && options.fps) || this.compositor.fps;
-        // In/Out point support: render only a sub-range of the timeline
-        const fullTotalFrames = this.compositor.totalFrames;
-        const startFrame = (options && options.startFrame != null) ? options.startFrame : 0;
-        const endFrame = (options && options.endFrame != null) ? options.endFrame : fullTotalFrames;
-        const totalFrames = endFrame - startFrame;
-
-        if (totalFrames <= 0) {
-            return { success: false, error: 'No frames to export (empty timeline or invalid in/out range)' };
+        const exportApi = window.electronAPI;
+        if (!exportApi?.startWebGLExport || !exportApi?.sendExportFramesBatch
+            || !exportApi?.finishWebGLExport || !exportApi?.cancelWebGLExport) {
+            return { success: false, error: 'Secure WebGL export IPC is unavailable. Restart the app after updating.' };
         }
 
+        const width = Number((options && options.width) || this.compositor.width);
+        const height = Number((options && options.height) || this.compositor.height);
+        const fps = Number((options && options.fps) || this.compositor.fps);
+        // In/Out point support: render only a sub-range of the timeline
+        const fullTotalFrames = Number(this.compositor.totalFrames);
+        const startFrame = (options && options.startFrame != null) ? Number(options.startFrame) : 0;
+        const endFrame = (options && options.endFrame != null) ? Number(options.endFrame) : fullTotalFrames;
+        if (!Number.isInteger(startFrame) || !Number.isInteger(endFrame)
+            || startFrame < 0 || endFrame > fullTotalFrames || endFrame <= startFrame) {
+            return { success: false, error: 'Invalid export in/out frame range' };
+        }
+
+        const totalFrames = endFrame - startFrame;
         const legacy = !!(options && options.legacy);
         this._startFrame = startFrame;
         const expectedFrameSize = width * height * 4;
@@ -94,82 +93,45 @@ class ExportPipeline {
         this._cancelled = false;
         this._framesWritten = 0;
         this._bytesWritten = 0;
+        this._exportStarted = false;
+        this._exportId = null;
+        this._cancelPromise = null;
+        this._pendingFrameBatch = [];
         this._lastLogTime = Date.now();
         this._lastLogFrames = 0;
         this.compositor._exporting = true;
-        // Switch to full resolution for export
-        this.compositor._setExportResolution();
-
-        // Verify Node.js require() is available (needs contextIsolation: false + sandbox: false)
-        if (typeof _spawn !== 'function') {
-            return { success: false, error: 'Direct-spawn not available. Check contextIsolation/sandbox settings.' };
-        }
 
         const rangeInfo = startFrame > 0 || endFrame < fullTotalFrames
             ? ` (frames ${startFrame}-${endFrame} of ${fullTotalFrames})`
             : '';
-        console.log(`[ExportPipeline] Starting ${legacy ? 'LEGACY' : 'OPTIMIZED'} DIRECT-SPAWN export: ${totalFrames} frames${rangeInfo}, ${width}x${height} @ ${fps}fps`);
+        console.log(`[ExportPipeline] Starting ${legacy ? 'LEGACY' : 'OPTIMIZED'} secure IPC export: ${totalFrames} frames${rangeInfo}, ${width}x${height} @ ${fps}fps`);
         const startTime = performance.now();
 
-        let videoFile = null;
-        let outputFile = null;
-
         try {
-            // 1. Get export config from main process (encoder args, output paths)
-            const config = await window.electronAPI.getExportConfig({
+            // Switch to full resolution inside the guarded lifecycle so even a
+            // setup failure restores preview state in finally.
+            this.compositor._setExportResolution();
+
+            // 1. Start the main-process encoder. Partial renders carry their
+            // narration trim range so video, voice-over, and SFX stay aligned.
+            const startResult = await exportApi.startWebGLExport({
                 width, height, fps, totalFrames,
+                audioTrimStartSec: startFrame > 0 ? startFrame / fps : undefined,
+                audioTrimEndSec: endFrame < fullTotalFrames ? endFrame / fps : undefined,
             });
-            if (!config || !config.success) {
-                throw new Error(config?.error || 'Failed to get export config');
+            if (!startResult || !startResult.success) {
+                throw new Error(startResult?.error || 'Failed to start WebGL export');
             }
+            if (typeof startResult.exportId !== 'string' || !startResult.exportId) {
+                throw new Error('Main process did not return an export ID');
+            }
+            this._exportId = startResult.exportId;
+            this._exportStarted = true;
 
-            videoFile = config.videoFile;
-            outputFile = config.outputFile;
-
-            // 2. Spawn FFmpeg directly in renderer process (no IPC for frame data!)
-            const ffmpegPath = config.ffmpegPath || FFMPEG_PATH;
-            const ffmpegArgs = [
-                '-y',
-                '-f', 'rawvideo',
-                '-pixel_format', 'rgba',
-                '-video_size', `${width}x${height}`,
-                '-framerate', String(fps),
-                '-i', 'pipe:0',
-                ...config.encArgs,
-                '-pix_fmt', 'yuv420p',
-                '-an',
-                videoFile
-            ];
-
-            console.log(`[ExportPipeline] Spawning FFmpeg: ${ffmpegPath} ${ffmpegArgs.join(' ')}`);
-            const ffmpegProc = _spawn(ffmpegPath, ffmpegArgs, {
-                stdio: ['pipe', 'pipe', 'pipe'],
-                windowsHide: true,
-            });
-            this._ffmpegProc = ffmpegProc;
-
-            let ffmpegStderr = '';
-            ffmpegProc.stderr.on('data', (data) => {
-                ffmpegStderr += data.toString();
-            });
-
-            // Handle unexpected FFmpeg death
-            let ffmpegDead = false;
-            ffmpegProc.on('error', (err) => {
-                ffmpegDead = true;
-                console.error('[ExportPipeline] FFmpeg process error:', err.message);
-            });
-            ffmpegProc.on('close', (code) => {
-                if (code !== 0 && !this._cancelled) {
-                    ffmpegDead = true;
-                    console.error(`[ExportPipeline] FFmpeg exited unexpectedly with code ${code}`);
-                }
-            });
-
-            // 3. Allocate ring buffer pool
+            // 2. Allocate ring buffer pool.
             this._initPool(width, height);
 
-            // 3b. Try to enable PBO async readback (WebGL2 only)
+            // 2b. Try to enable PBO async readback (WebGL2 only).
             this._pboEnabled = false;
             if (this.compositor.gl instanceof WebGL2RenderingContext) {
                 this._pboEnabled = this.compositor.initPBOs(width, height);
@@ -181,34 +143,26 @@ class ExportPipeline {
                 console.log(`[WebGL Export] ▶▶▶ PBO MODE: OFF (reason: ${reason}) ◀◀◀`);
             }
 
-            // 4. Pause all video playback, prepare for seeking
+            // 3. Pause all video playback, prepare for seeking.
             this.compositor.pauseVideos();
 
-            // 5. Run frame loop (legacy or optimized) — writes directly to FFmpeg stdin
+            // 4. Run the frame loop. Electron serializes and acknowledges each
+            // bounded batch before any readback buffer can be reused.
             const writeFrame = async (buffer) => {
-                if (ffmpegDead) throw new Error('FFmpeg process died');
                 if (this._cancelled) throw new Error('Export cancelled');
+                if (!(buffer instanceof ArrayBuffer) || buffer.byteLength !== expectedFrameSize) {
+                    throw new Error(`Invalid RGBA frame buffer (${buffer?.byteLength || 0} bytes, expected ${expectedFrameSize})`);
+                }
 
-                // Write the raw RGBA buffer directly to FFmpeg stdin — zero IPC!
-                // stdin.write accepts Uint8Array directly — no Buffer.from needed
-                const canWrite = ffmpegProc.stdin.write(new Uint8Array(buffer));
+                this._pendingFrameBatch.push({
+                    frameIndex: this._framesWritten,
+                    buffer,
+                });
                 this._framesWritten++;
                 this._bytesWritten += buffer.byteLength;
 
-                // Backpressure: wait for FFmpeg to drain before accepting more frames
-                if (!canWrite) {
-                    await new Promise((resolve, reject) => {
-                        // Poll cancelled flag every 200ms so cancel is never stuck
-                        const interval = setInterval(() => {
-                            if (this._cancelled || ffmpegDead) { clearInterval(interval); resolve(); }
-                        }, 200);
-                        const timeout = setTimeout(() => {
-                            clearInterval(interval); resolve(); // Force unblock after 2s max
-                        }, 2000);
-                        ffmpegProc.stdin.once('drain', () => { clearInterval(interval); clearTimeout(timeout); resolve(); });
-                        ffmpegProc.stdin.once('error', () => { clearInterval(interval); clearTimeout(timeout); resolve(); });
-                    });
-                    if (this._cancelled) throw new Error('Export cancelled');
+                if (this._pendingFrameBatch.length >= IPC_FRAME_BATCH_SIZE) {
+                    await this._flushFrameBatch();
                 }
 
                 // Periodic logging
@@ -218,7 +172,7 @@ class ExportPipeline {
                     const recentFrames = this._framesWritten - this._lastLogFrames;
                     const recentFps = (recentFrames / elapsed).toFixed(1);
                     const totalMB = (this._bytesWritten / (1024 * 1024)).toFixed(0);
-                    console.log(`[ExportPipeline] ${this._framesWritten}/${totalFrames} frames | ${recentFps} fps | ${totalMB} MB written (direct)`);
+                    console.log(`[ExportPipeline] ${this._framesWritten}/${totalFrames} frames | ${recentFps} fps | ${totalMB} MB queued (IPC)`);
                     this._lastLogTime = now;
                     this._lastLogFrames = this._framesWritten;
                 }
@@ -230,68 +184,32 @@ class ExportPipeline {
                 await this._runOptimizedFrameLoop(fps, totalFrames, startTime, writeFrame);
             }
 
-            // 6. Close FFmpeg stdin and wait for it to finish encoding
+            // Flush the final one or two frames before asking main to close FFmpeg.
             if (this._cancelled) throw new Error('Export cancelled');
-            await new Promise((resolve, reject) => {
-                // If FFmpeg already died (cancel or error), resolve immediately
-                if (ffmpegDead || ffmpegProc.killed) { resolve(); return; }
+            await this._flushFrameBatch();
 
-                const timeout = setTimeout(() => {
-                    try { ffmpegProc.kill('SIGTERM'); } catch (_) { }
-                    resolve(); // Don't reject on timeout — just move on
-                }, 120000);
-
-                // Poll cancelled flag so we don't hang here after cancel
-                const cancelCheck = setInterval(() => {
-                    if (this._cancelled || ffmpegDead) {
-                        clearInterval(cancelCheck); clearTimeout(timeout); resolve();
-                    }
-                }, 300);
-
-                ffmpegProc.on('close', (code) => {
-                    clearInterval(cancelCheck); clearTimeout(timeout);
-                    if (code === 0 || this._cancelled) {
-                        resolve();
-                    } else {
-                        reject(new Error(`FFmpeg exited with code ${code}\n${ffmpegStderr.slice(-500)}`));
-                    }
-                });
-                ffmpegProc.on('error', (err) => {
-                    clearInterval(cancelCheck); clearTimeout(timeout);
-                    if (this._cancelled) resolve(); else reject(err);
-                });
-
-                try { ffmpegProc.stdin.end(); } catch (_) { resolve(); }
-            });
-
-            console.log(`[ExportPipeline] Video encoded: ${videoFile} (${this._framesWritten} frames)`);
-
-            // 7. Mux audio via IPC (lightweight, one-time call)
-            // Pass audio trim range if rendering a sub-range (in/out points)
-            const muxResult = await window.electronAPI.muxAudio(videoFile, outputFile, startFrame > 0 ? startFrame / fps : undefined, endFrame < fullTotalFrames ? endFrame / fps : undefined);
-            if (!muxResult || !muxResult.success) {
-                throw new Error(muxResult?.error || 'Audio mux failed');
+            // 5. Main verifies the exact frame count, closes the encoder, and
+            // muxes the project audio/SFX into the generated video.
+            const finishResult = await exportApi.finishWebGLExport(this._exportId);
+            this._exportStarted = false;
+            this._exportId = null;
+            if (!finishResult || !finishResult.success) {
+                throw new Error(finishResult?.error || 'Failed to finish WebGL export');
             }
 
             const totalElapsed = ((performance.now() - startTime) / 1000).toFixed(1);
-            console.log(`[ExportPipeline] Export complete in ${totalElapsed}s: ${muxResult.outputPath}`);
+            console.log(`[ExportPipeline] Export complete in ${totalElapsed}s: ${finishResult.outputPath}`);
 
-            return { success: true, outputPath: muxResult.outputPath };
+            return { success: true, outputPath: finishResult.outputPath };
 
         } catch (err) {
             console.error('[ExportPipeline] Export failed:', err.message);
-            // Kill FFmpeg if still running
-            if (this._ffmpegProc && !this._ffmpegProc.killed) {
-                try {
-                    this._ffmpegProc.stdin.destroy();
-                    this._ffmpegProc.kill('SIGTERM');
-                } catch (_) { }
-            }
+            await this._requestCancel();
             return { success: false, error: err.message };
 
         } finally {
             this._running = false;
-            this._ffmpegProc = null;
+            this._pendingFrameBatch = [];
             this.compositor._exporting = false;
             this.compositor._restorePreviewResolution();
             this.compositor._resetVideosForPreview();
@@ -335,6 +253,43 @@ class ExportPipeline {
         this._pool = null;
         this._poolSize = 0;
         this._poolIndex = 0;
+    }
+
+    /**
+     * Send one bounded, ordered group of frames to the main-process encoder.
+     */
+    async _flushFrameBatch() {
+        if (this._pendingFrameBatch.length === 0) return;
+        if (this._cancelled) throw new Error('Export cancelled');
+
+        const frames = this._pendingFrameBatch;
+        this._pendingFrameBatch = [];
+        const result = await window.electronAPI.sendExportFramesBatch({
+            exportId: this._exportId,
+            frames,
+        });
+        if (!result?.success) {
+            throw new Error(result?.error || 'Failed to write WebGL frame batch');
+        }
+        if (Number(result.written) !== frames.length) {
+            throw new Error(`Incomplete WebGL frame batch (${result.written || 0}/${frames.length})`);
+        }
+    }
+
+    async _requestCancel() {
+        if (!this._exportStarted) return;
+        if (!this._cancelPromise) {
+            const exportId = this._exportId;
+            this._cancelPromise = Promise.resolve()
+                .then(() => window.electronAPI.cancelWebGLExport(exportId))
+                .catch((err) => console.warn('[ExportPipeline] Main-process cancel failed:', err.message))
+                .finally(() => {
+                    this._exportStarted = false;
+                    this._exportId = null;
+                    this._cancelPromise = null;
+                });
+        }
+        await this._cancelPromise;
     }
 
     /**
@@ -488,32 +443,32 @@ class ExportPipeline {
         for (const scene of allScenes) {
             if (scene.isMGScene || scene.mediaType === 'motion-graphic') continue;
             if (scene.mediaType === 'image') continue;
-            const idx = scene.index;
             const key = this.compositor._sceneKey(scene);
+            const sourceIndex = this.compositor._sourceSceneIndex(scene);
             const url = this.compositor._mediaUrls[key];
             if (!url) {
-                legacyScenes.add(idx);
-                console.log(`[ExportPipeline] Fallback to LEGACY for scene ${idx} (no media URL)`);
+                legacyScenes.add(key);
+                console.log(`[ExportPipeline] Fallback to LEGACY for clip ${key} / source ${sourceIndex} (no media URL)`);
                 continue;
             }
 
             const ext = (scene.mediaExtension || '.mp4').toLowerCase();
             if (ext !== '.mp4') {
-                legacyScenes.add(idx);
-                console.log(`[ExportPipeline] Fallback to LEGACY for scene ${idx} (non-MP4: ${ext})`);
+                legacyScenes.add(key);
+                console.log(`[ExportPipeline] Fallback to LEGACY for clip ${key} / source ${sourceIndex} (non-MP4: ${ext})`);
                 continue;
             }
 
             initPromises.push(
-                vfs.init(idx, url, fps).then(ok => {
+                vfs.init(key, url, fps).then(ok => {
                     if (ok) {
-                        webcodecScenes.add(idx);
-                        const state = vfs._decoders.get(idx);
+                        webcodecScenes.add(key);
+                        const state = vfs._decoders.get(key);
                         const codec = state && state.codecConfig ? state.codecConfig.codec : 'unknown';
-                        console.log(`[ExportPipeline] Using OPTIMIZED WebCodecs for scene ${idx} (${codec})`);
+                        console.log(`[ExportPipeline] Using OPTIMIZED WebCodecs for clip ${key} / source ${sourceIndex} (${codec})`);
                     } else {
-                        legacyScenes.add(idx);
-                        console.log(`[ExportPipeline] Fallback to LEGACY for scene ${idx} (WebCodecs init failed)`);
+                        legacyScenes.add(key);
+                        console.log(`[ExportPipeline] Fallback to LEGACY for clip ${key} / source ${sourceIndex} (WebCodecs init failed)`);
                     }
                 })
             );
@@ -551,20 +506,20 @@ class ExportPipeline {
                 for (const { scene } of activeScenes) {
                     if (scene.isMGScene || scene.mediaType === 'motion-graphic') continue;
                     if (scene.mediaType === 'image') continue;
-                    const idx = scene.index;
+                    const key = this.compositor._sceneKey(scene);
                     const localFrame = frame - scene._startFrame;
                     const mediaOffsetFrames = Math.round((scene.mediaOffset || 0) * fps);
                     const timeSec = (localFrame + mediaOffsetFrames) / fps;
 
-                    if (webcodecScenes.has(idx)) {
-                        const videoFrame = await vfs.getFrameAtTime(idx, timeSec);
+                    if (webcodecScenes.has(key)) {
+                        const videoFrame = await vfs.getFrameAtTime(key, timeSec);
                         if (videoFrame) {
-                            exportFrameSources.set(idx, videoFrame);
+                            exportFrameSources.set(key, videoFrame);
                         } else {
                             await this.compositor.seekVideoToFrame(scene, localFrame + mediaOffsetFrames);
                             didLegacySeek = true;
                         }
-                    } else if (legacyScenes.has(idx)) {
+                    } else if (legacyScenes.has(key)) {
                         await this.compositor.seekVideoToFrame(scene, localFrame + mediaOffsetFrames);
                         didLegacySeek = true;
                     }
@@ -580,9 +535,9 @@ class ExportPipeline {
                 this.compositor.renderFrame(frame);
 
                 // Close VideoFrames immediately after render
-                for (const [idx, vf] of exportFrameSources.entries()) {
+                for (const [key, vf] of exportFrameSources.entries()) {
                     try { vf.close(); } catch (_) { }
-                    const decState = vfs._decoders.get(idx);
+                    const decState = vfs._decoders.get(key);
                     if (decState && decState.currentFrame === vf) {
                         decState.currentFrame = null;
                     }
@@ -787,26 +742,11 @@ class ExportPipeline {
     }
 
     /**
-     * Cancel an in-progress export.
-     * Uses taskkill on Windows for reliable FFmpeg termination.
+     * Cancel an in-progress export. Main owns and terminates FFmpeg.
      */
     cancel() {
         this._cancelled = true;
-        const proc = this._ffmpegProc;
-        if (proc && !proc.killed) {
-            const pid = proc.pid;
-            try { proc.stdin.destroy(); } catch (_) { }
-            // On Windows, SIGTERM is unreliable — use taskkill /f /t to kill the process tree
-            if (typeof process !== 'undefined' && process.platform === 'win32' && pid) {
-                try {
-                    _spawn('taskkill', ['/pid', String(pid), '/f', '/t'], { windowsHide: true });
-                } catch (_) {
-                    try { proc.kill('SIGKILL'); } catch (_2) { }
-                }
-            } else {
-                try { proc.kill('SIGTERM'); } catch (_) { }
-            }
-        }
+        void this._requestCancel();
     }
 }
 

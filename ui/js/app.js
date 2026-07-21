@@ -84,7 +84,14 @@ const LISTICLE_TYPES = new Set(['listicleCounter']);
 const TEMPLATE_TYPES = new Set(['listicleGrid', 'chapterCard', 'locationCard', 'quoteCard', 'keyTakeaway', 'comparisonCard', 'timelineCard', 'factCard', 'imageShowcase', 'statCard', 'personIntro']);
 
 // Fields synced from QA Studio fixes into live state (crop, framing, QA flags)
-const QA_SYNCABLE_FIELDS = ['cropTop','cropRight','cropBottom','cropLeft','scale','posY','posX','framingMode','floatingBackground','floatingAnim','floatingShadow','flagForReplacement','qaFixed','qaFixReason','qaReason','qaReplacementKeyword','qaReplacementSource','qaReplacementDiagnosis'];
+const QA_SYNCABLE_FIELDS = [
+    'cropTop', 'cropRight', 'cropBottom', 'cropLeft',
+    'scale', 'posY', 'posX', 'framing', 'framingMode',
+    'floatingBackground', 'floatingAnim', 'floatingShadow',
+    'flagForReplacement', 'qaFixed', 'qaReplaced', 'qaFixReason', 'qaFixCount',
+    'qaReason', 'qaReplacementKeyword', 'qaReplacementSource', 'qaReplacementDiagnosis',
+    'keyword', 'searchKeyword', 'sourceHint', 'mediaType',
+];
 
 // ── Template Registry (UI-side) ──
 // Single source of truth for per-type variants, animations, labels.
@@ -408,8 +415,13 @@ const state = {
     isProcessing: false,
     videoPlan: null,
     hasProjectFile: false, // True once a .fvp file exists (enables auto-save)
+    projectRevision: 0,
+    projectPlanHash: null,
+    projectHydrating: false, // Suppress settings-driven saves while loading/reconciling the authoritative plan.
     hasProject: false, // True when this window booted with a real project (not the default workspace). Audio import is gated on it.
-    aiVideosScript: '', // AI Videos mode: the pasted story/script (script-first pipeline input).
+    aiVideosScript: '', // AI Videos mode: portable story text (paste/file/URL all normalize here).
+    aiVideosInputMode: 'auto', // auto | audio | script
+    aiVideosScriptSource: { type: 'paste', label: '' },
     currentSceneIndex: 0,
     activeSceneIndices: [], // Active media scene indices (non-overlay, non-MG)
     activeOverlaySceneIndices: [], // Active overlay scene indices
@@ -421,9 +433,14 @@ const state = {
     _lastPreloadCheck: 0, // Throttle preload checks
     _sceneLoadPending: false, // True while loadActiveScenes is running
     isPlaying: false,
+    playbackStarting: false,
+    playbackStartRequest: 0,
+    playbackClockFloor: 0,
+    playbackClockGuardUntil: 0,
     currentTime: 0,
     totalDuration: 0,
     playbackAnimationFrame: null,
+    playbackTimer: null,
     lastPlaybackTime: 0,
     snapEnabled: true,
     snapThreshold: 10, // pixels
@@ -436,6 +453,8 @@ const state = {
     selectedClipIndex: -1,
     selectedClipIndices: [], // Multi-select: array of selected clip indices
     selectedMgIndex: -1, // Selected motion graphic index
+    selectedTransitionIndex: -1,
+    transitions: [],
     // Audio clip offset (for dragging audio along timeline)
     audioClipOffset: 0,
     audioClipTrack: 'audio-track',
@@ -457,12 +476,9 @@ const state = {
     availableOverlays: [], // [{ filename, name, ext, mediaType, size, path }]
     // Available backgrounds scanned from assets/backgrounds/
     availableBackgrounds: [], // [{ filename, name, ext, mediaType, size, path }]
-    // SFX system - auto-placed at transition points
+    // SFX track authored by the build Sound Designer
     sfxClips: [],
-    sfxEnabled: true,
-    sfxVolume: 0.35,
     _sfxAudioPool: [],
-    sfxDesignedByWorker: false, // true when sfxClips were hydrated from an AI-designed plan
     // Motion Graphics system - AI-placed text overlays
     motionGraphics: [],
     mgEnabled: true,
@@ -487,23 +503,22 @@ const state = {
             { id: 'mg-track', label: 'MG', type: 'graphics' },
             { id: 'listicle-track', label: 'LI', type: 'listicle' },
             { id: 'audio-track', label: 'VO', type: 'audio' },
-            { id: 'music-track', label: 'MUS', type: 'audio' },
             { id: 'sfx-track', label: 'SFX', type: 'audio' }
         ],
         trackHeights: {
             'video-track-5': 28, 'video-track-4': 28, 'video-track-3': 28, 'video-track-2': 28, 'video-track-1': 40,
             'mg-track': 32, 'listicle-track': 28,
-            'audio-track': 36, 'music-track': 28, 'sfx-track': 22
+            'audio-track': 36, 'sfx-track': 22
         },
         trackMinHeights: {
             'video-track-5': 22, 'video-track-4': 22, 'video-track-3': 22, 'video-track-2': 22, 'video-track-1': 28,
             'mg-track': 22, 'listicle-track': 20,
-            'audio-track': 26, 'music-track': 22, 'sfx-track': 18
+            'audio-track': 26, 'sfx-track': 18
         },
         trackMaxHeights: {
             'video-track-5': 120, 'video-track-4': 120, 'video-track-3': 120, 'video-track-2': 120, 'video-track-1': 120,
             'mg-track': 80, 'listicle-track': 60,
-            'audio-track': 80, 'music-track': 80, 'sfx-track': 60
+            'audio-track': 80, 'sfx-track': 60
         }
     },
     // In/Out point for partial rendering (Premiere-style)
@@ -521,10 +536,664 @@ const state = {
         signature: '',
         refreshTimer: null,
         frameReady: false,
+        pendingRefresh: false,
+        pendingRefreshOptions: null,
+        navigationSerial: 0,
+        readyToken: '',
     },
 };
 
 const TRACK_HEADER_WIDTH = 100;
+const timelineContract = window.YtaTimelineContract;
+let _clipIdSequence = 0;
+
+function normalizePlanForEditor(plan) {
+    if (!plan || typeof plan !== 'object') return plan;
+    if (timelineContract?.normalizePlan) return timelineContract.normalizePlan(plan);
+    return plan;
+}
+
+function getSceneSourceIndex(scene, fallbackIndex = 0) {
+    if (timelineContract?.resolveSourceSceneIndex) {
+        return timelineContract.resolveSourceSceneIndex(scene, fallbackIndex);
+    }
+    return scene?.sourceSceneIndex ?? scene?.index ?? fallbackIndex;
+}
+
+function getSceneTiming(scene, fallbackDuration = 3) {
+    const fps = state.videoPlan?.fps || state.fps || 30;
+    if (timelineContract?.normalizeTiming) {
+        return timelineContract.normalizeTiming(scene, {
+            fps,
+            totalDuration: state.totalDuration || state.videoPlan?.totalDuration,
+            fallbackDuration,
+        });
+    }
+    const startTime = Number(scene?.startTime) || 0;
+    const endTime = Number(scene?.endTime) > startTime
+        ? Number(scene.endTime)
+        : startTime + (Number(scene?.duration) || fallbackDuration);
+    const duration = endTime - startTime;
+    return {
+        startTime,
+        endTime,
+        duration,
+        durationFrames: Math.max(1, Math.round(duration * fps)),
+        durationUnit: 'seconds',
+    };
+}
+
+function hydratePlanTransitions(plan, scenes = state.scenes) {
+    const mediaScenes = (scenes || []).filter((scene) => scene && !scene.isMGScene);
+    const byClipId = new Map();
+    const bySourceIndex = new Map();
+    mediaScenes.forEach((scene, fallbackIndex) => {
+        if (scene.clipId) byClipId.set(String(scene.clipId), scene);
+        const sourceIndex = String(getSceneSourceIndex(scene, fallbackIndex));
+        if (!bySourceIndex.has(sourceIndex)) bySourceIndex.set(sourceIndex, []);
+        bySourceIndex.get(sourceIndex).push(scene);
+    });
+
+    const resolveScene = (clipId, sourceIndex) => {
+        if (clipId && byClipId.has(String(clipId))) return byClipId.get(String(clipId));
+        if (sourceIndex == null || sourceIndex === '') return null;
+        const matches = bySourceIndex.get(String(sourceIndex)) || [];
+        return matches.length === 1 ? matches[0] : null;
+    };
+    const lane = (Array.isArray(plan?.transitions) ? plan.transitions : [])
+        .filter((transition) => transition && typeof transition === 'object')
+        .map((transition) => {
+            const copy = JSON.parse(JSON.stringify(transition));
+            let fromScene = resolveScene(copy.fromClipId, copy.fromSceneIndex);
+            let toScene = resolveScene(copy.toClipId, copy.toSceneIndex);
+            const boundary = Number(copy.startTime ?? copy.at);
+            if ((!fromScene || !toScene) && Number.isFinite(boundary)) {
+                for (const candidate of mediaScenes) {
+                    if (!fromScene && Math.abs((Number(candidate.endTime) || 0) - boundary) < 0.08) {
+                        fromScene = candidate;
+                    }
+                    if (!toScene && Math.abs((Number(candidate.startTime) || 0) - boundary) < 0.08) {
+                        toScene = candidate;
+                    }
+                }
+            }
+            if (fromScene) {
+                copy.fromClipId = fromScene.clipId;
+                copy.fromSceneIndex = getSceneSourceIndex(fromScene, mediaScenes.indexOf(fromScene));
+            }
+            if (toScene) {
+                copy.toClipId = toScene.clipId;
+                copy.toSceneIndex = getSceneSourceIndex(toScene, mediaScenes.indexOf(toScene));
+            }
+            if (!Number.isFinite(Number(copy.startTime)) && toScene) {
+                copy.startTime = Number(toScene.startTime) || 0;
+            }
+            return copy;
+        });
+
+    // Older projects sometimes kept the incoming transition only on the scene.
+    // Reconstruct those missing lane entries once so subsequent saves preserve a
+    // complete transition contract for preview, Agent edits, and undo/redo.
+    const existingBoundaries = new Set(lane.map((transition) => (
+        transition.fromClipId && transition.toClipId
+            ? `${transition.fromClipId}->${transition.toClipId}`
+            : `@${Number(transition.startTime ?? transition.at).toFixed(3)}`
+    )));
+    const byTrack = new Map();
+    mediaScenes.forEach((scene) => {
+        const trackId = scene.trackId || 'video-track-1';
+        if (!byTrack.has(trackId)) byTrack.set(trackId, []);
+        byTrack.get(trackId).push(scene);
+    });
+    for (const trackScenes of byTrack.values()) {
+        trackScenes.sort((a, b) => Number(a.startTime) - Number(b.startTime));
+        for (let index = 1; index < trackScenes.length; index++) {
+            const fromScene = trackScenes[index - 1];
+            const toScene = trackScenes[index];
+            if (Math.abs((Number(fromScene.endTime) || 0) - (Number(toScene.startTime) || 0)) > 0.08) continue;
+            const key = `${fromScene.clipId}->${toScene.clipId}`;
+            if (existingBoundaries.has(key)) continue;
+            const transitionObject = toScene.transition && typeof toScene.transition === 'object'
+                ? toScene.transition
+                : null;
+            const type = toScene.transitionIn
+                || transitionObject?.type
+                || (typeof toScene.transition === 'string' ? toScene.transition : '')
+                || toScene.transitionType;
+            if (!type) continue;
+            lane.push({
+                fromClipId: fromScene.clipId,
+                toClipId: toScene.clipId,
+                fromSceneIndex: getSceneSourceIndex(fromScene, mediaScenes.indexOf(fromScene)),
+                toSceneIndex: getSceneSourceIndex(toScene, mediaScenes.indexOf(toScene)),
+                startTime: Number(toScene.startTime) || 0,
+                type,
+                duration: String(type).toLowerCase() === 'cut'
+                    ? 0
+                    : Math.max(0, Number(transitionObject?.duration ?? toScene.transitionDuration) || 0.5),
+            });
+            existingBoundaries.add(key);
+        }
+    }
+
+    state.transitions = lane;
+    if (state.videoPlan) {
+        state.videoPlan.transitions = JSON.parse(JSON.stringify(lane));
+    }
+    if (state.selectedTransitionIndex >= lane.length) state.selectedTransitionIndex = -1;
+    return lane;
+}
+
+function createUniqueClipId(scene, prefix = 'clip') {
+    const source = timelineContract?.safeToken
+        ? timelineContract.safeToken(getSceneSourceIndex(scene, 'source'), 'source')
+        : String(getSceneSourceIndex(scene, 'source')).replace(/[^a-zA-Z0-9._-]+/g, '-');
+    let candidate;
+    do {
+        const entropy = window.crypto?.randomUUID
+            ? window.crypto.randomUUID()
+            : `${Date.now().toString(36)}-${(++_clipIdSequence).toString(36)}`;
+        candidate = `${prefix}-${source}-${entropy}`;
+    } while (state.scenes.some((item) => item?.clipId === candidate));
+    return candidate;
+}
+
+function notifyAgentContextChanged() {
+    window.dispatchEvent(new CustomEvent('yta:agent-context-changed'));
+}
+
+const AGENT_SCOPE_MODES = new Set(['selection', 'scene', 'project']);
+let agentScopeMode = 'selection';
+try {
+    const savedAgentScopeMode = window.localStorage?.getItem('yta.editorAgent.scopeMode');
+    if (AGENT_SCOPE_MODES.has(savedAgentScopeMode)) agentScopeMode = savedAgentScopeMode;
+} catch (_) { }
+
+function setAgentScopeMode(value) {
+    const next = AGENT_SCOPE_MODES.has(value) ? value : 'selection';
+    if (agentScopeMode === next) return;
+    agentScopeMode = next;
+    try {
+        window.localStorage?.setItem('yta.editorAgent.scopeMode', next);
+    } catch (_) { }
+    notifyAgentContextChanged();
+}
+
+function _agentClipRef(scene, index) {
+    const timing = getSceneTiming(scene);
+    return {
+        clipId: scene?.clipId || `scene-${getSceneSourceIndex(scene, index)}-${Math.round(timing.startTime * 1000)}`,
+        sourceSceneIndex: getSceneSourceIndex(scene, index),
+        trackId: scene?.trackId || 'video-track-1',
+        startTime: timing.startTime,
+        endTime: timing.endTime,
+        text: String(scene?.text || '').slice(0, 1500),
+        keyword: String(scene?.keyword || scene?.searchKeyword || '').slice(0, 500),
+        mediaType: scene?.mediaType || '',
+    };
+}
+
+function _agentVisualRef(visual, index, collection = '') {
+    const timing = getSceneTiming(visual, 3);
+    return {
+        id: visual?.id || visual?.clipId || `visual-${index}-${Math.round(timing.startTime * 1000)}`,
+        type: visual?.type || visual?.templateType || 'motion-graphic',
+        collection,
+        collectionIndex: index,
+        trackId: visual?.trackId || 'video-track-3',
+        startTime: timing.startTime,
+        endTime: timing.endTime,
+        sourceClipId: String(visual?.sourceClipId || ''),
+        sourceSceneIndex: Number.isFinite(Number(visual?.sourceSceneIndex))
+            ? Number(visual.sourceSceneIndex)
+            : null,
+        sceneIndex: Number.isFinite(Number(visual?.sceneIndex))
+            ? Number(visual.sceneIndex)
+            : null,
+        label: String(visual?.text || visual?.keyword || visual?.type || 'Motion graphic').slice(0, 500),
+    };
+}
+
+function _agentIconRef(scene, sceneIndex, moment, momentIndex) {
+    const timing = getSceneTiming(scene);
+    const at = Math.max(0, Number(moment?.at) || 0);
+    const duration = Math.max(0.05, Number(moment?.dur ?? moment?.duration) || 2);
+    const clipId = String(
+        scene?.clipId
+        || `scene-${getSceneSourceIndex(scene, sceneIndex)}-${Math.round(timing.startTime * 1000)}`
+    );
+    return {
+        id: `${clipId}:icon:${momentIndex}`,
+        clipId,
+        sourceSceneIndex: getSceneSourceIndex(scene, sceneIndex),
+        sceneIndex,
+        momentIndex,
+        kind: String(moment?.kind || 'icon'),
+        label: String(
+            moment?.concept
+            || moment?.label
+            || moment?.keyword
+            || moment?.query
+            || moment?.kind
+            || 'Scene icon'
+        ).slice(0, 500),
+        position: String(moment?.position || 'top-right'),
+        color: String(moment?.color || ''),
+        scale: Number.isFinite(Number(moment?.scale)) ? Number(moment.scale) : 1,
+        startTime: timing.startTime + at,
+        endTime: Math.min(timing.endTime, timing.startTime + at + duration),
+    };
+}
+
+function _agentIconRefsForScene(scene, sceneIndex) {
+    return (Array.isArray(scene?._iconMoments) ? scene._iconMoments : [])
+        .map((moment, momentIndex) => _agentIconRef(scene, sceneIndex, moment, momentIndex));
+}
+
+function _agentVisualEntries() {
+    const entries = [];
+    const seen = new Set();
+    const add = (visual, collection, index) => {
+        if (!visual || visual.disabled === true) return;
+        const timing = getSceneTiming(visual, collection === 'templateScenes' ? 4 : 3);
+        const id = String(visual.id || visual.clipId || '');
+        const key = id
+            ? `id:${id}`
+            : `${collection}:${visual.type || visual.templateType || 'visual'}:${timing.startTime.toFixed(3)}:${timing.endTime.toFixed(3)}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        entries.push({ visual, collection, index });
+    };
+
+    (state.motionGraphics || []).forEach((visual, index) => add(visual, 'motionGraphics', index));
+    (state.scenes || []).forEach((visual, index) => {
+        if (!visual?.isMGScene) return;
+        add(visual, visual.templateType ? 'templateScenes' : 'mgScenes', index);
+    });
+    for (const collection of ['motionGraphics', 'mgScenes', 'templateScenes']) {
+        (state.videoPlan?.[collection] || []).forEach((visual, index) => add(visual, collection, index));
+    }
+    return entries;
+}
+
+function _agentVisualBelongsToScene(visual, scene, sceneIndex) {
+    if (!visual || !scene) return false;
+    const clipId = String(scene.clipId || '');
+    if (clipId && String(visual.sourceClipId || '') === clipId) return true;
+
+    const sourceSceneIndex = Number(getSceneSourceIndex(scene, sceneIndex));
+    const visualIndexes = [visual.sourceSceneIndex, visual.sceneIndex]
+        .map(Number)
+        .filter(Number.isFinite);
+    if (visualIndexes.some((index) => (
+        index === sourceSceneIndex
+        || index === Number(scene.index)
+        || index === sceneIndex
+    ))) return true;
+
+    const sceneTiming = getSceneTiming(scene);
+    const visualTiming = getSceneTiming(visual, visual.templateType ? 4 : 3);
+    return visualTiming.endTime > sceneTiming.startTime + 0.001
+        && visualTiming.startTime < sceneTiming.endTime - 0.001;
+}
+
+function _agentOwningSceneIndex(visual) {
+    if (!visual) return -1;
+    const sourceClipId = String(visual.sourceClipId || '');
+    if (sourceClipId) {
+        const byClip = state.scenes.findIndex((scene) => (
+            scene && !scene.isMGScene && String(scene.clipId || '') === sourceClipId
+        ));
+        if (byClip >= 0) return byClip;
+    }
+
+    const visualIndexes = [visual.sourceSceneIndex, visual.sceneIndex]
+        .map(Number)
+        .filter(Number.isFinite);
+    for (let index = 0; index < state.scenes.length; index++) {
+        const scene = state.scenes[index];
+        if (!scene || scene.isMGScene) continue;
+        const sourceSceneIndex = Number(getSceneSourceIndex(scene, index));
+        if (visualIndexes.some((candidate) => (
+            candidate === sourceSceneIndex
+            || candidate === Number(scene.index)
+            || candidate === index
+        ))) return index;
+    }
+
+    const timing = getSceneTiming(visual, visual.templateType ? 4 : 3);
+    const midpoint = timing.startTime + Math.max(0, timing.endTime - timing.startTime) / 2;
+    return state.scenes.findIndex((scene) => {
+        if (!scene || scene.isMGScene) return false;
+        const sceneTiming = getSceneTiming(scene);
+        return sceneTiming.startTime <= midpoint && sceneTiming.endTime > midpoint;
+    });
+}
+
+function _agentSceneIndexesForWholeScene() {
+    const selected = [];
+    const add = (index) => {
+        if (!Number.isInteger(index) || index < 0 || index >= state.scenes.length) return;
+        const scene = state.scenes[index];
+        if (!scene || scene.isMGScene || selected.includes(index)) return;
+        selected.push(index);
+    };
+
+    if (state.selectedTransitionIndex >= 0 && state.transitions?.[state.selectedTransitionIndex]) {
+        const transition = state.transitions[state.selectedTransitionIndex];
+        const ids = new Set([
+            String(transition.fromClipId || ''),
+            String(transition.toClipId || ''),
+        ].filter(Boolean));
+        state.scenes.forEach((scene, index) => {
+            if (scene && !scene.isMGScene && ids.has(String(scene.clipId || ''))) add(index);
+        });
+        if (selected.length) return selected;
+    }
+
+    if (state.selectedMgIndex >= 0 && state.motionGraphics?.[state.selectedMgIndex]) {
+        add(_agentOwningSceneIndex(state.motionGraphics[state.selectedMgIndex]));
+        if (selected.length) return selected;
+    }
+
+    for (const index of [...new Set(state.selectedClipIndices || [])]) {
+        const scene = state.scenes[index];
+        if (scene?.isMGScene) add(_agentOwningSceneIndex(scene));
+        else add(index);
+    }
+    if (selected.length) return selected;
+
+    if (state.inPoint !== null || state.outPoint !== null) {
+        const fromSec = state.inPoint !== null ? state.inPoint : 0;
+        const toSec = state.outPoint !== null ? state.outPoint : state.totalDuration;
+        state.scenes.forEach((scene, index) => {
+            if (!scene || scene.isMGScene) return;
+            const timing = getSceneTiming(scene);
+            if (timing.endTime > fromSec + 0.001 && timing.startTime < toSec - 0.001) add(index);
+        });
+        if (selected.length) return selected;
+    }
+
+    const playheadIndex = state.scenes.findIndex((scene) => {
+        if (!scene || scene.isMGScene) return false;
+        const timing = getSceneTiming(scene);
+        return timing.startTime <= state.currentTime && timing.endTime > state.currentTime;
+    });
+    add(playheadIndex);
+    if (!selected.length) add(state.currentSceneIndex);
+    return selected;
+}
+
+function _agentRefsAreContiguous(refs) {
+    if (refs.length < 2) return true;
+    const sorted = [...refs].sort((a, b) => a.startTime - b.startTime);
+    return sorted.every((ref, index) => index === 0 || ref.startTime <= sorted[index - 1].endTime + 0.05);
+}
+
+function _agentProjectScope() {
+    return {
+        kind: 'project',
+        scopeMode: 'project',
+        label: 'Whole project',
+        fromSec: 0,
+        toSec: state.totalDuration,
+        currentTime: state.currentTime,
+        totalDuration: state.totalDuration,
+        contiguous: true,
+        clipRefs: [],
+        visualRefs: [],
+        iconRefs: [],
+    };
+}
+
+function _agentWholeSceneScope() {
+    const indexes = _agentSceneIndexesForWholeScene();
+    if (!indexes.length) return _agentProjectScope();
+
+    const clipRefs = indexes.map((index) => _agentClipRef(state.scenes[index], index));
+    const visualRefs = _agentVisualEntries()
+        .filter(({ visual }) => indexes.some((sceneIndex) => (
+            _agentVisualBelongsToScene(visual, state.scenes[sceneIndex], sceneIndex)
+        )))
+        .map(({ visual, collection, index }) => _agentVisualRef(visual, index, collection));
+    const iconRefs = indexes.flatMap((index) => _agentIconRefsForScene(state.scenes[index], index));
+    const sceneLabel = indexes.length === 1 ? 'Whole scene' : `${indexes.length} whole scenes`;
+    const layers = [
+        `${clipRefs.length} clip${clipRefs.length === 1 ? '' : 's'}`,
+        visualRefs.length ? `${visualRefs.length} graphic${visualRefs.length === 1 ? '' : 's'}` : '',
+        iconRefs.length ? `${iconRefs.length} icon${iconRefs.length === 1 ? '' : 's'}` : '',
+    ].filter(Boolean).join(' · ');
+    return {
+        kind: 'clips',
+        scopeMode: 'scene',
+        label: `${sceneLabel} · ${layers}`,
+        fromSec: Math.min(...clipRefs.map((ref) => ref.startTime)),
+        toSec: Math.max(...clipRefs.map((ref) => ref.endTime)),
+        currentTime: state.currentTime,
+        totalDuration: state.totalDuration,
+        contiguous: _agentRefsAreContiguous(clipRefs),
+        clipRefs,
+        visualRefs,
+        iconRefs,
+    };
+}
+
+function getAgentScopeSnapshot() {
+    if (agentScopeMode === 'project') return _agentProjectScope();
+    if (agentScopeMode === 'scene') return _agentWholeSceneScope();
+
+    if (state.selectedTransitionIndex >= 0 && state.transitions?.[state.selectedTransitionIndex]) {
+        const transition = state.transitions[state.selectedTransitionIndex];
+        const clipIds = new Set([
+            String(transition.fromClipId || ''),
+            String(transition.toClipId || ''),
+        ].filter(Boolean));
+        const clipRefs = state.scenes
+            .map((scene, index) => ({ scene, index }))
+            .filter(({ scene }) => !scene?.isMGScene && clipIds.has(String(scene.clipId || '')))
+            .map(({ scene, index }) => _agentClipRef(scene, index));
+        const at = Number(transition.startTime ?? transition.at) || state.currentTime;
+        return {
+            kind: 'clips',
+            scopeMode: 'selection',
+            label: `Selected transition: ${transition.type || 'cut'}`,
+            fromSec: clipRefs.length ? Math.min(...clipRefs.map((ref) => ref.startTime)) : at,
+            toSec: clipRefs.length ? Math.max(...clipRefs.map((ref) => ref.endTime)) : at + 0.001,
+            currentTime: at,
+            totalDuration: state.totalDuration,
+            contiguous: true,
+            clipRefs,
+            visualRefs: [],
+            iconRefs: [],
+        };
+    }
+
+    if (state.selectedMgIndex >= 0 && state.motionGraphics?.[state.selectedMgIndex]) {
+        const visualRef = _agentVisualRef(
+            state.motionGraphics[state.selectedMgIndex],
+            state.selectedMgIndex,
+            'motionGraphics'
+        );
+        return {
+            kind: 'visual',
+            scopeMode: 'selection',
+            label: `Selected ${visualRef.type}`,
+            fromSec: visualRef.startTime,
+            toSec: visualRef.endTime,
+            currentTime: state.currentTime,
+            totalDuration: state.totalDuration,
+            contiguous: true,
+            clipRefs: [],
+            visualRefs: [visualRef],
+            iconRefs: [],
+        };
+    }
+
+    const selected = [...new Set(state.selectedClipIndices || [])]
+        .filter((index) => Number.isInteger(index) && state.scenes[index]);
+    if (selected.length) {
+        const clipRefs = [];
+        const visualRefs = [];
+        const iconRefs = [];
+        selected.forEach((index) => {
+            const scene = state.scenes[index];
+            if (scene?.isMGScene || scene?.mediaType === 'motion-graphic' || scene?.mediaType === 'template') {
+                visualRefs.push(_agentVisualRef(
+                    scene,
+                    index,
+                    scene?.templateType ? 'templateScenes' : 'mgScenes'
+                ));
+            } else {
+                clipRefs.push(_agentClipRef(scene, index));
+                iconRefs.push(..._agentIconRefsForScene(scene, index));
+            }
+        });
+        if (clipRefs.length) {
+            const allRefs = [...clipRefs, ...visualRefs];
+            return {
+                kind: 'clips',
+                scopeMode: 'selection',
+                label: `${clipRefs.length} selected clip${clipRefs.length === 1 ? '' : 's'}`,
+                fromSec: Math.min(...allRefs.map((ref) => ref.startTime)),
+                toSec: Math.max(...allRefs.map((ref) => ref.endTime)),
+                currentTime: state.currentTime,
+                totalDuration: state.totalDuration,
+                contiguous: _agentRefsAreContiguous(allRefs),
+                clipRefs,
+                visualRefs,
+                iconRefs,
+            };
+        }
+        if (visualRefs.length) {
+            return {
+                kind: 'visual',
+                scopeMode: 'selection',
+                label: `${visualRefs.length} selected graphic${visualRefs.length === 1 ? '' : 's'}`,
+                fromSec: Math.min(...visualRefs.map((ref) => ref.startTime)),
+                toSec: Math.max(...visualRefs.map((ref) => ref.endTime)),
+                currentTime: state.currentTime,
+                totalDuration: state.totalDuration,
+                contiguous: _agentRefsAreContiguous(visualRefs),
+                clipRefs: [],
+                visualRefs,
+                iconRefs: [],
+            };
+        }
+    }
+
+    if (state.inPoint !== null || state.outPoint !== null) {
+        const fromSec = state.inPoint !== null ? state.inPoint : 0;
+        const toSec = state.outPoint !== null ? state.outPoint : state.totalDuration;
+        return {
+            kind: 'range',
+            scopeMode: 'selection',
+            label: `In/Out ${formatTime(fromSec)}-${formatTime(toSec)}`,
+            fromSec,
+            toSec,
+            currentTime: state.currentTime,
+            totalDuration: state.totalDuration,
+            contiguous: true,
+            clipRefs: [],
+            visualRefs: [],
+            iconRefs: [],
+        };
+    }
+
+    const playheadIndex = state.scenes.findIndex((scene) => {
+        if (!scene || scene.isMGScene) return false;
+        const timing = getSceneTiming(scene);
+        return timing.startTime <= state.currentTime && timing.endTime > state.currentTime;
+    });
+    if (playheadIndex >= 0) {
+        const clipRef = _agentClipRef(state.scenes[playheadIndex], playheadIndex);
+        return {
+            kind: 'playhead',
+            scopeMode: 'selection',
+            label: `Scene at ${formatTime(state.currentTime)}`,
+            fromSec: clipRef.startTime,
+            toSec: clipRef.endTime,
+            currentTime: state.currentTime,
+            totalDuration: state.totalDuration,
+            contiguous: true,
+            clipRefs: [clipRef],
+            visualRefs: [],
+            iconRefs: _agentIconRefsForScene(state.scenes[playheadIndex], playheadIndex),
+        };
+    }
+
+    return _agentProjectScope();
+}
+
+async function getAgentVisualContext() {
+    if (!state.hasProject || !state.videoPlan?.scenes?.length) return null;
+    if (state.isPlaying) stopPlayback();
+
+    if (state.hyperframesPreview?.active) {
+        syncHyperframesPreview(true);
+    } else if (state.compositorActive && state.compositor?.isInitialized) {
+        state.compositor.renderAtTime(state.currentTime || 0);
+    }
+
+    // Electron/Chromium can throttle requestAnimationFrame while DevTools is
+    // docked, the window is occluded, or an automated runtime probe is active.
+    // Give the preview up to two paint opportunities, but never let visual
+    // grounding hang indefinitely waiting for a frame callback.
+    await Promise.race([
+        new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
+        new Promise((resolve) => setTimeout(resolve, 120)),
+    ]);
+
+    const preferred = state.hyperframesPreview?.active
+        ? elements.hyperframesPreviewFrame
+        : elements.videoContainer;
+    const container = elements.previewContainer;
+    if (!preferred || !container) return null;
+
+    const frameRect = preferred.getBoundingClientRect();
+    const containerRect = container.getBoundingClientRect();
+    const left = Math.max(0, frameRect.left, containerRect.left);
+    const top = Math.max(0, frameRect.top, containerRect.top);
+    const right = Math.min(window.innerWidth, frameRect.right, containerRect.right);
+    const bottom = Math.min(window.innerHeight, frameRect.bottom, containerRect.bottom);
+    const width = Math.floor(right - left);
+    const height = Math.floor(bottom - top);
+    if (width < 64 || height < 36) return null;
+
+    return {
+        captureRequested: true,
+        currentTime: Number(state.currentTime) || 0,
+        renderer: state.hyperframesPreview?.active
+            ? 'hyperframes'
+            : (state.compositorActive ? 'webgl2' : 'html-preview'),
+        frameReady: state.hyperframesPreview?.active
+            ? state.hyperframesPreview.frameReady === true
+            : true,
+        rect: {
+            x: Math.floor(left),
+            y: Math.floor(top),
+            width,
+            height,
+        },
+    };
+}
+
+window.EditorAgentHost = {
+    getScopeSnapshot: getAgentScopeSnapshot,
+    getVisualContext: getAgentVisualContext,
+    getScopeMode: () => agentScopeMode,
+    setScopeMode: setAgentScopeMode,
+    getProjectVersion: () => ({
+        revision: state.projectRevision,
+        planHash: state.projectPlanHash,
+    }),
+    hasProject: () => !!(state.hasProject && state.videoPlan?.scenes?.length),
+    refreshScope: notifyAgentContextChanged,
+};
+
+function createSegmentClipId(scene, startTime, endTime, partIndex) {
+    const base = scene?.clipId || createUniqueClipId(scene, 'clip');
+    return `${base}-segment-${Math.round(startTime * 1000)}-${Math.round(endTime * 1000)}-${partIndex}`;
+}
 
 // ========================================
 // Built-in gradient backgrounds (mirrors BACKGROUND_LIBRARY from themes.js)
@@ -572,8 +1241,7 @@ const elements = {
     projectNameLabel: document.getElementById('project-name-label'),
     btnRefresh: document.getElementById('btn-refresh'),
     btnRender: document.getElementById('btn-render'),
-    btnQAStudio: document.getElementById('btn-qa-studio'),
-    btnQAChat:   document.getElementById('btn-qa-chat'),
+    btnAgent: document.getElementById('btn-agent'),
     openFootageResources: document.getElementById('open-footage-resources-btn'),
     footageResourceSummary: document.getElementById('footage-resource-summary'),
     btnGenerate: document.getElementById('btn-generate'),
@@ -581,6 +1249,8 @@ const elements = {
     btnRemoveAudio: document.getElementById('btn-remove-audio'),
     dropZone: document.getElementById('drop-zone'),
     fileInput: document.getElementById('file-input'),
+    audioImportCard: document.getElementById('audio-import-card'),
+    inputSourceHeading: document.getElementById('input-source-heading'),
     audioInfo: document.getElementById('audio-info'),
     audioName: document.getElementById('audio-name'),
     smartAiToggle: document.getElementById('smart-ai-toggle'),
@@ -588,6 +1258,7 @@ const elements = {
     // ollama* controls removed (non-bedrock providers dropped 2026-05-25; pruned in P2)
     aiThinking: document.getElementById('ai-thinking'),
     aiInstructions: document.getElementById('ai-instructions'),
+    aiInstructionsHint: document.getElementById('ai-instructions-hint'),
     videoTitle: document.getElementById('video-title'),
     buildQuality: document.getElementById('build-quality'),
     buildFormat: document.getElementById('build-format'),
@@ -596,6 +1267,24 @@ const elements = {
     buildMapStylePack: document.getElementById('build-map-style-pack'),
     buildProductionMode: document.getElementById('build-production-mode'),
     aiVideosScript: document.getElementById('ai-videos-script'),
+    aiVideosInputMode: document.getElementById('ai-videos-input-mode'),
+    aiVideosSourceBadge: document.getElementById('ai-videos-source-badge'),
+    aiVideosRoutingStatus: document.getElementById('ai-videos-routing-status'),
+    aiVideosScriptCount: document.getElementById('ai-videos-script-count'),
+    aiVideosScriptSourceStatus: document.getElementById('ai-videos-script-source-status'),
+    aiVideosScriptUrl: document.getElementById('ai-videos-script-url'),
+    aiVideosUrlRow: document.getElementById('ai-videos-url-row'),
+    btnImportAiScript: document.getElementById('btn-import-ai-script'),
+    btnToggleAiScriptUrl: document.getElementById('btn-toggle-ai-script-url'),
+    btnLoadAiScriptUrl: document.getElementById('btn-load-ai-script-url'),
+    btnClearAiScript: document.getElementById('btn-clear-ai-script'),
+    productionModeSummaryTitle: document.getElementById('production-mode-summary-title'),
+    productionModeSummaryBadge: document.getElementById('production-mode-summary-badge'),
+    productionModeSummaryDescription: document.getElementById('production-mode-summary-description'),
+    productionModeSummarySteps: document.getElementById('production-mode-summary-steps'),
+    mediaTabLabel: document.getElementById('media-tab-label'),
+    buildTabLabel: document.getElementById('build-tab-label'),
+    buildQualityHint: document.getElementById('build-quality-hint'),
     presenterImageRow: document.getElementById('presenter-image-row'),
     presenterImagePath: document.getElementById('presenter-image-path'),
     btnPickPresenter: document.getElementById('btn-pick-presenter'),
@@ -608,6 +1297,12 @@ const elements = {
     veoAiVideoRow: document.getElementById('veo-ai-video-row'),
     veoAiVideoEnabled: document.getElementById('veo-ai-video-enabled'),
     veoAiVideoOpts: document.getElementById('veo-ai-video-opts'),
+    veoAiVideoToggleRow: document.getElementById('veo-ai-video-toggle-row'),
+    veoAiVideoTitle: document.getElementById('veo-ai-video-title'),
+    veoAiVideoModeBadge: document.getElementById('veo-ai-video-mode-badge'),
+    veoAiVideoDescription: document.getElementById('veo-ai-video-description'),
+    veoScopeGroup: document.getElementById('veo-scope-group'),
+    fallbackMediaSettings: document.getElementById('fallback-media-settings'),
     veoScope: document.getElementById('veo-scope'),
     veoResolution: document.getElementById('veo-resolution'),
     veoBackend: document.getElementById('veo-backend'),
@@ -632,9 +1327,9 @@ const elements = {
     styleComparisonClose: document.getElementById('style-comparison-close'),
     // Clip analyzer toggle
     clipAnalyzerToggle: document.getElementById('clip-analyzer-toggle'),
-    // Resume build toggle (skip completed steps + reuse cached scene media)
-    buildResumeToggle: document.getElementById('build-resume-toggle'),
     fastMediaToggle: document.getElementById('fast-media-toggle'),
+    fastMediaGroup: document.getElementById('fast-media-group'),
+    fastMediaHint: document.getElementById('fast-media-hint'),
     repeatFromStep: document.getElementById('repeat-from-step'),
     forceFreshFootage: document.getElementById('force-fresh-footage-toggle'),
     // Footage source toggles
@@ -735,10 +1430,6 @@ const elements = {
     previewContainer: document.getElementById('preview-container'),
     previewZoomSelect: document.getElementById('preview-zoom-select'),
     previewZoomLabel: document.getElementById('preview-zoom-label'),
-    // SFX controls
-    sfxEnabled: document.getElementById('sfx-enabled'),
-    sfxVolume: document.getElementById('sfx-volume'),
-    sfxVolumeLabel: document.getElementById('sfx-volume-label'),
     // Subtitles
     subtitlesEnabled: document.getElementById('subtitles-enabled'),
 };
@@ -825,13 +1516,12 @@ function initCaptureMode() {
     window.electronAPI.onCaptureLoadPlan(async (planData) => {
         console.log('[CaptureMode] Received plan data');
         try {
-            state.videoPlan = planData;
-            window._mgBridgeVideoPlan = planData;
-
-            const plan = planData;
+            const plan = normalizePlanForEditor(planData);
+            state.videoPlan = plan;
+            window._mgBridgeVideoPlan = plan;
             state.scenes = plan.scenes || [];
             state.motionGraphics = plan.motionGraphics || [];
-            state.transitions = plan.transitions || [];
+            hydratePlanTransitions(plan, state.scenes);
             state.totalDuration = plan.totalDuration || 0;
             state.fps = plan.fps || 30;
             state.mgStyle = plan.mgStyle || 'clean';
@@ -841,13 +1531,14 @@ function initCaptureMode() {
             state.scenes.forEach((s, i) => {
                 if (!s.trackId) s.trackId = s.isMGScene ? 'video-track-3' : 'video-track-1';
                 if (s.index === undefined) s.index = i;
+                if (s.sourceSceneIndex === undefined) s.sourceSceneIndex = getSceneSourceIndex(s, i);
             });
 
             // Pre-cache ALL media URLs upfront (avoids per-frame IPC)
             console.log('[CaptureMode] Pre-caching media URLs for', state.scenes.length, 'scenes');
             for (const scene of state.scenes) {
                 if (scene.isMGScene || scene.disabled) continue;
-                const idx = scene.index !== undefined ? scene.index : state.scenes.indexOf(scene);
+                const idx = getSceneSourceIndex(scene, state.scenes.indexOf(scene));
                 try {
                     const url = await getCachedMediaUrl(idx, scene.mediaExtension);
                     _captureMediaCache[idx] = url;
@@ -862,7 +1553,7 @@ function initCaptureMode() {
             const videoLoadPromises = [];
             for (const scene of state.scenes) {
                 if (scene.isMGScene || scene.disabled || scene.mediaType === 'image') continue;
-                const idx = scene.index !== undefined ? scene.index : state.scenes.indexOf(scene);
+                const idx = getSceneSourceIndex(scene, state.scenes.indexOf(scene));
                 const url = _captureMediaCache[idx];
                 if (!url) continue;
                 const trackNum = scene.trackId?.match(/video-track-(\d)/)?.[1] || '1';
@@ -1030,11 +1721,6 @@ async function init() {
             buildStyleProfile: elements.buildStyleProfile ? elements.buildStyleProfile.value : 'none',
         });
     } catch (_) {}
-    // Show Ollama model row if Ollama is the active provider
-    if (elements.ollamaModelRow) {
-        elements.ollamaModelRow.style.display = elements.aiProvider.value === 'ollama' ? 'block' : 'none';
-    }
-
     // Scan available overlays from assets/overlays/
     try {
         state.availableOverlays = await window.electronAPI.scanOverlays();
@@ -1084,9 +1770,14 @@ function setupEventListeners() {
         e.preventDefault();
         elements.dropZone.classList.remove('drag-over');
         if (!_requireProject()) return;
-        if (e.dataTransfer.files.length > 0) handleFileSelect(e.dataTransfer.files[0]);
+        if (e.dataTransfer.files.length > 0) handleFileSelect(e.dataTransfer.files[0]).catch((error) => showToast(error.message, 'error'));
     });
-    elements.fileInput.addEventListener('change', (e) => { if (!_requireProject()) return; if (e.target.files.length > 0) handleFileSelect(e.target.files[0]); });
+    elements.fileInput.addEventListener('change', (e) => {
+        if (!_requireProject()) return;
+        if (e.target.files.length > 0) {
+            handleFileSelect(e.target.files[0]).catch((error) => showToast(error.message, 'error'));
+        }
+    });
     elements.btnRemoveAudio.addEventListener('click', removeAudio);
     elements.btnGenerate.addEventListener('click', generateVideo);
     if (elements.btnRepeatStep) elements.btnRepeatStep.addEventListener('click', () => generateVideo({ repeatStep: true }));
@@ -1100,8 +1791,9 @@ function setupEventListeners() {
         if (tog) tog.textContent = panel.classList.contains('collapsed') ? '▸' : '▾';
     });
     elements.btnRender.addEventListener('click', renderVideo);
-    if (elements.btnQAStudio) elements.btnQAStudio.addEventListener('click', () => window.electronAPI.openQAStudio());
-    if (elements.btnQAChat)   elements.btnQAChat.addEventListener('click',   () => window.electronAPI.openQAChat());
+    if (elements.btnAgent) {
+        elements.btnAgent.addEventListener('click', () => window.EditorAgentPanel?.open());
+    }
     if (elements.openFootageResources) {
         elements.openFootageResources.addEventListener('click', () => window.electronAPI?.openFootageResources?.());
     }
@@ -1117,8 +1809,6 @@ function setupEventListeners() {
             const on = elements.smartAiToggle.checked;
             elements.aiProvider.disabled = !on;
             if (elements.aiInstructions) elements.aiInstructions.disabled = !on;
-            if (elements.ollamaModel) elements.ollamaModel.disabled = !on;
-            if (elements.ollamaVisionModel) elements.ollamaVisionModel.disabled = !on;
             elements.aiProvider.parentElement.style.opacity = on ? '1' : '0.4';
             if (elements.aiInstructions) elements.aiInstructions.style.opacity = on ? '1' : '0.4';
         };
@@ -1131,11 +1821,8 @@ function setupEventListeners() {
             syncFootageResourcesToMainProcess();
         });
     }
-    if (elements.buildResumeToggle) {
-        elements.buildResumeToggle.addEventListener('change', () => saveSettings());
-    }
     if (elements.fastMediaToggle) {
-        elements.fastMediaToggle.addEventListener('change', () => saveSettings());
+        elements.fastMediaToggle.addEventListener('change', _syncFastMediaUI);
     }
     if (elements.repeatFromStep) {
         elements.repeatFromStep.addEventListener('change', () => saveSettings());
@@ -1510,28 +2197,23 @@ function setupEventListeners() {
 
     refreshVisionHealth();
     elements.aiProvider.addEventListener('change', () => {
-        // Show/hide Ollama model selection
-        if (elements.ollamaModelRow) {
-            elements.ollamaModelRow.style.display = elements.aiProvider.value === 'ollama' ? 'block' : 'none';
-        }
         // Apply the brain switch immediately (live for refresh/open, not just builds)
         if (window.electronAPI?.setAiProvider) {
             window.electronAPI.setAiProvider(elements.aiProvider.value).catch(() => {});
         }
         saveSettings();
     });
-    // Ollama model changes
-    if (elements.ollamaModel) elements.ollamaModel.addEventListener('change', saveSettings);
-    if (elements.ollamaVisionModel) elements.ollamaVisionModel.addEventListener('change', saveSettings);
     if (elements.videoTitle) {
         elements.videoTitle.addEventListener('input', () => {
             state.videoTitle = elements.videoTitle.value;
+            triggerAutoSave();
         });
         elements.videoTitle.addEventListener('change', saveSettings);
     }
     if (elements.aiInstructions) {
         elements.aiInstructions.addEventListener('input', () => {
             state.aiInstructions = elements.aiInstructions.value;
+            triggerAutoSave();
         });
         elements.aiInstructions.addEventListener('change', saveSettings);
     }
@@ -1561,58 +2243,6 @@ function setupEventListeners() {
 
     // Style Learner — populate dropdown, wire learn dialog
     setupStyleLearner();
-    // SFX controls
-    if (elements.sfxEnabled) {
-        elements.sfxEnabled.addEventListener('change', () => {
-            state.sfxEnabled = elements.sfxEnabled.checked;
-            if (!state.sfxEnabled) {
-                state.sfxClips = [];
-            } else if (state.sfxDesignedByWorker && state.videoPlan?.sfxClips?.length) {
-                // Re-enable the AI-designed track instead of rebuilding the floor.
-                hydrateDesignedSfx(state.videoPlan.sfxClips);
-            } else {
-                generateSfxClips();
-            }
-            renderTimeline();
-            saveSettings();
-        });
-    }
-    if (elements.sfxVolume) {
-        elements.sfxVolume.addEventListener('input', () => {
-            state.sfxVolume = parseFloat(elements.sfxVolume.value);
-            if (elements.sfxVolumeLabel) elements.sfxVolumeLabel.textContent = `${Math.round(state.sfxVolume * 100)}%`;
-            applySfxVolumeLevels();
-            renderTimeline();
-            saveSettings();
-        });
-    }
-    // Download Real SFX button
-    const btnDownloadSfx = document.getElementById('btn-download-sfx');
-    const sfxDownloadStatus = document.getElementById('sfx-download-status');
-    if (btnDownloadSfx) {
-        btnDownloadSfx.addEventListener('click', async () => {
-            if (!window.electronAPI?.downloadRealSfx) return;
-            btnDownloadSfx.disabled = true;
-            btnDownloadSfx.textContent = '⏳ Downloading...';
-            if (sfxDownloadStatus) sfxDownloadStatus.textContent = 'Searching Freesound for high-quality SFX...';
-            try {
-                const result = await window.electronAPI.downloadRealSfx();
-                if (result.noKey) {
-                    if (sfxDownloadStatus) sfxDownloadStatus.textContent = '⚠ Set FREESOUND_API_KEY in .env first';
-                } else if (result.success) {
-                    if (sfxDownloadStatus) sfxDownloadStatus.textContent = `✅ ${result.downloaded} downloaded, ${result.skipped} cached, ${result.failed} fallback`;
-                    // Re-preload SFX URLs with new files
-                    preloadSfxUrls();
-                } else {
-                    if (sfxDownloadStatus) sfxDownloadStatus.textContent = `❌ ${result.error || 'Download failed'}`;
-                }
-            } catch (e) {
-                if (sfxDownloadStatus) sfxDownloadStatus.textContent = `❌ ${e.message}`;
-            }
-            btnDownloadSfx.disabled = false;
-            btnDownloadSfx.textContent = '🎵 Download Real SFX';
-        });
-    }
     // Subtitles toggle
     if (elements.subtitlesEnabled) {
         elements.subtitlesEnabled.addEventListener('change', () => {
@@ -1651,6 +2281,48 @@ function setupEventListeners() {
     if (elements.aiVideosScript) {
         elements.aiVideosScript.addEventListener('input', () => {
             state.aiVideosScript = elements.aiVideosScript.value;
+            state.aiVideosScriptSource = { type: 'paste', label: '' };
+            _setAiScriptSourceStatus(state.aiVideosScript.trim()
+                ? `Using pasted text · ${_scriptWordCount(state.aiVideosScript)} words`
+                : 'Paste text, import a story file, or load a public URL.');
+            _syncAiVideosSourceUI();
+            saveSettings();
+        });
+    }
+    if (elements.aiVideosInputMode) {
+        elements.aiVideosInputMode.addEventListener('change', () => {
+            state.aiVideosInputMode = elements.aiVideosInputMode.value || 'auto';
+            _syncProductionModeUI();
+            saveSettings();
+        });
+    }
+    if (elements.btnImportAiScript) {
+        elements.btnImportAiScript.addEventListener('click', importAiVideosScriptFile);
+    }
+    if (elements.btnToggleAiScriptUrl) {
+        elements.btnToggleAiScriptUrl.addEventListener('click', () => {
+            elements.aiVideosUrlRow?.classList.toggle('hidden');
+            if (!elements.aiVideosUrlRow?.classList.contains('hidden')) elements.aiVideosScriptUrl?.focus();
+        });
+    }
+    if (elements.btnLoadAiScriptUrl) {
+        elements.btnLoadAiScriptUrl.addEventListener('click', loadAiVideosScriptUrl);
+    }
+    if (elements.aiVideosScriptUrl) {
+        elements.aiVideosScriptUrl.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                loadAiVideosScriptUrl();
+            }
+        });
+    }
+    if (elements.btnClearAiScript) {
+        elements.btnClearAiScript.addEventListener('click', () => {
+            state.aiVideosScript = '';
+            state.aiVideosScriptSource = { type: 'paste', label: '' };
+            if (elements.aiVideosScript) elements.aiVideosScript.value = '';
+            _setAiScriptSourceStatus('Paste text, import a story file, or load a public URL.');
+            _syncProductionModeUI();
             saveSettings();
         });
     }
@@ -1974,6 +2646,90 @@ function setupVideoControls() {
     }
 }
 
+const STRUCTURAL_FULLSCREEN_MG_TYPES = new Set([
+    'barChart',
+    'donutChart',
+    'rankingList',
+    'timeline',
+    'comparisonCard',
+    'bulletList',
+    'mapChart',
+    'articleHighlight',
+    'listicleGrid',
+]);
+
+function _samePlanVisual(current, source) {
+    if (!current || !source) return false;
+    if (current.id && source.id && current.id === source.id) return true;
+    if (current.clipId && source.clipId && current.clipId === source.clipId) return true;
+    return current.type === source.type
+        && Math.abs(Number(current.startTime || 0) - Number(source.startTime || 0)) < 0.02;
+}
+
+function _applyStructuralPlanRepairs(plan) {
+    const allMotionGraphics = Array.isArray(plan?.motionGraphics) ? plan.motionGraphics : [];
+    state.motionGraphics = allMotionGraphics.filter(mg => (
+        mg
+        && !STRUCTURAL_FULLSCREEN_MG_TYPES.has(mg.type)
+        && mg.category !== 'fullscreen'
+        && mg.trackId !== 'video-track-3'
+    ));
+    _resolveExplainerUrls(state.motionGraphics);
+
+    const activeStageVisuals = [
+        ...(plan?.mgScenes || []),
+        ...(plan?.templateScenes || []),
+        ...allMotionGraphics.filter(mg => (
+            STRUCTURAL_FULLSCREEN_MG_TYPES.has(mg?.type)
+            || mg?.category === 'fullscreen'
+            || mg?.trackId === 'video-track-3'
+        )),
+    ].filter(Boolean);
+    const authoredFields = [
+        '_authoredComposition',
+        '_authoredAssets',
+        '_authoredNs',
+        '_authoredRendered',
+    ];
+    const repairFields = [
+        'startTime',
+        'endTime',
+        'duration',
+        'durationSeconds',
+        'durationFrames',
+        'durationUnit',
+        'animation',
+        'animationSpeed',
+        'agenticComposition',
+        'position',
+        'safeZone',
+        'sceneIndex',
+        'sourceSceneIndex',
+        'originalSceneIndex',
+        'targetSceneIndex',
+    ];
+
+    state.scenes = state.scenes.filter((scene) => {
+        if (!scene?.isMGScene) return true;
+        const source = activeStageVisuals.find(item => _samePlanVisual(scene, item));
+        if (!source) return false;
+
+        for (const field of repairFields) {
+            if (Object.prototype.hasOwnProperty.call(source, field)) scene[field] = source[field];
+        }
+        for (const field of authoredFields) {
+            if (Object.prototype.hasOwnProperty.call(source, field)) {
+                scene[field] = source[field];
+                if (scene.mgData && typeof scene.mgData === 'object') scene.mgData[field] = source[field];
+            } else {
+                delete scene[field];
+                if (scene.mgData && typeof scene.mgData === 'object') delete scene.mgData[field];
+            }
+        }
+        return true;
+    });
+}
+
 function setupElectronListeners() {
     if (window.electronAPI) {
         window.electronAPI.onBuildProgress((data) => updateProgress(data.percent, data.message));
@@ -1993,21 +2749,179 @@ function setupElectronListeners() {
         });
     }
 
-    // QA Studio pushes fixes directly into memory so auto-save picks them up
-    window.electronAPI.onQAPlanUpdated?.((plan) => {
+    // QA Studio persists the unified plan in main, then pushes it here so the
+    // open editor/compositor reflects the same state immediately.
+    window.electronAPI.onQAPlanUpdated?.((payload) => {
+        const plan = payload?.videoPlan || payload;
         if (!plan || !plan.scenes) return;
-        const sceneByIndex = new Map(state.scenes.map(s => [s.index, s]));
-        plan.scenes.forEach((fixedScene, i) => {
-            if (!state.videoPlan?.scenes?.[i]) return;
-            QA_SYNCABLE_FIELDS.forEach(f => {
-                if (fixedScene[f] !== undefined) state.videoPlan.scenes[i][f] = fixedScene[f];
-            });
-            const stateScene = sceneByIndex.get(fixedScene.index) ?? sceneByIndex.get(i);
-            if (stateScene) QA_SYNCABLE_FIELDS.forEach(f => { if (fixedScene[f] !== undefined) stateScene[f] = fixedScene[f]; });
+        if (state.projectHydrating && _autoSaveTimer) {
+            clearTimeout(_autoSaveTimer);
+            _autoSaveTimer = null;
+        }
+        state.videoPlan = plan;
+        if (payload?.revision != null) state.projectRevision = Number(payload.revision) || state.projectRevision;
+        if (payload?.planHash) state.projectPlanHash = payload.planHash;
+        window._mgBridgeVideoPlan = plan;
+        _applyStructuralPlanRepairs(plan);
+
+        const clearWhenAbsent = new Set([
+            'cropTop', 'cropRight', 'cropBottom', 'cropLeft',
+            'scale', 'posY', 'posX', 'framing', 'framingMode',
+            'floatingBackground', 'floatingAnim', 'floatingShadow',
+            'flagForReplacement', 'qaFixed', 'qaReplaced', 'qaFixReason', 'qaFixCount',
+            'qaReason', 'qaReplacementKeyword', 'qaReplacementSource', 'qaReplacementDiagnosis',
+        ]);
+        const syncQaFields = (source, target) => {
+            if (!source || !target) return;
+            for (const field of QA_SYNCABLE_FIELDS) {
+                if (Object.prototype.hasOwnProperty.call(source, field)) target[field] = source[field];
+                else if (clearWhenAbsent.has(field)) delete target[field];
+            }
+        };
+
+        const scenesByClipId = new Map();
+        const scenesBySource = new Map();
+        state.scenes.filter((scene) => !scene.isMGScene).forEach((scene, fallbackIndex) => {
+            if (scene.clipId) scenesByClipId.set(scene.clipId, scene);
+            const key = getSceneSourceIndex(scene, fallbackIndex);
+            if (!scenesBySource.has(key)) scenesBySource.set(key, []);
+            scenesBySource.get(key).push(scene);
         });
+        plan.scenes.forEach((fixedScene, i) => {
+            const exactTarget = fixedScene.clipId ? scenesByClipId.get(fixedScene.clipId) : null;
+            const sourceKey = getSceneSourceIndex(fixedScene, i);
+            const targets = exactTarget ? [exactTarget] : (scenesBySource.get(sourceKey) || []);
+            targets.forEach((target) => syncQaFields(fixedScene, target));
+        });
+
+        for (const fixedTemplate of (plan.templateScenes || [])) {
+            const target = state.scenes.find((scene) => (
+                scene.isMGScene
+                && scene.templateType
+                && (scene.id === fixedTemplate.id
+                    || (scene.type === fixedTemplate.type
+                        && Math.abs(Number(scene.startTime) - Number(fixedTemplate.startTime)) < 0.001))
+            ));
+            if (target) {
+                syncQaFields(fixedTemplate, target);
+                if (target.mgData) syncQaFields(fixedTemplate, target.mgData);
+            }
+        }
+
+        renderScenes();
+        renderTimeline();
+        loadActiveScenes();
         if (state.compositorActive) loadPlanIntoCompositor();
-        showToast('QA fixes applied — compositor updated');
-        console.log('[QA] Plan patched from QA Studio — crop/flag fixes active');
+        if (payload?.source === 'motion-qa-preview') {
+            const repairCount = Number(payload?.motionQa?.repairCount || 0);
+            showToast(`Motion QA fixed ${repairCount} visual issue${repairCount === 1 ? '' : 's'} — preview and timeline updated`, 'success');
+            console.log('[Motion QA] Preview repairs patched into the editor and persisted');
+        } else {
+            showToast('QA fixes applied — compositor updated');
+            console.log('[QA] Unified plan patched from QA Studio — fixes active in memory and on disk');
+        }
+    });
+
+    // Agent changes are committed as full project transactions. Rehydrate the
+    // canonical plan so structural edits, visuals, and renderer state stay exact.
+    window.electronAPI.onAgentPlanUpdated?.(async (payload) => {
+        const plan = payload?.videoPlan || payload;
+        if (!plan?.scenes) return;
+        const playheadTime = state.currentTime;
+        const selectedVisualRef = state.selectedMgIndex >= 0 && state.motionGraphics?.[state.selectedMgIndex]
+            ? _agentVisualRef(state.motionGraphics[state.selectedMgIndex], state.selectedMgIndex)
+            : null;
+        const selectedTransitionRef = state.selectedTransitionIndex >= 0 && state.transitions?.[state.selectedTransitionIndex]
+            ? {
+                fromClipId: state.transitions[state.selectedTransitionIndex].fromClipId || '',
+                toClipId: state.transitions[state.selectedTransitionIndex].toClipId || '',
+                startTime: Number(
+                    state.transitions[state.selectedTransitionIndex].startTime
+                    ?? state.transitions[state.selectedTransitionIndex].at
+                ) || 0,
+            }
+            : null;
+        const selectedRefs = (state.selectedClipIndices || [])
+            .map((index) => state.scenes[index])
+            .filter(Boolean)
+            .map((scene, fallbackIndex) => ({
+                clipId: scene.clipId || '',
+                sourceSceneIndex: getSceneSourceIndex(scene, fallbackIndex),
+                startTime: Number(scene.startTime) || 0,
+                isMGScene: !!scene.isMGScene,
+            }));
+        try {
+            await loadVideoPlan({
+                hyperframesPreviewOptions: {
+                    persistMotionQa: false,
+                    source: payload?.source || 'editor-agent',
+                    transactionId: payload?.transactionId || '',
+                },
+            });
+            const restoredSelection = [];
+            selectedRefs.forEach((ref) => {
+                const index = state.scenes.findIndex((scene, fallbackIndex) => {
+                    if (ref.clipId && scene.clipId === ref.clipId) return true;
+                    return !!scene.isMGScene === ref.isMGScene
+                        && getSceneSourceIndex(scene, fallbackIndex) === ref.sourceSceneIndex
+                        && Math.abs((Number(scene.startTime) || 0) - ref.startTime) < 0.01;
+                });
+                if (index >= 0 && !restoredSelection.includes(index)) restoredSelection.push(index);
+            });
+            const restoredVisualIndex = selectedVisualRef
+                ? state.motionGraphics.findIndex((visual, index) => {
+                    const ref = _agentVisualRef(visual, index);
+                    return ref.id === selectedVisualRef.id
+                        || (
+                            ref.type === selectedVisualRef.type
+                            && Math.abs(ref.startTime - selectedVisualRef.startTime) < 0.02
+                        );
+                })
+                : -1;
+            const restoredTransitionIndex = selectedTransitionRef
+                ? state.transitions.findIndex((transition) => (
+                    (
+                        String(transition.fromClipId || '') === String(selectedTransitionRef.fromClipId)
+                        && String(transition.toClipId || '') === String(selectedTransitionRef.toClipId)
+                    )
+                    || Math.abs(
+                        (Number(transition.startTime ?? transition.at) || 0)
+                        - selectedTransitionRef.startTime
+                    ) < 0.02
+                ))
+                : -1;
+            state.selectedMgIndex = restoredVisualIndex;
+            state.selectedTransitionIndex = restoredVisualIndex >= 0 ? -1 : restoredTransitionIndex;
+            if (restoredVisualIndex >= 0) {
+                state.selectedClipIndices = [];
+                state.selectedClipIndex = -1;
+            } else if (restoredTransitionIndex >= 0) {
+                state.selectedClipIndices = [];
+                state.selectedClipIndex = -1;
+            } else {
+                state.selectedClipIndices = restoredSelection;
+                state.selectedClipIndex = restoredSelection.length
+                    ? restoredSelection[restoredSelection.length - 1]
+                    : -1;
+            }
+            await seekToTime(Math.min(playheadTime, state.totalDuration));
+            renderTimeline();
+            updateClipProperties();
+            notifyAgentContextChanged();
+
+            if (payload?.source === 'editor-agent-undo') {
+                showToast('Agent edit undone', 'success');
+            } else if (payload?.source === 'editor-agent-redo') {
+                showToast('Agent edit restored', 'success');
+            } else if (payload?.source === 'editor-agent-rollback') {
+                showToast('Agent edit was rolled back safely', 'warning');
+            } else {
+                showToast('Agent edit applied - preview and timeline updated', 'success');
+            }
+        } catch (error) {
+            console.error('[Agent] Failed to rehydrate edited plan:', error);
+            showToast(`Agent edit saved, but editor refresh failed: ${error.message}`, 'error');
+        }
     });
 }
 
@@ -2176,6 +3090,7 @@ function setInPoint(timeSec) {
     showToast(`In: ${formatTime(state.inPoint)}`, 'info');
     renderInOutMarkers();
     updateInOutDisplay();
+    notifyAgentContextChanged();
 }
 
 function setOutPoint(timeSec) {
@@ -2188,6 +3103,7 @@ function setOutPoint(timeSec) {
     showToast(`Out: ${formatTime(state.outPoint)}`, 'info');
     renderInOutMarkers();
     updateInOutDisplay();
+    notifyAgentContextChanged();
 }
 
 function clearInOutPoints() {
@@ -2197,13 +3113,29 @@ function clearInOutPoints() {
     showToast('In/Out points cleared', 'info');
     renderInOutMarkers();
     updateInOutDisplay();
+    notifyAgentContextChanged();
 }
 
 /** Get effective render range in seconds */
 function getRenderRange() {
-    const inSec = state.inPoint !== null ? state.inPoint : 0;
-    const outSec = state.outPoint !== null ? state.outPoint : state.totalDuration;
+    const timelineEnd = Math.max(0, Number(state.totalDuration) || 0);
+    const inSec = Math.max(0, Math.min(timelineEnd, state.inPoint !== null ? Number(state.inPoint) || 0 : 0));
+    const outSec = Math.max(inSec, Math.min(timelineEnd, state.outPoint !== null ? Number(state.outPoint) || 0 : timelineEnd));
     return { inSec, outSec, duration: outSec - inSec };
+}
+
+function getFrameAlignedRenderRange(fps) {
+    const safeFps = Math.max(1, Number(fps) || 30);
+    const { inSec, outSec } = getRenderRange();
+    const startFrame = Math.max(0, Math.floor(inSec * safeFps + 1e-7));
+    const endFrame = Math.max(startFrame + 1, Math.ceil(outSec * safeFps - 1e-7));
+    return {
+        startFrame,
+        endFrame,
+        inSec: startFrame / safeFps,
+        outSec: endFrame / safeFps,
+        duration: (endFrame - startFrame) / safeFps,
+    };
 }
 
 /** Draw in/out markers + shaded work area on ruler */
@@ -2312,8 +3244,9 @@ function updateInOutDisplay() {
         <span class="in-out-label">Work Area:</span>
         <span class="in-out-range">${formatTime(inSec)} → ${formatTime(outSec)}</span>
         <span class="in-out-duration">(${formatTime(duration)})</span>
-        <button class="in-out-clear" title="Clear In/Out (Esc)" onclick="clearInOutPoints()">✕</button>
+        <button class="in-out-clear" title="Clear In/Out (Esc)">✕</button>
     `;
+    display.querySelector('.in-out-clear')?.addEventListener('click', clearInOutPoints);
 }
 
 // ========================================
@@ -2357,6 +3290,8 @@ function undo() {
     _restoreUndoSnapshot(state.undoStack.pop());
     state.selectedClipIndex = -1;
     state.selectedClipIndices = [];
+    state.selectedMgIndex = -1;
+    state.selectedTransitionIndex = -1;
     recalcTotalDuration();
     renderTimeline();
     updateClipProperties();
@@ -2375,6 +3310,8 @@ function redo() {
     _restoreUndoSnapshot(state.redoStack.pop());
     state.selectedClipIndex = -1;
     state.selectedClipIndices = [];
+    state.selectedMgIndex = -1;
+    state.selectedTransitionIndex = -1;
     recalcTotalDuration();
     renderTimeline();
     updateClipProperties();
@@ -2406,7 +3343,9 @@ function selectClip(index, ctrlKey = false) {
     }
     // Deselect any MG selection
     state.selectedMgIndex = -1;
+    state.selectedTransitionIndex = -1;
     document.querySelectorAll('.mg-clip').forEach(c => c.classList.remove('selected'));
+    document.querySelectorAll('.transition-marker.selected').forEach(c => c.classList.remove('selected'));
     // Update visual selection
     document.querySelectorAll('.timeline-clip').forEach(c => c.classList.remove('selected'));
     state.selectedClipIndices.forEach(idx => {
@@ -2415,26 +3354,35 @@ function selectClip(index, ctrlKey = false) {
     });
     updateClipProperties();
     applySceneTransform(state.selectedClipIndex);
+    notifyAgentContextChanged();
 }
 
 function selectAllClips() {
     if (state.scenes.length === 0) return;
     state.selectedClipIndices = state.scenes.map((_, i) => i);
     state.selectedClipIndex = state.selectedClipIndices[state.selectedClipIndices.length - 1];
+    state.selectedMgIndex = -1;
+    state.selectedTransitionIndex = -1;
+    document.querySelectorAll('.mg-clip').forEach(c => c.classList.remove('selected'));
+    document.querySelectorAll('.transition-marker.selected').forEach(c => c.classList.remove('selected'));
     document.querySelectorAll('.timeline-clip[data-index]').forEach(c => c.classList.add('selected'));
     updateClipProperties();
     const count = state.selectedClipIndices.length;
     showToast(`Selected all ${count} clips`, 'info');
+    notifyAgentContextChanged();
 }
 
 function deselectClip() {
     state.selectedClipIndex = -1;
     state.selectedClipIndices = [];
     state.selectedMgIndex = -1;
+    state.selectedTransitionIndex = -1;
     clearSceneTransform();
     document.querySelectorAll('.timeline-clip').forEach(c => c.classList.remove('selected'));
     document.querySelectorAll('.mg-clip').forEach(c => c.classList.remove('selected'));
+    document.querySelectorAll('.transition-marker.selected').forEach(c => c.classList.remove('selected'));
     updateClipProperties();
+    notifyAgentContextChanged();
 }
 
 function copySelectedClip() {
@@ -2457,8 +3405,12 @@ function pasteClip() {
     const duration = clip.endTime - clip.startTime;
     clip.startTime = state.currentTime;
     clip.endTime = state.currentTime + duration;
-    // Keep the original scene index so the correct video file loads (scene-{index}.mp4)
-    // Do NOT overwrite clip.index - it must point to the original scene's video file
+    clip.duration = duration;
+    clip.durationFrames = Math.max(1, Math.round(duration * (state.videoPlan?.fps || 30)));
+    clip.durationUnit = 'seconds';
+    clip.sourceSceneIndex = getSceneSourceIndex(clip, clip.index);
+    // A paste is a new timeline instance, but it still resolves the same source media.
+    clip.clipId = createUniqueClipId(clip, 'paste');
     state.scenes.push(clip);
     state.scenes.sort((a, b) => a.startTime - b.startTime);
     recalcTotalDuration();
@@ -2488,6 +3440,7 @@ function deleteSelectedClips() {
     }
     state.selectedClipIndex = -1;
     state.selectedClipIndices = [];
+    state.selectedTransitionIndex = -1;
     recalcTotalDuration();
     renderTimeline();
     showToast(`${toDelete.length} clip${toDelete.length > 1 ? 's' : ''} deleted`, 'info');
@@ -2523,11 +3476,19 @@ function cutClipAtPlayhead() {
     // Create the second half (right side of cut)
     const rightClip = JSON.parse(JSON.stringify(scene));
     rightClip.startTime = cutTime;
+    rightClip.clipId = createUniqueClipId(scene, 'cut');
+    rightClip.sourceSceneIndex = getSceneSourceIndex(scene, scene.index);
     // mediaOffset tracks how far into the source video this clip starts
     rightClip.mediaOffset = (scene.mediaOffset || 0) + (cutTime - scene.startTime);
+    rightClip.duration = rightClip.endTime - rightClip.startTime;
+    rightClip.durationFrames = Math.max(1, Math.round(rightClip.duration * (state.videoPlan?.fps || 30)));
+    rightClip.durationUnit = 'seconds';
 
     // Trim the original (left side of cut)
     scene.endTime = cutTime;
+    scene.duration = scene.endTime - scene.startTime;
+    scene.durationFrames = Math.max(1, Math.round(scene.duration * (state.videoPlan?.fps || 30)));
+    scene.durationUnit = 'seconds';
 
     // Insert right clip after the original
     state.scenes.splice(idx + 1, 0, rightClip);
@@ -2994,7 +3955,10 @@ function _syncEffectToCompositor(sceneIndex) {
     if (!sg) return;
     const srcScene = state.scenes[sceneIndex];
     if (!srcScene) return;
-    const target = sg._scenes.find(s => s.index === srcScene.index);
+    const target = sg._scenes.find(s => (
+        (srcScene.clipId && s.clipId === srcScene.clipId)
+        || (!srcScene.clipId && s.index === srcScene.index)
+    ));
     if (!target) return;
     target.effects = srcScene.effects;
     target.effectOverrides = srcScene.effectOverrides;
@@ -3577,22 +4541,7 @@ function setupClipPropertyListeners() {
             pushUndoState();
             const scene = state.scenes[state.selectedClipIndex];
             const newFraming = e.target.value;
-            scene.framing = newFraming;
-            if (newFraming === 'floating') {
-                // Apply floating defaults if switching to floating
-                if (!scene.shadow && scene.shadow !== 0) scene.shadow = 0.5;
-                scene.floatingAnim = scene.floatingAnim || 'slideRight';
-                scene.floatingAnimDuration = scene.floatingAnimDuration || 0.6;
-                scene.borderRadius = scene.borderRadius || 4;
-                if (!scene.background || scene.background === 'none') scene.background = 'blur';
-                // Scale down for floating look
-                if (scene.scale > 0.7) scene.scale = 0.6;
-            } else if (newFraming === 'fullscreen') {
-                scene.shadow = 0;
-                scene.borderRadius = 0;
-                scene.scale = 1;
-                scene.background = 'none';
-            }
+            applyEditorFramingPreset(scene, newFraming);
             updateClipProperties();
             applySceneTransform(state.selectedClipIndex);
             refreshCompositorScene(state.selectedClipIndex);
@@ -4566,6 +5515,64 @@ function applySceneTransformToVideo(videoElement, scene) {
     }
 }
 
+function applyEditorFramingPreset(scene, requestedFraming) {
+    if (!scene) return;
+    const framing = ['fullscreen', 'cinematic', 'floating'].includes(requestedFraming)
+        ? requestedFraming
+        : 'fullscreen';
+    const width = Number(scene.mediaWidth || scene.width) || 0;
+    const height = Number(scene.mediaHeight || scene.height) || 0;
+    const ratio = width > 0 && height > 0 ? width / height : Number(scene.aspectRatio) || 0;
+    const fillFactor = Math.min(1, Math.max(0, (ratio - 1) / ((1920 / 1080) - 1)));
+
+    scene.framing = framing;
+    scene.framingMode = framing;
+    scene.fit = 'cover';
+    scene.fitMode = 'cover';
+    scene.posX = 0;
+    scene.posY = 0;
+    delete scene._verticalContain;
+    delete scene._verticalContainReason;
+
+    if (framing === 'floating') {
+        const currentScale = Number(scene.scale);
+        scene.scale = currentScale >= 0.4 && currentScale <= 0.6
+            ? currentScale
+            : Math.round((0.45 + fillFactor * 0.10) * 100) / 100;
+        scene.background = scene.background && scene.background !== 'none' ? scene.background : 'blur';
+        scene.backgroundId = scene.backgroundId && scene.backgroundId !== 'none' ? scene.backgroundId : 'blur';
+        scene.floatingBackground = scene.background;
+        scene.borderRadius = 4;
+        scene.shadow = 0.5;
+        scene.floatingShadow = 0.5;
+        scene.floatingAnim = scene.floatingAnim || 'slideRight';
+        scene.floatingAnimDuration = Number(scene.floatingAnimDuration) || 0.6;
+    } else if (framing === 'cinematic') {
+        const currentScale = Number(scene.scale);
+        scene.scale = currentScale >= 0.7 && currentScale < 1
+            ? currentScale
+            : Math.round((0.75 + fillFactor * 0.20) * 100) / 100;
+        scene.background = scene.background && scene.background !== 'none' ? scene.background : 'blur';
+        scene.backgroundId = scene.backgroundId && scene.backgroundId !== 'none' ? scene.backgroundId : 'blur';
+        scene.floatingBackground = scene.background;
+        scene.borderRadius = 0;
+        scene.shadow = 0;
+        scene.floatingShadow = 0;
+        scene.floatingAnim = null;
+        scene.floatingAnimDuration = null;
+    } else {
+        scene.scale = 1;
+        scene.background = 'none';
+        scene.backgroundId = 'none';
+        scene.floatingBackground = 'none';
+        scene.borderRadius = 0;
+        scene.shadow = 0;
+        scene.floatingShadow = 0;
+        scene.floatingAnim = null;
+        scene.floatingAnimDuration = null;
+    }
+}
+
 /**
  * Apply transform to a scene by index (finds the scene's track video)
  */
@@ -4811,58 +5818,116 @@ function setPreviewZoom(zoom) {
 function syncVideoPlanFromEditor() {
     if (!state.videoPlan) return null;
 
-    state.videoPlan.scenes = state.scenes.filter(s => !s.isMGScene).map((s, i) => ({
-        ...s,
-        index: i,
-        duration: (Number.isFinite(Number(s.endTime)) && Number.isFinite(Number(s.startTime)) && Number(s.endTime) > Number(s.startTime))
-            ? Number(s.endTime) - Number(s.startTime)
-            : s.duration,
-        originalStartTime: s.originalStartTime,
-        originalEndTime: s.originalEndTime
-    }));
-    state.videoPlan.mgScenes = state.scenes.filter(s => s.isMGScene && !s.disabled && !s.templateType).map(s => ({ ...s }));
-    state.videoPlan.templateScenes = state.scenes
-        .filter(s => s.isMGScene && !s.disabled && s.templateType)
+    const fps = state.videoPlan.fps || 30;
+    const mediaScenes = state.scenes.filter(s => !s.isMGScene);
+    const normalizedMediaScenes = timelineContract?.normalizeScenes
+        ? timelineContract.normalizeScenes(mediaScenes, {
+            fps,
+            totalDuration: state.totalDuration,
+        })
+        : mediaScenes.map((scene, index) => ({
+            ...scene,
+            index: getSceneSourceIndex(scene, index),
+            sourceSceneIndex: getSceneSourceIndex(scene, index),
+            clipId: scene.clipId || createUniqueClipId(scene),
+            ...getSceneTiming(scene),
+        }));
+    normalizedMediaScenes.forEach((scene, index) => Object.assign(mediaScenes[index], scene));
+    state.videoPlan.scenes = timelineContract?.serializeScenes
+        ? timelineContract.serializeScenes(normalizedMediaScenes, {
+            fps,
+            totalDuration: state.totalDuration,
+        })
+        : normalizedMediaScenes.map((scene, index) => ({
+            ...scene,
+            index,
+            sourceSceneIndex: getSceneSourceIndex(scene, index),
+        }));
+
+    const fullscreenMGs = state.scenes.filter(s => s.isMGScene && !s.templateType);
+    const normalizedMGs = timelineContract?.normalizeVisualScenes
+        ? timelineContract.normalizeVisualScenes(fullscreenMGs, {
+            fps,
+            totalDuration: state.totalDuration,
+            prefix: 'mg',
+        })
+        : fullscreenMGs.map((scene) => ({ ...scene, ...getSceneTiming(scene) }));
+    normalizedMGs.forEach((scene, index) => Object.assign(fullscreenMGs[index], scene));
+    state.videoPlan.mgScenes = timelineContract?.serializeVisualScenes
+        ? timelineContract.serializeVisualScenes(normalizedMGs, {
+            fps,
+            totalDuration: state.totalDuration,
+            prefix: 'mg',
+        })
+        : normalizedMGs;
+
+    const templateScenes = state.scenes.filter(s => s.isMGScene && s.templateType);
+    const normalizedTemplates = timelineContract?.normalizeVisualScenes
+        ? timelineContract.normalizeVisualScenes(templateScenes, {
+            fps,
+            totalDuration: state.totalDuration,
+            prefix: 'template',
+            fallbackDuration: 4,
+        })
+        : templateScenes.map((scene) => ({ ...scene, ...getSceneTiming(scene, 4) }));
+    normalizedTemplates.forEach((scene, index) => Object.assign(templateScenes[index], scene));
+    const persistedTemplates = normalizedTemplates
         .map(s => ({ ..._normalizeTemplateSceneBackground(s) }));
+    state.videoPlan.templateScenes = timelineContract?.serializeVisualScenes
+        ? timelineContract.serializeVisualScenes(persistedTemplates, {
+            fps,
+            totalDuration: state.totalDuration,
+            prefix: 'template',
+            fallbackDuration: 4,
+        })
+        : persistedTemplates;
+    state.videoPlan.timelineContractVersion = timelineContract?.VERSION || 2;
     state.videoPlan.mutedTracks = { ...state.mutedTracks };
     state.videoPlan.totalDuration = state.totalDuration;
+    state.videoPlan.transitions = JSON.parse(JSON.stringify(state.transitions || []));
 
-    // Preserve an AI-designed SFX track (hydrated from the plan on open) instead
-    // of clobbering it with the mechanical floor. Only (re)generate the floor when
-    // there is no worker track. The SFX-enabled toggle re-hydrates explicitly.
-    if (!state.sfxDesignedByWorker || !(state.sfxClips && state.sfxClips.length)) {
-        generateSfxClips();
-    }
-    state.videoPlan.sfxEnabled = state.sfxEnabled;
-    state.videoPlan.sfxVolume = state.sfxVolume;
+    // The build Sound Designer owns SFX placement and levels. The editor preserves
+    // that authored track verbatim instead of regenerating a second mechanical one.
+    delete state.videoPlan.sfxEnabled;
+    delete state.videoPlan.sfxVolume;
     state.videoPlan.sfxClips = state.sfxClips.map(sfx => ({
         file: sfx.file,
         startTime: sfx.startTime,
         duration: sfx.duration,
-        volume: sfx.volume
+        volume: sfx.volume,
+        transitionType: sfx.transitionType || undefined,
+        role: sfx.role || undefined,
+        why: sfx.why || undefined,
     }));
 
     state.videoPlan.subtitlesEnabled = state.subtitlesEnabled;
     state.videoPlan.mgStyle = state.mgStyle;
-    state.videoPlan.motionGraphics = state.motionGraphics.filter(mg => !mg.disabled).map(mg => {
-        const base = {
-            id: mg.id,
-            type: mg.type,
-            text: mg.text,
-            subtext: mg.subtext || '',
-            startTime: mg.startTime,
-            duration: mg.duration,
-            position: mg.position,
-            sceneIndex: mg.sceneIndex,
-            style: mg.style || state.mgStyle || 'clean',
-            subType: mg.subType || undefined,
-            animation: mg.animation || undefined,
-            animationSpeed: mg.animationSpeed || undefined,
-            overlayShadowStrength: mg.overlayShadowStrength != null ? mg.overlayShadowStrength : state.mgOverlayShadow,
-            styleManual: mg.styleManual === true ? true : undefined,
-            variantManual: mg.variantManual === true ? true : undefined,
-            animationManual: mg.animationManual === true ? true : undefined,
-        };
+    state.videoPlan.motionGraphics = state.motionGraphics.map(mg => {
+        // Preserve the complete authored visual contract. Agentic composition,
+        // colors, items, variants, render assets, and future fields must survive
+        // an unrelated editor save; only compositor/runtime caches are stripped.
+        const base = JSON.parse(JSON.stringify(mg || {}));
+        for (const field of [
+            '_startFrame', '_endFrame', '_totalFrames', '_trackNum', '_animationSpeed',
+            '_authoredRendered', 'explainerImageUrl', 'articleImageUrl', 'mapImageUrl',
+        ]) delete base[field];
+        base.id = mg.id;
+        base.clipId = mg.clipId || mg.id;
+        base.type = mg.type;
+        base.style = mg.style || state.mgStyle || 'clean';
+        base.overlayShadowStrength = mg.overlayShadowStrength != null
+            ? mg.overlayShadowStrength
+            : state.mgOverlayShadow;
+        base.textStyleRanges = Array.isArray(mg.textStyleRanges)
+            ? mg.textStyleRanges.map((range) => ({
+                match: String(range?.match || range?.text || '').slice(0, 1_000),
+                color: String(range?.color || range?.textColor || '').slice(0, 120),
+                occurrence: Number.isInteger(Number(range?.occurrence))
+                    ? Number(range.occurrence)
+                    : 0,
+                allOccurrences: range?.allOccurrences === true,
+            })).filter((range) => range.match && range.color)
+            : undefined;
         if (mg.type === 'explainer') {
             if (mg.explainerImageFile) base.explainerImageFile = mg.explainerImageFile;
             if (mg.explainerLabel) base.explainerLabel = mg.explainerLabel;
@@ -4907,10 +5972,12 @@ function syncVideoPlanFromEditor() {
     if (!state.videoPlan.scriptContext) state.videoPlan.scriptContext = {};
     state.videoPlan.scriptContext.mgAnimationSpeed = globalAnimSpeed;
     state.videoPlan.scriptContext.mgOverlayShadow = state.mgOverlayShadow;
+    state.videoPlan.timelineContractVersion = timelineContract?.VERSION || 1;
+    window._mgBridgeVideoPlan = state.videoPlan;
     return state.videoPlan;
 }
 
-async function saveProject(silent = false) {
+async function _saveProjectNow(silent = false) {
     if (!state.videoPlan) {
         if (!silent) showToast('No project to save', 'info');
         return;
@@ -4926,20 +5993,46 @@ async function saveProject(silent = false) {
             // State-backed + special settings (no simple element control) stay explicit.
             volume: state.volume,
             footageSources: getEnabledSources(),
-            sfxEnabled: state.sfxEnabled,
-            sfxVolume: state.sfxVolume,
             subtitlesEnabled: state.subtitlesEnabled,
             aiInstructions: state.aiInstructions,
             videoTitle: state.videoTitle,
             presenterImage: state.presenterImage || '',
+            aiVideosScript: state.aiVideosScript || '',
+            aiVideosInputMode: state.aiVideosInputMode || 'auto',
+            aiVideosScriptSource: state.aiVideosScriptSource || { type: 'paste', label: '' },
             buildStyleProfile: elements.buildStyleProfile ? elements.buildStyleProfile.value : 'none',
             mutedTracks: state.mutedTracks
         };
 
         // Save as .fvp project file (includes settings + video plan + writes video-plan.json)
         if (window.electronAPI.saveProjectFile) {
-            const result = await window.electronAPI.saveProjectFile({ settings, videoPlan: state.videoPlan });
+            const expectedRevision = state.projectRevision;
+            const expectedPlanHash = state.projectPlanHash;
+            const result = await window.electronAPI.saveProjectFile({
+                settings,
+                videoPlan: state.videoPlan,
+                expectedRevision,
+                expectedPlanHash,
+            });
+            if (!result?.success) {
+                if (result?.conflict) {
+                    const authoritativeRevision = Number(result.currentRevision) || 0;
+                    const authoritativePlanHash = result.currentPlanHash || null;
+                    const requestWasSuperseded = Number(state.projectRevision) !== Number(expectedRevision)
+                        || (!!expectedPlanHash && !!state.projectPlanHash && expectedPlanHash !== state.projectPlanHash);
+                    const rendererHasAuthoritativeState = Number(state.projectRevision) === authoritativeRevision
+                        && (!authoritativePlanHash || state.projectPlanHash === authoritativePlanHash);
+                    if (silent && requestWasSuperseded && rendererHasAuthoritativeState) {
+                        console.info('[ProjectStore] Discarded a stale autosave after an authoritative QA update.');
+                        return { success: true, skipped: true, stale: true };
+                    }
+                    showToast('Project changed outside this editor. Reload before saving to avoid data loss.', 'error');
+                }
+                throw new Error(result?.error || 'Project save failed');
+            }
             state.hasProjectFile = true;
+            state.projectRevision = Number(result.revision) || state.projectRevision;
+            state.projectPlanHash = result.planHash || state.projectPlanHash;
             if (!silent && result && result.path) {
                 showToast(`Project saved to ${result.path}`, 'success');
             } else if (!silent) {
@@ -4947,22 +6040,45 @@ async function saveProject(silent = false) {
             }
         } else {
             // Fallback: old save method
-            await window.electronAPI.saveVideoPlan(state.videoPlan);
+            const fallbackResult = await window.electronAPI.saveVideoPlan(
+                state.videoPlan,
+                state.projectRevision,
+                state.projectPlanHash
+            );
+            if (fallbackResult?.success === false) {
+                throw new Error(fallbackResult.error || 'Video plan save failed');
+            }
+            state.projectRevision = Number(fallbackResult?.revision) || state.projectRevision;
+            state.projectPlanHash = fallbackResult?.planHash || state.projectPlanHash;
             if (!silent) showToast('Project saved', 'success');
         }
+        return { success: true };
     } catch (e) {
         console.error('Save failed:', e);
         if (!silent) showToast('Save failed', 'error');
+        return { success: false, error: e.message };
     }
+}
+
+let _projectSaveChain = Promise.resolve();
+function saveProject(silent = false) {
+    const run = _projectSaveChain.then(() => _saveProjectNow(silent));
+    _projectSaveChain = run.catch(() => {});
+    return run;
 }
 
 // Debounced auto-save: saves .fvp file 3 seconds after last change
 let _autoSaveTimer = null;
 function triggerAutoSave() {
+    if (state.projectHydrating) return;
     if (state.hyperframesPreview?.active) scheduleHyperframesPreviewRefresh();
     if (!state.hasProjectFile || !state.videoPlan) return;
     if (_autoSaveTimer) clearTimeout(_autoSaveTimer);
     _autoSaveTimer = setTimeout(() => {
+        if (state.isProcessing) {
+            triggerAutoSave();
+            return;
+        }
         saveProject(true); // silent save
     }, 3000);
 }
@@ -4970,35 +6086,115 @@ function triggerAutoSave() {
 function togglePlayback() {
     if (state.scenes.length === 0) return;
 
-    if (state.isPlaying) {
+    if (state.isPlaying || state.playbackStarting) {
         stopPlayback();
     } else {
-        startPlayback();
+        void startPlayback();
     }
 }
 
-function startPlayback() {
-    if (state.isPlaying) return;
+function _clampPlaybackTime(time) {
+    const value = Math.max(0, Number(time) || 0);
+    const duration = Number(state.totalDuration);
+    return Number.isFinite(duration) && duration > 0
+        ? Math.min(value, duration)
+        : value;
+}
 
-    // If at the end, restart from beginning
-    if (state.currentTime >= state.totalDuration) {
-        state.currentTime = 0;
-        state.currentSceneIndex = 0;
-        jumpToScene(0).then(() => {
-            actuallyStartPlayback();
+async function _positionPreviewAudio(audio, targetTime, timeoutMs = 900) {
+    if (!audio?.src) return false;
+
+    if (audio.readyState === 0) {
+        await new Promise((resolve) => {
+            let settled = false;
+            const finish = () => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                audio.removeEventListener('loadedmetadata', finish);
+                audio.removeEventListener('canplay', finish);
+                resolve();
+            };
+            const timer = setTimeout(finish, timeoutMs);
+            audio.addEventListener('loadedmetadata', finish, { once: true });
+            audio.addEventListener('canplay', finish, { once: true });
+            try { audio.load(); } catch (_) {}
         });
-        return;
     }
 
-    actuallyStartPlayback();
+    const duration = Number.isFinite(audio.duration) && audio.duration > 0
+        ? audio.duration
+        : state.totalDuration;
+    const target = Math.max(0, Math.min(targetTime, duration || targetTime));
+    if (!audio.seeking && Math.abs((audio.currentTime || 0) - target) <= 0.04) return true;
+
+    await new Promise((resolve) => {
+        let settled = false;
+        const finish = () => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            audio.removeEventListener('seeked', finish);
+            resolve();
+        };
+        const timer = setTimeout(finish, timeoutMs);
+        audio.addEventListener('seeked', finish, { once: true });
+        try {
+            audio.currentTime = target;
+            if (!audio.seeking && Math.abs((audio.currentTime || 0) - target) <= 0.04) {
+                queueMicrotask(finish);
+            }
+        } catch (_) {
+            finish();
+        }
+    });
+
+    // Re-apply once after the wait. Some Windows media backends briefly report
+    // currentTime=0 while completing the first seek on a freshly loaded source.
+    if (Math.abs((audio.currentTime || 0) - target) > 0.2) {
+        try { audio.currentTime = target; } catch (_) {}
+    }
+    return Math.abs((audio.currentTime || 0) - target) <= 0.25 || audio.seeking;
 }
 
-function actuallyStartPlayback() {
+async function startPlayback() {
+    if (state.isPlaying || state.playbackStarting) return;
+
+    const requestId = ++state.playbackStartRequest;
+    state.playbackStarting = true;
+    let targetTime = _clampPlaybackTime(state.currentTime);
+
+    try {
+        // If at the end, restart from beginning.
+        if (targetTime >= state.totalDuration) {
+            state.currentTime = 0;
+            state.currentSceneIndex = 0;
+            await jumpToScene(0);
+            targetTime = 0;
+        }
+
+        await _positionPreviewAudio(elements.previewAudio, targetTime);
+        if (requestId !== state.playbackStartRequest || !state.playbackStarting) return;
+
+        state.playbackStarting = false;
+        actuallyStartPlayback(targetTime);
+    } catch (error) {
+        if (requestId !== state.playbackStartRequest) return;
+        state.playbackStarting = false;
+        console.warn('Playback preparation failed:', error);
+        actuallyStartPlayback(targetTime);
+    }
+}
+
+function actuallyStartPlayback(startTime = state.currentTime) {
     const audio = elements.previewAudio;
+    state.currentTime = _clampPlaybackTime(startTime);
     const activeScenes = getActiveScenesAtTime(state.currentTime);
 
     state.isPlaying = true;
     state.lastPlaybackTime = performance.now();
+    state.playbackClockFloor = state.currentTime;
+    state.playbackClockGuardUntil = performance.now() + 1200;
 
     // Update play button
     if (elements.btnPlay) {
@@ -5030,7 +6226,11 @@ function actuallyStartPlayback() {
 
     // Always start audio - it plays through gaps
     if (audio?.src) {
-        audio.currentTime = Math.min(state.currentTime, audio.duration || state.totalDuration);
+        _bindPlaybackAudioClock(audio);
+        const target = Math.min(state.currentTime, audio.duration || state.totalDuration);
+        if (Math.abs((audio.currentTime || 0) - target) > 0.12) {
+            try { audio.currentTime = target; } catch (_) {}
+        }
         audio.play().catch(e => console.warn('Audio play failed:', e));
     }
 
@@ -5046,6 +6246,10 @@ function actuallyStartPlayback() {
 }
 
 function stopPlayback() {
+    state.playbackStartRequest++;
+    state.playbackStarting = false;
+    state.playbackClockFloor = 0;
+    state.playbackClockGuardUntil = 0;
     state.isPlaying = false;
 
     // Update play button
@@ -5053,10 +6257,16 @@ function stopPlayback() {
         elements.btnPlay.textContent = '▶';
     }
 
-    // Cancel animation frame
+    // Cancel both playback schedulers. requestAnimationFrame can be throttled
+    // by Windows when DevTools is docked or the Electron surface is considered
+    // occluded, so playback also keeps a short timer fallback.
     if (state.playbackAnimationFrame) {
         cancelAnimationFrame(state.playbackAnimationFrame);
         state.playbackAnimationFrame = null;
+    }
+    if (state.playbackTimer) {
+        clearTimeout(state.playbackTimer);
+        state.playbackTimer = null;
     }
 
     // Pause compositor videos
@@ -5121,11 +6331,103 @@ function stopPlayback() {
     syncHyperframesPreview(true);
 }
 
-
-function startPlaybackLoop() {
+function _cancelPlaybackTick() {
     if (state.playbackAnimationFrame) {
         cancelAnimationFrame(state.playbackAnimationFrame);
+        state.playbackAnimationFrame = null;
     }
+    if (state.playbackTimer) {
+        clearTimeout(state.playbackTimer);
+        state.playbackTimer = null;
+    }
+}
+
+function _schedulePlaybackTick(loop) {
+    let fired = false;
+    const run = () => {
+        if (fired) return;
+        fired = true;
+        _cancelPlaybackTick();
+        loop();
+    };
+    state.playbackAnimationFrame = requestAnimationFrame(run);
+    state.playbackTimer = setTimeout(run, 50);
+}
+
+function _readPlaybackAudioClock(audio) {
+    if (!audio?.src || audio.paused) return null;
+    const audioTime = Math.max(0, Number(audio.currentTime) || 0);
+    const floor = Math.max(0, Number(state.playbackClockFloor) || 0);
+    const guardActive = performance.now() < (state.playbackClockGuardUntil || 0);
+
+    if (guardActive && floor > 0.05 && audioTime + 0.25 < floor) {
+        // Never let a transient pre-seek `0` overwrite the user's selected
+        // playhead. Nudge the media clock back to the requested start as soon
+        // as the backend is ready to accept another seek.
+        if (!audio.seeking) {
+            try { audio.currentTime = floor; } catch (_) {}
+        }
+        return Math.max(state.currentTime, floor);
+    }
+
+    if (!audio.seeking && audioTime + 0.25 >= floor) {
+        state.playbackClockGuardUntil = 0;
+    }
+    return audioTime;
+}
+
+function _syncPlaybackFromAudioEvent() {
+    if (!state.isPlaying) return;
+    const audio = elements.previewAudio;
+    const audioTime = _readPlaybackAudioClock(audio);
+    if (audioTime === null) return;
+
+    state.currentTime = _clampPlaybackTime(audioTime);
+    state.lastPlaybackTime = performance.now();
+
+    if (state.currentTime >= state.totalDuration) {
+        state.currentTime = state.totalDuration;
+        stopPlayback();
+    } else if (state.hyperframesPreview?.active) {
+        syncHyperframesPreview();
+    } else if (state.compositorActive && state.compositor?.isInitialized) {
+        state.compositor.renderAtTime(state.currentTime);
+    }
+
+    updatePlayhead();
+    updateTimeDisplay();
+    const activeScenes = getActiveScenesAtTime(state.currentTime);
+    const activeMediaScenes = activeScenes.filter(({ scene }) => !scene.isMGScene && !scene.disabled);
+    updateSceneHighlight(activeMediaScenes.length > 0 ? activeMediaScenes[0].index : -1);
+}
+
+function _bindPlaybackAudioClock(audio) {
+    if (!audio || audio._ytaPlaybackClockBound) return;
+    audio._ytaPlaybackClockBound = true;
+    audio.addEventListener('timeupdate', _syncPlaybackFromAudioEvent);
+    audio.addEventListener('playing', _syncPlaybackFromAudioEvent);
+    audio.addEventListener('seeked', _syncPlaybackFromAudioEvent);
+    audio.addEventListener('ended', () => {
+        if (!state.isPlaying) return;
+        const audioEnd = Math.max(0, Number(audio.currentTime) || Number(audio.duration) || 0);
+        if (state.totalDuration <= audioEnd + 0.25) {
+            state.currentTime = state.totalDuration;
+            stopPlayback();
+            updatePlayhead();
+            updateTimeDisplay();
+        } else {
+            // Some edits intentionally continue after narration ends. Keep the
+            // visual clock running from the last audio position instead of
+            // jumping the playhead to the end of the whole timeline.
+            state.currentTime = Math.max(state.currentTime, audioEnd);
+            state.lastPlaybackTime = performance.now();
+        }
+    });
+}
+
+
+function startPlaybackLoop() {
+    _cancelPlaybackTick();
 
     const loop = () => {
         if (!state.isPlaying) return;
@@ -5138,8 +6440,9 @@ function startPlaybackLoop() {
             const delta = Math.max(0, (now - (state.lastPlaybackTime || now)) / 1000);
             state.lastPlaybackTime = now;
 
-            if (audio?.src && !audio.paused) {
-                state.currentTime = audio.currentTime;
+            const audioTime = _readPlaybackAudioClock(audio);
+            if (audioTime !== null) {
+                state.currentTime = audioTime;
             } else {
                 state.currentTime = Math.min(state.totalDuration, state.currentTime + delta);
             }
@@ -5156,7 +6459,7 @@ function startPlaybackLoop() {
             // MUTED visual scrubber — its <audio> tags never play in preview — so
             // the app's own SFX pool is the ONLY path to the speakers here. Without
             // this block the user hears no SFX at all in the default preview.)
-            if (state.sfxEnabled && state.sfxClips.length > 0) {
+            if (state.sfxClips.length > 0) {
                 const ct = state.currentTime;
                 state.sfxClips.forEach(sfx => {
                     const sfxEnd = sfx.startTime + sfx.duration;
@@ -5176,15 +6479,16 @@ function startPlaybackLoop() {
             const activeScenes = getActiveScenesAtTime(state.currentTime);
             updateSceneHighlight(activeScenes.length > 0 ? activeScenes[0].index : -1);
 
-            state.playbackAnimationFrame = requestAnimationFrame(loop);
+            _schedulePlaybackTick(loop);
             return;
         }
 
         // === WebGL2 Compositor path (when active, bypasses HTML preview) ===
         if (state.compositorActive && state.compositor && state.compositor.isInitialized) {
             // Audio is still the master clock
-            if (audio?.src && !audio.paused) {
-                state.currentTime = audio.currentTime;
+            const audioTime = _readPlaybackAudioClock(audio);
+            if (audioTime !== null) {
+                state.currentTime = audioTime;
             }
             // Check end of timeline
             if (state.currentTime >= state.totalDuration) {
@@ -5197,14 +6501,14 @@ function startPlaybackLoop() {
             // Render the frame via WebGL2 engine
             state.compositor.renderAtTime(state.currentTime);
             // Sync audio
-            if (audio?.src && !audio.paused) {
+            if (audioTime !== null) {
                 const audioDiff = Math.abs(audio.currentTime - state.currentTime);
                 if (audioDiff > 0.2) {
                     audio.currentTime = Math.min(state.currentTime, audio.duration || state.totalDuration);
                 }
             }
             // Trigger SFX clips at transition points
-            if (state.sfxEnabled && state.sfxClips.length > 0) {
+            if (state.sfxClips.length > 0) {
                 const ct = state.currentTime;
                 state.sfxClips.forEach(sfx => {
                     const sfxEnd = sfx.startTime + sfx.duration;
@@ -5224,7 +6528,7 @@ function startPlaybackLoop() {
             const activeMediaScenes = activeScenes.filter(({ scene }) => !scene.isMGScene && !scene.disabled);
             updateSceneHighlight(activeMediaScenes.length > 0 ? activeMediaScenes[0].index : -1);
             // Continue loop
-            state.playbackAnimationFrame = requestAnimationFrame(loop);
+            _schedulePlaybackTick(loop);
             return;
         }
 
@@ -5234,8 +6538,9 @@ function startPlaybackLoop() {
             !scene.isMGScene && !scene.disabled
         );
         // Use audio as the master clock - it plays continuously through gaps
-        if (audio?.src && !audio.paused) {
-            state.currentTime = audio.currentTime;
+        const audioTime = _readPlaybackAudioClock(audio);
+        if (audioTime !== null) {
+            state.currentTime = audioTime;
         } else if (activeMediaScenes.length > 0) {
             // Use first active video as clock
             const firstScene = activeMediaScenes[0].scene;
@@ -5342,7 +6647,7 @@ function startPlaybackLoop() {
         }
 
         // Trigger SFX clips at transition points
-        if (state.sfxEnabled && state.sfxClips.length > 0) {
+        if (state.sfxClips.length > 0) {
             const ct = state.currentTime;
             state.sfxClips.forEach(sfx => {
                 const sfxEnd = sfx.startTime + sfx.duration;
@@ -5366,22 +6671,18 @@ function startPlaybackLoop() {
         updateMGOverlay();
 
         // Continue loop
-        state.playbackAnimationFrame = requestAnimationFrame(loop);
+        _schedulePlaybackTick(loop);
     };
 
-    state.playbackAnimationFrame = requestAnimationFrame(loop);
+    _schedulePlaybackTick(loop);
 }
 
 // Cache of resolved SFX file URLs to avoid IPC latency on every play
 const _sfxUrlCache = {};
 
 async function preloadSfxUrls() {
-    // Preload all known SFX file URLs at startup
+    // Preload only the exact files selected by the build Sound Designer.
     const allFiles = new Set();
-    for (const v of Object.values(SFX_MAP)) allFiles.add(v.file);
-    for (const v of Object.values(MG_SFX_MAP)) allFiles.add(v.file);
-    // Also preload files from the current (possibly AI-designed) track — the
-    // worker palette can include files not in the maps (e.g. sfx-impact/riser/boom).
     for (const c of (state.sfxClips || [])) if (c && c.file) allFiles.add(c.file);
     for (const file of allFiles) {
         if (!_sfxUrlCache[file]) {
@@ -5394,7 +6695,7 @@ async function preloadSfxUrls() {
 }
 
 function playSfxClip(sfx) {
-    if (!state.sfxEnabled || state.isMuted) return;
+    if (state.isMuted) return;
     const poolEntry = state._sfxAudioPool.find(p => !p.playing) || state._sfxAudioPool[0];
     if (!poolEntry) return;
     const audio = poolEntry.element;
@@ -5424,7 +6725,7 @@ function playSfxClip(sfx) {
     } else {
         audio.src = url;
     }
-    audio.volume = sfx.volume * state.volume;
+    audio.volume = Math.min(1, sfx.volume * state.volume * PREVIEW_SFX_GAIN);
     audio.play().catch(() => { });
     audio.onended = () => { poolEntry.playing = false; };
     setTimeout(() => { poolEntry.playing = false; }, (sfx.duration + 0.5) * 1000);
@@ -6177,8 +7478,12 @@ function updateMGOverlay() {
 }
 
 function escapeHTML(str) {
-    if (!str) return '';
-    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    return String(str ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
 }
 
 /**
@@ -6268,7 +7573,9 @@ function setupPanelResize(handle, side) {
         const panel = side === 'left' ? elements.leftPanel : elements.rightPanel;
         const deltaX = e.clientX - startX;
         let newWidth = side === 'left' ? startWidth + deltaX : startWidth - deltaX;
-        panel.style.width = `${Math.max(150, Math.min(400, newWidth))}px`;
+        const minWidth = side === 'left' ? 280 : 200;
+        const maxWidth = side === 'left' ? 520 : 420;
+        panel.style.width = `${Math.max(minWidth, Math.min(maxWidth, newWidth))}px`;
     });
     document.addEventListener('mouseup', () => { if (isDragging) { isDragging = false; document.body.style.cursor = ''; document.body.style.userSelect = ''; } });
 }
@@ -6327,21 +7634,24 @@ function setupPanelSections() {
 // ========================================
 // File Handling
 // ========================================
-function handleFileSelect(file) {
+async function handleFileSelect(file) {
     if (!['.mp3', '.wav', 'audio/mpeg', 'audio/wav'].some(t => file.name.toLowerCase().endsWith(t) || file.type === t)) {
         showToast('Please select an MP3 or WAV file', 'error'); return;
     }
-    // Use webUtils.getPathForFile for sandboxed Electron (file.path is unavailable in Electron 20+)
-    const filePath = window.electronAPI?.getFilePath ? window.electronAPI.getFilePath(file) : (file.path || '');
+    const imported = await window.electronAPI?.importAudioFile?.(file);
+    if (!imported?.success || !imported.path) {
+        showToast(imported?.error || 'Could not import the audio file', 'error');
+        return;
+    }
+    const filePath = imported.path;
     state.audioFile = { name: file.name, path: filePath };
     state.audioPath = filePath || file.name;
     elements.audioName.textContent = file.name;
     elements.audioInfo.classList.remove('hidden');
     elements.dropZone.style.display = 'none';
-    elements.btnGenerate.disabled = false;
-    if (elements.btnRepeatStep) elements.btnRepeatStep.disabled = false;
     showToast(`Audio loaded: ${file.name}`, 'success');
     loadAudioFile(filePath);
+    _syncProductionModeUI();
 }
 
 async function loadAudioFile(filePath) {
@@ -6367,10 +7677,9 @@ function removeAudio() {
     state.audioFile = null; state.audioPath = null;
     elements.audioInfo.classList.add('hidden');
     elements.dropZone.style.display = 'block';
-    elements.btnGenerate.disabled = true;
-    if (elements.btnRepeatStep) elements.btnRepeatStep.disabled = true;
     elements.fileInput.value = '';
     clearScenes();
+    _syncProductionModeUI();
 }
 
 // ========================================
@@ -6378,15 +7687,16 @@ function removeAudio() {
 // ========================================
 async function cancelProcess() {
     if (!state.isProcessing) return;
+    let waitForAsyncCancellation = false;
     elements.btnCancel.disabled = true;
     elements.btnCancel.textContent = 'Cancelling...';
     try {
-        // Cancel WebGL2 export pipeline if active (direct-spawn FFmpeg in renderer)
+        // Cancel WebGL2 export pipeline if active (main-process FFmpeg).
         if (state.exportPipeline) {
             console.log('[Cancel] Cancelling WebGL2 export pipeline...');
             state.exportPipeline.cancel();
-            // Pipeline cancel is synchronous (sets flag + kills process).
-            // The frame loop will throw on next iteration, which renderVideo() catches.
+            // Pipeline cancel sets the local flag and requests main-process termination.
+            // The frame loop will throw on its next iteration.
             // Show feedback immediately — don't wait for IPC.
             stopTimer();
             updateProgress(0, '⛔ Export cancelled');
@@ -6395,10 +7705,11 @@ async function cancelProcess() {
         // Also signal main process (for build processes, legacy exports)
         const result = await window.electronAPI?.cancelProcess();
         if (result?.success && !state.exportPipeline) {
+            waitForAsyncCancellation = /AI Video/i.test(String(result.message || ''));
             // Only show IPC cancel feedback if there was no pipeline cancel above
             stopTimer();
             updateProgress(0, `⛔ ${result.message || 'Cancelled'}`);
-            showToast('Process cancelled', 'error');
+            showToast(waitForAsyncCancellation ? 'AI Video cancellation requested' : 'Process cancelled', 'info');
         }
     } catch (e) {
         console.error('Cancel error:', e);
@@ -6406,7 +7717,7 @@ async function cancelProcess() {
         elements.btnCancel.disabled = false;
         elements.btnCancel.textContent = 'Cancel';
         // Force-cleanup state after short delay if renderVideo() is stuck and never resolves
-        setTimeout(() => {
+        if (!waitForAsyncCancellation) setTimeout(() => {
             if (state.isProcessing) {
                 console.warn('[Cancel] Force cleanup — render loop did not exit cleanly');
                 state.isProcessing = false;
@@ -6425,43 +7736,288 @@ async function cancelProcess() {
     }
 }
 
+function _scriptWordCount(value) {
+    const text = String(value || '').trim();
+    return text ? text.split(/\s+/).filter(Boolean).length : 0;
+}
+
+function _setAiScriptSourceStatus(message, tone = '') {
+    if (!elements.aiVideosScriptSourceStatus) return;
+    elements.aiVideosScriptSourceStatus.textContent = message || '';
+    elements.aiVideosScriptSourceStatus.classList.toggle('is-success', tone === 'success');
+    elements.aiVideosScriptSourceStatus.classList.toggle('is-error', tone === 'error');
+}
+
+function _setAiVideosScript(text, source = { type: 'paste', label: '' }, { selectScript = true } = {}) {
+    state.aiVideosScript = String(text || '').trim();
+    state.aiVideosScriptSource = {
+        type: source?.type || 'paste',
+        label: String(source?.label || '').slice(0, 500),
+    };
+    if (selectScript) state.aiVideosInputMode = 'script';
+    if (elements.aiVideosScript) elements.aiVideosScript.value = state.aiVideosScript;
+    if (elements.aiVideosInputMode) elements.aiVideosInputMode.value = state.aiVideosInputMode;
+    _syncProductionModeUI();
+    saveSettings();
+}
+
+async function importAiVideosScriptFile() {
+    if (!_requireProject()) return;
+    if (!window.electronAPI?.selectFile || !window.electronAPI?.readAiScriptFile) {
+        showToast('Story file import is unavailable', 'error');
+        return;
+    }
+    try {
+        const picked = await window.electronAPI.selectFile({
+            title: 'Import story or script',
+            filters: [
+                { name: 'Story files', extensions: ['txt', 'md', 'markdown', 'docx', 'odt', 'epub', 'rtf', 'srt', 'vtt', 'json', 'csv', 'html', 'htm', 'xml', 'yaml', 'yml', 'log'] },
+            ],
+        });
+        if (!picked) return;
+        if (elements.btnImportAiScript) elements.btnImportAiScript.disabled = true;
+        _setAiScriptSourceStatus('Reading story file...');
+        const result = await window.electronAPI.readAiScriptFile(picked);
+        if (!result?.success || !result.text) throw new Error(result?.error || 'No readable text found');
+        _setAiVideosScript(result.text, { type: 'file', label: result.filename || 'Imported file' });
+        _setAiScriptSourceStatus(`Imported ${result.filename || 'story file'} · ${_scriptWordCount(result.text)} words`, 'success');
+        showToast(`Story imported: ${result.filename || 'file'}`, 'success');
+    } catch (error) {
+        _setAiScriptSourceStatus(error.message || 'Could not import story file', 'error');
+        showToast(`Story import failed: ${error.message || error}`, 'error');
+    } finally {
+        if (elements.btnImportAiScript) elements.btnImportAiScript.disabled = false;
+    }
+}
+
+async function loadAiVideosScriptUrl() {
+    if (!_requireProject()) return;
+    const url = String(elements.aiVideosScriptUrl?.value || '').trim();
+    if (!/^https?:\/\//i.test(url)) {
+        _setAiScriptSourceStatus('Enter a public HTTP or HTTPS story URL.', 'error');
+        return;
+    }
+    if (!window.electronAPI?.loadAiScriptUrl) {
+        showToast('Story URL import is unavailable', 'error');
+        return;
+    }
+    try {
+        if (elements.btnLoadAiScriptUrl) elements.btnLoadAiScriptUrl.disabled = true;
+        _setAiScriptSourceStatus('Loading story URL...');
+        const result = await window.electronAPI.loadAiScriptUrl(url);
+        if (!result?.success || !result.text) throw new Error(result?.error || 'No readable text found');
+        let label = result.filename || 'Story URL';
+        try {
+            const parsed = new URL(result.sourceUrl || url);
+            label = `${parsed.hostname}${parsed.pathname && parsed.pathname !== '/' ? parsed.pathname : ''}`;
+        } catch (_) {}
+        _setAiVideosScript(result.text, { type: 'url', label });
+        elements.aiVideosUrlRow?.classList.add('hidden');
+        _setAiScriptSourceStatus(`Loaded ${label} · ${_scriptWordCount(result.text)} words`, 'success');
+        showToast('Story loaded from URL', 'success');
+    } catch (error) {
+        _setAiScriptSourceStatus(error.message || 'Could not load story URL', 'error');
+        showToast(`Story URL failed: ${error.message || error}`, 'error');
+    } finally {
+        if (elements.btnLoadAiScriptUrl) elements.btnLoadAiScriptUrl.disabled = false;
+    }
+}
+
+function _resolveAiVideosInputSource() {
+    const selected = elements.aiVideosInputMode?.value || state.aiVideosInputMode || 'auto';
+    const hasAudio = !!(state.audioFile?.path);
+    const script = String(state.aiVideosScript || '').trim();
+    const hasScript = script.length > 0;
+    if (selected === 'audio') {
+        return { selected, kind: 'audio', available: hasAudio, hasAudio, hasScript, script };
+    }
+    if (selected === 'script') {
+        return { selected, kind: 'script', available: hasScript, hasAudio, hasScript, script };
+    }
+    if (hasAudio) return { selected: 'auto', kind: 'audio', available: true, hasAudio, hasScript, script };
+    return { selected: 'auto', kind: 'script', available: hasScript, hasAudio, hasScript, script };
+}
+
+function _syncAiVideosSourceUI() {
+    if (elements.aiVideosInputMode) {
+        state.aiVideosInputMode = elements.aiVideosInputMode.value || state.aiVideosInputMode || 'auto';
+    }
+    const source = _resolveAiVideosInputSource();
+    const words = _scriptWordCount(state.aiVideosScript);
+    if (elements.aiVideosScriptCount) elements.aiVideosScriptCount.textContent = `${words.toLocaleString()} word${words === 1 ? '' : 's'}`;
+    if (elements.aiVideosSourceBadge) {
+        elements.aiVideosSourceBadge.textContent = source.kind === 'audio'
+            ? 'Audio'
+            : (state.aiVideosScriptSource?.type === 'file' ? 'File' : state.aiVideosScriptSource?.type === 'url' ? 'URL' : 'Script');
+    }
+    if (elements.aiVideosRoutingStatus) {
+        let message;
+        if (source.kind === 'audio' && source.available) {
+            message = 'Narration audio controls timing, scene boundaries, subtitles, and the full AI Director pipeline. Every eligible visual scene is AI-generated.';
+        } else if (source.kind === 'audio') {
+            message = 'Narration audio is selected. Import an MP3 or WAV file to enable the build.';
+        } else if (source.available) {
+            message = 'Written story mode creates timed visual beats without narration. Generator, quality, niche, theme, title, and AI Instructions are applied.';
+        } else {
+            message = 'Add story text, import a document, load a public URL, or switch to narration audio.';
+        }
+        elements.aiVideosRoutingStatus.textContent = message;
+        elements.aiVideosRoutingStatus.classList.toggle('is-missing', !source.available);
+    }
+    if (words && state.aiVideosScriptSource?.label) {
+        const kind = state.aiVideosScriptSource.type === 'url' ? 'URL' : 'file';
+        _setAiScriptSourceStatus(`${kind === 'URL' ? 'Loaded' : 'Imported'} ${state.aiVideosScriptSource.label} · ${words} words`, 'success');
+    }
+    return source;
+}
+
+function _syncGenerateAvailability() {
+    const mode = elements.buildProductionMode?.value || 'faceless';
+    const aiSource = mode === 'aiVideos' ? _resolveAiVideosInputSource() : null;
+    const canGenerate = !!state.hasProject
+        && !state.isProcessing
+        && (mode === 'aiVideos' ? aiSource.available : !!state.audioFile?.path);
+    if (elements.btnGenerate) {
+        elements.btnGenerate.disabled = !canGenerate;
+        elements.btnGenerate.title = !state.hasProject
+            ? 'Create or open a project first'
+            : canGenerate ? '' : (mode === 'aiVideos' ? 'Add narration audio or a story/script' : 'Import narration audio first');
+    }
+    const canRepeat = !!state.hasProject && !state.isProcessing && !!state.audioFile?.path
+        && !(mode === 'aiVideos' && aiSource?.kind === 'script');
+    if (elements.btnRepeatStep) elements.btnRepeatStep.disabled = !canRepeat;
+}
+
 // ========================================
 // Video Generation
 // ========================================
-// AI Videos (script-first): run the isolated ai-videos pipeline instead of the audio
-// build. Dry-run by default — turns the script into scenes + prompts + a plan without
-// spending credits; loads the resulting scenes onto the timeline.
+function _selectedControlLabel(control) {
+    const option = control?.selectedOptions?.[0];
+    return String(option?.textContent || '').replace(/\s+/g, ' ').trim();
+}
+
+function _collectEffectiveBuildOptions() {
+    const collected = SettingsIO.collect(null);
+    const mode = elements.buildProductionMode?.value || 'faceless';
+    const effective = {
+        ...collected,
+        buildStyleProfile: elements.buildStyleProfile ? elements.buildStyleProfile.value : 'none',
+        footageSources: getEnabledSources(),
+        aiInstructions: state.aiInstructions,
+        videoTitle: state.videoTitle,
+        presenterImage: state.presenterImage || '',
+    };
+
+    if (mode !== 'talkingHead') {
+        effective.presenterImage = '';
+        effective.klingAvatar = false;
+        effective.klingAvatarPrompt = '';
+    }
+    if (mode === 'aiVideos') {
+        effective.buildFormat = 'auto';
+        effective.veoAiVideo = true;
+        effective.veoScope = 'all';
+        effective.fastMedia = false;
+    }
+    return effective;
+}
+
+function _captureProjectCreativeFields(source = state) {
+    return {
+        videoTitle: String(source?.videoTitle ?? ''),
+        aiInstructions: String(source?.aiInstructions ?? ''),
+    };
+}
+
+async function _persistProjectSettingsBeforeBuild() {
+    if (!state.hasProject || !state.videoPlan) return { success: true, skipped: true };
+    if (_autoSaveTimer) {
+        clearTimeout(_autoSaveTimer);
+        _autoSaveTimer = null;
+    }
+    const result = await saveProject(true);
+    if (!result?.success) {
+        throw new Error(result?.error || 'Could not save project settings before the build');
+    }
+    return result;
+}
+
+// Script-driven AI Videos use the selected generator directly. Narration-driven
+// AI Videos deliberately stay on the full run-build path below.
 async function generateAiVideos() {
     if (state.isProcessing) return;
     const script = (state.aiVideosScript || '').trim();
-    if (!script) { showToast('📝 Paste a story/script first (AI Videos mode)', 'error'); return; }
+    if (!script) { showToast('Add a story/script first', 'error'); return; }
     if (!state.hasProject) { _requireProject(); return; }
     state.isProcessing = true;
-    if (elements.btnGenerate) elements.btnGenerate.disabled = true;
+    _syncGenerateAvailability();
+    showProgress(true);
+    startTimer();
+    buildLog.reset();
     try {
-        showToast('🤖 AI Videos: planning scenes from your script…', 'info');
-        const res = await window.electronAPI.runAiVideos({ script, generate: false });
+        const settings = _collectEffectiveBuildOptions();
+        await _persistProjectSettingsBeforeBuild();
+        updateProgress(8, 'Preparing story and generator...');
+        showToast('AI Videos: generating scenes from your story…', 'info');
+        const res = await window.electronAPI.runAiVideos({
+            script,
+            generate: true,
+            backend: settings.veoBackend,
+            resolution: settings.veoResolution,
+            qualityTier: settings.buildQuality,
+            themeId: settings.buildTheme,
+            themeLabel: _selectedControlLabel(elements.buildTheme),
+            nicheId: settings.buildNiche,
+            nicheLabel: _selectedControlLabel(elements.buildNiche),
+            videoTitle: state.videoTitle,
+            aiInstructions: state.aiInstructions,
+            scriptSource: state.aiVideosScriptSource,
+            aspectRatio: '16:9',
+        });
         if (res && res.success) {
             await loadVideoPlan({ freshBuild: true });
             state.hasProjectFile = true;
-            showToast(`✅ AI Videos: ${res.sceneCount} scene(s) ready — dry-run preview (turn on generation for real clips)`, 'success');
+            await saveProject(true);
+            stopTimer();
+            const genTime = getElapsedString();
+            const warning = res.failedCount ? ` · ${res.failedCount} scene warning(s)` : '';
+            updateProgress(100, `AI Video ready (${genTime})${warning}`);
+            showToast(`AI Video generated: ${res.generatedCount}/${res.sceneCount} clips${warning}`, res.failedCount ? 'warning' : 'success');
+            showNotification('AI Video Complete', `${res.generatedCount}/${res.sceneCount} clips generated in ${genTime}`);
+            elements.btnRender.disabled = false;
+            if (state.scenes.length > 0) await jumpToScene(0);
         } else {
-            showToast('AI Videos failed: ' + ((res && res.error) || 'unknown'), 'error');
+            throw new Error((res && res.error) || 'AI Video build failed');
         }
     } catch (e) {
-        showToast('AI Videos error: ' + ((e && e.message) || e), 'error');
+        stopTimer();
+        if (e?.message === 'Cancelled') {
+            updateProgress(0, 'AI Video generation cancelled');
+            showToast('AI Video generation cancelled', 'info');
+        } else {
+            showToast('AI Videos error: ' + ((e && e.message) || e), 'error');
+        }
     } finally {
         state.isProcessing = false;
-        if (elements.btnGenerate) elements.btnGenerate.disabled = false;
+        _syncGenerateAvailability();
+        if (elements.btnCancel) {
+            elements.btnCancel.disabled = false;
+            elements.btnCancel.textContent = 'Cancel';
+        }
+        setTimeout(() => showProgress(false), 5000);
     }
 }
 
 async function generateVideo(options = {}) {
-    // AI Videos is script-first — no audio/transcription. Route to the isolated pipeline.
-    if (elements.buildProductionMode && elements.buildProductionMode.value === 'aiVideos') {
-        return generateAiVideos();
+    if (state.isProcessing) return;
+    if (!state.hasProject) { _requireProject(); return; }
+    const mode = elements.buildProductionMode?.value || 'faceless';
+    const aiSource = mode === 'aiVideos' ? _resolveAiVideosInputSource() : null;
+    if (mode === 'aiVideos' && aiSource.kind === 'script') return generateAiVideos();
+    if (!state.audioFile) {
+        showToast(mode === 'aiVideos' ? 'Import narration audio or switch to Story / script' : 'Import narration audio first', 'error');
+        return;
     }
-    if (!state.audioFile || state.isProcessing) return;
     if (!state.audioFile.path) {
         showToast('Audio file path is missing. Please re-import the audio file.', 'error'); return;
     }
@@ -6472,23 +8028,21 @@ async function generateVideo(options = {}) {
     state.isProcessing = true; elements.btnGenerate.disabled = true; if (elements.btnRepeatStep) elements.btnRepeatStep.disabled = true; showProgress(true); startTimer();
     buildLog.reset();
     try {
-        updateProgress(5, '📁 Copying audio file...');
-        const copyResult = await window.electronAPI?.copyFile(state.audioFile.path, 'input');
-        if (copyResult && !copyResult.success) {
-            throw new Error(`Failed to copy audio: ${copyResult.error}`);
-        }
+        updateProgress(5, 'Audio ready in project input...');
         updateProgress(10, '🎙️ Transcribing audio with Whisper...');
         const audioFileName = state.audioFile.name || state.audioFile.path?.split(/[\\/]/).pop();
+        const effectiveSettings = _collectEffectiveBuildOptions();
+        await _persistProjectSettingsBeforeBuild();
+        if (effectiveSettings.fastMedia && elements.fastMediaToggle) {
+            // Diagnostic mode is intentionally one-shot. Keep it in this payload, then
+            // immediately return the production UI to its safe default for the next run.
+            elements.fastMediaToggle.checked = false;
+            _syncFastMediaUI();
+            showToast('Fast pipeline test launched: random media; footage relevance checks skipped; Motion QA stays active', 'info');
+        }
         const result = await window.electronAPI.runBuild({
-            // All element-backed settings from the schema (single source of truth).
-            ...SettingsIO.collect(null),
-            // Special (schema-excluded) + state-backed + runtime fields:
-            buildStyleProfile: elements.buildStyleProfile ? elements.buildStyleProfile.value : 'none',
+            ...effectiveSettings,
             audioFileName,
-            footageSources: getEnabledSources(),
-            aiInstructions: state.aiInstructions,
-            videoTitle: state.videoTitle,
-            presenterImage: state.presenterImage || '',
             // Conditional: only sent when the Repeat button was used — override collect's raw values.
             repeatFromStep,
             forceFreshFootage,
@@ -6496,7 +8050,7 @@ async function generateVideo(options = {}) {
         if (result.success) {
             updateProgress(90, '📋 Loading video plan...'); await loadVideoPlan({ freshBuild: true });
             state.hasProjectFile = true; // Enable auto-save for the new plan
-            saveProject(true); // Save .fvp with the fresh build data
+            await saveProject(true); // Commit fresh build data to every project mirror
             stopTimer();
             const genTime = getElapsedString();
             updateProgress(100, `✅ Ready to render! (${genTime})`); showToast(`Video generated in ${genTime}!`, 'success');
@@ -6512,34 +8066,51 @@ async function generateVideo(options = {}) {
             }
         }
     } catch (error) { console.error('❌ Generation error:', error); stopTimer(); showToast(`Error: ${error.message}`, 'error'); }
-    finally { state.isProcessing = false; elements.btnGenerate.disabled = false; if (elements.btnRepeatStep) elements.btnRepeatStep.disabled = false; elements.btnCancel.disabled = false; elements.btnCancel.textContent = 'Cancel'; setTimeout(() => showProgress(false), 5000); }
+    finally {
+        state.isProcessing = false;
+        _syncGenerateAvailability();
+        elements.btnCancel.disabled = false;
+        elements.btnCancel.textContent = 'Cancel';
+        setTimeout(() => showProgress(false), 5000);
+    }
 }
 
 // ========================================
 // Video Plan & Scenes
 // ========================================
-async function loadVideoPlan({ freshBuild = false } = {}) {
+async function loadVideoPlan({ freshBuild = false, hyperframesPreviewOptions = null } = {}) {
+    // A build may finish before the debounced project-settings save runs. Capture
+    // the live title/instructions before loading the newly generated plan so stale
+    // .fvp settings cannot erase the exact text the user currently has in the UI.
+    const freshProjectFields = freshBuild ? _captureProjectCreativeFields() : null;
+    state.projectHydrating = true;
+    if (_autoSaveTimer) {
+        clearTimeout(_autoSaveTimer);
+        _autoSaveTimer = null;
+    }
     try {
-        // Try loading from .fvp project file first (unified save with settings)
-        // BUT skip .fvp after a fresh build — it has stale data from the previous build
+        // Main reconciles .fvp/public/temp and returns the newest plan with the
+        // project-scoped settings. Fresh builds no longer need a stale-.fvp bypass.
         let plan = null;
         let fvpSettings = null;
-        if (!freshBuild && window.electronAPI.loadProjectFile) {
-            console.log('[loadVideoPlan] Attempting .fvp load...');
+        if (window.electronAPI.loadProjectFile) {
+            console.log(`[loadVideoPlan] Loading unified project state${freshBuild ? ' after build' : ''}...`);
             const projectData = await window.electronAPI.loadProjectFile();
             if (projectData && projectData.videoPlan) {
                 plan = projectData.videoPlan;
                 fvpSettings = projectData.settings || null;
                 state.hasProjectFile = true;
-                console.log(`✅ Loaded from .fvp project file (${plan.scenes?.length || 0} scenes)`);
+                state.projectRevision = Number(projectData.revision) || 0;
+                state.projectPlanHash = projectData.planHash || null;
+                console.log(`✅ Loaded unified plan from ${projectData.source || '.fvp'} (${plan.scenes?.length || 0} scenes)`);
             } else {
-                console.warn('[loadVideoPlan] .fvp returned no videoPlan:', projectData ? Object.keys(projectData) : 'null');
+                console.warn('[loadVideoPlan] Unified project state returned no videoPlan:', projectData ? Object.keys(projectData) : 'null');
             }
         }
 
-        // Load from video-plan.json (always used after fresh build, fallback otherwise)
+        // Compatibility fallback for older preload/main combinations.
         if (!plan) {
-            console.log('[loadVideoPlan] Falling back to video-plan.json...');
+            console.log('[loadVideoPlan] Falling back to direct video-plan load...');
             plan = await window.electronAPI.loadVideoPlan();
             if (plan) {
                 console.log(`✅ Loaded from video-plan.json (${plan.scenes?.length || 0} scenes)`);
@@ -6549,9 +8120,11 @@ async function loadVideoPlan({ freshBuild = false } = {}) {
         }
 
         if (plan) {
+            plan = normalizePlanForEditor(plan);
+
             // Restore editor settings from .fvp if available
             if (fvpSettings) {
-                applyProjectSettings(fvpSettings);
+                applyProjectSettings(fvpSettings, { projectFieldOverride: freshProjectFields });
             }
 
             state.videoPlan = plan;
@@ -6565,54 +8138,18 @@ async function loadVideoPlan({ freshBuild = false } = {}) {
                 if (v) { v._loadedUrl = null; v.src = ''; }
             });
 
-            // Check if this is a saved project (scenes already have trackId = edited by user)
-            const isSavedProject = plan.scenes.length > 0 && plan.scenes[0].trackId;
-
-            if (isSavedProject) {
-                // Restore scenes as-is (user already edited the layout)
-                state.scenes = plan.scenes.map(s => ({
-                    ...s,
-                    trackId: s.trackId || 'video-track-1',
-                    duration: (Number.isFinite(Number(s.endTime)) && Number.isFinite(Number(s.startTime)) && Number(s.endTime) > Number(s.startTime))
-                        ? Number(s.endTime) - Number(s.startTime)
-                        : s.duration
-                }));
-                state.totalDuration = plan.totalDuration || Math.max(...state.scenes.map(s => s.endTime));
-            } else {
-                // Fresh build - keep original timestamps, expand scenes to fill gaps
-                // Route images to video-track-2, videos stay on video-track-1
-                const processedScenes = [];
-
-                for (let i = 0; i < plan.scenes.length; i++) {
-                    const scene = plan.scenes[i];
-                    const nextScene = plan.scenes[i + 1];
-
-                    // Extend this scene's endTime to fill gap before next scene
-                    let endTime = scene.endTime;
-                    if (nextScene && nextScene.startTime > scene.endTime) {
-                        endTime = nextScene.startTime;
-                    }
-
-                    // Respect existing trackId (set by compositor planner for V2 overlays)
-                    // Regular footage (both images and videos) stays on track 1
-                    const trackId = scene.trackId || 'video-track-1';
-
-                    processedScenes.push({
-                        ...scene,
-                        originalStartTime: scene.startTime,
-                        originalEndTime: scene.endTime,
-                        startTime: scene.startTime,
-                        endTime: endTime,
-                        duration: (Number.isFinite(Number(endTime)) && Number.isFinite(Number(scene.startTime)) && Number(endTime) > Number(scene.startTime))
-                            ? Number(endTime) - Number(scene.startTime)
-                            : scene.duration,
-                        trackId: trackId
-                    });
-                }
-
-                state.scenes = processedScenes;
-                state.totalDuration = plan.totalDuration || (processedScenes.length > 0 ? processedScenes[processedScenes.length - 1].endTime : 0);
-            }
+            // Builds already carry trackIds, so trackId cannot distinguish a fresh
+            // build from an edited project. Restore the canonical normalized timing
+            // exactly; gaps are real timeline gaps and must not be silently expanded.
+            state.scenes = (plan.scenes || []).map((scene) => ({
+                ...scene,
+                trackId: scene.trackId || 'video-track-1',
+            }));
+            hydratePlanTransitions(plan, state.scenes);
+            const sceneEnd = state.scenes.length
+                ? Math.max(...state.scenes.map((scene) => Number(scene.endTime) || 0))
+                : 0;
+            state.totalDuration = plan.totalDuration || sceneEnd;
 
             state.currentTime = 0;
 
@@ -6625,38 +8162,31 @@ async function loadVideoPlan({ freshBuild = false } = {}) {
                         elements.audioName.textContent = plan.audio;
                         elements.audioInfo.classList.remove('hidden');
                         elements.dropZone.style.display = 'none';
-                        elements.btnGenerate.disabled = false;
-                        // Mirror the manual-drop path: a restored project with
-                        // audio is just as valid a base for repeating a single
-                        // step (e.g. re-run media download) as a freshly dropped
-                        // file, so enable Repeat Selected Step too.
-                        if (elements.btnRepeatStep) elements.btnRepeatStep.disabled = false;
                         await loadAudioFile(audioPath);
                     }
                 } catch (e) { console.warn('Audio loading failed:', e.message); }
+            } else if (plan.productionMode === 'aiVideos' || plan._generatedFrom === 'ai-videos-script') {
+                state.audioFile = null;
+                state.audioPath = null;
+                if (elements.previewAudio) {
+                    elements.previewAudio.removeAttribute('src');
+                    elements.previewAudio.load();
+                }
+                elements.audioInfo?.classList.add('hidden');
+                if (elements.dropZone) elements.dropZone.style.display = 'block';
             }
+            _syncProductionModeUI();
 
             // Enable render button if we have scenes
             if (state.scenes.length > 0) {
                 elements.btnRender.disabled = false;
             }
 
-            // Transitions disabled - hard cut only, skip planned transitions
-
-            // Hydrate the AI-designed SFX track from the plan (the Sound Designer
-            // worker writes plan.sfxClips at build time). Only fall back to the
-            // mechanical floor when the plan carries no designed track — so opening
-            // a project no longer clobbers the sound design with a sound-on-everything.
+            // The build is the sole SFX authority. An empty array means the Sound
+            // Designer intentionally left this cut silent; the editor must not invent
+            // a replacement track.
             try {
-                if (plan.sfxDesigned && Array.isArray(plan.sfxClips) && plan.sfxClips.length) {
-                    hydrateDesignedSfx(plan.sfxClips);
-                } else {
-                    // No AI-designed track (or a stale mechanical one) — build the
-                    // RESTRAINED floor instead of trusting old dense clips, so the
-                    // editor never falls back to sound-on-everything.
-                    state.sfxDesignedByWorker = false;
-                    generateSfxClips();
-                }
+                hydratePlanSfx(Array.isArray(plan.sfxClips) ? plan.sfxClips : []);
                 preloadSfxUrls();
             } catch (e) { console.warn('SFX hydrate failed:', e.message); }
 
@@ -6682,6 +8212,7 @@ async function loadVideoPlan({ freshBuild = false } = {}) {
             // Deduplicate (in case both mgScenes and motionGraphics have the same MG)
             const seenIds = new Set();
             for (const mg of fullscreenMGs) {
+                if (!mg) continue;
                 const key = mg.id || `${mg.type}-${mg.startTime}`;
                 if (seenIds.has(key)) continue;
                 seenIds.add(key);
@@ -6690,13 +8221,20 @@ async function loadVideoPlan({ freshBuild = false } = {}) {
                 // Resolve deeply nested mgData to get the actual core data
                 let core = mg;
                 while (core.mgData) core = core.mgData;
+                const mgTiming = timelineContract?.normalizeTiming
+                    ? timelineContract.normalizeTiming(mg, {
+                        fps: plan.fps || 30,
+                        totalDuration: plan.totalDuration,
+                        fallbackDuration: mg.templateType ? 4 : 3,
+                    })
+                    : getSceneTiming(mg, mg.templateType ? 4 : 3);
                 const sceneObj = {
                     isMGScene: true,
+                    disabled: mg.disabled === true,
                     trackId: 'video-track-3',
                     mediaType: mg.templateType ? 'template' : 'motion-graphic',
-                    startTime: mg.startTime,
-                    endTime: mg.endTime || (mg.startTime + mg.duration),
-                    duration: Math.round((mg.duration || (mg.endTime - mg.startTime)) * 30),
+                    clipId: mg.clipId || `mg-${timelineContract?.safeToken?.(key, 'visual') || key}-${Math.round(mgTiming.startTime * 1000)}`,
+                    ...mgTiming,
                     text: mg.text || '',
                     subtext: mg.subtext || mg.subText || '',
                     type: mg.type,
@@ -6705,6 +8243,19 @@ async function loadVideoPlan({ freshBuild = false } = {}) {
                     keyword: mg.templateType ? `Template: ${mg.type}` : `MG: ${mg.type}`,
                     mgData: core === mg ? mgFlat : core,
                 };
+                for (const identityKey of [
+                    'sceneIndex',
+                    'sourceSceneIndex',
+                    'originalSceneIndex',
+                    'targetSceneIndex',
+                ]) {
+                    const identityValue = core[identityKey] != null ? core[identityKey] : mg[identityKey];
+                    if (identityValue == null) continue;
+                    sceneObj[identityKey] = identityValue;
+                    if (sceneObj.mgData && typeof sceneObj.mgData === 'object') {
+                        sceneObj.mgData[identityKey] = identityValue;
+                    }
+                }
                 if (mg.templateType) sceneObj.templateType = true;
                 if (mg.templateType) {
                     const templateBg = core.mgBackground || mg.mgBackground || core.background || mg.background || 'none';
@@ -6940,12 +8491,23 @@ async function loadVideoPlan({ freshBuild = false } = {}) {
                         }
                         parts = next;
                     }
-                    for (const p of parts) {
+                    for (let partIndex = 0; partIndex < parts.length; partIndex++) {
+                        const p = parts[partIndex];
                         if (p.end - p.start < 0.3) continue;
                         const trimmed = { ...scene };
                         const offset = p.start - scene.startTime;
                         trimmed.startTime = p.start;
                         trimmed.endTime = p.end;
+                        trimmed.duration = p.end - p.start;
+                        trimmed.durationFrames = Math.max(1, Math.round(trimmed.duration * (plan.fps || 30)));
+                        trimmed.durationUnit = 'seconds';
+                        trimmed.sourceSceneIndex = getSceneSourceIndex(scene, scene.index);
+                        const unchanged = parts.length === 1
+                            && Math.abs(p.start - scene.startTime) < 0.001
+                            && Math.abs(p.end - scene.endTime) < 0.001;
+                        if (!unchanged) {
+                            trimmed.clipId = createSegmentClipId(scene, p.start, p.end, partIndex);
+                        }
                         if (offset > 0) {
                             trimmed.mediaOffset = (scene.mediaOffset || 0) + offset;
                         }
@@ -6972,12 +8534,13 @@ async function loadVideoPlan({ freshBuild = false } = {}) {
                     if (scene.mediaFile) {
                         const url = await window.electronAPI.getFileUrl(scene.mediaFile).catch(() => null);
                         if (url) {
-                            const cacheKey = `${scene.index}:${scene.mediaExtension || ''}:scene`;
+                            const sourceIndex = getSceneSourceIndex(scene, i);
+                            const cacheKey = `${sourceIndex}:${scene.mediaExtension || ''}:scene`;
                             state._mediaUrlCache[cacheKey] = url;
                             return url;
                         }
                     }
-                    const idx = scene.index !== undefined ? scene.index : i;
+                    const idx = getSceneSourceIndex(scene, i);
                     return getCachedMediaUrl(idx, scene.mediaExtension).catch(() => null);
                 });
             await Promise.all(cachePromises);
@@ -6986,7 +8549,7 @@ async function loadVideoPlan({ freshBuild = false } = {}) {
             // Keep the selected preview engine in sync with the loaded plan.
             const rendererMode = document.getElementById('renderer-select')?.value || 'hyperframes';
             if (rendererMode === 'hyperframes') {
-                await setHyperframesPreviewMode(true);
+                await setHyperframesPreviewMode(true, hyperframesPreviewOptions || {});
             } else if (state.compositor) {
                 loadPlanIntoCompositor().catch(e => console.warn('[Compositor] Plan load deferred:', e.message));
             }
@@ -6996,6 +8559,8 @@ async function loadVideoPlan({ freshBuild = false } = {}) {
         }
     } catch (error) {
         console.error('❌ Failed to load video plan:', error?.message || error, error?.stack);
+    } finally {
+        state.projectHydrating = false;
     }
 }
 
@@ -7004,30 +8569,28 @@ async function loadVideoPlan({ freshBuild = false } = {}) {
 // ========================================
 window._loadTestPlan = async function(plan) {
     if (!plan) {
-        // Load from public/test-mg-plan.json via Node fs (preload globals)
+        // Load the fixed project test-plan path through narrow IPC.
         try {
-            const _fs = window._nodeFs;
-            const _path = window._nodePath;
-            // Resolve public/ dir relative to the app root (ui/ is one level down)
-            const htmlDir = decodeURIComponent(location.pathname.replace(/^\/([A-Z]:)/, '$1')).replace(/\/[^/]*$/, '');
-            const publicDir = _path.join(htmlDir, '..', 'public');
-            const testPath = _path.join(publicDir, 'test-mg-plan.json');
-            const data = _fs.readFileSync(testPath, 'utf8');
-            plan = JSON.parse(data);
+            const result = await window.electronAPI.loadTestMgPlan();
+            if (!result?.success) throw new Error(result?.error || 'Failed to load test MG plan');
+            plan = result.plan;
         } catch (e) {
             console.error('Failed to load test-mg-plan.json:', e.message);
             return;
         }
     }
+    plan = normalizePlanForEditor(plan);
     state.videoPlan = plan;
     window._mgBridgeVideoPlan = plan; // sync with mg-theme-bridge.js for MG style resolution
     state._mediaUrlCache = {};
     state.scenes = [];
     state.motionGraphics = [];
+    state.transitions = [];
 
     const FULLSCREEN_MG_TYPES = new Set(['barChart', 'donutChart', 'rankingList', 'timeline', 'comparisonCard', 'bulletList', 'mapChart', 'articleHighlight']);
     const allMGs = plan.motionGraphics || [];
     state.motionGraphics = allMGs.filter(mg => !FULLSCREEN_MG_TYPES.has(mg.type));
+    hydratePlanTransitions(plan, plan.scenes || []);
     state.mgStyle = plan.mgStyle || 'clean';
     _hydrateMgOverlayShadow(plan);
 
@@ -7038,11 +8601,11 @@ window._loadTestPlan = async function(plan) {
     let nextIndex = 0;
     for (const s of (plan.scenes || [])) {
         const scene = { ...s };
-        scene.index = scene.index !== undefined ? scene.index : nextIndex;
         scene.trackId = scene.trackId || 'video-track-1';
         if (!scene.mediaType) scene.mediaType = 'video';
         state.scenes.push(scene);
-        nextIndex = Math.max(nextIndex, scene.index + 1);
+        const numericSource = Number(getSceneSourceIndex(scene, nextIndex));
+        if (Number.isFinite(numericSource)) nextIndex = Math.max(nextIndex, numericSource + 1);
     }
 
     // Process fullscreen MG scenes (includes templates from ai-templates.js)
@@ -7052,9 +8615,13 @@ window._loadTestPlan = async function(plan) {
         ...allMGs.filter(mg => FULLSCREEN_MG_TYPES.has(mg.type))
     ];
     for (const mg of fullscreenMGs) {
+        if (!mg) continue;
+        const timing = getSceneTiming(mg, mg.templateType ? 4 : 3);
         const scene = {
             ...mg,
             index: mg.index !== undefined ? mg.index : nextIndex++,
+            clipId: mg.clipId || `mg-test-${nextIndex}-${Math.round(timing.startTime * 1000)}`,
+            ...timing,
             isMGScene: true,
             mediaType: 'motion-graphic',
             trackId: mg.trackId || 'video-track-3',
@@ -7071,7 +8638,7 @@ window._loadTestPlan = async function(plan) {
     // Pre-cache media URLs for video scenes
     for (const s of state.scenes) {
         if (s.mediaType === 'video' && s.mediaExtension) {
-            await getCachedMediaUrl(s.index, s.mediaExtension).catch(() => null);
+            await getCachedMediaUrl(getSceneSourceIndex(s, s.index), s.mediaExtension).catch(() => null);
         }
     }
 
@@ -7091,317 +8658,76 @@ window._loadTestPlan = async function(plan) {
 };
 
 // ========================================
-// SFX Auto-Placement System
+// Build-authored SFX track
 // ========================================
-// ── SFX rule mirror — KEEP IN SYNC with src/editor-agent/workers/sfx-rules.js ──
-// The renderer sandbox can't require() a src module, so the gating constants are
-// mirrored here. They make the app-side mechanical floor match the AI Sound
-// Designer: motivated + sparse, and persistent text overlays (lower-thirds,
-// captions, focus words, bullets…) stay SILENT. This is a FALLBACK floor — it
-// runs only when the plan has no AI-designed SFX (see generateSfxClips).
-const SFX_MOTIVATED_TRANSITIONS = new Set([
-    'whip', 'whippan', 'zoompunch', 'zoomrotate', 'dipblack', 'fadetoblack', 'flash',
-    'cameraflash', 'glitch', 'datamosh', 'rgbsplit', 'static', 'filmburn', 'spin',
-    'prismshift', 'shutterslice', 'pixelate', 'mosaic', 'push', 'slide', 'swipe', 'bounce',
-    'lensflare', 'fireburn', 'lightsweep', 'wipe',
-]);
-// MIRRORS sfx-rules.js IMPACT_MG_TYPES (keep in sync). Graphics are SILENT by
-// default — a stat card / chart / counter / key-takeaway is punctuated by its own
-// reveal ANIMATION, so a reflexive ding on it is the #1 amateur tell. Only the
-// subscribe CTA earns a graphic sound (a once-per-video viewer-action chime);
-// dramatic beats ride the motivated transition on that cut, not the card.
-const SFX_IMPACT_MG_TYPES = new Set([
-    'subscribeCTA',
-]);
-// Preview-only gain: the final render is loudnorm-mixed (SFX ride under VO), but the
-// raw preview plays each <audio> at its bare level, which is too quiet to QA. Boost
-// preview playback so the designer's sounds are clearly audible while scrubbing.
+// Final renders are loudness-normalized, while browser preview plays raw files.
+// This preview-only gain makes the build-authored cues audible for QA.
 const PREVIEW_SFX_GAIN = 1.9;
-const SFX_SILENT_MG = new Set([
-    'lowerThird', 'callout', 'focusWord', 'kineticText', 'caption', 'subtitle',
-    'bulletList', 'typewriter', 'tag', 'eyebrow', 'explainer', 'progressBar',
-    'progressTracker', 'listicleCounter', 'personIntro', 'imageShowcase',
-    'listicleGrid', 'splitScreen',
-]);
-const SFX_MIN_GAP = 4.0;
-const SFX_SALIENCE = { impact: 3, whoosh: 2, accent: 2, texture: 1 };
-function sfxNormTx(t) {
-    const base = String(t || '').toLowerCase().replace(/[-_\s]/g, '');
-    return base.replace(/(left|right|up|down|pan)$/g, '') || base;
-}
 
-const SFX_MAP = {
-    // === Smooth / Cinematic ===
-    fade:           { file: 'sfx-fade.mp3', duration: 0.5 },
-    fade_to_black:  { file: 'sfx-fade.mp3', duration: 0.4 },
-    dissolve:       { file: 'sfx-dissolve.mp3', duration: 0.5 },
-    crossfade:      { file: 'sfx-fade.mp3', duration: 0.5 },
-    blur:           { file: 'sfx-blur.mp3', duration: 0.5 },
-    crossBlur:      { file: 'sfx-blur.mp3', duration: 0.5 },
-    luma:           { file: 'sfx-fade.mp3', duration: 0.5 },
-    lumaFade:       { file: 'sfx-fade.mp3', duration: 0.5 },
-    lumaDark:       { file: 'sfx-fade.mp3', duration: 0.5 },
-    ripple:         { file: 'sfx-ripple.mp3', duration: 0.7 },
-    reveal:         { file: 'sfx-ink.mp3', duration: 0.6 },
-    morph:          { file: 'sfx-blur.mp3', duration: 0.5 },
-    dreamFade:      { file: 'sfx-fade.mp3', duration: 0.5 },
-    colorFade:      { file: 'sfx-fade.mp3', duration: 0.5 },
-    filmBurn:       { file: 'sfx-filmburn.mp3', duration: 0.6 },
-    filmGrain:      { file: 'sfx-filmburn.mp3', duration: 0.6 },
-    ink:            { file: 'sfx-ink.mp3', duration: 0.6 },
-    // === Energetic / Dynamic ===
-    slide:          { file: 'sfx-slide.mp3', duration: 0.4 },
-    wipe:           { file: 'sfx-wipe.mp3', duration: 0.3 },
-    push:           { file: 'sfx-slide.mp3', duration: 0.4 },
-    swipe:          { file: 'sfx-wipe.mp3', duration: 0.3 },
-    splitWipe:      { file: 'sfx-wipe.mp3', duration: 0.3 },
-    shutterSlice:   { file: 'sfx-shutter.mp3', duration: 0.3 },
-    bounce:         { file: 'sfx-bounce.mp3', duration: 0.4 },
-    // === Zoom ===
-    zoom:           { file: 'sfx-zoom.mp3', duration: 0.5 },
-    zoomBlur:       { file: 'sfx-zoom.mp3', duration: 0.5 },
-    zoomOut:        { file: 'sfx-zoom.mp3', duration: 0.5 },
-    zoomRotate:     { file: 'sfx-spin.mp3', duration: 0.6 },
-    // === Camera Motion ===
-    panLeft:        { file: 'sfx-pan.mp3', duration: 0.4 },
-    panRight:       { file: 'sfx-pan.mp3', duration: 0.4 },
-    panUp:          { file: 'sfx-pan.mp3', duration: 0.4 },
-    panDown:        { file: 'sfx-pan.mp3', duration: 0.4 },
-    whip:           { file: 'sfx-whip.mp3', duration: 0.3 },
-    whipPan:        { file: 'sfx-whip.mp3', duration: 0.3 },
-    directionalBlur:{ file: 'sfx-whip.mp3', duration: 0.3 },
-    spin:           { file: 'sfx-spin.mp3', duration: 0.6 },
-    // === Light Leaks ===
-    flash:          { file: 'sfx-flash.mp3', duration: 0.3 },
-    cameraFlash:    { file: 'sfx-camera-flash.mp3', duration: 0.3 },
-    flare:          { file: 'sfx-flare.mp3', duration: 0.6 },
-    lightLeak:      { file: 'sfx-flare.mp3', duration: 0.6 },
-    warmLeak:       { file: 'sfx-warm-leak.mp3', duration: 0.6 },
-    coolLeak:       { file: 'sfx-cool-leak.mp3', duration: 0.6 },
-    vignetteBlink:  { file: 'sfx-camera-flash.mp3', duration: 0.3 },
-    shadowWipe:     { file: 'sfx-wipe.mp3', duration: 0.3 },
-    prismShift:     { file: 'sfx-prism.mp3', duration: 0.5 },
-    // === Glitch / Tech ===
-    glitch:         { file: 'sfx-glitch.mp3', duration: 0.4 },
-    pixelate:       { file: 'sfx-glitch.mp3', duration: 0.4 },
-    mosaic:         { file: 'sfx-glitch.mp3', duration: 0.4 },
-    dataMosh:       { file: 'sfx-glitch.mp3', duration: 0.4 },
-    scanline:       { file: 'sfx-static.mp3', duration: 0.5 },
-    rgbSplit:       { file: 'sfx-glitch.mp3', duration: 0.4 },
-    static:         { file: 'sfx-static.mp3', duration: 0.5 },
-    // === Shapes ===
-    diagonalStripes:{ file: 'sfx-wipe.mp3', duration: 0.3 },
-    rectangles:     { file: 'sfx-shutter.mp3', duration: 0.3 },
-    diamonds:       { file: 'sfx-diamond.mp3', duration: 0.4 },
-    blinds:         { file: 'sfx-blinds.mp3', duration: 0.4 },
-    circles:        { file: 'sfx-fade.mp3', duration: 0.5 },
-};
-
-// MG type -> SFX mapping
-const MG_SFX_MAP = {
-    headline:       { file: 'sfx-mg-pop.mp3', duration: 0.25 },
-    lowerThird:     { file: 'sfx-mg-swoosh.mp3', duration: 0.35 },
-    callout:        { file: 'sfx-mg-swoosh.mp3', duration: 0.35 },
-    focusWord:      { file: 'sfx-mg-pop.mp3', duration: 0.25 },
-    statCounter:    { file: 'sfx-mg-tick.mp3', duration: 0.15 },
-    progressBar:    { file: 'sfx-mg-tick.mp3', duration: 0.15 },
-    bulletList:     { file: 'sfx-mg-pop.mp3', duration: 0.25 },
-    barChart:       { file: 'sfx-mg-ding.mp3', duration: 0.4 },
-    donutChart:     { file: 'sfx-mg-ding.mp3', duration: 0.4 },
-    comparisonCard: { file: 'sfx-mg-ding.mp3', duration: 0.4 },
-    timeline:       { file: 'sfx-mg-rise.mp3', duration: 0.5 },
-    rankingList:    { file: 'sfx-mg-rise.mp3', duration: 0.5 },
-    kineticText:    { file: 'sfx-mg-type.mp3', duration: 0.2 },
-    typewriter:     { file: 'sfx-mg-type.mp3', duration: 0.3 },
-    subscribeCTA:   { file: 'sfx-mg-chime.mp3', duration: 0.5 },
-    mapChart:        { file: 'sfx-mg-ding.mp3', duration: 0.4 },
-    explainer:       { file: 'sfx-mg-swoosh.mp3', duration: 0.35 },
-    listicleCounter: { file: 'sfx-mg-tick.mp3', duration: 0.15 },
-    progressTracker: { file: 'sfx-mg-tick.mp3', duration: 0.15 },
-    // Template types (fullscreen MG scenes)
-    splitScreen:     { file: 'sfx-mg-swoosh.mp3', duration: 0.35 },
-    infographic:     { file: 'sfx-mg-ding.mp3', duration: 0.4 },
-    factCard:        { file: 'sfx-mg-pop.mp3', duration: 0.25 },
-    statCard:        { file: 'sfx-mg-ding.mp3', duration: 0.4 },
-    personIntro:     { file: 'sfx-mg-swoosh.mp3', duration: 0.35 },
-    imageShowcase:   { file: 'sfx-mg-pop.mp3', duration: 0.25 },
-    listicleGrid:    { file: 'sfx-mg-pop.mp3', duration: 0.25 },
-    chapterCard:     { file: 'sfx-mg-swoosh.mp3', duration: 0.35 },
-    locationCard:    { file: 'sfx-mg-swoosh.mp3', duration: 0.35 },
-    quoteCard:       { file: 'sfx-mg-rise.mp3', duration: 0.5 },
-    keyTakeaway:     { file: 'sfx-mg-ding.mp3', duration: 0.4 },
-    timelineCard:    { file: 'sfx-mg-rise.mp3', duration: 0.5 },
-};
-
-function applySfxVolumeLevels() {
-    for (const sfx of (state.sfxClips || [])) {
-        const mult = typeof sfx.volumeMultiplier === 'number' ? sfx.volumeMultiplier : 1;
-        sfx.volume = +(state.sfxVolume * mult).toFixed(4);
-    }
-}
-
-// Load an AI-designed SFX track (plan.sfxClips) into the editor WITHOUT rebuilding
-// the mechanical floor. The designer's per-clip volume is preserved as a multiplier
-// of the current SFX-volume slider, so dragging the slider scales the whole design
-// proportionally (a gain) instead of flattening every clip to one level.
-function hydrateDesignedSfx(clips) {
-    const base = state.sfxVolume > 0 ? state.sfxVolume : 0.35;
-    state.sfxClips = (clips || []).map((s, i) => ({
-        id: `sfx-${i}`,
-        file: s.file,
-        startTime: s.startTime,
-        duration: s.duration,
-        volume: (typeof s.volume === 'number' ? s.volume : state.sfxVolume),
-        volumeMultiplier: (typeof s.volume === 'number' ? +(s.volume / base).toFixed(4) : 1),
-        _triggered: false,
-    }));
-    state.sfxDesignedByWorker = true;
-}
-
-function generateSfxClips() {
-    if (!state.sfxEnabled) {
-        state.sfxClips = [];
-        return;
-    }
-
-    const clips = [];
-
-    // Group scenes by track — only video tracks get transition SFX
-    const trackGroups = {};
-    state.scenes.forEach((scene, idx) => {
-        if (scene.isMGScene) return; // Skip MG scenes
-        const trackId = scene.trackId || 'video-track-1';
-        if (!trackId.startsWith('video-track-')) return; // Only video tracks
-        if (!trackGroups[trackId]) trackGroups[trackId] = [];
-        trackGroups[trackId].push({ scene, idx });
-    });
-
-    // For each track, find adjacent scene boundaries (transition points)
-    for (const trackId of Object.keys(trackGroups)) {
-        const trackScenes = trackGroups[trackId].sort((a, b) => a.scene.startTime - b.scene.startTime);
-
-        for (let i = 1; i < trackScenes.length; i++) {
-            const prev = trackScenes[i - 1];
-            const curr = trackScenes[i];
-
-            // Check if scenes are adjacent (gap < 0.1s = transition point)
-            const gap = curr.scene.startTime - prev.scene.endTime;
-            if (Math.abs(gap) > 0.1) continue;
-
-            // Resolve transition type: per-scene override > global force > AI-assigned > cut
-            let transType = curr.scene.transitionType
-                || (state.transition.style !== 'auto' ? state.transition.style : null)
-                || curr.scene.transition?.type
-                || 'cut';
-            if (transType === 'random') {
-                const seed = curr.idx * 7 + 3;
-                transType = state.transition.types[seed % state.transition.types.length];
-            }
-
-            // Only KINETIC / hard transitions earn a whoosh — cuts, crossfades and
-            // soft dissolves stay SILENT (a soft blend has no motion to sound).
-            if (!SFX_MOTIVATED_TRANSITIONS.has(sfxNormTx(transType))) continue;
-
-            const _txBase = String(transType).toLowerCase().split(/[-_\s]/)[0];
-            const sfxInfo = SFX_MAP[transType] || SFX_MAP[_txBase] || SFX_MAP[sfxNormTx(transType)] || { file: 'sfx-whip.mp3', duration: 0.35 };
-
-            // Start SFX before the transition point (150ms pre-roll for better sync)
-            const preRoll = 0.15;
-            const startTime = Math.max(0, curr.scene.startTime - preRoll);
-
-            clips.push({
-                id: `sfx-${clips.length}`,
-                transitionType: transType,
-                sceneIndex: curr.idx,
-                startTime: startTime,
-                duration: sfxInfo.duration,
-                volumeMultiplier: 0.86, // ≈0.30 at default slider — matches the worker's whoosh band
-                volume: state.sfxVolume * 0.86,
-                file: sfxInfo.file
-            });
-        }
-    }
-
-    // MG SFX — trigger on MG enter (overlay MGs)
-    if (state.motionGraphics && state.motionGraphics.length > 0) {
-        state.motionGraphics.forEach((mg, i) => {
-            if (mg.disabled) return;
-            // Persistent reading aids (lower-thirds/callouts/focus-words/captions/
-            // bullets…) are NOT beats — they stay silent. Only genuine data/story
-            // reveals that punch in earn a sparse, quiet accent.
-            if (SFX_SILENT_MG.has(mg.type)) return;
-            if (!SFX_IMPACT_MG_TYPES.has(mg.type)) return;
-            const mgSfx = MG_SFX_MAP[mg.type];
-            if (!mgSfx) return;
-            clips.push({
-                id: `sfx-mg-${i}`,
-                transitionType: mg.type,
-                sceneIndex: -1,
-                startTime: mg.startTime || 0,
-                duration: mgSfx.duration,
-                volumeMultiplier: 0.91,
-                volume: state.sfxVolume * 0.91,
-                file: mgSfx.file
-            });
-        });
-    }
-
-    // MG SFX — fullscreen MG scenes
-    state.scenes.forEach((scene, idx) => {
-        if (!scene.isMGScene || scene.disabled) return;
-        if (SFX_SILENT_MG.has(scene.type)) return;
-        if (!SFX_IMPACT_MG_TYPES.has(scene.type)) return;
-        const mgSfx = MG_SFX_MAP[scene.type];
-        if (!mgSfx) return;
-        clips.push({
-            id: `sfx-mg-scene-${idx}`,
-            transitionType: scene.type,
-            sceneIndex: idx,
-            startTime: scene.startTime || 0,
-            duration: mgSfx.duration,
-            volumeMultiplier: 0.55,
-            volume: state.sfxVolume * 0.55,
-            file: mgSfx.file
-        });
-    });
-
-    // Density gate: sort by salience (impact > whoosh) then drop any clip within
-    // SFX_MIN_GAP of a kept one — mirrors the AI designer + build-video floor so
-    // the mechanical fallback is also sparse, never a sound-on-every-boundary.
-    const _roleOf = (c) => (c.sceneIndex === -1 || String(c.id).startsWith('sfx-mg')) ? 'accent'
-        : (SFX_IMPACT_MG_TYPES.has(c.transitionType) ? 'impact' : 'whoosh');
-    clips.sort((a, b) => (SFX_SALIENCE[_roleOf(b)] || 0) - (SFX_SALIENCE[_roleOf(a)] || 0) || a.startTime - b.startTime);
-    const _kept = [];
-    for (const c of clips) {
-        if (_kept.some(k => Math.abs(k.startTime - c.startTime) < SFX_MIN_GAP)) continue;
-        _kept.push(c);
-    }
-    _kept.sort((a, b) => a.startTime - b.startTime);
-
-    state.sfxClips = _kept;
-    applySfxVolumeLevels();
+function hydratePlanSfx(clips) {
+    state.sfxClips = (clips || [])
+        .filter((sfx) => sfx && typeof sfx.file === 'string')
+        .map((sfx, index) => ({
+            id: `sfx-${index}`,
+            file: sfx.file,
+            startTime: Math.max(0, Number(sfx.startTime) || 0),
+            duration: Math.max(0.01, Number(sfx.duration) || 0.5),
+            volume: Math.max(0, Math.min(1, Number.isFinite(Number(sfx.volume)) ? Number(sfx.volume) : 0.35)),
+            transitionType: sfx.transitionType || '',
+            role: sfx.role || '',
+            why: sfx.why || '',
+            _triggered: false,
+        }));
 }
 
 function renderScenes() {
     // Show all scenes including full-screen MG scenes (they are real scenes on V3)
-    const displayScenes = state.scenes.filter(s => s.trackId !== undefined || !s.isMGScene || s.isMGScene);
+    const displayScenes = state.scenes;
     if (displayScenes.length === 0) { elements.sceneList.innerHTML = '<p class="empty-state">No scenes yet</p>'; return; }
-    elements.sceneList.innerHTML = displayScenes.map((scene) => {
+    elements.sceneList.replaceChildren();
+    displayScenes.forEach((scene) => {
         const i = state.scenes.indexOf(scene);
         const trType = scene.transitionType || (state.transition.style !== 'auto' ? state.transition.style : null) || scene.transition?.type || 'crossfade';
         const trIcons = { cut: '✂️', crossfade: '🔀', fade: '🔀', dissolve: '🔀', blur: '🔀', crossBlur: '🔀', luma: '🌗', morph: '🔀', dreamFade: '💭', ripple: '🌊', wipe: '↔️', slide: '↔️', push: '↔️', swipe: '↔️', splitWipe: '↔️', zoom: '🔎', zoomBlur: '🔎', whip: '💨', bounce: '⬆️', shutterSlice: '📷', flash: '⚡', directionalBlur: '💨', colorFade: '🎨', spin: '🌀', cameraFlash: '📸', filmBurn: '🎞️', filmGrain: '🎞️', flare: '✨', lightLeak: '✨', shadowWipe: '🌑', vignetteBlink: '👁️', reveal: '🔀', ink: '🖋️', prismShift: '🔮', glitch: '⚡', pixelate: '🟦', mosaic: '🟦', dataMosh: '⚡', scanline: '📺', rgbSplit: '🌈', static: '📺', fade_to_black: '⬛' };
-        const trBadge = i > 0 && !scene.isMGScene ? `<span class="scene-transition-badge" title="${trType}">${trIcons[trType] || '🔀'} ${trType}</span>` : '';
-        const mgBadge = scene.isMGScene ? `<span class="scene-mg-badge" title="Motion Graphic: ${scene.type || 'MG'}">🎨 ${scene.type || 'MG'}</span>` : '';
-        const qaBadge = scene.flagForReplacement ? `<span class="scene-qa-badge" title="${(scene.qaReason || 'Flagged by QA').replace(/"/g, '&quot;')}">⚠ QA</span>` : '';
         const keyword = scene.isMGScene ? `🎨 MG: ${scene.type || 'motion-graphic'}` : `🔍 ${scene.keyword}`;
-        return `<div class="scene-card ${scene.isMGScene ? 'scene-card-mg' : ''} ${scene.flagForReplacement ? 'scene-card-qa-flagged' : ''}" data-index="${i}">
-            <div class="scene-number">Scene ${i}${trBadge}${mgBadge}${qaBadge}</div>
-            <div class="scene-text">${scene.text || ''}</div>
-            <div class="scene-keyword">${keyword}</div>
-        </div>`;
-    }).join('');
-    document.querySelectorAll('.scene-card').forEach(card => {
-        card.addEventListener('click', () => jumpToScene(parseInt(card.dataset.index)));
+
+        const card = document.createElement('div');
+        card.className = `scene-card${scene.isMGScene ? ' scene-card-mg' : ''}${scene.flagForReplacement ? ' scene-card-qa-flagged' : ''}`;
+        card.dataset.index = String(i);
+
+        const number = document.createElement('div');
+        number.className = 'scene-number';
+        number.appendChild(document.createTextNode(`Scene ${i}`));
+
+        const addBadge = (className, title, text) => {
+            const badge = document.createElement('span');
+            badge.className = className;
+            badge.title = String(title || '');
+            badge.textContent = String(text || '');
+            number.appendChild(badge);
+        };
+        if (i > 0 && !scene.isMGScene) {
+            addBadge('scene-transition-badge', trType, `${trIcons[trType] || '🔀'} ${trType}`);
+        }
+        if (scene.isMGScene) {
+            const type = scene.type || 'MG';
+            addBadge('scene-mg-badge', `Motion Graphic: ${type}`, `🎨 ${type}`);
+        }
+        if (scene.flagForReplacement) {
+            addBadge('scene-qa-badge', scene.qaReason || 'Flagged by QA', '⚠ QA');
+        }
+
+        const text = document.createElement('div');
+        text.className = 'scene-text';
+        text.textContent = scene.text || '';
+
+        const keywordEl = document.createElement('div');
+        keywordEl.className = 'scene-keyword';
+        keywordEl.textContent = keyword;
+
+        card.append(number, text, keywordEl);
+        card.addEventListener('click', () => jumpToScene(i));
+        elements.sceneList.appendChild(card);
     });
 }
 
@@ -7555,7 +8881,8 @@ function renderTracks() {
     state.scenes.forEach(s => usedVideoTracks.add(s.trackId || 'video-track-1'));
 
     state.timeline.tracks.forEach((track, trackIndex) => {
-        const isMuted = state.mutedTracks[track.id] || false;
+        const canMuteTrack = track.id !== 'sfx-track';
+        const isMuted = canMuteTrack && (state.mutedTracks[track.id] || false);
         const muteIcon = isMuted ? svgMuted : svgUnmuted;
         const muteClass = isMuted ? 'track-muted' : '';
         let trackHeight = state.timeline.trackHeights[track.id] || 36;
@@ -7566,8 +8893,11 @@ function renderTracks() {
         if (isEmptyUpper) trackHeight = 12;
 
         const mgTestBtn = track.id === 'mg-track' ? `<button class="mg-test-btn" data-action="inject-test-mg" title="Inject 6 test MGs">+</button>` : '';
+        const muteButton = canMuteTrack
+            ? `<button class="track-mute-btn ${isMuted ? 'muted' : ''}" data-track-mute="${track.id}" title="${isMuted ? 'Unmute' : 'Mute'} track">${muteIcon}</button>`
+            : '';
         html += `<div class="timeline-row ${muteClass}" data-track="${track.id}" style="height:${trackHeight}px">
-            <div class="track-label"><span class="track-label-text">${track.label}</span>${mgTestBtn}<button class="track-mute-btn ${isMuted ? 'muted' : ''}" data-track-mute="${track.id}" title="${isMuted ? 'Unmute' : 'Mute'} track">${muteIcon}</button></div>
+            <div class="track-label"><span class="track-label-text">${track.label}</span>${mgTestBtn}${muteButton}</div>
             <div class="track-content ${track.type}-track" data-track="${track.id}">`;
 
         // Audio clip on its current track - use actual audio duration, not totalDuration
@@ -7580,9 +8910,10 @@ function renderTracks() {
             const barCount = Math.min(Math.floor(w / 3), 500);
             for (let b = 0; b < barCount; b++) { waveHtml += `<div class="waveform-bar" style="height:${20 + Math.random() * 60}%"></div>`; }
             waveHtml += '</div>';
-            html += `<div class="timeline-clip audio-clip" data-audio-clip="voice" data-track="audio-track" style="left:${audioLeft}px;width:${w}px" title="${state.audioFile.name}">
+            const safeAudioName = escapeHTML(String(state.audioFile.name || 'Audio'));
+            html += `<div class="timeline-clip audio-clip" data-audio-clip="voice" data-track="audio-track" style="left:${audioLeft}px;width:${w}px" title="${safeAudioName}">
                 ${waveHtml}
-                <span class="clip-label">${state.audioFile.name}</span>
+                <span class="clip-label">${safeAudioName}</span>
                 <button class="audio-clip-delete" title="Remove audio">✕</button>
             </div>`;
         }
@@ -7622,7 +8953,7 @@ function renderTracks() {
                 const clampedW = Math.max(w, 20);
                 html += `<div class="timeline-clip mg-clip ${meta.colorClass} ${isDisabled ? 'clip-disabled' : ''} ${isSelected ? 'selected' : ''}" data-mg-index="${i}"
                     style="left:${left}px;width:${clampedW}px"
-                    title="${mg.type}: ${mg.text} [${mg.startTime.toFixed(2)}s → ${(mg.startTime + mg.duration).toFixed(2)}s] (${mg.duration.toFixed(2)}s)${isDisabled ? ' [OFF]' : ''}">
+                    title="${escapeHTML(mg.type)}: ${escapeHTML(mg.text)} [${mg.startTime.toFixed(2)}s → ${(mg.startTime + mg.duration).toFixed(2)}s] (${mg.duration.toFixed(2)}s)${isDisabled ? ' [OFF]' : ''}">
                     <span class="clip-label">${meta.icon}</span>
                     <button class="clip-toggle-btn" data-toggle-mg="${i}" title="${isDisabled ? 'Enable' : 'Disable'} graphic">${eyeIcon}</button>
                 </div>`;
@@ -7635,9 +8966,10 @@ function renderTracks() {
                 const left = sfx.startTime * state.timeline.zoom;
                 const w = sfx.duration * state.timeline.zoom;
                 const icon = state.transition.metadata[sfx.transitionType]?.icon || '🔊';
+                const cueName = sfx.transitionType || sfx.role || String(sfx.file || 'sound effect').replace(/^sfx-|\.(mp3|wav|ogg|m4a)$/gi, '');
                 html += `<div class="timeline-clip sfx-clip" data-sfx-index="${i}"
                     style="left:${left}px;width:${Math.max(w, 8)}px"
-                    title="SFX: ${sfx.transitionType} (${sfx.duration.toFixed(2)}s)">
+                    title="SFX: ${escapeHTML(cueName)} (${sfx.duration.toFixed(2)}s)">
                     <span class="clip-label">${icon}</span>
                 </div>`;
             });
@@ -7665,13 +8997,14 @@ function renderTracks() {
                 };
                 const meta = mgMeta[scene.type] || { name: scene.type || 'MG', colorClass: '' };
                 const clipName = scene.text ? `${meta.name}: ${scene.text}` : meta.name;
+                const safeClipName = escapeHTML(clipName);
                 const isDisabled = scene.disabled === true;
                 const eyeIcon = isDisabled ? '👁️‍🗨️' : '👁️';
                 html += `<div class="timeline-clip clip-mg-scene ${meta.colorClass} ${isDisabled ? 'clip-disabled' : ''} ${state.selectedClipIndices.includes(idx) ? 'selected' : ''}"
                     data-index="${idx}" style="left:${left}px;width:${width}px"
-                    title="${clipName} [${scene.startTime.toFixed(2)}s → ${scene.endTime.toFixed(2)}s] (${(scene.endTime - scene.startTime).toFixed(2)}s)${isDisabled ? ' [OFF]' : ''}">
+                    title="${safeClipName} [${scene.startTime.toFixed(2)}s → ${scene.endTime.toFixed(2)}s] (${(scene.endTime - scene.startTime).toFixed(2)}s)${isDisabled ? ' [OFF]' : ''}">
                     <div class="clip-trim-handle clip-trim-handle-left" data-index="${idx}" data-edge="left"></div>
-                    <span class="clip-label">${clipName}</span>
+                    <span class="clip-label">${safeClipName}</span>
                     <button class="clip-toggle-btn" data-toggle-idx="${idx}" title="${isDisabled ? 'Enable' : 'Disable'} graphic">${eyeIcon}</button>
                     <div class="clip-trim-handle clip-trim-handle-right" data-index="${idx}" data-edge="right"></div>
                 </div>`;
@@ -7688,7 +9021,22 @@ function renderTracks() {
             const trIcon = trIcons[trType] || '🔀';
             // Show transition marker between clips (skip first scene)
             if (i > 0 && trIcon) {
-                html += `<div class="transition-marker" style="left:${left - 8}px" title="${trType}">${trIcon}</div>`;
+                const prevScene = trackScenes[i - 1];
+                const transitionIndex = (state.transitions || []).findIndex((transition) => (
+                    (
+                        String(transition.fromClipId || '') === String(prevScene.clipId || '')
+                        && String(transition.toClipId || '') === String(scene.clipId || '')
+                    )
+                    || (
+                        !transition.fromClipId
+                        && !transition.toClipId
+                        && Math.abs((Number(transition.startTime ?? transition.at) || 0) - Number(scene.startTime || 0)) < 0.05
+                    )
+                ));
+                const selectedClass = transitionIndex >= 0 && state.selectedTransitionIndex === transitionIndex
+                    ? ' selected'
+                    : '';
+                html += `<div class="transition-marker${selectedClass}" data-transition-index="${transitionIndex}" style="left:${left - 8}px" title="${escapeHTML(trType)}">${trIcon}</div>`;
             }
             // Clip separator line for adjacent clips
             if (i > 0) {
@@ -7698,10 +9046,12 @@ function renderTracks() {
                 }
             }
 
+            const clipText = String(scene.text || scene.keyword || '');
+            const clipLabel = clipText.substring(0, 30) + (clipText.length > 30 ? '...' : '');
             html += `<div class="timeline-clip ${mediaClass} ${isDisabled ? 'clip-disabled' : ''} ${idx === state.currentSceneIndex ? 'active' : ''} ${state.selectedClipIndices.includes(idx) ? 'selected' : ''}"
-                data-index="${idx}" style="left:${left}px;width:${width}px" title="${scene.text || scene.keyword || ''}${isDisabled ? ' [OFF]' : ''}">
+                data-index="${idx}" style="left:${left}px;width:${width}px" title="${escapeHTML(clipText)}${isDisabled ? ' [OFF]' : ''}">
                 <div class="clip-trim-handle clip-trim-handle-left" data-index="${idx}" data-edge="left"></div>
-                <span class="clip-label">${(scene.text || scene.keyword || '').substring(0, 30)}${(scene.text || scene.keyword || '').length > 30 ? '...' : ''}</span>
+                <span class="clip-label">${escapeHTML(clipLabel)}</span>
                 <button class="clip-toggle-btn" data-toggle-idx="${idx}" title="${isDisabled ? 'Enable' : 'Disable'} clip">${eyeIcon}</button>
                 <div class="clip-trim-handle clip-trim-handle-right" data-index="${idx}" data-edge="right"></div>
             </div>`;
@@ -7728,6 +9078,22 @@ function renderTracks() {
             const idx = parseInt(clip.dataset.index);
             selectClip(idx, e.ctrlKey || e.metaKey);
             if (!e.ctrlKey && !e.metaKey) jumpToScene(idx);
+        });
+    });
+
+    document.querySelectorAll('.transition-marker[data-transition-index]').forEach(marker => {
+        marker.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const index = Number(marker.dataset.transitionIndex);
+            if (!Number.isInteger(index) || index < 0 || !state.transitions[index]) return;
+            state.selectedTransitionIndex = index;
+            state.selectedClipIndices = [];
+            state.selectedClipIndex = -1;
+            state.selectedMgIndex = -1;
+            const transition = state.transitions[index];
+            seekToTime(Number(transition.startTime ?? transition.at) || state.currentTime);
+            renderTimeline();
+            notifyAgentContextChanged();
         });
     });
 
@@ -7839,9 +9205,12 @@ function renderTracks() {
             document.querySelectorAll('.timeline-clip').forEach(c => c.classList.remove('selected'));
             // Select this MG
             state.selectedMgIndex = mgIdx;
+            state.selectedTransitionIndex = -1;
+            document.querySelectorAll('.transition-marker.selected').forEach(c => c.classList.remove('selected'));
             document.querySelectorAll('.mg-clip').forEach(c => c.classList.remove('selected'));
             clip.classList.add('selected');
             updateClipProperties();
+            notifyAgentContextChanged();
         });
     });
 
@@ -7962,7 +9331,7 @@ async function loadClipThumbnails() {
 
         try {
             // Try frame-{index}.jpg first (from vision analysis)
-            const originalIdx = scene.index !== undefined ? scene.index : idx;
+            const originalIdx = getSceneSourceIndex(scene, idx);
             let framePath = await window.electronAPI.getSceneMediaPath(originalIdx, '.jpg', 'frame');
             if (framePath) {
                 const url = await window.electronAPI.getFileUrl(framePath);
@@ -8033,7 +9402,7 @@ function setupMarqueeSelect() {
     scroll.addEventListener('mousedown', (e) => {
         // Only start marquee on left-click on empty area (not on a clip or handle)
         if (e.button !== 0) return;
-        if (e.target.closest('.timeline-clip') || e.target.closest('.clip-trim-handle') || e.target.closest('.playhead') || e.target.closest('.transition-icon')) return;
+        if (e.target.closest('.timeline-clip') || e.target.closest('.clip-trim-handle') || e.target.closest('.playhead') || e.target.closest('.transition-marker')) return;
 
         isMarquee = true;
         const scrollRect = scroll.getBoundingClientRect();
@@ -8114,11 +9483,16 @@ function highlightClipsInMarquee(mLeft, mTop, mWidth, mHeight, addToExisting) {
     // Update selection visually
     state.selectedClipIndices = newSelection;
     state.selectedClipIndex = newSelection.length > 0 ? newSelection[newSelection.length - 1] : -1;
+    state.selectedMgIndex = -1;
+    state.selectedTransitionIndex = -1;
 
     document.querySelectorAll('.timeline-clip[data-index]').forEach(c => {
         const idx = parseInt(c.dataset.index);
         c.classList.toggle('selected', newSelection.includes(idx));
     });
+    document.querySelectorAll('.mg-clip').forEach(c => c.classList.remove('selected'));
+    document.querySelectorAll('.transition-marker.selected').forEach(c => c.classList.remove('selected'));
+    notifyAgentContextChanged();
 }
 
 // Logarithmic zoom slider: maps 0-1000 slider range to 0.5-200 px/s zoom
@@ -8693,6 +10067,7 @@ async function seekToTime(time) {
     if (wasPlaying && activeScenes.length > 0) {
         startPlayback();
     }
+    notifyAgentContextChanged();
 }
 
 function getSceneAtTime(time) {
@@ -8716,7 +10091,7 @@ function computeKenBurnsForExport(scene, rtW, rtH) {
     const none = { sStart: 1, sEnd: 1, txStart: 0, txEnd: 0, tyStart: 0, tyEnd: 0 };
     if (scene.kenBurnsEnabled === false) return none;
 
-    const originalIndex = scene.index !== undefined ? scene.index : 0;
+    const originalIndex = getSceneSourceIndex(scene, 0);
     const kbTypes = [
         'zoomIn', 'zoomOut',
         'panLeft', 'panRight', 'panUp', 'panDown',
@@ -8784,7 +10159,7 @@ function updateKenBurnsTransform(img, scene) {
         if (wr) { applyRadius(wr, scene); wr.style.clipPath = ''; }
         return;
     }
-    const originalIndex = scene.index !== undefined ? scene.index : 0;
+    const originalIndex = getSceneSourceIndex(scene, 0);
     const kbTypes = [
         'zoomIn', 'zoomOut',
         'panLeft', 'panRight', 'panUp', 'panDown',
@@ -8928,7 +10303,7 @@ function preloadUpcomingScenes(currentTime, force) {
         );
         if (!nextScene) continue;
 
-        const idx = nextScene.index !== undefined ? nextScene.index : state.scenes.indexOf(nextScene);
+        const idx = getSceneSourceIndex(nextScene, state.scenes.indexOf(nextScene));
         const cacheKey = `${idx}:${nextScene.mediaExtension || ''}:scene`;
         const url = state._mediaUrlCache[cacheKey];
 
@@ -9069,7 +10444,7 @@ async function loadActiveScenes(activeScenes) {
                 const img = elements[`imgTrack${trackNum}`];
                 const isImage = scene.mediaType === 'image';
 
-                const originalIndex = scene.index !== undefined ? scene.index : index;
+                const originalIndex = getSceneSourceIndex(scene, index);
                 // V2 overlay scenes have mediaFile set directly — use it instead of index-based lookup
                 let mediaUrl;
                 if (scene.mediaFile) {
@@ -9400,106 +10775,18 @@ function updateSceneHighlight(index) {
 // WebGL2 Compositor Engine Integration
 // ========================================
 
-function filePathToPreviewUrl(filePath, query = '') {
-    if (!filePath) return '';
-    const normalized = String(filePath).replace(/\\/g, '/');
-    const url = normalized.startsWith('/')
-        ? `file://${normalized}`
-        : `file:///${normalized}`;
-    return encodeURI(url) + query;
-}
-
 function getHyperframesPreviewSignature() {
-    const compactScenes = state.scenes.map(s => ({
-        index: s.index,
-        startTime: s.startTime,
-        endTime: s.endTime,
-        duration: s.duration,
-        mediaFile: s.mediaFile,
-        mediaPath: s.mediaPath,
-        assetFile: s.assetFile,
-        assetPath: s.assetPath,
-        imageFile: s.imageFile,
-        imagePath: s.imagePath,
-        videoFile: s.videoFile,
-        videoPath: s.videoPath,
-        backgroundMediaFile: s.backgroundMediaFile,
-        backgroundImageFile: s.backgroundImageFile,
-        backgroundVideoFile: s.backgroundVideoFile,
-        templateMediaFile: s.templateMediaFile,
-        templateBackgroundFile: s.templateBackgroundFile,
-        templateBackgroundMediaFile: s.templateBackgroundMediaFile,
-        templateBackgroundImageFile: s.templateBackgroundImageFile,
-        templateBackgroundVideoFile: s.templateBackgroundVideoFile,
-        mapImageFile: s.mapImageFile,
-        mapImagePath: s.mapImagePath,
-        mapImage: s.mapImage,
-        renderAssets: s.renderAssets,
-        mgData: s.mgData,
-        _mapView: s._mapView,
-        _mapPins: s._mapPins,
-        mediaType: s.mediaType,
-        isMGScene: s.isMGScene,
-        templateType: s.templateType,
-        type: s.type,
-        text: s.text,
-        subtext: s.subtext,
-        style: s.style,
-        subType: s.subType,
-        animation: s.animation,
-        mgBackground: s.mgBackground,
-        scale: s.scale,
-        posX: s.posX,
-        posY: s.posY,
-        fitMode: s.fitMode,
-        cropTop: s.cropTop,
-        cropBottom: s.cropBottom,
-        cropLeft: s.cropLeft,
-        cropRight: s.cropRight,
-    }));
-    const compactMgs = state.motionGraphics.map(mg => ({
-        id: mg.id,
-        type: mg.type,
-        text: mg.text,
-        subtext: mg.subtext,
-        startTime: mg.startTime,
-        duration: mg.duration,
-        position: mg.position,
-        style: mg.style,
-        subType: mg.subType,
-        animation: mg.animation,
-        disabled: mg.disabled,
-        mediaFile: mg.mediaFile,
-        mediaPath: mg.mediaPath,
-        assetFile: mg.assetFile,
-        assetPath: mg.assetPath,
-        imageFile: mg.imageFile,
-        imagePath: mg.imagePath,
-        videoFile: mg.videoFile,
-        videoPath: mg.videoPath,
-        backgroundMediaFile: mg.backgroundMediaFile,
-        backgroundImageFile: mg.backgroundImageFile,
-        backgroundVideoFile: mg.backgroundVideoFile,
-        templateMediaFile: mg.templateMediaFile,
-        templateBackgroundFile: mg.templateBackgroundFile,
-        templateBackgroundMediaFile: mg.templateBackgroundMediaFile,
-        templateBackgroundImageFile: mg.templateBackgroundImageFile,
-        templateBackgroundVideoFile: mg.templateBackgroundVideoFile,
-        mapImageFile: mg.mapImageFile,
-        mapImagePath: mg.mapImagePath,
-        mapImage: mg.mapImage,
-        renderAssets: mg.renderAssets,
-        mgData: mg.mgData,
-        _mapView: mg._mapView,
-        _mapPins: mg._mapPins,
-    }));
+    // The generated HTML consumes much more than media + transform fields:
+    // effects, transition lanes, authored graphics, theme/base-look data, and
+    // framing/background directives all change the rendered result. Fingerprint
+    // the complete synchronized render contract so no valid Agent action can be
+    // incorrectly skipped as "same preview".
     return JSON.stringify({
-        hfPreviewRuntime: 6,
-        totalDuration: state.totalDuration,
+        hfPreviewRuntime: 7,
+        videoPlan: state.videoPlan,
+        editorDuration: state.totalDuration,
         mgStyle: state.mgStyle,
         mgOverlayShadow: state.mgOverlayShadow,
-        scenes: compactScenes,
-        motionGraphics: compactMgs,
     });
 }
 
@@ -9527,16 +10814,53 @@ function scheduleHyperframesPreviewRefresh(delay = 700) {
     }, delay);
 }
 
-async function refreshHyperframesPreview({ force = false } = {}) {
+function markHyperframesPreviewReady(token = '') {
+    const frame = elements.hyperframesPreviewFrame;
+    if (!frame || !state.hyperframesPreview?.active) return;
+    const expected = String(state.hyperframesPreview.readyToken || '');
+    if (token && expected && token !== expected) return;
+    state.hyperframesPreview.frameReady = true;
+    syncHyperframesPreview(true);
+    console.log('[HyperFrames Preview] Ready:', state.hyperframesPreview.indexPath);
+}
+
+window.addEventListener('message', (event) => {
+    const frame = elements.hyperframesPreviewFrame;
+    if (!frame?.contentWindow || event.source !== frame.contentWindow) return;
+    const message = event.data || {};
+    if (message.type === 'hf-preview-ready') {
+        markHyperframesPreviewReady(String(message.rev || ''));
+    }
+});
+
+async function refreshHyperframesPreview({
+    force = false,
+    persistMotionQa = true,
+    source = '',
+    transactionId = '',
+} = {}) {
     if (!state.hyperframesPreview?.active || !state.videoPlan) return;
     if (!window.electronAPI?.hyperframesGenerateProject) {
         showToast('HyperFrames preview IPC is not available. Restart the app.', 'error');
         return;
     }
-    if (state.hyperframesPreview.loading) return;
 
     syncVideoPlanFromEditor();
     const signature = getHyperframesPreviewSignature();
+    if (state.hyperframesPreview.loading) {
+        if (force || state.hyperframesPreview.signature !== signature) {
+            state.hyperframesPreview.pendingRefresh = true;
+            const pending = state.hyperframesPreview.pendingRefreshOptions || {};
+            state.hyperframesPreview.pendingRefreshOptions = {
+                persistMotionQa: pending.persistMotionQa === false || persistMotionQa === false
+                    ? false
+                    : true,
+                source: source || pending.source || '',
+                transactionId: transactionId || pending.transactionId || '',
+            };
+        }
+        return;
+    }
     if (!force && state.hyperframesPreview.indexPath && state.hyperframesPreview.signature === signature) {
         syncHyperframesPreview(true);
         return;
@@ -9548,11 +10872,21 @@ async function refreshHyperframesPreview({ force = false } = {}) {
         const result = await window.electronAPI.hyperframesGenerateProject({
             plan: state.videoPlan,
             fps: state.videoPlan.fps || 30,
-            options: { preview: true },
+            options: {
+                preview: true,
+                persistMotionQa: persistMotionQa !== false,
+                previewSource: source || '',
+                agentTransactionId: transactionId || '',
+            },
         });
-        if (!result?.success || !result.indexPath) {
+        if (!result?.success || !result.previewUrl) {
             throw new Error(result?.error || 'HyperFrames preview project generation failed');
         }
+        if (result.revision != null) {
+            const revision = Number(result.revision);
+            if (Number.isFinite(revision)) state.projectRevision = revision;
+        }
+        if (result.planHash) state.projectPlanHash = result.planHash;
 
         const frame = elements.hyperframesPreviewFrame;
         if (!frame) return;
@@ -9560,21 +10894,36 @@ async function refreshHyperframesPreview({ force = false } = {}) {
         state.hyperframesPreview.indexPath = result.indexPath;
         state.hyperframesPreview.signature = signature;
         state.hyperframesPreview.frameReady = false;
+        if (Number(result.motionQa?.repairCount || 0) > 0) {
+            console.log(`[Motion QA] Preview preflight repaired ${result.motionQa.repairCount} visual issue(s).`);
+        }
+        const navigationSerial = ++state.hyperframesPreview.navigationSerial;
+        const readyToken = `${navigationSerial}-${Date.now()}`;
+        state.hyperframesPreview.readyToken = readyToken;
         frame.onload = () => {
-            state.hyperframesPreview.frameReady = true;
-            syncHyperframesPreview(true);
-            console.log('[HyperFrames Preview] Ready:', result.indexPath);
+            if (navigationSerial !== state.hyperframesPreview.navigationSerial) return;
+            markHyperframesPreviewReady(readyToken);
         };
-        frame.src = filePathToPreviewUrl(result.indexPath, `?preview=1&t=${encodeURIComponent((state.currentTime || 0).toFixed(3))}`);
+        frame.src = `${result.previewUrl}?preview=1&t=${encodeURIComponent((state.currentTime || 0).toFixed(3))}&rev=${encodeURIComponent(readyToken)}`;
     } catch (err) {
         console.error('[HyperFrames Preview] Failed:', err);
         showToast(`HyperFrames preview failed: ${err.message || err}`, 'error');
     } finally {
         state.hyperframesPreview.loading = false;
+        if (state.hyperframesPreview.pendingRefresh) {
+            state.hyperframesPreview.pendingRefresh = false;
+            const pendingOptions = state.hyperframesPreview.pendingRefreshOptions || {};
+            state.hyperframesPreview.pendingRefreshOptions = null;
+            queueMicrotask(() => {
+                refreshHyperframesPreview({ force: true, ...pendingOptions }).catch(err => {
+                    console.warn('[HyperFrames Preview] Queued refresh failed:', err);
+                });
+            });
+        }
     }
 }
 
-async function setHyperframesPreviewMode(active) {
+async function setHyperframesPreviewMode(active, previewOptions = {}) {
     const frame = elements.hyperframesPreviewFrame;
     const container = elements.previewContainer;
     if (!frame || !container) return;
@@ -9593,11 +10942,12 @@ async function setHyperframesPreviewMode(active) {
         elements.videoContainer?.classList.add('hidden');
         elements.previewPlaceholder?.classList.add('hidden');
         elements.videoControls?.classList.add('hidden');
-        await refreshHyperframesPreview({ force: false });
+        await refreshHyperframesPreview({ force: false, ...previewOptions });
         syncHyperframesPreview(true);
     } else {
         frame.contentWindow?.postMessage({ type: 'hf-preview-pause' }, '*');
         state.hyperframesPreview.frameReady = false;
+        state.hyperframesPreview.readyToken = '';
         if (!state.compositorActive) {
             elements.videoContainer?.classList.remove('hidden');
             elements.previewPlaceholder?.classList.remove('hidden');
@@ -9759,7 +11109,10 @@ function refreshCompositorScene(sceneIndex) {
     if (!srcScene) return;
 
     // Find the matching scene in the SceneGraph's internal copy
-    const target = sg._scenes.find(s => s.index === srcScene.index);
+    const target = sg._scenes.find(s => (
+        (srcScene.clipId && s.clipId === srcScene.clipId)
+        || (!srcScene.clipId && s.index === srcScene.index)
+    ));
     if (!target) return;
 
     // Sync mutable visual properties
@@ -9829,6 +11182,7 @@ function initSceneContextMenu() {
             state.selectedClipIndex = idx;
             document.querySelectorAll('.timeline-clip.selected').forEach(c => c.classList.remove('selected'));
             clip.classList.add('selected');
+            notifyAgentContextChanged();
         }
         _showSceneMenu(e.clientX, e.clientY);
     });
@@ -9845,21 +11199,11 @@ function _showSceneMenu(x, y) {
     const menu = document.createElement('div');
     menu.className = 'scene-context-menu';
     menu.innerHTML = `
-        <div class="scm-header">${label}</div>
+        <div class="scm-header">${escapeHTML(label)}</div>
         <div class="scm-item" data-act="retry">🔄 Retry footage</div>
+        <div class="scm-item" data-act="agent">✨ Edit with Agent…</div>
         <div class="scm-sep"></div>
-        <div class="scm-item scm-sub">🎬 CEO Editor <span class="scm-arrow">▸</span>
-            <div class="scm-submenu">
-                <div class="scm-item" data-act="ceo:reframe">Re-frame</div>
-                <div class="scm-item scm-disabled" data-act="ceo:template">Re-template<span class="scm-soon">soon</span></div>
-                <div class="scm-item scm-disabled" data-act="ceo:mg">Re-do motion graphics<span class="scm-soon">soon</span></div>
-                <div class="scm-item scm-disabled" data-act="ceo:explainer">Re-do explainer images<span class="scm-soon">soon</span></div>
-                <div class="scm-item scm-disabled" data-act="ceo:map">Re-do map assets<span class="scm-soon">soon</span></div>
-                <div class="scm-item scm-disabled" data-act="ceo:transition">Re-do transitions<span class="scm-soon">soon</span></div>
-                <div class="scm-sep"></div>
-                <div class="scm-item scm-disabled" data-act="ceo:instruction">✏️ Edit with instruction…<span class="scm-soon">soon</span></div>
-            </div>
-        </div>`;
+        <div class="scm-item" data-act="ceo:reframe">🎬 AI re-frame</div>`;
     document.body.appendChild(menu);
     menu.style.left = Math.min(x, window.innerWidth - 250) + 'px';
     menu.style.top = Math.min(y, window.innerHeight - 280) + 'px';
@@ -9880,19 +11224,32 @@ function _showSceneMenu(x, y) {
 }
 
 async function _runSceneAction(act, indices) {
+    if (act === 'agent') {
+        notifyAgentContextChanged();
+        window.EditorAgentPanel?.openWithCurrentScope();
+        return;
+    }
     if (!window.electronAPI?.sceneAction) {
         showToast('Scene action IPC unavailable. Restart the app.', 'error');
         return;
     }
 
     const sceneIds = [];
+    const sceneRefs = [];
     const idToArrayIndex = new Map();
     for (const idx of indices) {
         const scene = state.scenes[idx];
         if (!scene) continue;
-        const sceneId = Number.isFinite(Number(scene.index)) ? Number(scene.index) : idx;
+        const sceneId = getSceneSourceIndex(scene, idx);
+        if (!scene.clipId) scene.clipId = createUniqueClipId(scene);
         sceneIds.push(sceneId);
-        idToArrayIndex.set(String(sceneId), idx);
+        sceneRefs.push({
+            clipId: scene.clipId,
+            sourceSceneIndex: sceneId,
+            index: sceneId,
+        });
+        idToArrayIndex.set(String(scene.clipId), idx);
+        if (!idToArrayIndex.has(String(sceneId))) idToArrayIndex.set(String(sceneId), idx);
     }
     if (!sceneIds.length) {
         showToast('No valid scene selected', 'error');
@@ -9927,6 +11284,7 @@ async function _runSceneAction(act, indices) {
             kind,
             action,
             sceneIndices: sceneIds,
+            sceneRefs,
         });
     } catch (e) {
         result = { success: false, ok: 0, fail: sceneIds.length, error: e.message || String(e) };
@@ -9939,7 +11297,7 @@ async function _runSceneAction(act, indices) {
 
     if (Array.isArray(result?.scenes)) {
         for (const row of result.scenes) {
-            const arrIdx = idToArrayIndex.get(String(row.si));
+            const arrIdx = idToArrayIndex.get(String(row.clipId ?? row.si));
             if (arrIdx === undefined || !state.scenes[arrIdx]) continue;
             if (row.keyword) state.scenes[arrIdx].keyword = row.keyword;
             if (row.sourceHint) state.scenes[arrIdx].sourceHint = row.sourceHint;
@@ -9949,7 +11307,11 @@ async function _runSceneAction(act, indices) {
                 state._assetVersions[Number(row.si)] = Date.now();
             }
             if (row.scene) {
-                state.scenes[arrIdx] = row.scene;
+                state.scenes[arrIdx] = {
+                    ...row.scene,
+                    clipId: row.scene.clipId || state.scenes[arrIdx].clipId,
+                    sourceSceneIndex: getSceneSourceIndex(row.scene, getSceneSourceIndex(state.scenes[arrIdx], arrIdx)),
+                };
                 refreshCompositorScene(arrIdx);
                 showToast(`Scene ${row.si}: ${row.change || 'updated'}`, 'success');
             }
@@ -10054,15 +11416,19 @@ function refreshCompositorMGs() {
     // Sync fullscreen MG scenes (_scenes that are isMGScene)
     const mgScenes = state.scenes.filter(s => s.isMGScene);
     for (const mgScene of mgScenes) {
-        // Match by index first, then fall back to startTime for mgScenes missing index
+        // Clip identity is authoritative; index is only a legacy/source fallback.
         const existing = sg._scenes.find(s => s.isMGScene && (
-            (s.index != null && mgScene.index != null && s.index === mgScene.index) ||
-            (s.index == null && Math.abs((s.startTime || 0) - (mgScene.startTime || 0)) < 0.01)
+            (s.clipId && mgScene.clipId && s.clipId === mgScene.clipId) ||
+            (!s.clipId && !mgScene.clipId
+                && s.index != null && mgScene.index != null && s.index === mgScene.index) ||
+            (!s.clipId && !mgScene.clipId
+                && s.index == null && Math.abs((s.startTime || 0) - (mgScene.startTime || 0)) < 0.01)
         ));
         if (existing) {
             // Recompute frame range from seconds
             const startFrame = Math.round((mgScene.startTime || 0) * fps);
-            const endFrame = Math.round((mgScene.endTime || (mgScene.startTime + (mgScene.duration || 3))) * fps);
+            const timing = getSceneTiming(mgScene);
+            const endFrame = Math.round(timing.endTime * fps);
             // Update all mutable fields including duration, frames, animation speed, and background
             Object.assign(existing, {
                 type: mgScene.type, text: mgScene.text, subtext: mgScene.subtext,
@@ -10070,8 +11436,11 @@ function refreshCompositorMGs() {
                 position: mgScene.position,
                 data: mgScene.data, mgData: mgScene.mgData,
                 mgBackground: mgScene.mgBackground,
-                duration: mgScene.duration,
-                startTime: mgScene.startTime, endTime: mgScene.endTime,
+                clipId: mgScene.clipId,
+                duration: timing.duration,
+                durationFrames: timing.durationFrames,
+                durationUnit: 'seconds',
+                startTime: timing.startTime, endTime: timing.endTime,
                 templateContentStartTime: mgScene.templateContentStartTime,
                 templateContentEndTime: mgScene.templateContentEndTime,
                 templateContentDuration: mgScene.templateContentDuration,
@@ -10118,7 +11487,10 @@ async function loadPlanIntoCompositor() {
         // Build scenes list for compositor
         const compositorScenes = state.scenes.filter(s => !s.isMGScene).map((s, i) => ({
             ...s,
-            index: s.index !== undefined ? s.index : i,
+            index: getSceneSourceIndex(s, i),
+            sourceSceneIndex: getSceneSourceIndex(s, i),
+            clipId: s.clipId || createUniqueClipId(s),
+            ...getSceneTiming(s),
         }));
 
         // Build transitions array from adjacent scenes on the same track.
@@ -10155,6 +11527,8 @@ async function loadPlanIntoCompositor() {
                     ? curr.transition.duration
                     : globalDuration;
                 transitions.push({
+                    fromClipId: prev.clipId,
+                    toClipId: curr.clipId,
                     fromSceneIndex: prev.index,
                     toSceneIndex: curr.index,
                     type,
@@ -10187,7 +11561,7 @@ async function loadPlanIntoCompositor() {
         await state.compositor.loadPlan(compositorPlan, async (sceneIndex, ext) => {
             return getCachedMediaUrl(sceneIndex, ext);
         }, async (mediaFile) => {
-            // Resolve full file path to a file:// URL for compositor overlay scenes
+            // Resolve the media path through the confined asset:// protocol.
             if (window.electronAPI.getFileUrl) {
                 return window.electronAPI.getFileUrl(mediaFile).catch(() => null);
             }
@@ -10239,9 +11613,7 @@ async function renderVideoWebGL2() {
     console.log('[WebGL2 Export] Validation hashes:', JSON.stringify(hashes));
 
     // In/Out point support: convert seconds to frames
-    const { inSec, outSec } = getRenderRange();
-    const startFrame = Math.round(inSec * fps);
-    const endFrame = Math.round(outSec * fps);
+    const { inSec, outSec, startFrame, endFrame } = getFrameAlignedRenderRange(fps);
     const hasRange = state.inPoint !== null || state.outPoint !== null;
     if (hasRange) {
         console.log(`[WebGL2 Export] In/Out range: ${inSec.toFixed(2)}s-${outSec.toFixed(2)}s → frames ${startFrame}-${endFrame}`);
@@ -10276,7 +11648,7 @@ async function renderVideoHyperFrames() {
     }
 
     const fps = state.videoPlan.fps || 30;
-    const { inSec, outSec } = getRenderRange();
+    const { inSec, outSec } = getFrameAlignedRenderRange(fps);
     const hasRange = state.inPoint !== null || state.outPoint !== null;
     if (hasRange) {
         showToast(`HyperFrames: rendering section ${formatTime(inSec)} → ${formatTime(outSec)}`, 'info');
@@ -10297,9 +11669,10 @@ async function renderVideo() {
     if (!state.videoPlan || state.isProcessing) return;
     state.isProcessing = true; elements.btnRender.disabled = true; showProgress(true); startTimer();
     try {
-        // Save current editor state into the plan before rendering.
-        syncVideoPlanFromEditor();
-        await window.electronAPI.saveVideoPlan(state.videoPlan);
+        // Commit editor state + project settings to every persistence mirror
+        // before rendering so a crash cannot reopen a stale timeline.
+        const saveResult = await saveProject(true);
+        if (!saveResult?.success) throw new Error(saveResult?.error || 'Pre-render project save failed');
 
         const selectedRenderer = document.getElementById('renderer-select')?.value || 'hyperframes';
         const isHyperFramesRender = selectedRenderer === 'hyperframes';
@@ -10314,6 +11687,13 @@ async function renderVideo() {
             updateProgress(100, `✅ Video rendered! (${renderTime})`);
             showToast(`${engineLabel} video rendered in ${renderTime}!`, 'success');
             showNotification('Render Complete', `${engineLabel} video rendered in ${renderTime}`);
+            if (isHyperFramesRender && Number(result.motionQa?.repairCount || 0) > 0) {
+                showNotification(
+                    'Motion QA',
+                    `Agent automatically repaired ${result.motionQa.repairCount} animation issue(s) before render`,
+                    'success'
+                );
+            }
             if (result.outputPath) showFinalVideo(result.outputPath);
         } else {
             stopTimer();
@@ -10545,16 +11925,33 @@ function renderNotifList() {
         list.innerHTML = '<div class="notif-empty">No notifications yet</div>';
         return;
     }
-    list.innerHTML = items.map((n, i) => `
-        <div class="notif-item ${n.read ? '' : 'unread'}" data-notif-index="${i}">
-            <div class="notif-dot ${n.type}"></div>
-            <div class="notif-body">
-                <div class="notif-title">${n.title}</div>
-                <div class="notif-desc">${n.body}</div>
-            </div>
-            <div class="notif-time">${formatNotifTime(n.timestamp)}</div>
-        </div>
-    `).join('');
+    list.replaceChildren();
+    const allowedTypes = new Set(['success', 'error', 'cancel', 'warning', 'info']);
+    items.forEach((n, i) => {
+        const item = document.createElement('div');
+        item.className = `notif-item${n.read ? '' : ' unread'}`;
+        item.dataset.notifIndex = String(i);
+
+        const dot = document.createElement('div');
+        dot.className = `notif-dot ${allowedTypes.has(n.type) ? n.type : 'info'}`;
+
+        const body = document.createElement('div');
+        body.className = 'notif-body';
+        const title = document.createElement('div');
+        title.className = 'notif-title';
+        title.textContent = n.title || '';
+        const description = document.createElement('div');
+        description.className = 'notif-desc';
+        description.textContent = n.body || '';
+        body.append(title, description);
+
+        const time = document.createElement('div');
+        time.className = 'notif-time';
+        time.textContent = formatNotifTime(n.timestamp);
+
+        item.append(dot, body, time);
+        list.appendChild(item);
+    });
 }
 
 function updateNotifBadge() {
@@ -10638,14 +12035,28 @@ function showNotification(title, body, type = 'success') {
     }
     // Also show a persistent banner in-app
     const isCancelled = type === 'cancel';
-    const icon = isCancelled ? '&#10007;' : '&#10003;';
     document.querySelector('.completion-banner')?.remove();
     const banner = document.createElement('div');
     banner.className = `completion-banner ${isCancelled ? 'banner-cancel' : ''}`;
-    banner.innerHTML = `<span class="completion-icon">${icon}</span><div class="completion-text"><strong>${title}</strong><span>${body}</span></div><button class="completion-close">&times;</button>`;
+    const icon = document.createElement('span');
+    icon.className = 'completion-icon';
+    icon.textContent = isCancelled ? '✕' : '✓';
+    const text = document.createElement('div');
+    text.className = 'completion-text';
+    const heading = document.createElement('strong');
+    heading.textContent = title || '';
+    const description = document.createElement('span');
+    description.textContent = body || '';
+    text.append(heading, description);
+    const close = document.createElement('button');
+    close.className = 'completion-close';
+    close.type = 'button';
+    close.setAttribute('aria-label', 'Close notification');
+    close.textContent = '×';
+    banner.append(icon, text, close);
     document.body.appendChild(banner);
     setTimeout(() => banner.classList.add('show'), 10);
-    banner.querySelector('.completion-close').addEventListener('click', () => {
+    close.addEventListener('click', () => {
         banner.classList.remove('show');
         setTimeout(() => banner.remove(), 300);
     });
@@ -10962,33 +12373,187 @@ function setupStyleLearner() {
 
 }
 
-// Adapt the settings to the selected production mode — hide controls that don't apply.
-// Mirrors the src/categories descriptors' allowedFormats (the renderer can't require the
-// Node registry): AI Videos has its own format, so the documentary/listicle Format
-// control is hidden. Extend _MODE_HIDE + the id loop as categories gain more rules.
-const _MODE_HIDE = {
-    // AI Videos generates all footage, so the documentary/listicle Format choice and the
-    // stock-footage settings (Vision scoring + Resource Control providers) don't apply.
-    aiVideos: ['format-group', 'vision-backend-group', 'resource-control-group'],
-};
-const _MODE_TOGGLEABLE = ['format-group', 'vision-backend-group', 'resource-control-group']; // groups a mode may hide
-// Groups shown ONLY for a given mode (hidden otherwise) — e.g. AI Videos' script box.
-const _MODE_SHOW = {
-    aiVideos: ['ai-videos-script-group'],
-};
-const _MODE_SHOW_ONLY = ['ai-videos-script-group'];
+const PRODUCTION_MODE_PROFILES = Object.freeze({
+    faceless: {
+        title: 'Faceless production',
+        badge: 'B-roll',
+        description: 'Narration drives an agentic edit built from sourced B-roll, motion graphics, transitions, and sound design.',
+        steps: ['Narration', 'AI direction', 'Matched media', 'Motion graphics', 'Render'],
+        generateLabel: 'Generate Faceless Video',
+    },
+    talkingHead: {
+        title: 'Talking-head production',
+        badge: 'Presenter + B-roll',
+        description: 'Narration drives the full edit while a recurring presenter appears at selected high-value beats.',
+        steps: ['Narration', 'Presenter', 'Supporting B-roll', 'Graphics', 'Render'],
+        generateLabel: 'Generate Talking-Head Video',
+    },
+    aiVideos: {
+        title: 'AI video production',
+        badge: 'Generated footage',
+        description: 'Use narration audio for the full Director pipeline, or written story text for a generator-first production.',
+        steps: ['Audio or story', 'Visual beats', 'AI generation', 'Fallback safety', 'Render'],
+        generateLabel: 'Generate AI Video',
+    },
+});
+
+function _setModeGroup(id, visible) {
+    document.getElementById(id)?.classList.toggle('mode-hidden', !visible);
+}
+
+function _setSettingsTabVisibility(name, visible) {
+    document.querySelector(`.stab-btn[data-stab="${name}"]`)?.classList.toggle('mode-hidden', !visible);
+}
+
+function _syncFastMediaUI() {
+    const mode = elements.buildProductionMode?.value || 'faceless';
+    const active = mode !== 'aiVideos' && !!elements.fastMediaToggle?.checked;
+    elements.fastMediaGroup?.classList.toggle('diagnostic-active', active);
+    if (elements.fastMediaGroup && active) elements.fastMediaGroup.open = true;
+    if (elements.fastMediaHint) {
+        elements.fastMediaHint.textContent = active
+            ? 'TEST MODE ACTIVE: unique random footage is used. Semantic asset searches, footage relevance vision, icon/subject acquisition, and bespoke overlay authoring are skipped. Stage authoring and Motion QA remain active.'
+            : 'OFF for production. One-shot mode uses unique random footage and skips semantic asset searches, footage relevance vision, icon/subject acquisition, and bespoke overlay authoring. Stage authoring and Motion QA remain active. It automatically returns to OFF after launch.';
+    }
+    if (elements.btnGenerate && mode !== 'aiVideos') {
+        const profile = PRODUCTION_MODE_PROFILES[mode] || PRODUCTION_MODE_PROFILES.faceless;
+        elements.btnGenerate.textContent = active
+            ? 'Run Pipeline Test (Random Media)'
+            : profile.generateLabel;
+    }
+}
+
+function _showSettingsTab(name, { persist = true } = {}) {
+    const btns = Array.from(document.querySelectorAll('.settings-tabs .stab-btn'));
+    const panels = Array.from(document.querySelectorAll('.stab-panel'));
+    const target = btns.find((button) => button.dataset.stab === name && !button.classList.contains('mode-hidden'))
+        || btns.find((button) => !button.classList.contains('mode-hidden'));
+    if (!target) return;
+    btns.forEach((button) => button.classList.toggle('active', button === target));
+    panels.forEach((panel) => panel.classList.toggle('active', panel.dataset.stab === target.dataset.stab));
+    if (persist) {
+        try { localStorage.setItem('faceless-settings-tab', target.dataset.stab); } catch (_) {}
+    }
+}
+
 function _syncProductionModeUI() {
     const mode = elements.buildProductionMode ? elements.buildProductionMode.value : 'faceless';
-    const hide = new Set(_MODE_HIDE[mode] || []);
-    for (const id of _MODE_TOGGLEABLE) {
-        const el = document.getElementById(id);
-        if (el) el.style.display = hide.has(id) ? 'none' : '';
+    const profile = PRODUCTION_MODE_PROFILES[mode] || PRODUCTION_MODE_PROFILES.faceless;
+    const isAiVideos = mode === 'aiVideos';
+    const aiSource = isAiVideos ? _syncAiVideosSourceUI() : null;
+    const scriptRoute = isAiVideos && aiSource.kind === 'script';
+    if (isAiVideos && elements.fastMediaToggle) elements.fastMediaToggle.checked = false;
+
+    document.body.classList.remove('mode-faceless', 'mode-talkingHead', 'mode-aiVideos');
+    document.body.classList.add(`mode-${mode}`);
+
+    if (elements.productionModeSummaryTitle) elements.productionModeSummaryTitle.textContent = profile.title;
+    if (elements.productionModeSummaryBadge) elements.productionModeSummaryBadge.textContent = profile.badge;
+    if (elements.productionModeSummaryDescription) elements.productionModeSummaryDescription.textContent = profile.description;
+    if (elements.productionModeSummarySteps) {
+        elements.productionModeSummarySteps.replaceChildren(...profile.steps.map((step) => {
+            const item = document.createElement('span');
+            item.className = 'mode-step';
+            item.textContent = step;
+            return item;
+        }));
     }
-    const show = new Set(_MODE_SHOW[mode] || []);
-    for (const id of _MODE_SHOW_ONLY) {
-        const el = document.getElementById(id);
-        if (el) el.style.display = show.has(id) ? '' : 'none';
+
+    _setModeGroup('ai-videos-script-group', isAiVideos);
+    _setModeGroup('audio-import-card', !(isAiVideos && aiSource?.selected === 'script'));
+    _setModeGroup('format-group', !isAiVideos);
+    _setModeGroup('language-group', !scriptRoute);
+    _setModeGroup('subtitles-group', !scriptRoute);
+    _setModeGroup('map-style-group', !scriptRoute);
+    _setModeGroup('reference-style-group', !scriptRoute);
+    _setModeGroup('smart-ai-group', !scriptRoute);
+    _setModeGroup('ai-provider-group', !scriptRoute);
+    _setModeGroup('ai-thinking-group', !scriptRoute);
+    _setModeGroup('fallback-media-settings', !scriptRoute);
+    _setModeGroup('fast-media-group', !isAiVideos);
+    _setModeGroup('repeat-settings-group', !scriptRoute);
+    _setModeGroup('force-fresh-group', !scriptRoute);
+    _setModeGroup('script-build-note', scriptRoute);
+    _setSettingsTabVisibility('build', !scriptRoute);
+
+    if (elements.mediaTabLabel) elements.mediaTabLabel.textContent = isAiVideos ? 'Generator' : 'Media';
+    if (elements.buildTabLabel) elements.buildTabLabel.textContent = isAiVideos ? 'Advanced' : 'Build';
+    if (elements.inputSourceHeading) {
+        elements.inputSourceHeading.textContent = isAiVideos ? '🎙️ Narration Audio (optional)' : '📁 Import Audio';
     }
+    if (elements.btnGenerate) {
+        elements.btnGenerate.textContent = scriptRoute
+            ? 'Generate AI Video from Script'
+            : (isAiVideos ? 'Generate AI Video from Audio' : profile.generateLabel);
+    }
+    if (elements.btnRepeatStep) {
+        elements.btnRepeatStep.textContent = isAiVideos ? 'Repeat Selected AI Step' : 'Repeat Selected Step';
+    }
+    if (elements.buildQuality) {
+        const labels = isAiVideos
+            ? {
+                mini: scriptRoute ? 'Economy (fewer generated clips)' : 'Economy (faster AI-video build)',
+                standard: scriptRoute ? 'Standard (balanced clip count)' : 'Standard (balanced AI-video build)',
+                pro: scriptRoute ? 'Cinematic (more generated shots)' : 'Pro (denser premium edit)',
+            }
+            : {
+                mini: 'Mini (Fast, Images Only)',
+                standard: 'Standard (Balanced)',
+                pro: 'Pro (Best Quality)',
+            };
+        for (const option of elements.buildQuality.options) {
+            if (labels[option.value]) option.textContent = labels[option.value];
+        }
+    }
+    if (elements.buildQualityHint) {
+        elements.buildQualityHint.textContent = scriptRoute
+            ? 'Controls how densely the story is split into generated visual beats. More shots use more generator credits.'
+            : 'Controls scene count, transitions, motion-graphics density, and build depth.';
+    }
+    if (elements.aiInstructionsHint) {
+        elements.aiInstructionsHint.textContent = scriptRoute
+            ? 'Applied directly to every generated scene prompt. Use it for camera language, realism, lighting, pacing, and exclusions.'
+            : 'Sent to every decision brain — Director, Visual Planner, templates, motion graphics, effects. Highest priority.';
+    }
+
+    if (elements.veoAiVideoEnabled) {
+        elements.veoAiVideoEnabled.classList.toggle('mode-hidden', isAiVideos);
+        elements.veoAiVideoEnabled.disabled = isAiVideos;
+    }
+    if (elements.veoAiVideoToggleRow) elements.veoAiVideoToggleRow.style.cursor = isAiVideos ? 'default' : 'pointer';
+    if (elements.veoAiVideoTitle) {
+        elements.veoAiVideoTitle.textContent = isAiVideos ? '🎬 AI Video Generator' : '🎬 AI Video — generate select scenes';
+    }
+    elements.veoAiVideoModeBadge?.classList.toggle('hidden', !isAiVideos);
+    if (elements.veoAiVideoDescription) {
+        elements.veoAiVideoDescription.textContent = isAiVideos
+            ? (scriptRoute
+                ? 'Required for this production mode. Every story beat is sent to the selected generator.'
+                : 'Required for this production mode. Narration timing is preserved while every eligible visual scene is generated.')
+            : 'Optional hybrid mode: generate selected B-roll scenes instead of downloading them.';
+    }
+    elements.veoScopeGroup?.classList.toggle('mode-hidden', isAiVideos);
+    _syncVeoRow();
+
+    if (elements.fallbackMediaSettings) {
+        elements.fallbackMediaSettings.classList.toggle('primary-media-settings', !isAiVideos);
+        elements.fallbackMediaSettings.classList.toggle('fallback-media-settings', isAiVideos && !scriptRoute);
+        const profileKey = isAiVideos ? 'fallback' : 'primary';
+        if (elements.fallbackMediaSettings.dataset.profile !== profileKey) {
+            elements.fallbackMediaSettings.dataset.profile = profileKey;
+            elements.fallbackMediaSettings.open = !isAiVideos;
+        }
+    }
+
+    const activeHidden = document.querySelector('.settings-tabs .stab-btn.active.mode-hidden');
+    if (activeHidden) _showSettingsTab('setup');
+    _syncAudioGate();
+    const previewHint = elements.previewPlaceholder?.querySelector('.small');
+    if (previewHint && state.scenes.length === 0) {
+        previewHint.textContent = isAiVideos ? 'Add narration audio or a story to get started' : 'Import audio to get started';
+    }
+    _syncFastMediaUI();
+    _syncGenerateAvailability();
 }
 
 // Show/hide the presenter-image picker based on production mode + reflect the stored path.
@@ -11006,7 +12571,8 @@ function _syncPresenterRow() {
 // AI Video (Veo) options show only when the toggle is on.
 function _syncVeoRow() {
     if (elements.veoAiVideoOpts && elements.veoAiVideoEnabled) {
-        elements.veoAiVideoOpts.style.display = elements.veoAiVideoEnabled.checked ? 'block' : 'none';
+        const required = elements.buildProductionMode?.value === 'aiVideos';
+        elements.veoAiVideoOpts.style.display = (required || elements.veoAiVideoEnabled.checked) ? 'block' : 'none';
     }
 }
 
@@ -11015,17 +12581,11 @@ function _initSettingsTabs() {
     const bar = document.getElementById('settings-tabs');
     if (!bar) return;
     const btns = Array.from(bar.querySelectorAll('.stab-btn'));
-    const panels = Array.from(document.querySelectorAll('.stab-panel'));
-    const show = (name) => {
-        btns.forEach(b => b.classList.toggle('active', b.dataset.stab === name));
-        panels.forEach(p => p.classList.toggle('active', p.dataset.stab === name));
-        try { localStorage.setItem('faceless-settings-tab', name); } catch (_) {}
-    };
-    btns.forEach(b => b.addEventListener('click', () => show(b.dataset.stab)));
+    btns.forEach(b => b.addEventListener('click', () => _showSettingsTab(b.dataset.stab)));
     let saved = 'setup';
     try { saved = localStorage.getItem('faceless-settings-tab') || 'setup'; } catch (_) {}
-    if (!btns.some(b => b.dataset.stab === saved)) saved = 'setup';
-    show(saved);
+    if (!btns.some(b => b.dataset.stab === saved && !b.classList.contains('mode-hidden'))) saved = 'setup';
+    _showSettingsTab(saved, { persist: false });
     _initSettingsKeyScroll();
 }
 
@@ -11074,12 +12634,10 @@ function saveSettings() {
         // State-backed + special settings (no simple element control) stay explicit.
         volume: state.volume,
         footageSources: getEnabledSources(),
-        sfxEnabled: state.sfxEnabled,
-        sfxVolume: state.sfxVolume,
         subtitlesEnabled: state.subtitlesEnabled,
         mutedTracks: state.mutedTracks,
         presenterImage: state.presenterImage || '',
-        aiVideosScript: state.aiVideosScript || '',
+        aiVideosInputMode: state.aiVideosInputMode || 'auto',
         buildStyleProfile: elements.buildStyleProfile ? elements.buildStyleProfile.value : 'none',
     }));
     // Also trigger .fvp auto-save so settings persist per-project
@@ -11167,38 +12725,25 @@ function loadSettings() {
             if (window.electronAPI?.setAiProvider && elements.aiProvider.value) {
                 window.electronAPI.setAiProvider(elements.aiProvider.value).catch(() => {});
             }
-            // Restore Ollama model selections
-            if (elements.ollamaModel) elements.ollamaModel.value = s.ollamaModel || 'gemma3:12b';
-            if (elements.ollamaVisionModel) elements.ollamaVisionModel.value = s.ollamaVisionModel || 'llava';
-            if (elements.ollamaModelRow) {
-                elements.ollamaModelRow.style.display = (s.aiProvider || 'bedrock') === 'ollama' ? 'block' : 'none';
-            }
             state.volume = s.volume !== undefined ? s.volume : 1;
             if (elements.volumeSlider) {
                 elements.volumeSlider.value = state.volume;
             }
-            // Restore SFX settings
-            state.sfxEnabled = s.sfxEnabled !== undefined ? s.sfxEnabled : true;
-            state.sfxVolume = s.sfxVolume !== undefined ? s.sfxVolume : 0.35;
-            if (elements.sfxEnabled) elements.sfxEnabled.checked = state.sfxEnabled;
-            if (elements.sfxVolume) elements.sfxVolume.value = state.sfxVolume;
-            if (elements.sfxVolumeLabel) elements.sfxVolumeLabel.textContent = `${Math.round(state.sfxVolume * 100)}%`;
             // Restore Subtitles setting
             state.subtitlesEnabled = s.subtitlesEnabled !== undefined ? s.subtitlesEnabled : false;
             if (elements.subtitlesEnabled) elements.subtitlesEnabled.checked = state.subtitlesEnabled;
-            // Title/instructions are project-scoped. Restore them only from
-            // .fvp project settings, never from global app localStorage.
-            state.videoTitle = '';
-            if (elements.videoTitle) elements.videoTitle.value = state.videoTitle;
-            state.aiInstructions = '';
-            if (elements.aiInstructions) elements.aiInstructions.value = state.aiInstructions;
+            // Title/instructions are project-scoped. Global app settings must
+            // never overwrite fields already restored from the active project.
             // Restore Niche Preset
             if (elements.buildNiche && s.buildNiche) elements.buildNiche.value = s.buildNiche;
             if (elements.buildMapStylePack && s.buildMapStylePack) elements.buildMapStylePack.value = s.buildMapStylePack;
             if (elements.buildProductionMode && s.buildProductionMode) elements.buildProductionMode.value = s.buildProductionMode;
             state.presenterImage = s.presenterImage || '';
-        state.aiVideosScript = s.aiVideosScript || '';
-        if (elements.aiVideosScript) elements.aiVideosScript.value = state.aiVideosScript;
+            state.aiVideosScript = '';
+            state.aiVideosInputMode = ['audio', 'script'].includes(s.aiVideosInputMode) ? s.aiVideosInputMode : 'auto';
+            state.aiVideosScriptSource = { type: 'paste', label: '' };
+            if (elements.aiVideosScript) elements.aiVideosScript.value = state.aiVideosScript;
+            if (elements.aiVideosInputMode) elements.aiVideosInputMode.value = state.aiVideosInputMode;
             if (elements.klingAvatarEnabled) elements.klingAvatarEnabled.checked = !!s.klingAvatar;
             if (elements.klingResolution && s.klingResolution) elements.klingResolution.value = s.klingResolution;
             if (elements.klingAvatarPrompt) elements.klingAvatarPrompt.value = s.klingAvatarPrompt || '';
@@ -11206,6 +12751,7 @@ function loadSettings() {
             if (elements.veoScope && s.veoScope) elements.veoScope.value = s.veoScope;
             if (elements.veoResolution && s.veoResolution) elements.veoResolution.value = s.veoResolution;
             if (elements.veoBackend && s.veoBackend) elements.veoBackend.value = s.veoBackend;
+            if (elements.fastMediaToggle) elements.fastMediaToggle.checked = false;
             _syncPresenterRow();
             _syncVeoRow();
             _syncProductionModeUI();
@@ -11217,9 +12763,6 @@ function loadSettings() {
             }
             // Restore Clip Analyzer toggle
             if (elements.clipAnalyzerToggle) elements.clipAnalyzerToggle.checked = s.clipAnalyzer !== false;
-            // Restore Resume Build toggle (default OFF — fresh build unless user opts in)
-            if (elements.buildResumeToggle) elements.buildResumeToggle.checked = s.buildResume === true;
-            if (elements.fastMediaToggle) elements.fastMediaToggle.checked = s.fastMedia === true;
             if (elements.repeatFromStep) elements.repeatFromStep.value = s.repeatFromStep || 'visual-planner';
             if (elements.forceFreshFootage) elements.forceFreshFootage.checked = s.forceFreshFootage === true;
             // Restore track mute state
@@ -11240,32 +12783,28 @@ function loadSettings() {
 }
 
 // Apply settings from .fvp project file (same logic as loadSettings but from object, not localStorage)
-function applyProjectSettings(s) {
+function applyProjectSettings(s, { projectFieldOverride = null } = {}) {
     if (!s) return;
     try {
         SettingsIO.apply(s, 'fvp'); // baseline: restore every element-backed setting from the schema
         elements.aiProvider.value = s.aiProvider || 'bedrock';
-        if (elements.ollamaModel) elements.ollamaModel.value = s.ollamaModel || 'gemma3:12b';
-        if (elements.ollamaVisionModel) elements.ollamaVisionModel.value = s.ollamaVisionModel || 'llava';
-        if (elements.ollamaModelRow) {
-            elements.ollamaModelRow.style.display = (s.aiProvider || 'bedrock') === 'ollama' ? 'block' : 'none';
-        }
         state.volume = s.volume !== undefined ? s.volume : 1;
         if (elements.volumeSlider) elements.volumeSlider.value = state.volume;
-        // SFX
-        state.sfxEnabled = s.sfxEnabled !== undefined ? s.sfxEnabled : true;
-        state.sfxVolume = s.sfxVolume !== undefined ? s.sfxVolume : 0.35;
-        if (elements.sfxEnabled) elements.sfxEnabled.checked = state.sfxEnabled;
-        if (elements.sfxVolume) elements.sfxVolume.value = state.sfxVolume;
-        if (elements.sfxVolumeLabel) elements.sfxVolumeLabel.textContent = `${Math.round(state.sfxVolume * 100)}%`;
         // Subtitles
         state.subtitlesEnabled = s.subtitlesEnabled !== undefined ? s.subtitlesEnabled : false;
         if (elements.subtitlesEnabled) elements.subtitlesEnabled.checked = state.subtitlesEnabled;
-        // Video Title and AI instructions are project-scoped, not global settings.
-        state.videoTitle = '';
+        // Video Title and AI instructions are project-scoped. During a fresh-build
+        // reload, the live UI snapshot wins over a stale .fvp settings envelope.
+        const hasOverride = projectFieldOverride && typeof projectFieldOverride === 'object';
+        const titleValue = hasOverride && Object.prototype.hasOwnProperty.call(projectFieldOverride, 'videoTitle')
+            ? projectFieldOverride.videoTitle
+            : s.videoTitle;
+        const instructionsValue = hasOverride && Object.prototype.hasOwnProperty.call(projectFieldOverride, 'aiInstructions')
+            ? projectFieldOverride.aiInstructions
+            : s.aiInstructions;
+        state.videoTitle = String(titleValue ?? '');
         if (elements.videoTitle) elements.videoTitle.value = state.videoTitle;
-        // AI Instructions
-        state.aiInstructions = '';
+        state.aiInstructions = String(instructionsValue ?? '');
         if (elements.aiInstructions) elements.aiInstructions.value = state.aiInstructions;
         // Niche Preset
         if (elements.buildNiche && s.buildNiche) elements.buildNiche.value = s.buildNiche;
@@ -11273,7 +12812,12 @@ function applyProjectSettings(s) {
         if (elements.buildProductionMode && s.buildProductionMode) elements.buildProductionMode.value = s.buildProductionMode;
         state.presenterImage = s.presenterImage || '';
         state.aiVideosScript = s.aiVideosScript || '';
+        state.aiVideosInputMode = ['audio', 'script'].includes(s.aiVideosInputMode) ? s.aiVideosInputMode : 'auto';
+        state.aiVideosScriptSource = s.aiVideosScriptSource && typeof s.aiVideosScriptSource === 'object'
+            ? { type: s.aiVideosScriptSource.type || 'paste', label: String(s.aiVideosScriptSource.label || '').slice(0, 500) }
+            : { type: 'paste', label: '' };
         if (elements.aiVideosScript) elements.aiVideosScript.value = state.aiVideosScript;
+        if (elements.aiVideosInputMode) elements.aiVideosInputMode.value = state.aiVideosInputMode;
         if (elements.klingAvatarEnabled) elements.klingAvatarEnabled.checked = !!s.klingAvatar;
         if (elements.klingResolution && s.klingResolution) elements.klingResolution.value = s.klingResolution;
         if (elements.klingAvatarPrompt) elements.klingAvatarPrompt.value = s.klingAvatarPrompt || '';
@@ -11281,6 +12825,7 @@ function applyProjectSettings(s) {
         if (elements.veoScope && s.veoScope) elements.veoScope.value = s.veoScope;
         if (elements.veoResolution && s.veoResolution) elements.veoResolution.value = s.veoResolution;
         if (elements.veoBackend && s.veoBackend) elements.veoBackend.value = s.veoBackend;
+        if (elements.fastMediaToggle) elements.fastMediaToggle.checked = false;
         _syncPresenterRow();
         _syncVeoRow();
         _syncProductionModeUI();
@@ -11312,24 +12857,36 @@ function applyProjectSettings(s) {
 // at "New Project"; once a project is open it works normally.
 function _requireProject() {
     if (state.hasProject) return true;
-    showToast('📁 Create or open a project first — then import your voiceover', 'info');
+    showToast('📁 Create or open a project first — then add narration or a story source', 'info');
     return false;
 }
 
 function _syncAudioGate() {
     const dz = elements.dropZone;
     if (!dz || state.audioFile) return; // don't clobber the loaded-audio display
+    const isAiVideos = elements.buildProductionMode?.value === 'aiVideos';
+    const lines = dz.querySelectorAll('p');
+    const setCopy = (primary, secondary) => {
+        if (lines[0]) lines[0].textContent = primary;
+        if (lines[1]) lines[1].textContent = secondary;
+    };
     if (state.hasProject) {
         dz.classList.remove('locked');
         dz.style.opacity = '';
         dz.style.cursor = 'pointer';
-        dz.innerHTML = '<p>Drag &amp; drop your voiceover here</p><p class="small">or click to browse</p>';
+        dz.title = isAiVideos ? 'Optional narration audio for AI Video mode' : 'Import narration audio';
+        setCopy(
+            isAiVideos ? 'Drop narration audio here (optional)' : 'Drag & drop your voiceover here',
+            isAiVideos ? 'or use Story source in Setup' : 'or click to browse'
+        );
     } else {
         dz.classList.add('locked');
         dz.style.opacity = '0.55';
         dz.style.cursor = 'not-allowed';
         dz.title = 'Create or open a project first';
-        dz.innerHTML = '<p>📁 Create or open a project first</p><p class="small">Import unlocks once you have a project</p>';
+        setCopy('📁 Create or open a project first', isAiVideos
+            ? 'Audio and story imports unlock inside a project'
+            : 'Import unlocks once you have a project');
     }
 }
 
@@ -11341,6 +12898,7 @@ async function loadProjectInfo() {
         // gated on this — you create/open a project first, then bring in your audio.
         state.hasProject = !!(info && info.projectName);
         _syncAudioGate();
+        _syncGenerateAvailability();
         if (info && info.projectName && elements.projectNameLabel) {
             elements.projectNameLabel.textContent = `— ${info.projectName}`;
             elements.projectNameLabel.title = `Project: ${info.projectDir}\nClick to open folder`;
@@ -11375,12 +12933,39 @@ async function newProject() {
         return;
     }
 
-    // Fallback: reset current project (no multi-instance support)
+    // Compatibility fallback when the project-switch IPC is unavailable.
     resetCurrentProject();
 }
 
+async function _saveBeforeProjectSwitch() {
+    if (!state.hasProject || !window.electronAPI?.saveProjectFile) {
+        return { success: true, skipped: true };
+    }
+    const result = await saveProject(true);
+    if (!result?.success) {
+        throw new Error(result?.error || 'Current project could not be saved before switching.');
+    }
+    return result;
+}
+
+function _reloadWorkspaceForProject(projectName = 'project') {
+    showToast(`Opening ${projectName} in this workspace...`, 'info');
+    window.location.reload();
+}
+
+function _finishProjectOpen(result, projectName = 'Project') {
+    if (result?.openedIn === 'new-instance') {
+        showToast(`${projectName} opened in a new window`, 'success');
+        return;
+    }
+    if (result?.reload === false) {
+        showToast(`${projectName} is already open`, 'info');
+        return;
+    }
+    _reloadWorkspaceForProject(projectName);
+}
+
 function showNewProjectDialog() {
-    // Remove existing dialog if any
     const existing = document.getElementById('new-project-dialog');
     if (existing) existing.remove();
 
@@ -11389,24 +12974,46 @@ function showNewProjectDialog() {
     overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:10000;display:flex;align-items:center;justify-content:center;';
 
     const dialog = document.createElement('div');
-    dialog.style.cssText = 'background:#1e1e2e;border:1px solid #444;border-radius:12px;padding:28px 32px;width:480px;max-width:90vw;box-shadow:0 20px 60px rgba(0,0,0,0.5);';
+    dialog.style.cssText = 'background:#1e1e2e;border:1px solid #444;border-radius:12px;padding:26px 30px;width:560px;max-width:90vw;max-height:90vh;overflow:auto;box-shadow:0 20px 60px rgba(0,0,0,0.5);';
     dialog.innerHTML = `
-        <h2 style="margin:0 0 20px;font-size:1.2rem;color:#e0e0e0;font-weight:600;">New Project</h2>
+        <h2 style="margin:0 0 8px;font-size:1.2rem;color:#e0e0e0;font-weight:600;">New Project</h2>
+        <p style="margin:0 0 20px;color:#999;font-size:0.88rem;line-height:1.45;">Choose exactly where the project should live. YTA will create a project marker, an empty timeline, and the project file there.</p>
+        <div style="margin-bottom:18px;">
+            <label style="display:block;margin-bottom:8px;font-size:0.85rem;color:#aaa;">Folder Behavior</label>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+                <label id="np-mode-selected-card" style="display:block;padding:12px;background:#25253a;border:1px solid #656ee8;border-radius:8px;cursor:pointer;">
+                    <div style="display:flex;align-items:center;gap:8px;color:#fff;font-size:0.9rem;font-weight:600;">
+                        <input type="radio" name="np-location-mode" value="selected-folder" checked />
+                        Use selected folder
+                    </div>
+                    <div style="margin:6px 0 0 24px;color:#aaa;font-size:0.78rem;line-height:1.35;">Best when you already created and named the final project folder. No nested folder.</div>
+                </label>
+                <label id="np-mode-subfolder-card" style="display:block;padding:12px;background:#171722;border:1px solid #444;border-radius:8px;cursor:pointer;">
+                    <div style="display:flex;align-items:center;gap:8px;color:#fff;font-size:0.9rem;font-weight:600;">
+                        <input type="radio" name="np-location-mode" value="create-subfolder" />
+                        Create a folder inside
+                    </div>
+                    <div style="margin:6px 0 0 24px;color:#aaa;font-size:0.78rem;line-height:1.35;">Choose a parent location and YTA creates a new folder using the project name.</div>
+                </label>
+            </div>
+        </div>
         <div style="margin-bottom:16px;">
-            <label style="display:block;margin-bottom:6px;font-size:0.85rem;color:#aaa;">Project Name</label>
-            <input id="np-name" type="text" placeholder="My Video Project" value="Untitled Project"
-                   style="width:100%;padding:10px 12px;background:#12121a;border:1px solid #555;border-radius:6px;color:#fff;font-size:0.95rem;outline:none;box-sizing:border-box;"
-                   onfocus="this.select()" />
+             <label style="display:block;margin-bottom:6px;font-size:0.85rem;color:#aaa;">Project Name</label>
+             <input id="np-name" type="text" placeholder="Comes from the selected folder" value="" disabled
+                    style="width:100%;padding:10px 12px;background:#12121a;border:1px solid #555;border-radius:6px;color:#fff;font-size:0.95rem;outline:none;box-sizing:border-box;" />
+             <div id="np-name-hint" style="margin-top:6px;color:#777;font-size:0.78rem;">In this mode, the selected folder name becomes the project name.</div>
         </div>
         <div style="margin-bottom:20px;">
-            <label style="display:block;margin-bottom:6px;font-size:0.85rem;color:#aaa;">Location</label>
+            <label id="np-location-label" style="display:block;margin-bottom:6px;font-size:0.85rem;color:#aaa;">Final Project Folder</label>
             <div style="display:flex;gap:8px;">
                 <input id="np-location" type="text" readonly placeholder="Choose a folder..."
                        style="flex:1;padding:10px 12px;background:#12121a;border:1px solid #555;border-radius:6px;color:#ccc;font-size:0.85rem;outline:none;cursor:pointer;box-sizing:border-box;" />
                 <button id="np-browse" style="padding:10px 16px;background:#333;border:1px solid #555;border-radius:6px;color:#fff;cursor:pointer;font-size:0.85rem;white-space:nowrap;">Browse...</button>
             </div>
         </div>
-        <div id="np-preview" style="margin-bottom:20px;padding:10px 12px;background:#12121a;border-radius:6px;font-size:0.8rem;color:#666;font-family:monospace;"></div>
+        <div style="margin-bottom:6px;color:#777;font-size:0.76rem;text-transform:uppercase;letter-spacing:0.05em;">Project will be created at</div>
+        <div id="np-preview" style="margin-bottom:10px;padding:10px 12px;background:#12121a;border:1px solid #30303f;border-radius:6px;font-size:0.8rem;color:#666;font-family:monospace;word-break:break-all;">Choose a folder...</div>
+        <div id="np-status" style="min-height:18px;margin-bottom:14px;color:#ff8f8f;font-size:0.82rem;line-height:1.35;"></div>
         <div style="display:flex;gap:10px;justify-content:flex-end;">
             <button id="np-cancel" style="padding:10px 20px;background:transparent;border:1px solid #555;border-radius:6px;color:#aaa;cursor:pointer;font-size:0.9rem;">Cancel</button>
             <button id="np-create" style="padding:10px 24px;background:#4a6cf7;border:none;border-radius:6px;color:#fff;cursor:pointer;font-size:0.9rem;font-weight:600;" disabled>Create Project</button>
@@ -11416,35 +13023,133 @@ function showNewProjectDialog() {
     document.body.appendChild(overlay);
 
     const nameInput = document.getElementById('np-name');
+    const nameHint = document.getElementById('np-name-hint');
     const locationInput = document.getElementById('np-location');
+    const locationLabel = document.getElementById('np-location-label');
     const browseBtn = document.getElementById('np-browse');
     const previewEl = document.getElementById('np-preview');
+    const statusEl = document.getElementById('np-status');
     const createBtn = document.getElementById('np-create');
     const cancelBtn = document.getElementById('np-cancel');
+    const modeInputs = Array.from(dialog.querySelectorAll('input[name="np-location-mode"]'));
+    const selectedModeCard = document.getElementById('np-mode-selected-card');
+    const subfolderModeCard = document.getElementById('np-mode-subfolder-card');
 
     let selectedLocation = '';
+    let locationMode = 'selected-folder';
+    let editableProjectName = 'Untitled Project';
+    let busy = false;
+
+    function folderName(folderPath) {
+        const cleaned = String(folderPath || '').replace(/[\\/]+$/, '');
+        return cleaned.split(/[\\/]/).pop() || cleaned;
+    }
+
+    function joinedPath(parent, child) {
+        return `${String(parent || '').replace(/[\\/]+$/, '')}\\${child}`;
+    }
+
+    function currentProjectName() {
+        return locationMode === 'selected-folder'
+            ? folderName(selectedLocation)
+            : nameInput.value.trim();
+    }
+
+    function updateModeCards() {
+        const selectedFolderMode = locationMode === 'selected-folder';
+        selectedModeCard.style.background = selectedFolderMode ? '#25253a' : '#171722';
+        selectedModeCard.style.borderColor = selectedFolderMode ? '#656ee8' : '#444';
+        subfolderModeCard.style.background = selectedFolderMode ? '#171722' : '#25253a';
+        subfolderModeCard.style.borderColor = selectedFolderMode ? '#444' : '#656ee8';
+    }
 
     function updatePreview() {
-        const name = nameInput.value.trim();
-        if (name && selectedLocation) {
+        const name = currentProjectName();
+        const valid = Boolean(selectedLocation && name);
+        if (valid) {
             previewEl.style.color = '#888';
-            previewEl.textContent = selectedLocation + '\\' + name + '\\';
-            createBtn.disabled = false;
+            previewEl.textContent = locationMode === 'selected-folder'
+                ? selectedLocation
+                : joinedPath(selectedLocation, name);
         } else {
             previewEl.style.color = '#666';
-            previewEl.textContent = name ? 'Choose a location...' : '';
-            createBtn.disabled = true;
+            previewEl.textContent = selectedLocation
+                ? 'Enter a project name...'
+                : 'Choose a folder...';
+        }
+        createBtn.disabled = busy || !valid;
+        createBtn.style.opacity = createBtn.disabled ? '0.55' : '1';
+        createBtn.style.cursor = createBtn.disabled ? 'not-allowed' : 'pointer';
+    }
+
+    function applyLocationMode(nextMode) {
+        if (locationMode === 'create-subfolder') {
+            editableProjectName = nameInput.value.trim() || editableProjectName;
+        }
+        locationMode = nextMode;
+        const selectedFolderMode = locationMode === 'selected-folder';
+        nameInput.disabled = selectedFolderMode;
+        nameInput.value = selectedFolderMode
+            ? folderName(selectedLocation)
+            : editableProjectName;
+        nameInput.placeholder = selectedFolderMode
+            ? 'Comes from the selected folder'
+            : 'My Video Project';
+        nameInput.style.opacity = selectedFolderMode ? '0.65' : '1';
+        nameHint.textContent = selectedFolderMode
+            ? 'In this mode, the selected folder name becomes the project name.'
+            : 'YTA creates a new folder with this name inside the selected parent location.';
+        locationLabel.textContent = selectedFolderMode
+            ? 'Final Project Folder'
+            : 'Parent Location';
+        locationInput.placeholder = selectedFolderMode
+            ? 'Choose the final project folder...'
+            : 'Choose the parent folder...';
+        statusEl.textContent = '';
+        updateModeCards();
+        updatePreview();
+        if (!selectedFolderMode) {
+            nameInput.focus();
+            nameInput.select();
         }
     }
 
-    nameInput.addEventListener('input', updatePreview);
-    nameInput.focus();
+    function setBusy(nextBusy) {
+        busy = nextBusy;
+        browseBtn.disabled = busy;
+        cancelBtn.disabled = busy;
+        modeInputs.forEach((input) => { input.disabled = busy; });
+        nameInput.disabled = busy || locationMode === 'selected-folder';
+        createBtn.textContent = busy ? 'Creating...' : 'Create Project';
+        browseBtn.style.opacity = busy ? '0.55' : '1';
+        updatePreview();
+    }
+
+    nameInput.addEventListener('input', () => {
+        editableProjectName = nameInput.value;
+        statusEl.textContent = '';
+        updatePreview();
+    });
+
+    modeInputs.forEach((input) => {
+        input.addEventListener('change', () => {
+            if (input.checked) applyLocationMode(input.value);
+        });
+    });
 
     browseBtn.addEventListener('click', async () => {
-        const folder = await window.electronAPI.selectFolder('Choose project location');
+        const folder = await window.electronAPI.selectFolder(
+            locationMode === 'selected-folder'
+                ? 'Choose the final project folder'
+                : 'Choose the parent folder'
+        );
         if (folder) {
             selectedLocation = folder;
             locationInput.value = folder;
+            if (locationMode === 'selected-folder') {
+                nameInput.value = folderName(folder);
+            }
+            statusEl.textContent = '';
             updatePreview();
         }
     });
@@ -11455,32 +13160,41 @@ function showNewProjectDialog() {
     overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
 
     createBtn.addEventListener('click', async () => {
-        const projectName = nameInput.value.trim();
+        const projectName = currentProjectName();
         if (!projectName || !selectedLocation) return;
 
-        createBtn.disabled = true;
-        createBtn.textContent = 'Creating...';
+        setBusy(true);
+        statusEl.textContent = '';
+        try {
+            await _saveBeforeProjectSwitch();
+            const result = await window.electronAPI.launchNewInstance({
+                projectName,
+                location: selectedLocation,
+                locationMode,
+            });
 
-        const result = await window.electronAPI.launchNewInstance({
-            projectName: projectName,
-            location: selectedLocation
-        });
-
-        if (result && result.success) {
-            showToast(`Project "${projectName}" created`, 'success');
-            overlay.remove();
-        } else {
-            showToast('Failed to create project', 'error');
-            createBtn.disabled = false;
-            createBtn.textContent = 'Create Project';
+            if (result && result.success) {
+                overlay.remove();
+                _finishProjectOpen(result, `Project "${result.projectName || projectName}"`);
+                return;
+            }
+            statusEl.textContent = result?.error || 'Failed to create project.';
+        } catch (error) {
+            statusEl.textContent = error?.message || 'Failed to create project.';
+        } finally {
+            if (overlay.isConnected) setBusy(false);
         }
     });
 
-    // Enter key to create
     nameInput.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && !createBtn.disabled) createBtn.click();
         if (e.key === 'Escape') overlay.remove();
     });
+    overlay.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && !busy) overlay.remove();
+    });
+
+    applyLocationMode('selected-folder');
 }
 
 function resetCurrentProject() {
@@ -11571,10 +13285,11 @@ function showOpenProjectDialog() {
         }
         setBusy(true, kind === 'folder' ? 'Selecting folder...' : 'Selecting .fvp file...');
         try {
+            await _saveBeforeProjectSwitch();
             const result = kind === 'folder' ? await openFolder() : await openFile();
             if (result && result.success) {
-                showToast('Project window opened', 'success');
                 overlay.remove();
+                _finishProjectOpen(result, 'Project');
                 return;
             }
             setBusy(false, '');
@@ -11613,9 +13328,14 @@ async function openExistingProject() {
 
     // Backward compatibility fallback
     if (window.electronAPI.openExistingProject) {
-        const result = await window.electronAPI.openExistingProject();
-        if (result && result.success) {
-            showToast('Project window opened', 'success');
+        try {
+            await _saveBeforeProjectSwitch();
+            const result = await window.electronAPI.openExistingProject();
+            if (result && result.success) {
+                _finishProjectOpen(result, 'Project');
+            }
+        } catch (error) {
+            showToast(error?.message || 'Failed to open project', 'error');
         }
     }
 }
@@ -11653,12 +13373,21 @@ if (!window.electronAPI) {
                 { text: 'Thank you for watching!', keyword: 'sunset ocean', startTime: 20, endTime: 30 }
             ]
         }),
-        copyFile: async () => true, getSceneVideoPath: async () => null, getSceneMediaPath: async () => null, getFileUrl: async () => null, getAudioPath: async () => null,
+        getSceneVideoPath: async () => null, getSceneMediaPath: async () => null, getFileUrl: async () => null, getAudioPath: async () => null,
         openExistingProject: async () => ({ success: false, cancelled: true }),
         openExistingProjectFolder: async () => ({ success: false, cancelled: true }),
         openExistingProjectFile: async () => ({ success: false, cancelled: true }),
         hyperframesGenerateProject: async () => ({ success: false, error: 'HyperFrames bridge not available' }),
         hyperframesRender: async () => ({ success: false, error: 'HyperFrames bridge not available' }),
+        agentPlan: async () => ({ success: false, error: 'Editor Agent is available only in the desktop app' }),
+        agentExecute: async () => ({ success: false, error: 'Editor Agent is available only in the desktop app' }),
+        agentUndo: async () => ({ success: false, error: 'Editor Agent is available only in the desktop app' }),
+        agentRedo: async () => ({ success: false, error: 'Editor Agent is available only in the desktop app' }),
+        agentHistory: async () => ({ success: true, undo: [], redo: [] }),
+        agentSession: async () => ({ success: false, error: 'Editor Agent memory is available only in the desktop app' }),
+        agentNewSession: async () => ({ success: false, error: 'Editor Agent memory is available only in the desktop app' }),
+        onAgentProgress: () => () => { },
+        onAgentPlanUpdated: () => () => { },
         onBuildProgress: () => { }, onRenderProgress: () => { },
         cancelProcess: async () => ({ success: true, message: 'Cancelled' }),
         showNotification: () => { }

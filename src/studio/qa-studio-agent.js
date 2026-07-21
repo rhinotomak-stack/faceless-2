@@ -171,8 +171,8 @@ async function _uploadToGeminiFiles(filePath, apiKey) {
             'Content-Length': body.length,
         },
         timeout: 120000,
-        maxBodyLength: Infinity,
-        maxContentLength: Infinity,
+        maxBodyLength: 2 * 1024 * 1024 * 1024,
+        maxContentLength: 2 * 1024 * 1024 * 1024,
     });
 
     const file = uploadResp.data?.file;
@@ -289,7 +289,8 @@ const QA_OMNI_OPENAI_UNSUPPORTED_POOL = [
     'qwen-omni-turbo-2025-03-26',
 ];
 
-const _qaExhaustedFile = path.join(__dirname, '..', '..', '.qa-omni-exhausted-models.json');
+const _qaRuntimeStateRoot = process.env.YTA_USER_DATA_DIR || path.join(__dirname, '..', '..');
+const _qaExhaustedFile = path.join(_qaRuntimeStateRoot, '.qa-omni-exhausted-models.json');
 let _qaExhaustedModels = {}; // { model: true (permanent) | timestamp (cooldown end) }
 
 try {

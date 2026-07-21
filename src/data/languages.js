@@ -1,3 +1,4 @@
+(() => {
 /**
  * Language Registry — single source of truth for multi-language support.
  *
@@ -134,7 +135,7 @@ function getLanguageList() {
     }));
 }
 
-module.exports = {
+const LANGUAGE_API = {
     LANGUAGES,
     DEFAULT_LANGUAGE,
     getLanguage,
@@ -142,3 +143,10 @@ module.exports = {
     getSupportedLanguages,
     getLanguageList,
 };
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = LANGUAGE_API;
+}
+if (typeof window !== 'undefined') {
+    window._languages = LANGUAGE_API;
+}
+})();

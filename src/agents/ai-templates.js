@@ -15,6 +15,7 @@ const { getTheme, MG_THEME_OVERRIDES, getThemeTokens, TEMPLATE_THEME_OVERRIDES }
 const { getNiche } = require('../data/niches');
 const { getLanguageBlock } = require('../data/language-helper');
 const { normalizeUrlForDedup } = require('../util/url-utils');
+const { createByteLimitTransform, requestSafeStream } = require('../security/safe-download');
 const {
     validateTemplateHintPlacement,
     distinctiveWords,
@@ -485,6 +486,18 @@ function _templateCandidateRejectReason(scene, scriptContext, allowedTemplates, 
 /**
  * Collect scenes with templateHint from Visual Planner.
  */
+function _templateIdentity(scene, fallbackIndex = 0) {
+    const stable = scene?.originalIndex
+        ?? scene?.sourceSceneIndex
+        ?? scene?.index
+        ?? fallbackIndex;
+    return {
+        sceneIndex: scene?.index ?? stable,
+        sourceSceneIndex: stable,
+        originalSceneIndex: stable,
+    };
+}
+
 function _buildCandidates(scenes, scriptContext, allowedTemplates) {
     const candidates = [];
     const hookEnd = scriptContext?.hookEndTime || 0;
@@ -515,7 +528,7 @@ function _buildCandidates(scenes, scriptContext, allowedTemplates) {
         if (validateTemplateHintPlacement(scene, scenes, scriptContext)) continue;
 
         candidates.push({
-            sceneIndex: scene.index,
+            ..._templateIdentity(scene),
             scene,
             hintType,
             hintContent,
@@ -539,7 +552,7 @@ function _buildPreservedPlannerTemplateCandidates(scenes, allowedTemplates) {
         if (!allowedTemplates.includes(hintType)) continue;
 
         candidates.push({
-            sceneIndex: scene.index,
+            ..._templateIdentity(scene),
             scene,
             hintType,
             hintContent,
@@ -582,7 +595,7 @@ function _buildEditorAgentTemplateCandidates(scenes, scriptContext, allowedTempl
         if (seen.has(key)) return;
         seen.add(key);
         candidates.push({
-            sceneIndex: scene.index,
+            ..._templateIdentity(scene),
             scene,
             hintType: type,
             hintContent: content,
@@ -893,6 +906,8 @@ function _parseAIResponse(response, candidates, scenes, themeId) {
             variant,
             animation,
             sceneIndex: sceneIdx,
+            sourceSceneIndex: candidate.sourceSceneIndex ?? scene.originalIndex ?? sceneIdx,
+            originalSceneIndex: candidate.originalSceneIndex ?? scene.originalIndex ?? sceneIdx,
             selectionMode: 'ai',
             confidence,
             position: 'center',
@@ -1151,6 +1166,8 @@ function _buildFallbackTemplateFromScene(candidate, themeId) {
         variant,
         animation,
         sceneIndex: candidate.sceneIndex,
+        sourceSceneIndex: candidate.sourceSceneIndex ?? scene.originalIndex ?? candidate.sceneIndex,
+        originalSceneIndex: candidate.originalSceneIndex ?? scene.originalIndex ?? candidate.sceneIndex,
         selectionMode: 'visual-planner-preserved-fallback',
         confidence: 0.72,
         position: 'center',
@@ -1198,6 +1215,8 @@ function _buildCoverageTemplateFromScene(candidate, themeId) {
         variant,
         animation,
         sceneIndex: candidate.sceneIndex,
+        sourceSceneIndex: candidate.sourceSceneIndex ?? scene.originalIndex ?? candidate.sceneIndex,
+        originalSceneIndex: candidate.originalSceneIndex ?? scene.originalIndex ?? candidate.sceneIndex,
         selectionMode: 'visual-planner-preserved-coverage',
         confidence: 0.68,
         position: 'center',
@@ -1273,6 +1292,8 @@ function _buildTemplateFromVPHint(candidate, themeId) {
         variant,
         animation,
         sceneIndex: candidate.sceneIndex,
+        sourceSceneIndex: candidate.sourceSceneIndex ?? scene.originalIndex ?? candidate.sceneIndex,
+        originalSceneIndex: candidate.originalSceneIndex ?? scene.originalIndex ?? candidate.sceneIndex,
         selectionMode: candidate.selectionMode || 'vp-direct',
         confidence: 0.9,
         position: 'center',
@@ -1356,7 +1377,6 @@ function _checkV3Conflict(tplScene, v3Ranges, existingTemplates, options = {}) {
  * @returns {number} Count of successfully downloaded backgrounds
  */
 async function downloadTemplateBackgrounds(templateScenes, tempDir, scriptContext) {
-    const axios = require('axios');
     const path = require('path');
     const fs = require('fs');
     const config = require('../settings/config');
@@ -1404,12 +1424,13 @@ async function downloadTemplateBackgrounds(templateScenes, tempDir, scriptContex
                 const outputPath = path.join(tempDir, filename);
 
                 try {
-                    const response = await axios.get(media.url, {
-                        responseType: 'stream',
+                    const maxBytes = media.mediaType === 'video'
+                        ? 2 * 1024 * 1024 * 1024
+                        : 80 * 1024 * 1024;
+                    const response = await requestSafeStream(media.url, {
                         timeout: media.mediaType === 'video' ? 60000 : 30000,
-                        maxRedirects: 5,
                         headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
-                    });
+                    }, { maxRedirects: 5, maxBytes });
 
                     const contentType = response.headers['content-type'] || '';
                     const looksVideo = media.mediaType === 'video' && (contentType.includes('video') || /\.mp4(\?|$)/i.test(media.url));
@@ -1420,7 +1441,9 @@ async function downloadTemplateBackgrounds(templateScenes, tempDir, scriptContex
                     }
 
                     const writer = fs.createWriteStream(outputPath);
-                    response.data.pipe(writer);
+                    const limiter = createByteLimitTransform(maxBytes);
+                    response.data.pipe(limiter).pipe(writer);
+                    limiter.on('error', (error) => writer.destroy(error));
                     await new Promise((resolve, reject) => {
                         writer.on('finish', resolve);
                         writer.on('error', reject);
@@ -1619,7 +1642,6 @@ async function _searchBackgroundImage(query, config) {
  * @returns {number} Count of successfully downloaded images
  */
 async function downloadTemplateItemImages(templateScenes, tempDir, scriptContext) {
-    const axios = require('axios');
     const path = require('path');
     const fs = require('fs');
     const config = require('../settings/config');
@@ -1659,12 +1681,11 @@ async function downloadTemplateItemImages(templateScenes, tempDir, scriptContext
                     continue;
                 }
 
-                const response = await axios.get(url, {
-                    responseType: 'stream',
+                const maxBytes = 80 * 1024 * 1024;
+                const response = await requestSafeStream(url, {
                     timeout: 30000,
-                    maxRedirects: 5,
                     headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
-                });
+                }, { maxRedirects: 5, maxBytes });
 
                 const contentType = response.headers['content-type'] || '';
                 if (!contentType.includes('image')) {
@@ -1673,7 +1694,9 @@ async function downloadTemplateItemImages(templateScenes, tempDir, scriptContext
                 }
 
                 const writer = fs.createWriteStream(outputPath);
-                response.data.pipe(writer);
+                const limiter = createByteLimitTransform(maxBytes);
+                response.data.pipe(limiter).pipe(writer);
+                limiter.on('error', (error) => writer.destroy(error));
                 await new Promise((resolve, reject) => {
                     writer.on('finish', resolve);
                     writer.on('error', reject);

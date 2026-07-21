@@ -25,7 +25,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const axios = require('axios');
+const { requestSafeBuffer } = require('../security/safe-download');
 const { callVisionAI } = require('../brain/ai-provider');
 const { normalizeUrlForDedup } = require('../util/url-utils');
 
@@ -98,8 +98,6 @@ async function _getBrowser() {
         executablePath: exe,
         headless: 'new',
         args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
             '--disable-gpu',
             '--mute-audio',
@@ -371,15 +369,13 @@ async function judgeYouTubeSERP(results, query, contract, scene, opts = {}) {
 // ───── Public: synthetic-grid judgment (non-YouTube providers) ─────
 
 async function _fetchImageBuffer(url, timeoutMs = 8000) {
-    const resp = await axios.get(url, {
-        responseType: 'arraybuffer',
+    const resp = await requestSafeBuffer(url, {
         timeout: timeoutMs,
         headers: {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             'Accept': 'image/*,*/*;q=0.8',
         },
-        maxRedirects: 4,
-    });
+    }, { maxRedirects: 4, maxBytes: 20 * 1024 * 1024 });
     return Buffer.from(resp.data);
 }
 

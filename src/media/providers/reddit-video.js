@@ -3,6 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const BaseProvider = require('./base-provider');
 const config = require('../../settings/config');
+const { createByteLimitTransform, requestSafeStream } = require('../../security/safe-download');
 const {
     findYtdlp,
     execYtdlpWithRetry,
@@ -916,18 +917,19 @@ class RedditVideoProvider extends BaseProvider {
      * Used for Reddit's fallback_url (raw DASH video streams).
      */
     async _downloadDirect(url, outputPath) {
-        const response = await axios({
+        const maxBytes = 2 * 1024 * 1024 * 1024;
+        const response = await requestSafeStream(url, {
             method: 'get',
-            url: url,
-            responseType: 'stream',
             timeout: 60000,
             headers: {
                 'User-Agent': USER_AGENTS[0],
             },
-        });
+        }, { maxRedirects: 5, maxBytes });
 
         const writer = fs.createWriteStream(outputPath);
-        response.data.pipe(writer);
+        const limiter = createByteLimitTransform(maxBytes);
+        response.data.pipe(limiter).pipe(writer);
+        limiter.on('error', (error) => writer.destroy(error));
 
         return new Promise((resolve, reject) => {
             writer.on('finish', resolve);

@@ -47,6 +47,7 @@
 'use strict';
 
 const fs = require('fs');
+const { createByteLimitTransform, requestSafeStream } = require('../../security/safe-download');
 const path = require('path');
 
 const COOKIE_FILE = () => process.env.KLING_COOKIE_FILE || path.join(process.cwd(), '.kling-cookies.json');
@@ -232,7 +233,6 @@ async function _screenshot(page, tag, log) {
 }
 
 async function _downloadWithCookies(url, outFile, timeoutMs = 120_000) {
-    const axios = require('axios');
     const headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'video/mp4,video/*;q=0.9,*/*;q=0.8',
@@ -240,12 +240,20 @@ async function _downloadWithCookies(url, outFile, timeoutMs = 120_000) {
     };
     const ck = _cookieHeader();
     if (ck) headers['Cookie'] = ck;
-    const res = await axios({ url, method: 'GET', responseType: 'stream', adapter: 'http', timeout: timeoutMs, maxRedirects: 10, headers });
+    const maxBytes = 2 * 1024 * 1024 * 1024;
+    const res = await requestSafeStream(url, {
+        method: 'GET',
+        adapter: 'http',
+        timeout: timeoutMs,
+        headers,
+    }, { maxRedirects: 10, maxBytes });
     const ct = res.headers['content-type'] || '';
     if (ct.includes('text/html') || ct.includes('application/json')) throw new Error(`result URL returned ${ct}, not video`);
     fs.mkdirSync(path.dirname(outFile), { recursive: true });
     const writer = fs.createWriteStream(outFile);
-    res.data.pipe(writer);
+    const limiter = createByteLimitTransform(maxBytes);
+    res.data.pipe(limiter).pipe(writer);
+    limiter.on('error', (error) => writer.destroy(error));
     await new Promise((resolve, reject) => { writer.on('finish', resolve); writer.on('error', reject); });
     const st = fs.statSync(outFile);
     if (st.size < 10_000) { try { fs.unlinkSync(outFile); } catch (_) {} throw new Error(`downloaded clip too small (${st.size}B)`); }
@@ -518,7 +526,7 @@ async function generateVideoClip({ prompt, imageFile, outFile, durationSec, aspe
         executablePath: exe,
         headless: headed ? false : 'new',
         defaultViewport: headed ? null : { width: 1440, height: 1000 },
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled', '--lang=en-US,en', headed ? '--start-maximized' : ''].filter(Boolean),
+        args: ['--disable-blink-features=AutomationControlled', '--lang=en-US,en', headed ? '--start-maximized' : ''].filter(Boolean),
     });
 
     let resultUrl = null;

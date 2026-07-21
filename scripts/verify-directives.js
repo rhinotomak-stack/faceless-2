@@ -35,12 +35,16 @@ console.log('[1] directivesFloor → structured slices');
     ok(!(d.icons && d.icons.allow === false), '"no icons over faces" does NOT ban icons entirely');
     ok(d.footage && d.footage.preferReal === true, 'footage.preferReal=true');
     ok(d.footage && Array.isArray(d.footage.bannedSources) && d.footage.bannedSources.includes('reddit'), 'footage.bannedSources includes reddit');
+    const effectTarget = dc.directivesFloor('make the vignette in that clip black');
+    ok(!effectTarget?.footage, 'referring to the selected clip does not invent a footage/media-type directive');
     ok(dc.directivesFloor('') === null, 'empty order → null');
     ok(JSON.stringify(dc.directivesFloor(SAMPLE)) === JSON.stringify(d), 'floor is deterministic (same order → same object)');
 
     const noicons = dc.directivesFloor('no icons at all please');
     ok(noicons.icons && noicons.icons.allow === false, '"no icons at all" → icons.allow=false');
     const nomaps = dc.directivesFloor('clean look, no maps');
+    const numericLt = dc.directivesFloor('give all numbers a lowerthird');
+    ok(numericLt.graphics?.numericTreatment === 'lowerThird', 'all numbers lowerthird compiles to graphics.numericTreatment=lowerThird');
     ok(nomaps.maps && nomaps.maps.want === 'none', '"no maps" → maps.want=none');
     ok(nomaps.effects && nomaps.effects.noGrain === true, '"clean look" → effects.noGrain');
 }
@@ -57,6 +61,8 @@ console.log('[2] renderDirectivesBlock');
     ok(/fullscreen/i.test(dc.renderDirectivesBlock(d, 'framing')), 'framing block mentions fullscreen');
     ok(/face/i.test(dc.renderDirectivesBlock(d, 'icons')), 'icons block mentions faces');
     ok(/real|stock/i.test(dc.renderDirectivesBlock(d, 'footage')), 'footage block mentions real/stock');
+    ok(/every scene containing a spoken number/i.test(dc.renderDirectivesBlock(dc.directivesFloor('give all numbers a lowerthird'), 'graphics')), 'numeric lower-third rule renders into graphics prompt block');
+    ok(/do not retrofit|never repeat its hero number/i.test(dc.renderDirectivesBlock(dc.directivesFloor('give all numbers a lowerthird'), 'composition')), 'composition prompt forbids nesting a duplicate numeric lower third');
     // A directive with only a transitions slice must render '' for unrelated stages.
     const onlyTx = { raw: 'x', transitions: { style: 'hard-cuts' } };
     ok(dc.renderDirectivesBlock(onlyTx, 'effects') === '', 'unrelated stage with no matching slice → ""');
@@ -89,6 +95,84 @@ console.log('[3] compiler gating');
     ok(pd.user.bannedSources.has('reddit'), 'merge: banned source carried into Set');
     ok(__test._userExplicitlyWantsMaps(pd) === true, 'userExplicitlyWantsMaps true when forceMaps');
     ok(__test._userExplicitlyWantsMaps({ user: {} }) === false, 'userExplicitlyWantsMaps false with no map ask');
+    const numericDirectives = dc.directivesFloor('give all numbers a lowerthird');
+    const numericPd = __test._buildPlannerDirectives([{}], { _directives: numericDirectives }, { freeInstructions: '' });
+    ok(numericPd.user.forceNumericLowerThird === true, 'planner merge carries numeric lower-third authority');
+    const numericScenes = [{
+        index: 0,
+        startTime: 0,
+        endTime: 4,
+        text: 'This system costs $300 and cools the house.',
+        ideaLowerThird: '$300 System Cost',
+        fullscreenMG: 'comparisonCard: $300 vs $9,000',
+        keyword: null,
+        sourceHint: null,
+        mediaType: null,
+    }];
+    const numericFixes = __test._enforceNumericLowerThirdDirective(
+        numericScenes,
+        { nicheId: 'explainer.diy', _directives: numericDirectives },
+        { tier: { allowVideo: true } },
+        numericPd
+    );
+    ok(numericFixes.length === 1, 'numeric directive rewrites the numeric scene');
+    ok(numericScenes[0].fullscreenMG === null && numericScenes[0].templateHint === null, 'numeric directive removes competing stage-graphic lane');
+    ok(/^lowerThird:\s*\$300/i.test(numericScenes[0].mgHint), 'numeric directive produces the required lowerThird hint');
+    ok(!!numericScenes[0].keyword && !!numericScenes[0].sourceHint, 'numeric directive restores a footage lane behind the lower third');
+    const ordinalPhraseScene = [{
+        index: 1,
+        startTime: 4,
+        endTime: 7,
+        text: 'Now think about that for a second.',
+    }];
+    const ordinalPhraseFixes = __test._enforceNumericLowerThirdDirective(
+        ordinalPhraseScene,
+        { nicheId: 'explainer.diy', _directives: numericDirectives },
+        { tier: { allowVideo: true } },
+        numericPd
+    );
+    ok(ordinalPhraseFixes.length === 0 && !ordinalPhraseScene[0].mgHint, 'ordinal discourse phrases do not become fake numeric lower thirds');
+    const pluralScaleScene = [{
+        index: 2,
+        startTime: 7,
+        endTime: 11,
+        text: 'That gap represents billions of dollars every year.',
+    }];
+    const pluralScaleFixes = __test._enforceNumericLowerThirdDirective(
+        pluralScaleScene,
+        { nicheId: 'explainer.diy', _directives: numericDirectives },
+        { tier: { allowVideo: true } },
+        numericPd
+    );
+    ok(pluralScaleFixes.length === 1 && /^lowerThird:/i.test(pluralScaleScene[0].mgHint), 'plural scale words such as billions count as numeric information');
+    const multiNumberScene = [{
+        index: 3,
+        startTime: 11,
+        endTime: 16,
+        text: 'This $300 system cools the house to 55 degrees.',
+        ideaLowerThird: '$300 System Cost',
+    }];
+    __test._enforceNumericLowerThirdDirective(
+        multiNumberScene,
+        { nicheId: 'explainer.diy', _directives: numericDirectives },
+        { tier: { allowVideo: true } },
+        numericPd
+    );
+    ok(/\$300/.test(multiNumberScene[0].mgHint) && /\b55\b/.test(multiNumberScene[0].mgHint), 'one lower third covers every numeric value spoken in the scene');
+    const pronounOneScene = [{
+        index: 4,
+        startTime: 16,
+        endTime: 20,
+        text: 'I stood inside one on a day when it was 91 degrees outside.',
+        ideaLowerThird: '91°F Outside',
+    }];
+    __test._enforceNumericLowerThirdDirective(
+        pronounOneScene,
+        { nicheId: 'explainer.diy', _directives: numericDirectives },
+        { tier: { allowVideo: true } },
+        numericPd
+    );
+    ok(/91/.test(pronounOneScene[0].mgHint) && !/inside one/i.test(pronounOneScene[0].mgHint), 'pronoun "one" is not mistaken for a second numeric fact');
 
     // ── (5) Authority: creator "use maps" beats the niche mapChart ban ────────
     console.log('[5] authority — map ban override');
@@ -185,7 +269,7 @@ console.log('[3] compiler gating');
 
         // applier (build-video, require with BUILD_VIDEO_NO_RUN=1)
         process.env.BUILD_VIDEO_NO_RUN = '1';
-        const { applySceneDirectives } = require('../src/pipeline/build-video').__test;
+        const { applySceneDirectives, assignFinalSceneIndices } = require('../src/pipeline/build-video').__test;
         const scenes = mkScenes();
         const directives = {
             perScene: [
@@ -201,12 +285,20 @@ console.log('[3] compiler gating');
         ok(scenes[3].transition && scenes[3].transition.type === 'cut' && scenes[3]._txDirected === true, 'transition override → {type,duration} object + _txDirected');
         ok(Array.isArray(scenes[4]._directiveLock) && scenes[4]._directiveLock.includes('framing'), 'scene._directiveLock records written field (serializable array)');
         ok(applySceneDirectives({ perScene: [] }, mkScenes(), {}) === 0, 'no perScene → applier no-op (0)');
+
+        const carvedIdentity = [
+            { index: 0, originalIndex: 4 },
+            { index: 1, sourceSceneIndex: 9 },
+        ];
+        assignFinalSceneIndices(carvedIdentity);
+        ok(carvedIdentity[0].index === 0 && carvedIdentity[0].sourceSceneIndex === 4, 'final reindex preserves original source identity after carving');
+        ok(carvedIdentity[1].index === 1 && carvedIdentity[1].sourceSceneIndex === 9, 'final reindex preserves an existing stable source identity');
     }
 
     // ── (9) Compliance loop (Feature 3) ─────────────────────────────────────
     console.log('[9] compliance loop');
     {
-        const { auditCompliance } = require('../src/directives/compliance-loop');
+        const { auditCompliance, enforceNumericLowerThirdExclusivity } = require('../src/directives/compliance-loop');
         const skip = await auditCompliance({ scenes: [], scriptContext: {} }, {});
         ok(skip.skipped === true && skip.ok === true, 'null directives → skipped no-op (OFF-identical)');
 
@@ -240,6 +332,106 @@ console.log('[3] compiler gating');
 
         const rep2 = await auditCompliance(plan, {});
         ok(rep2.fixed.length === 0, 'compliance idempotent — second pass fixes nothing');
+
+        const numericPlan = {
+            fps: 30,
+            mgStyle: 'clean',
+            scriptContext: { _directives: { raw: 'give all numbers a lowerthird', summary: 'Every number gets a lower third.' } },
+            scenes: [{ index: 0, startTime: 0, endTime: 4, text: 'The tunnel costs $300.', ideaLowerThird: '$300 System Cost' }],
+            mgScenes: [{ type: 'statCounter', sceneIndex: 0, startTime: 0, duration: 4, text: '$300' }],
+            templateScenes: [],
+            motionGraphics: [],
+        };
+        const numericPrep = enforceNumericLowerThirdExclusivity(
+            numericPlan,
+            numericPlan.scriptContext._directives,
+            { allowStageRemoval: true }
+        );
+        ok(numericPlan.mgScenes[0].disabled === true, 'pre-carve compliance disables the competing numeric stage visual');
+        ok(numericPlan.motionGraphics.length === 1 && numericPlan.motionGraphics[0].type === 'lowerThird', 'pre-carve compliance leaves one exclusive numeric lower third');
+        ok(numericPrep.fixed.some(f => f.slice === 'numericLowerThird'), 'pre-carve compliance reports numeric treatment repair');
+        const numericPrep2 = enforceNumericLowerThirdExclusivity(
+            numericPlan,
+            numericPlan.scriptContext._directives,
+            { allowStageRemoval: true }
+        );
+        ok(numericPrep2.fixed.length === 0, 'numeric lower-third pre-carve compliance is idempotent');
+
+        const duplicateOverlayPlan = {
+            fps: 30,
+            mgStyle: 'clean',
+            scriptContext: { _directives: { raw: 'give all numbers a lowerthird' } },
+            scenes: [{ index: 0, startTime: 0, endTime: 5, text: 'The project costs $300.' }],
+            mgScenes: [],
+            templateScenes: [],
+            motionGraphics: [
+                { type: 'lowerThird', sceneIndex: 0, startTime: 0.2, endTime: 4, text: '$300 Project Cost' },
+                { type: 'explainer', sceneIndex: 0, startTime: 0.3, endTime: 4.2, text: '$300 system breakdown' },
+                { type: 'progressBar', sceneIndex: 0, startTime: 0.4, endTime: 4.3, text: 'Project construction progress' },
+            ],
+        };
+        const duplicateOverlayPrep = enforceNumericLowerThirdExclusivity(
+            duplicateOverlayPlan,
+            duplicateOverlayPlan.scriptContext._directives,
+            { allowStageRemoval: true }
+        );
+        ok(duplicateOverlayPlan.motionGraphics[0].disabled !== true, 'directed numeric lower third remains active');
+        ok(duplicateOverlayPlan.motionGraphics[1].disabled === true, 'competing numeric overlay is disabled beside the lower third');
+        ok(duplicateOverlayPlan.motionGraphics[2].disabled === true, 'non-numeric overlay in the same numeric beat is also removed for exclusive treatment');
+        ok(duplicateOverlayPrep.fixed.some(f => /disabled competing explainer/.test(f.action)), 'numeric overlay suppression is reported');
+
+        const staleFalsePositivePlan = {
+            fps: 30,
+            scriptContext: { _directives: { raw: 'give all numbers a lowerthird' } },
+            scenes: [{
+                index: 0,
+                startTime: 0,
+                endTime: 3,
+                text: 'Now think about that for a second.',
+                _numericLowerThirdDirected: true,
+            }],
+            mgScenes: [],
+            templateScenes: [],
+            motionGraphics: [{
+                id: 'directive-number-lower-third-0',
+                type: 'lowerThird',
+                sceneIndex: 0,
+                startTime: 0.2,
+                endTime: 2.8,
+                text: 'for a second',
+            }],
+        };
+        const staleFalsePositivePrep = enforceNumericLowerThirdExclusivity(
+            staleFalsePositivePlan,
+            staleFalsePositivePlan.scriptContext._directives,
+            { allowStageRemoval: true }
+        );
+        ok(staleFalsePositivePlan.motionGraphics[0].disabled === true, 'stale ordinal false-positive lower third is removed');
+        ok(staleFalsePositivePrep.fixed.some(f => /removed false numeric/.test(f.action)), 'false-positive cleanup is reported');
+
+        const identityCollisionPlan = {
+            fps: 30,
+            scriptContext: { _directives: { raw: 'give all numbers a lowerthird' } },
+            scenes: [{
+                index: 2,
+                sourceSceneIndex: 2,
+                originalIndex: 3,
+                startTime: 10,
+                endTime: 14,
+                text: 'The next scene contains no numeric fact.',
+            }],
+            mgScenes: [],
+            templateScenes: [{
+                type: 'statCard',
+                sceneIndex: 2,
+                startTime: 2,
+                endTime: 6,
+                text: '$875 Project Cost',
+            }],
+            motionGraphics: [],
+        };
+        await auditCompliance(identityCollisionPlan, {});
+        ok(identityCollisionPlan.motionGraphics.length === 0, 'a compact index collision cannot assign an earlier numeric card to a different original scene');
 
         // flag-only: banned source can't be silently dropped
         const plan3 = { scenes: [{ index: 0, mediaFile: 'x.mp4', sourceProvider: 'reddit' }], scriptContext: { _directives: { footage: { bannedSources: ['reddit'] } } } };

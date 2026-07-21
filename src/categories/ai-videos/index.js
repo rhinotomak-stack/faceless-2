@@ -7,14 +7,15 @@
 //   index.js          — this descriptor (id/label/formats/generation) + pipeline entry
 //   pipeline.js       — the isolated script → clips flow (ordered, named stages)
 //   script-input.js   — normalize pasted story/link → clean script text
-//   scene-planner.js  — (P7 next) script → scene beats
-//   prompt-generator.js — (P7 next) per-scene → generation prompt
+//   source-loader.js  — secure local-document/public-URL text extraction
+//   scene-planner.js  — script → quality-aware scene beats
+//   prompt-generator.js — per-scene → styled generation prompt
 //   README.md         — how the module is laid out + how to extend it
 //
 // Two ways AI Videos runs:
-//   • Narration-first (today): the normal build pipeline forces the ai-video lane
+//   • Narration-first: the normal build pipeline forces the ai-video lane
 //     (_applyVeoScope scope='all' via generation === 'ai-video'), with stock fallback.
-//   • Script-first (P7): paste a story → pipeline.js turns it into generated clips
+//   • Script-first: paste/import/load a story → pipeline.js turns it into generated clips
 //     with no voiceover required. See pipeline.js for the stage list.
 'use strict';
 

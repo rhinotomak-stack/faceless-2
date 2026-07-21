@@ -14,14 +14,14 @@
 
 class VideoFrameSource {
     constructor() {
-        /** @type {Map<number, DecoderState>} sceneIndex -> decoder state */
+        /** @type {Map<string|number, DecoderState>} clip key -> decoder state */
         this._decoders = new Map();
     }
 
     /**
      * Initialize a WebCodecs decoder for a video file.
      *
-     * @param {number} sceneIndex - Scene index in the timeline
+     * @param {string|number} sceneIndex - Unique clip key in the timeline
      * @param {string} fileUrl - file:// URL or path to local MP4
      * @param {number} fps - Timeline FPS (for timestamp calculations)
      * @returns {Promise<boolean>} true if WebCodecs path is available for this file
@@ -63,6 +63,7 @@ class VideoFrameSource {
                 pendingFrames: [], // Decoded VideoFrames waiting to be consumed
                 currentFrame: null, // Most recently returned frame (auto-closed on next call)
                 decodePromise: null, // Resolves when a new frame is decoded
+                flushed: false,
                 fps,
                 closed: false,
             });
@@ -81,7 +82,7 @@ class VideoFrameSource {
      * Decodes sequentially forward — never seeks backward.
      * Caller does NOT need to close the returned frame — it's auto-closed on next call.
      *
-     * @param {number} sceneIndex
+     * @param {string|number} sceneIndex
      * @param {number} timeSec - Target time in seconds within the source video
      * @returns {Promise<VideoFrame|null>}
      */
@@ -119,6 +120,12 @@ class VideoFrameSource {
 
             // Need to decode more — feed samples in batches for decoder pipelining
             if (state.nextSampleIdx >= state.samples.length) {
+                if (!state.flushed && state.decoder?.state === 'configured') {
+                    try { await state.decoder.flush(); } catch (_) { }
+                    state.flushed = true;
+                }
+                const finalIdx = this._findBestFrame(state.pendingFrames, targetUs);
+                if (finalIdx >= 0) return this._consumeFrame(state, finalIdx);
                 // No more samples — return whatever we have
                 if (state.pendingFrames.length > 0) {
                     return this._consumeFrame(state, state.pendingFrames.length - 1);
@@ -536,7 +543,7 @@ class VideoFrameSource {
         // (meaning we've decoded far enough) or if last frame is past target
         if (bestIdx >= 0) {
             const lastTs = frames[frames.length - 1].timestamp;
-            if (lastTs >= targetUs || bestIdx === frames.length - 1) {
+            if (lastTs >= targetUs) {
                 return bestIdx;
             }
         }
@@ -577,4 +584,5 @@ class VideoFrameSource {
     }
 }
 
-window.VideoFrameSource = VideoFrameSource;
+if (typeof window !== 'undefined') window.VideoFrameSource = VideoFrameSource;
+if (typeof module !== 'undefined' && module.exports) module.exports = VideoFrameSource;

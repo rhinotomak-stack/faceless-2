@@ -40,6 +40,10 @@ const { filterDisabledSources, sanitizeSourceHint, providerToSourceHint } = requ
 const {
     repairDisplaySearchQuery,
 } = require('../media/search-keywords');
+const {
+    chooseNumericLabel,
+    containsNumericSignal: sharedContainsNumericSignal,
+} = require('../directives/numeric-signals');
 
 // ============================================================
 // HELPERS
@@ -882,6 +886,9 @@ function _parseVisualInstructionPrefs(rawInstructions = '') {
         preferMaps: /\b(?:use|prefer|more)\s+maps?\b/.test(lower) || /\bmap animation\b/.test(lower) || /\b(?:map[\s-]*charts?|route[\s-]*maps?|trade[\s-]*route[\s-]*maps?|shipping[\s-]*route[\s-]*maps?|locator[\s-]*maps?)\b/.test(lower),
         preferTemplates: /\b(?:use|prefer|more)\s+(?:templates?|infographics?|cards?)\b/.test(lower) || /\buse more templates?\b/.test(lower),
         preferGraphics: /\b(?:use|prefer|more)\s+(?:graphics|motion graphics|mgs?|overlays)\b/.test(lower),
+        forceNumericLowerThird:
+            /\b(?:all|every|each)\s+(?:number|numbers|numeric value|numeric values|stat|stats|statistic|statistics)\b.{0,48}\blower[\s-]?thirds?\b/.test(lower)
+            || /\blower[\s-]?thirds?\b.{0,48}\b(?:all|every|each)\s+(?:number|numbers|numeric value|numeric values|stat|stats|statistic|statistics)\b/.test(lower),
         minimizeGraphics: /\b(?:no|avoid|less|fewer|minimal)\s+(?:graphics|motion graphics|mgs?|overlays)\b/.test(lower),
         avoidFullscreenMG: /\b(?:no|avoid|less|fewer|minimal|minimize)\s+(?:fullscreen|full-?screen|full screen)(?:\s+(?:graphics|mgs?))?\b/.test(lower),
         preferImages: /\b(?:use|prefer|more)\s+(?:images|photos|stills)\b/.test(lower),
@@ -994,6 +1001,7 @@ function _mergeCompiledDirectives(user, directives) {
     if (g.fewerTemplates) user.minimizeTemplates = true;
     if (g.moreMGs) user.preferGraphics = true;
     if (g.fewerMGs) user.minimizeGraphics = true;
+    if (g.numericTreatment === 'lowerThird') user.forceNumericLowerThird = true;
     if (Array.isArray(g.bannedTypes) && g.bannedTypes.length) {
         user.bannedMGTypes = new Set([...(user.bannedMGTypes || []), ...g.bannedTypes.map(t => String(t).trim()).filter(Boolean)]);
     }
@@ -1853,7 +1861,8 @@ SCENE N: lane=<short editorial role> | source=<best source family> | graphics=<f
 
 RULES:
 - Cover EVERY scene exactly once.
-- Keep scene notes short and practical.
+- Keep each SCENE line under 28 words total and each note under 12 words.
+- Output only the four GLOBAL lines plus the required SCENE lines; no commentary.
 - Let graphics choices be editorial, not mechanical.
 - Use "template" when a card/panel layout would communicate better than raw footage.
 - Use "fullscreenMG" only when replacing footage is clearly the better communication choice.
@@ -1966,7 +1975,10 @@ function _logGlobalOutlineDetails(outline, scenes) {
 async function _generateGlobalVisualOutline(scenes, scriptContext, directorsBrief, plannerDirectives) {
     console.log(`   🧭 [Step 4 Outline] generating whole-video outline for ${scenes.length} scenes...`);
     const prompt = buildGlobalOutlinePrompt(scenes, scriptContext, directorsBrief, plannerDirectives);
-    const maxTokens = Math.max(1200, scenes.length * 60);
+    // Reserve enough space for every required scene line plus the four global
+    // lines. The old 60-token/scene budget could truncate the tail of longer
+    // videos even when the model otherwise followed the contract.
+    const maxTokens = Math.min(8000, Math.max(1600, 600 + scenes.length * 72));
     const hasBedrockFallback = !!(process.env.BEDROCK_ACCESS_KEY_ID && process.env.BEDROCK_SECRET_ACCESS_KEY);
     if (hasBedrockFallback) console.log(`   🟣 [VP Outline] routing via task-aware text router (Bedrock fallback available)`);
     const rawText = await callAI(prompt, { maxTokens, taskType: 'planner-outline' });
@@ -2364,6 +2376,97 @@ function _useLeanVpFinalizer() {
     return String(process.env.VP_FULL_GUARDRAILS || '').trim() !== '1';
 }
 
+const _NUMERIC_TOKEN_RE = /(?:[$€£¥]\s*)?\d+(?:[.,]\d+)*(?:\s*(?:%|°[cf]?|[a-z]{1,8}(?:\/[a-z0-9³]+)?))?/i;
+const _NUMBER_WORD_RE = /\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundreds?|thousands?|millions?|billions?|trillions?|half|quarter)\b/i;
+
+function _containsNumericSignal(value) {
+    return sharedContainsNumericSignal(value);
+}
+
+function _cleanNumericLabel(value) {
+    return String(value || '')
+        .replace(/^\s*[a-z][a-z0-9-]*\s*:\s*/i, '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 80);
+}
+
+function _numericLowerThirdLabel(scene) {
+    const candidates = [
+        scene?.ideaLowerThird,
+        scene?.mgHint,
+        scene?.templateHint,
+        scene?.fullscreenMG,
+        ...(Array.isArray(scene?.protectedTerms) ? scene.protectedTerms : []),
+    ].map(_cleanNumericLabel);
+    return chooseNumericLabel(candidates, scene?.text, 80);
+}
+
+function _enforceNumericLowerThirdDirective(scenes, scriptContext = {}, directorsBrief = {}, plannerDirectives = {}) {
+    const directives = scriptContext?._directives || {};
+    const raw = String(directives.raw || directorsBrief?.freeInstructions || '');
+    const requested = plannerDirectives?.user?.forceNumericLowerThird === true
+        || directives?.graphics?.numericTreatment === 'lowerThird'
+        || (
+            /\b(?:all|every|each)\s+(?:number|numbers|numeric value|numeric values|stat|stats|statistic|statistics)\b.{0,48}\blower[\s-]?thirds?\b/i.test(raw)
+            || /\blower[\s-]?thirds?\b.{0,48}\b(?:all|every|each)\s+(?:number|numbers|numeric value|numeric values|stat|stats|statistic|statistics)\b/i.test(raw)
+        );
+    if (!requested) return [];
+
+    const fixes = [];
+    for (const scene of scenes || []) {
+        const content = [
+            scene?.text,
+            scene?.ideaLowerThird,
+            scene?.mgHint,
+            scene?.templateHint,
+            scene?.fullscreenMG,
+            ...(Array.isArray(scene?.protectedTerms) ? scene.protectedTerms : []),
+        ].filter(Boolean).join(' ');
+        if (!_containsNumericSignal(content)) continue;
+
+        const label = _numericLowerThirdLabel(scene);
+        if (!label) continue;
+        const before = {
+            fullscreenMG: scene.fullscreenMG || null,
+            templateHint: scene.templateHint || null,
+            mgHint: scene.mgHint || null,
+        };
+
+        const fallbackKeyword = scene.templateBgQuery
+            || scene.bgQuery
+            || scene.stockQuery
+            || scene.webQuery
+            || scene.ideaVisual
+            || scene.visualIntent
+            || extractFallbackKeyword(scene.text || '');
+        scene.fullscreenMG = null;
+        scene.templateHint = null;
+        scene.templateType = null;
+        scene.isListicleOverview = false;
+        scene.mgHint = `lowerThird: ${label}`;
+        scene.keyword = (scene.keyword && scene.keyword !== 'none') ? scene.keyword : fallbackKeyword;
+        scene.mediaType = scene.mediaType || (directorsBrief?.tier?.allowVideo === false ? 'image' : 'video');
+        scene.sourceHint = scene.sourceHint || _pickPreferredVideoSource(scriptContext.nicheId || 'general', plannerDirectives, 'youtube');
+        if (scene.keyword) {
+            scene.stockQuery = scene.stockQuery || _autoStockQuery(scene.keyword);
+            scene.webQuery = scene.webQuery || _autoWebQuery(scene.keyword, scene.sourceHint);
+        }
+        scene._numericLowerThirdDirected = true;
+        if (!Array.isArray(scene._directiveLock)) scene._directiveLock = [];
+        for (const field of ['fullscreenMG', 'templateHint', 'mgHint']) {
+            if (!scene._directiveLock.includes(field)) scene._directiveLock.push(field);
+        }
+        fixes.push({
+            index: scene.index,
+            before,
+            after: scene.mgHint,
+            reason: 'creator required every number/stat to use a lower third',
+        });
+    }
+    return fixes;
+}
+
 async function _finalizeVisualPlan(enrichedScenes, scriptContext, directorsBrief, plannerDirectives, globalOutline = null) {
     // Listicle keyword variety enforcement
     if (scriptContext.format === 'listicle' && scriptContext.listicleItems) {
@@ -2399,6 +2502,16 @@ async function _finalizeVisualPlan(enrichedScenes, scriptContext, directorsBrief
             }
         }
         const nicheMapDrops = enrichedScenes.filter(s => s._nicheMapDrop).length;
+
+        const numericLowerThirdFixes = _enforceNumericLowerThirdDirective(
+            enrichedScenes,
+            scriptContext,
+            directorsBrief,
+            plannerDirectives
+        );
+        if (numericLowerThirdFixes.length > 0) {
+            console.log(`   [Creator Numeric Treatment] forced lowerThird on ${numericLowerThirdFixes.length} number/stat scene(s)`);
+        }
 
         for (const scene of enrichedScenes) {
             _normalizeProtectedTerms(scene, scriptContext);
@@ -2447,8 +2560,8 @@ async function _finalizeVisualPlan(enrichedScenes, scriptContext, directorsBrief
             mapOverrides: 0,
             framingOverrides: 0,
             styleMixAdjusted: 0,
-            graphicsInjected: 0,
-            graphicsTrimmed: 0,
+            graphicsInjected: numericLowerThirdFixes.length,
+            graphicsTrimmed: numericLowerThirdFixes.filter(f => f.before.fullscreenMG || f.before.templateHint).length,
         });
         console.log(summary);
         _logFinalVpDiagnostics(enrichedScenes, scriptContext, globalOutline);
@@ -2649,6 +2762,16 @@ async function _finalizeVisualPlan(enrichedScenes, scriptContext, directorsBrief
     // Run ONCE across the full scene list (was per-batch, which missed
     // cross-chunk skew: e.g. 3 batches each 50% youtube = 50% youtube globally
     // but ran with 2-scene streaks in every chunk seam).
+    const numericLowerThirdFixes = _enforceNumericLowerThirdDirective(
+        enrichedScenes,
+        scriptContext,
+        directorsBrief,
+        plannerDirectives
+    );
+    if (numericLowerThirdFixes.length > 0) {
+        console.log(`   [Creator Numeric Treatment] forced lowerThird on ${numericLowerThirdFixes.length} number/stat scene(s)`);
+    }
+
     _enforceSourceDiversity(enrichedScenes, scriptContext.nicheId);
 
     for (const scene of enrichedScenes) {
@@ -2703,8 +2826,8 @@ async function _finalizeVisualPlan(enrichedScenes, scriptContext, directorsBrief
         mapOverrides: complianceStats.mapOverrides || 0,
         framingOverrides: complianceStats.framingOverrides || 0,
         styleMixAdjusted: complianceStats.styleMixAdjusted || 0,
-        graphicsInjected: complianceStats.graphicsInjected || 0,
-        graphicsTrimmed: complianceStats.graphicsTrimmed || 0,
+        graphicsInjected: (complianceStats.graphicsInjected || 0) + numericLowerThirdFixes.length,
+        graphicsTrimmed: (complianceStats.graphicsTrimmed || 0) + numericLowerThirdFixes.filter(f => f.before.fullscreenMG || f.before.templateHint).length,
     });
     console.log(summary);
     _logFinalVpDiagnostics(enrichedScenes, scriptContext, globalOutline);
@@ -6280,6 +6403,7 @@ module.exports = {
 // Test-only surface (verify-directives.js). Not part of the public API.
 module.exports.__test = {
     _buildPlannerDirectives,
+    _enforceNumericLowerThirdDirective,
     _mergeCompiledDirectives,
     _parseVisualInstructionPrefs,
     _userExplicitlyWantsMaps,

@@ -21,7 +21,7 @@ function findChrome() {
     const browser = await puppeteer.launch({
         executablePath: findChrome(),
         headless: 'new',
-        args: ['--no-sandbox', '--disable-blink-features=AutomationControlled', '--lang=en-US,en'],
+        args: ['--disable-blink-features=AutomationControlled', '--lang=en-US,en'],
         defaultViewport: { width: 1440, height: 2000 },
     });
     const page = await browser.newPage();

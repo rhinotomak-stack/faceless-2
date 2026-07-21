@@ -42,9 +42,9 @@ function _getModel() {
 function buildSystemPrompt(focusNicheId) {
     const parts = [];
 
-    parts.push(`You are the QA Studio AI agent for YTA Empire — a faceless YouTube video generator.
-Your job is to analyze rendered video clips and flag issues. You are being tested by the developer to verify your knowledge.
-Answer concisely and accurately. If you are unsure, say so clearly.`);
+    parts.push(`You are the Editor Agent for YTA Empire - a faceless YouTube video generator and timeline editor.
+You understand the full generated project, the active editor selection, footage, motion graphics, pacing, framing, transitions, and quality diagnostics.
+Answer concisely and accurately. Never claim that an edit was applied unless the host application confirms execution. If you are unsure, say so clearly.`);
 
     // ── App overview ──
     parts.push(`
@@ -225,7 +225,32 @@ function buildProjectPrompt(projectContext) {
         parts.push(`Entities : ${projectContext.entities.join(', ')}`);
     }
 
+    const activeScope = projectContext.activeScope;
+    if (activeScope) {
+        parts.push(`\nACTIVE EDITOR SCOPE: ${activeScope.label || activeScope.kind || 'Whole project'}`);
+        if (activeScope.kind !== 'project') {
+            parts.push(`  Range: ${Number(activeScope.fromSec || 0).toFixed(2)}s - ${Number(activeScope.toSec || 0).toFixed(2)}s`);
+        }
+        for (const clip of (activeScope.clipRefs || []).slice(0, 40)) {
+            parts.push(`  Clip scene=${clip.sourceSceneIndex} [${Number(clip.startTime || 0).toFixed(2)}-${Number(clip.endTime || 0).toFixed(2)}] "${clip.keyword || clip.text || ''}"`);
+        }
+        for (const visual of (activeScope.visualRefs || []).slice(0, 20)) {
+            parts.push(`  Visual type=${visual.type || '?'} [${Number(visual.startTime || 0).toFixed(2)}-${Number(visual.endTime || 0).toFixed(2)}] "${visual.label || ''}"`);
+        }
+        parts.push('When the creator says "this", "here", or "the selected part", use this active scope.');
+    }
+
     // Scene list — compact table so the agent knows every scene
+    const editorInspection = projectContext.editorInspection;
+    if (editorInspection && typeof editorInspection === 'object') {
+        parts.push('\nLIVE EDITOR INSPECTION:');
+        for (const [capabilityId, inspection] of Object.entries(editorInspection).slice(0, 12)) {
+            const compact = JSON.stringify(inspection || {}).slice(0, 2_400);
+            parts.push(`  ${capabilityId}: ${compact}`);
+        }
+        parts.push('Use these live capability inspections when explaining selected media, framing, effects, graphics, pacing, timeline setup, captions, audio, or transitions.');
+    }
+
     if (projectContext.sceneList?.length) {
         parts.push(`\nALL SCENES (${projectContext.sceneList.length}):`);
         for (const s of projectContext.sceneList) {

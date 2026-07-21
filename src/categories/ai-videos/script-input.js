@@ -1,15 +1,12 @@
 // src/categories/ai-videos/script-input.js
 // ============================================================================
-// Step 1 of the AI Videos pipeline: turn whatever the creator pasted — a story,
-// a script, or (later) a URL/file — into ONE clean, normalized script string the
-// scene planner can split. Isolated + pure (no I/O, no AI) so it's trivially
-// unit-testable and safe to extend.
+// Step 1 of the AI Videos pipeline: turn imported or pasted story text into ONE
+// clean, normalized script string the scene planner can split. File/URL I/O lives
+// in source-loader.js; this module stays pure and unit-testable.
 // ============================================================================
 'use strict';
 
-// A rough URL/file detector — a single line that looks like a link or a path,
-// so the caller can decide to fetch it (fetching itself is added later, out of scope
-// for this pure module).
+// A rough URL/file detector retained for compatibility and diagnostics.
 function isLink(input) {
     const s = String(input || '').trim();
     if (!s || /\s/.test(s)) return false; // multi-word = it's a script, not a link

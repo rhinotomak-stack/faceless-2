@@ -10,6 +10,9 @@
  */
 'use strict';
 
+const { applyFramingPreset } = require('./framing-preset');
+const { applySceneEffectPreset } = require('./effect-preset');
+
 const DIRECTIVE_MG_ALIASES = {
     'map': 'mapChart', 'maps': 'mapChart', 'map animation': 'mapChart', 'map chart': 'mapChart',
     'split screen': 'splitScreen', 'split-screen': 'splitScreen', 'splitscreen': 'splitScreen',
@@ -153,12 +156,20 @@ function applySceneDirectives(directives, scenes, scriptContext, opts = {}) {
                 scene.keyword = null; scene.stockQuery = null; scene.sourceHint = null;
                 lockField(scene, 'templateHint');
             }
-            if (set.framing) { scene.framing = set.framing; lockField(scene, 'framing'); }
+            if (set.framing) {
+                const framing = applyFramingPreset(scene, set.framing);
+                for (const field of framing.fields) lockField(scene, field);
+                lockField(scene, 'framing');
+            }
             if (set.transition) { scene.transition = { type: set.transition.type, duration: set.transition.duration }; scene._txDirected = true; lockField(scene, 'transition'); }
             if (set.mediaType) { scene.mediaType = set.mediaType; lockField(scene, 'mediaType'); }
             if (set.sourceHint) { scene.sourceHint = set.sourceHint; lockField(scene, 'sourceHint'); }
             if (set.keyword) { scene.keyword = set.keyword; scene.visualIntent = set.keyword; lockField(scene, 'keyword'); }
-            if (set.effect) { scene._directiveEffect = { ...(scene._directiveEffect || {}), ...set.effect }; lockField(scene, 'effect'); }
+            if (set.effect) {
+                const effect = applySceneEffectPreset(scene, set.effect);
+                for (const field of effect.fields) lockField(scene, field);
+                lockField(scene, 'effect');
+            }
             touched++;
             const changed = Object.keys(set).concat(remove.map(r => '-' + r));
             log(`   ⚡ [Directive] ${entry.when.kind} → scene ${scene.index}: ${changed.join(', ')}`);

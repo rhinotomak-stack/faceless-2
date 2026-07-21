@@ -12,7 +12,7 @@ const SettingsIO = require('../ui/js/settings-io');
 let pass = 0, fail = 0;
 const ok = (n, c) => c ? (pass++, console.log(`  ✅ ${n}`)) : (fail++, console.log(`  ❌ ${n}`));
 
-const CHECKBOX_KEYS = new Set(['smartAI', 'klingAvatar', 'veoAiVideo', 'clipAnalyzer', 'fastMedia', 'buildResume', 'forceFreshFootage']);
+const CHECKBOX_KEYS = new Set(['smartAI', 'klingAvatar', 'veoAiVideo', 'clipAnalyzer', 'fastMedia', 'forceFreshFootage']);
 function mkEls(fill) {
     const els = {};
     for (const s of schema.SETTINGS) {
@@ -32,7 +32,11 @@ function mkEls(fill) {
 console.log('\n=== schema ↔ index.html id parity ===');
 {
     const html = fs.readFileSync(path.join(__dirname, '..', 'ui', 'index.html'), 'utf8');
-    const htmlIds = new Set([...html.matchAll(/\bid=["']([^"']+)["']/g)].map(m => m[1]));
+    const allHtmlIds = [...html.matchAll(/\bid=["']([^"']+)["']/g)].map(m => m[1]);
+    const htmlIds = new Set(allHtmlIds);
+    const duplicateIds = [...htmlIds].filter((id) => allHtmlIds.filter((candidate) => candidate === id).length > 1);
+    ok('index.html has no duplicate DOM ids', duplicateIds.length === 0);
+    if (duplicateIds.length) console.log('     duplicates: ' + duplicateIds.join(', '));
     const need = schema.SETTINGS.filter(s => s.el && !s.deprecated);
     const missing = need.filter(s => !htmlIds.has(s.el)).map(s => `${s.key}#${s.el}`);
     ok(`all ${need.length} live schema controls exist in index.html`, missing.length === 0);
@@ -48,9 +52,11 @@ const src = mkEls(true);
 const getSrc = (id) => src[id];
 const collected = SettingsIO.collect('ls', { getEl: getSrc });
 
-// Excluded correctly?
-ok('deprecated ollamaModel NOT collected', !('ollamaModel' in collected) && !('ollamaVisionModel' in collected));
+// Retired provider settings must be gone, not merely hidden.
+ok('retired Ollama settings removed from schema', !schema.byKey('ollamaModel') && !schema.byKey('ollamaVisionModel'));
 ok('special buildStyleProfile NOT collected', !('buildStyleProfile' in collected));
+ok('fast pipeline diagnostic is not persisted globally', !('fastMedia' in collected));
+ok('fast pipeline diagnostic is not persisted per project', !(schema.byKey('fastMedia').persist || []).includes('fvp'));
 
 // Included the expected 'ls' element settings (non-special, non-deprecated).
 const expectLs = schema.SETTINGS.filter(s => s.el && !s.deprecated && !s.special && (s.persist || []).includes('ls')).map(s => s.key);
@@ -73,6 +79,7 @@ ok('save -> load round-trip preserves every element setting', rtOk);
 const all = SettingsIO.collect(null, { getEl: getSrc });
 const expectAll = schema.SETTINGS.filter(s => s.el && !s.deprecated && !s.special).map(s => s.key);
 ok(`collect(null) has all ${expectAll.length} element settings`, expectAll.every(k => k in all));
+ok('fast pipeline diagnostic is still passed to an explicitly launched build', all.fastMedia === true);
 
 // apply falls back to defaults for missing keys.
 const dst2 = mkEls(false);

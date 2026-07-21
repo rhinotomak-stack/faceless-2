@@ -21,16 +21,362 @@
 'use strict';
 
 const util = require('./directive-util');
-
-// Texture-family effect ids (mirror the FX director's texture floor). "No grain"
-// enforcement strips these from the base look + per-scene deltas.
-const TEXTURE_FX = new Set(['grain', 'dust', 'vhsband', 'staticNoise', 'flicker', 'scanlines', 'scanline']);
+const { applyFramingPreset } = require('./framing-preset');
+const { applyProjectEffectPreset } = require('./effect-preset');
+const { applyHardCuts } = require('./transition-preset');
+const {
+    chooseNumericLabel,
+    containsNumericSignal,
+} = require('./numeric-signals');
 
 function _mediaScenes(plan) {
     return (plan.scenes || []).filter(s => s && !s.isMGScene);
 }
 
 function _isMapType(t) { return /map/i.test(String(t || '')); }
+
+const NUMERIC_TOKEN_RE = /(?:[$€£¥]\s*)?\d+(?:[.,]\d+)*(?:\s*(?:%|°[cf]?|[a-z]{1,8}(?:\/[a-z0-9³]+)?))?/i;
+const NUMBER_WORD_RE = /\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundreds?|thousands?|millions?|billions?|trillions?|half|quarter)\b/i;
+
+function _containsNumber(value) {
+    return containsNumericSignal(value);
+}
+
+function _numericLowerThirdRequested(directives = {}) {
+    if (directives?.graphics?.numericTreatment === 'lowerThird') return true;
+    const raw = String(directives.raw || directives.summary || '');
+    return /\b(?:all|every|each)\s+(?:number|numbers|numeric value|numeric values|stat|stats|statistic|statistics)\b.{0,48}\blower[\s-]?thirds?\b/i.test(raw)
+        || /\blower[\s-]?thirds?\b.{0,48}\b(?:all|every|each)\s+(?:number|numbers|numeric value|numeric values|stat|stats|statistic|statistics)\b/i.test(raw);
+}
+
+function _cleanNumericLabel(value) {
+    return String(value || '')
+        .replace(/^\s*[a-z][a-z0-9-]*\s*:\s*/i, '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 80);
+}
+
+function _integerId(value) {
+    const parsed = Number(value);
+    return Number.isInteger(parsed) ? parsed : null;
+}
+
+function _sceneStableIndex(scene) {
+    for (const value of [
+        scene?.originalIndex,
+        scene?.sourceSceneIndex,
+        scene?.sceneIndex,
+        scene?.index,
+    ]) {
+        const parsed = _integerId(value);
+        if (parsed != null) return parsed;
+    }
+    return null;
+}
+
+function _graphicSceneIndexes(graphic) {
+    const nested = graphic?.mgData && typeof graphic.mgData === 'object'
+        ? graphic.mgData
+        : null;
+    const values = [
+        graphic?.originalSceneIndex,
+        graphic?.sourceSceneIndex,
+        graphic?.targetSceneIndex,
+        graphic?.sceneIndex,
+        nested?.originalSceneIndex,
+        nested?.sourceSceneIndex,
+        nested?.targetSceneIndex,
+        nested?.sceneIndex,
+    ];
+    return [...new Set(values.map(_integerId).filter(value => value != null))];
+}
+
+function _graphicMatchesScene(graphic, scene) {
+    const graphicIndexes = _graphicSceneIndexes(graphic);
+    if (graphicIndexes.length === 0) return null;
+    const sceneIndex = _sceneStableIndex(scene);
+    return sceneIndex != null && graphicIndexes.includes(sceneIndex);
+}
+
+function _graphicWindow(graphic) {
+    const start = Number(graphic?.startTime || 0);
+    const end = Number(
+        graphic?.endTime
+        || (start + Number(graphic?.durationSeconds || graphic?.duration || 0))
+    );
+    return { start, end: Math.max(start, end) };
+}
+
+function _graphicsForScene(videoPlan, scene) {
+    const start = Number(scene?.startTime || 0);
+    const end = Number(scene?.endTime || start);
+    const out = [];
+    for (const group of ['motionGraphics', 'mgScenes', 'templateScenes']) {
+        for (const graphic of videoPlan?.[group] || []) {
+            if (!graphic || graphic.disabled) continue;
+            const identityMatch = _graphicMatchesScene(graphic, scene);
+            const graphicWindow = _graphicWindow(graphic);
+            const timeMatch = graphicWindow.start < end - 0.02 && graphicWindow.end > start + 0.02;
+
+            // Explicit ownership wins. A stale compact scene.index must never
+            // override a different originalIndex after fullscreen carving.
+            if (identityMatch === true || (identityMatch == null && timeMatch)) {
+                out.push({ group, graphic });
+            }
+        }
+    }
+    return out;
+}
+
+function _isStageGraphic(group, graphic) {
+    if (group === 'mgScenes' || group === 'templateScenes') return true;
+    return graphic?.category === 'fullscreen'
+        || graphic?.templateType === true
+        || graphic?.trackId === 'video-track-3';
+}
+
+function _graphicContainsNumber(graphic) {
+    return _containsNumber([
+        graphic?.text,
+        graphic?.subtext,
+        graphic?.templateText,
+        graphic?.templateSubtext,
+        graphic?.label,
+        graphic?.value,
+    ].filter(Boolean).join(' '));
+}
+
+function _clearStaleGraphicPayload(graphic) {
+    for (const key of [
+        '_authoredAssets',
+        '_authoredComposition',
+        '_authoredNs',
+        '_explainerImageUrl',
+        'explainerImageFile',
+        'explainerLabel',
+        'explainerQuery',
+        'items',
+        'label',
+        'templateType',
+        'value',
+    ]) {
+        delete graphic[key];
+    }
+}
+
+function _numericLowerThirdLabel(scene, graphics = []) {
+    const candidates = [
+        scene?.ideaLowerThird,
+        scene?.mgHint,
+        scene?.templateHint,
+        scene?.fullscreenMG,
+        ...(Array.isArray(scene?.protectedTerms) ? scene.protectedTerms : []),
+        ...graphics.flatMap(({ graphic }) => [
+            graphic?.text,
+            graphic?.subtext,
+            graphic?.templateText,
+            graphic?.templateSubtext,
+            graphic?.label,
+            graphic?.value,
+        ]),
+    ].map(_cleanNumericLabel);
+    return chooseNumericLabel(candidates, scene?.text, 80);
+}
+
+function _makeNumericLowerThird(scene, label, videoPlan) {
+    const fps = Math.max(1, Number(videoPlan?.fps || 30));
+    const sceneStart = Math.max(0, Number(scene?.startTime || 0));
+    const sceneEnd = Math.max(sceneStart + 0.5, Number(scene?.endTime || sceneStart + 3));
+    const startTime = Math.min(sceneEnd - 0.45, sceneStart + Math.min(0.2, (sceneEnd - sceneStart) * 0.08));
+    const duration = Math.max(0.5, Math.min(5, sceneEnd - startTime - 0.08));
+    const stableSceneIndex = _sceneStableIndex(scene) ?? scene.index;
+    return {
+        id: `directive-number-lower-third-${stableSceneIndex}`,
+        type: 'lowerThird',
+        category: 'overlay',
+        text: label,
+        subtext: '',
+        startTime,
+        endTime: startTime + duration,
+        duration,
+        durationSeconds: duration,
+        durationFrames: Math.max(1, Math.round(duration * fps)),
+        durationUnit: 'seconds',
+        position: 'bottom-left',
+        sceneIndex: scene.index,
+        sourceSceneIndex: stableSceneIndex,
+        originalSceneIndex: stableSceneIndex,
+        style: videoPlan?.mgStyle || 'clean',
+        selectionMode: 'creator-directive',
+        _numericLowerThirdDirected: true,
+    };
+}
+
+/**
+ * Enforce the creator's "numbers use lower thirds" instruction as one
+ * exclusive treatment. Before V1 carving, allowStageRemoval=true safely
+ * removes competing fullscreen/template visuals. After carving, legacy stage
+ * visuals are preserved and any duplicate overlay is suppressed so QA never
+ * creates a black coverage gap.
+ */
+function enforceNumericLowerThirdExclusivity(videoPlan, directives, opts = {}) {
+    const d = directives || videoPlan?.scriptContext?._directives;
+    const result = { checked: false, violations: [], fixed: [], unfixable: [] };
+    if (!_numericLowerThirdRequested(d)) return result;
+
+    result.checked = true;
+    if (!Array.isArray(videoPlan.motionGraphics)) videoPlan.motionGraphics = [];
+    const scenes = _mediaScenes(videoPlan);
+    const allowStageRemoval = opts.allowStageRemoval === true;
+    const V = (entry) => {
+        result.violations.push(entry);
+        if (typeof opts.onViolation === 'function') opts.onViolation(entry);
+    };
+    const F = (entry) => {
+        result.fixed.push(entry);
+        if (typeof opts.onFix === 'function') opts.onFix(entry);
+    };
+
+    for (const scene of scenes) {
+        let related = _graphicsForScene(videoPlan, scene);
+        const spokenContent = String(scene?.text || '').trim();
+        if (!_containsNumber(spokenContent)) {
+            if (scene?._numericLowerThirdDirected) {
+                for (const { group, graphic } of related) {
+                    const directedGraphic = group === 'motionGraphics'
+                        && String(graphic?.type || '').toLowerCase() === 'lowerthird'
+                        && (graphic?._numericLowerThirdDirected
+                            || String(graphic?.id || '').startsWith('directive-number-lower-third-'));
+                    if (!directedGraphic || graphic.disabled) continue;
+                    graphic.disabled = true;
+                    F({
+                        slice: 'numericLowerThird',
+                        sceneIndex: scene.index,
+                        action: 'removed false numeric lowerThird from non-numeric narration',
+                    });
+                }
+                scene._numericLowerThirdDirected = false;
+                if (/^\s*lower[\s-]?third\s*:/i.test(String(scene.mgHint || ''))) scene.mgHint = null;
+            }
+            continue;
+        }
+
+        const label = _numericLowerThirdLabel(scene, related);
+        if (!label) {
+            result.unfixable.push({
+                slice: 'numericLowerThird',
+                sceneIndex: scene.index,
+                reason: `scene ${scene.index} contains a number but no safe lower-third label could be derived`,
+            });
+            continue;
+        }
+
+        const stageVisuals = related.filter(({ group, graphic }) => _isStageGraphic(group, graphic));
+        const lowerThirds = related.filter(({ group, graphic }) => (
+            group === 'motionGraphics'
+            && String(graphic?.type || '').toLowerCase() === 'lowerthird'
+        ));
+
+        if (stageVisuals.length > 0 && !allowStageRemoval) {
+            // Once footage has been carved away, deleting the stage visual can
+            // expose black frames. Keep the coverage and suppress the redundant
+            // overlay; the next fresh build fixes the treatment before carving.
+            for (const { graphic } of lowerThirds) {
+                if (graphic.disabled) continue;
+                graphic.disabled = true;
+                F({
+                    slice: 'numericLowerThird',
+                    sceneIndex: scene.index,
+                    action: 'suppressed duplicate lowerThird beside a carved stage visual',
+                });
+            }
+            continue;
+        }
+
+        if (stageVisuals.length > 0) {
+            for (const { group, graphic } of stageVisuals) {
+                if (graphic.disabled) continue;
+                graphic.disabled = true;
+                V({
+                    slice: 'numericLowerThird',
+                    sceneIndex: scene.index,
+                    expected: `lowerThird: ${label}`,
+                    actual: graphic.type || group,
+                });
+                F({
+                    slice: 'numericLowerThird',
+                    sceneIndex: scene.index,
+                    action: `disabled competing ${graphic.type || group} before footage carving`,
+                });
+            }
+            scene.fullscreenMG = null;
+            scene.templateHint = null;
+            related = _graphicsForScene(videoPlan, scene);
+        }
+
+        const existing = related.find(({ group, graphic }) => (
+            group === 'motionGraphics'
+            && String(graphic?.type || '').toLowerCase() === 'lowerthird'
+        ));
+        if (existing) {
+            existing.graphic.disabled = false;
+            if (String(existing.graphic.text || '') !== label) {
+                _clearStaleGraphicPayload(existing.graphic);
+            }
+            existing.graphic.text = label;
+            existing.graphic.position = existing.graphic.position || 'bottom-left';
+            existing.graphic._numericLowerThirdDirected = true;
+            for (const { group, graphic } of related) {
+                if (graphic === existing.graphic || group !== 'motionGraphics' || graphic.disabled) continue;
+                graphic.disabled = true;
+                F({
+                    slice: 'numericLowerThird',
+                    sceneIndex: scene.index,
+                    action: `disabled competing ${graphic.type || 'overlay'} beside the directed lowerThird`,
+                });
+            }
+            continue;
+        }
+
+        const replaceable = related.find(({ group, graphic }) => (
+            group === 'motionGraphics'
+            && !_isStageGraphic(group, graphic)
+            && _graphicContainsNumber(graphic)
+        )) || related.find(({ group, graphic }) => (
+            group === 'motionGraphics'
+            && !_isStageGraphic(group, graphic)
+        ));
+        const previousType = replaceable?.graphic?.type || 'none';
+        V({
+            slice: 'numericLowerThird',
+            sceneIndex: scene.index,
+            expected: `lowerThird: ${label}`,
+            actual: previousType,
+        });
+        if (replaceable) {
+            const preservedId = replaceable.graphic.id;
+            _clearStaleGraphicPayload(replaceable.graphic);
+            Object.assign(replaceable.graphic, _makeNumericLowerThird(scene, label, videoPlan));
+            if (preservedId) replaceable.graphic.id = preservedId;
+            for (const { group, graphic } of related) {
+                if (graphic === replaceable.graphic || group !== 'motionGraphics' || graphic.disabled) continue;
+                graphic.disabled = true;
+                F({
+                    slice: 'numericLowerThird',
+                    sceneIndex: scene.index,
+                    action: `disabled extra numeric ${graphic.type || 'overlay'} after lowerThird conversion`,
+                });
+            }
+            F({ slice: 'numericLowerThird', sceneIndex: scene.index, action: `converted ${previousType} → lowerThird` });
+        } else {
+            videoPlan.motionGraphics.push(_makeNumericLowerThird(scene, label, videoPlan));
+            F({ slice: 'numericLowerThird', sceneIndex: scene.index, action: 'inserted required lowerThird' });
+        }
+    }
+
+    return result;
+}
 
 function _resolvePerScene(when, scenes) {
     if (!when) return [];
@@ -61,16 +407,18 @@ async function auditCompliance(videoPlan, opts = {}) {
     if (d.transitions) {
         checked.push('transitions');
         const banned = new Set((d.transitions.banned || []).map(x => String(x).toLowerCase()));
-        for (const s of scenes) {
-            const t = s.transition && s.transition.type;
-            if (!t) continue;
-            const hardViolation = d.transitions.style === 'hard-cuts' && t !== 'cut' && t !== 'none';
-            const bannedViolation = banned.has(t);
-            if (hardViolation || bannedViolation) {
-                V({ slice: 'transitions', sceneIndex: s.index, expected: 'cut', actual: t });
-                s.transition = { type: 'cut', duration: 0 };
-                s._txDirected = true;
-                F({ slice: 'transitions', sceneIndex: s.index, action: `${t} → cut` });
+        if (d.transitions.style === 'hard-cuts' || banned.size) {
+            const applied = applyHardCuts(videoPlan, null, [...banned]);
+            if (applied.changed) {
+                V({
+                    slice: 'transitions',
+                    expected: 'cut',
+                    actual: `${applied.scenesChanged} scene transition(s), ${applied.transitionsChanged} transition-lane item(s)`,
+                });
+                F({
+                    slice: 'transitions',
+                    action: `hard cuts (${applied.scenesChanged} scenes, ${applied.transitionsChanged} lane items)`,
+                });
             }
         }
     }
@@ -80,15 +428,16 @@ async function auditCompliance(videoPlan, opts = {}) {
         checked.push('framing');
         const force = d.framing.force;
         for (const s of scenes) {
-            if (!s.mediaFile || s.fullscreenMG) continue;
-            // Vertical-contain exception: portrait media legitimately uses a contain
-            // fit — not a framing violation.
-            const w = Number(s.mediaWidth), h = Number(s.mediaHeight);
-            if (s._verticalContain || (w && h && (w / h) < 0.7)) continue;
-            if (s.framing !== force) {
-                V({ slice: 'framing', sceneIndex: s.index, expected: force, actual: s.framing || '(none)' });
-                s.framing = force;
-                F({ slice: 'framing', sceneIndex: s.index, action: `framing → ${force}` });
+            if (!s.mediaFile) continue;
+            const actual = s.framing || '(none)';
+            const applied = applyFramingPreset(s, force);
+            if (applied.changed) {
+                V({ slice: 'framing', sceneIndex: s.index, expected: force, actual });
+                F({
+                    slice: 'framing',
+                    sceneIndex: s.index,
+                    action: `framing → ${force} (${applied.fields.join(', ')})`,
+                });
             }
         }
     }
@@ -96,24 +445,20 @@ async function auditCompliance(videoPlan, opts = {}) {
     // ── effects (noGrain / grade) ──
     if (d.effects) {
         checked.push('effects');
-        if (d.effects.noGrain) {
-            const bl = videoPlan._hfBaseLook;
-            if (bl && Array.isArray(bl.texture) && bl.texture.length) {
-                V({ slice: 'effects', expected: 'no base texture', actual: bl.texture.map(t => t.id || t).join(',') });
-                bl.texture = [];
-                F({ slice: 'effects', action: 'cleared base texture' });
-            }
-            for (const s of scenes) {
-                if (!Array.isArray(s._effectRecipe)) continue;
-                const before = s._effectRecipe.length;
-                s._effectRecipe = s._effectRecipe.filter(e => !TEXTURE_FX.has(e && e.id));
-                if (s._effectRecipe.length !== before) F({ slice: 'effects', sceneIndex: s.index, action: 'stripped texture delta' });
-            }
-        }
-        if (d.effects.grade && videoPlan._hfBaseLook && videoPlan._hfBaseLook.grade !== d.effects.grade) {
-            V({ slice: 'effects', expected: d.effects.grade, actual: videoPlan._hfBaseLook.grade });
-            videoPlan._hfBaseLook.grade = d.effects.grade;
-            F({ slice: 'effects', action: `grade → ${d.effects.grade}` });
+        const applied = applyProjectEffectPreset(videoPlan, d.effects);
+        if (applied.changed) {
+            V({
+                slice: 'effects',
+                expected: [
+                    d.effects.noGrain ? 'no texture' : null,
+                    d.effects.grade ? `grade ${d.effects.grade}` : null,
+                ].filter(Boolean).join(', '),
+                actual: 'previous project look',
+            });
+            F({
+                slice: 'effects',
+                action: `applied project look (${applied.fields.join(', ')})`,
+            });
         }
     }
 
@@ -171,10 +516,35 @@ async function auditCompliance(videoPlan, opts = {}) {
         }
     }
 
+    // ── numeric treatment: every number/stat gets a lower third ──
+    // Infer from d.raw too, so an older cached directive object is repaired
+    // immediately instead of requiring the creator to rebuild the cache first.
+    if (_numericLowerThirdRequested(d)) {
+        checked.push('numericLowerThird');
+        const numeric = enforceNumericLowerThirdExclusivity(videoPlan, d, {
+            allowStageRemoval: false,
+            onViolation: V,
+            onFix: F,
+        });
+        unfixable.push(...numeric.unfixable);
+    }
+
     // ── graphics banned types ──
     if (d.graphics && Array.isArray(d.graphics.bannedTypes) && d.graphics.bannedTypes.length) {
         checked.push('graphics');
         const banned = new Set(d.graphics.bannedTypes.map(x => String(x).toLowerCase()));
+        for (const s of scenes) {
+            const fullscreenType = String(s.fullscreenMG || '').split(':')[0].trim().toLowerCase();
+            const templateType = String(s.templateHint || '').split(':')[0].trim().toLowerCase();
+            if (fullscreenType && banned.has(fullscreenType)) {
+                s.fullscreenMG = null;
+                F({ slice: 'graphics', sceneIndex: s.index, action: `removed ${fullscreenType} fullscreen graphic` });
+            }
+            if (templateType && banned.has(templateType)) {
+                s.templateHint = null;
+                F({ slice: 'graphics', sceneIndex: s.index, action: `removed ${templateType} template` });
+            }
+        }
         for (const arr of ['mgScenes', 'templateScenes', 'motionGraphics']) {
             if (!Array.isArray(videoPlan[arr])) continue;
             for (const mg of videoPlan[arr]) {
@@ -194,18 +564,30 @@ async function auditCompliance(videoPlan, opts = {}) {
         for (const entry of d.perScene) {
             const set = entry.set || {};
             for (const s of _resolvePerScene(entry.when, scenes)) {
-                if (set.framing && s.framing !== set.framing) {
-                    V({ slice: 'perScene', sceneIndex: s.index, expected: set.framing, actual: s.framing || '(none)' });
-                    s.framing = set.framing;
-                    F({ slice: 'perScene', sceneIndex: s.index, action: `re-forced framing ${set.framing}` });
+                if (set.framing) {
+                    const actual = s.framing || '(none)';
+                    const applied = applyFramingPreset(s, set.framing);
+                    if (applied.changed) {
+                        V({ slice: 'perScene', sceneIndex: s.index, expected: set.framing, actual });
+                        F({
+                            slice: 'perScene',
+                            sceneIndex: s.index,
+                            action: `re-forced framing ${set.framing} (${applied.fields.join(', ')})`,
+                        });
+                    }
                 }
                 if (set.transition) {
                     const want = set.transition.type;
-                    if (!s.transition || s.transition.type !== want) {
-                        V({ slice: 'perScene', sceneIndex: s.index, expected: want, actual: (s.transition && s.transition.type) || '(none)' });
-                        s.transition = { type: want, duration: set.transition.duration };
-                        s._txDirected = true;
-                        F({ slice: 'perScene', sceneIndex: s.index, action: `re-forced transition ${want}` });
+                    if (want === 'cut' || want === 'none') {
+                        const applied = applyHardCuts(videoPlan, [s]);
+                        if (applied.changed) {
+                            V({ slice: 'perScene', sceneIndex: s.index, expected: want, actual: 'visible transition' });
+                            F({
+                                slice: 'perScene',
+                                sceneIndex: s.index,
+                                action: `re-forced transition ${want} (${applied.transitionsChanged} lane items)`,
+                            });
+                        }
                     }
                 }
             }
@@ -216,4 +598,7 @@ async function auditCompliance(videoPlan, opts = {}) {
     return { ok, directivesSummary: d.summary || d.raw || '', checked, violations, fixed, unfixable };
 }
 
-module.exports = { auditCompliance };
+module.exports = {
+    auditCompliance,
+    enforceNumericLowerThirdExclusivity,
+};

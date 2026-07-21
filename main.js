@@ -7,15 +7,29 @@ const { app, BrowserWindow, ipcMain, dialog, shell, Menu, Notification, protocol
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
-const { pathToFileURL } = require('url');
-const { execSync, spawn, exec } = require('child_process');
+const { fileURLToPath, pathToFileURL } = require('url');
+const { execSync, spawn, exec, execFile } = require('child_process');
+const { Readable } = require('stream');
+const projectStore = require('./src/project/project-store');
 
-// Remote-debugging port for the verify workflow: lets tooling attach to the
-// LIVE app via DevTools protocol (seek the preview, screenshot the renderer,
-// read console) instead of only window-surface captures. Localhost-only.
-// Disable with YTA_REMOTE_DEBUG=0.
-if (!/^(0|false|off)$/i.test(String(process.env.YTA_REMOTE_DEBUG || '').trim())) {
-    app.commandLine.appendSwitch('remote-debugging-port', '9223');
+app.enableSandbox();
+
+// Resolve reloadable runtime modules up front so folder moves fail fast and are
+// covered by scripts/verify/require-paths.js instead of being swallowed later.
+const RUNTIME_CONFIG_MODULE_PATHS = [
+    require.resolve('./src/settings/config'),
+    require.resolve('./src/brain/ai-provider'),
+];
+
+// DevTools protocol is test/development-only. Production launches never expose
+// a predictable unauthenticated debugging port.
+if (/^(1|true|on)$/i.test(String(process.env.YTA_REMOTE_DEBUG || '').trim())) {
+    const requestedPort = Number(process.env.YTA_REMOTE_DEBUG_PORT || 9223);
+    const debugPort = Number.isInteger(requestedPort) && requestedPort >= 1024 && requestedPort <= 65535
+        ? requestedPort
+        : 9223;
+    app.commandLine.appendSwitch('remote-debugging-address', '127.0.0.1');
+    app.commandLine.appendSwitch('remote-debugging-port', String(debugPort));
 }
 
 // ========================================
@@ -23,81 +37,541 @@ if (!/^(0|false|off)$/i.test(String(process.env.YTA_REMOTE_DEBUG || '').trim()))
 // ========================================
 // Parse --project=<path> or .fvp file path from command line args
 const APP_ROOT = __dirname;  // The app's install directory (code, node_modules, assets)
-let PROJECT_DIR = APP_ROOT;  // Default: use app root (backward compat)
+if (process.env.YTA_TEST_USER_DATA_DIR
+    && (
+        /^(1|true|on)$/i.test(String(process.env.YTA_REMOTE_DEBUG || '').trim())
+        || /^(1|true|on)$/i.test(String(process.env.YTA_ALLOW_TEST_USER_DATA_DIR || '').trim())
+    )) {
+    app.setPath('userData', path.resolve(process.env.YTA_TEST_USER_DATA_DIR));
+}
+const USER_DATA_DIR = app.getPath('userData');
+const USER_ENV_PATH = path.join(USER_DATA_DIR, '.env');
+const DEFAULT_WORKSPACE_DIR = path.join(USER_DATA_DIR, 'workspace');
+process.env.YTA_USER_DATA_DIR = USER_DATA_DIR;
+process.env.YTA_USER_ENV_PATH = USER_ENV_PATH;
+let PROJECT_DIR = DEFAULT_WORKSPACE_DIR;
+let PROJECT_FILE_PATH = null;
 let hasExplicitProject = false;
+let initialProjectOpenError = null;
+const _hardenedRendererSessions = new WeakSet();
+const _rendererRoles = new Map();
+const _selectedFileGrants = new Map();
+const _selectedDirectoryGrants = new Map();
 
-for (const arg of process.argv) {
-    if (arg.startsWith('--project=')) {
-        PROJECT_DIR = arg.substring('--project='.length);
-        hasExplicitProject = true;
-        break;
+const IPC_ROLE_CHANNELS = Object.freeze({
+    startup: new Set([
+        'startup-create-project',
+        'startup-open-project-folder',
+        'startup-open-project-file',
+        'startup-cancel',
+    ]),
+    'footage-resources': new Set([
+        'footage-resources-get',
+        'footage-resources-set',
+        'qwen-pool-status',
+        'qwen-pool-reset',
+        'qwen-vision-keys-status',
+        'qwen-vision-keys-save',
+        'vision-health-status',
+        'vision-health-live-check',
+        'resource-env-status',
+        'resource-env-save',
+        'resource-env-clean',
+        'resource-env-live-check',
+        'cloud-account-slots-status',
+        'cloud-account-slots-save',
+        'cloud-account-slot-check',
+    ]),
+    'qa-studio': new Set([
+        'load-video-plan',
+        'load-project-file',
+        'get-project-info',
+        'load-qa-results',
+        'save-qa-results',
+        'push-plan-to-main',
+        'save-video-plan',
+        'qa-pre-crop-media',
+        'get-scene-media-path',
+        'get-file-url',
+        'get-background-url',
+        'get-country-geojson',
+        'start-webgl-export',
+        'export-frames-batch',
+        'finish-webgl-export',
+        'cancel-webgl-export',
+        'cancel-process',
+        'qa-agent-init-log',
+        'qa-agent-set-provider',
+        'qa-agent-analyze-scene',
+        'qa-agent-log',
+        'qa-replace-scene-media',
+        'qa-chat-send',
+    ]),
+    'qa-chat': new Set([
+        'load-video-plan',
+        'qa-chat-niches',
+        'qa-chat-send',
+    ]),
+    'style-studio': new Set([
+        'pick-video-file',
+        'style-studio-start',
+        'style-studio-add-video',
+        'style-studio-chat',
+        'style-studio-analyze-script',
+        'style-studio-extract-profile',
+        'style-studio-save-profile',
+        'style-studio-end-session',
+        'style-studio-session-info',
+        'style-studio-set-code-access',
+        'style-studio-set-project-context',
+        'style-studio-check-saved',
+        'style-studio-restore',
+        'style-studio-discard-saved',
+        'style-studio-load-memory',
+        'style-studio-save-memory',
+        'style-studio-delete-memory',
+        'style-studio-clear-memory',
+        'style-studio-pick-audio',
+        'style-studio-transcribe-audio',
+        'style-studio-get-transcript-info',
+    ]),
+});
+
+const _registerIpcHandle = ipcMain.handle.bind(ipcMain);
+ipcMain.handle = (channel, listener) => _registerIpcHandle(channel, async (event, ...args) => {
+    const role = _rendererRoles.get(event.sender.id);
+    const allowed = role === 'main' || IPC_ROLE_CHANNELS[role]?.has(channel);
+    if (!allowed) {
+        console.warn(`[IPC] denied channel="${channel}" sender=${event.sender.id} role=${role || 'unknown'}`);
+        throw new Error('IPC channel is not available to this window');
     }
-    // Handle double-click on .fvp file: extract project dir from file path
-    if (arg.endsWith('.fvp') && fs.existsSync(arg)) {
-        PROJECT_DIR = path.dirname(arg);
+    return listener(event, ...args);
+});
+
+function _isTrustedRendererNavigation(rawUrl) {
+    try {
+        const target = new URL(String(rawUrl || ''));
+        if (target.protocol !== 'file:') return false;
+        const uiRoot = pathToFileURL(path.join(APP_ROOT, 'ui') + path.sep).href.toLowerCase();
+        return target.href.toLowerCase().startsWith(uiRoot);
+    } catch (_) {
+        return false;
+    }
+}
+
+function hardenRendererWindow(win, role) {
+    const contents = win?.webContents;
+    if (!contents) return;
+    _rendererRoles.set(contents.id, role);
+    contents.once('destroyed', () => {
+        _rendererRoles.delete(contents.id);
+        _selectedFileGrants.delete(contents.id);
+        _selectedDirectoryGrants.delete(contents.id);
+    });
+
+    // Renderer windows never need to create child windows. External links use
+    // the explicit, validated open-external IPC path instead.
+    contents.setWindowOpenHandler(() => ({ action: 'deny' }));
+    contents.on('will-navigate', (event, url) => {
+        if (!_isTrustedRendererNavigation(url)) event.preventDefault();
+    });
+    contents.on('will-attach-webview', (event) => event.preventDefault());
+
+    const rendererSession = contents.session;
+    if (rendererSession && !_hardenedRendererSessions.has(rendererSession)) {
+        _hardenedRendererSessions.add(rendererSession);
+        rendererSession.setPermissionCheckHandler(() => false);
+        rendererSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
+        if (typeof rendererSession.setDevicePermissionHandler === 'function') {
+            rendererSession.setDevicePermissionHandler(() => false);
+        }
+    }
+}
+
+function _isPathWithin(rootPath, candidatePath) {
+    const root = path.resolve(rootPath);
+    const candidate = path.resolve(candidatePath);
+    if (process.platform === 'win32') {
+        const rootLower = root.toLowerCase();
+        const candidateLower = candidate.toLowerCase();
+        return candidateLower === rootLower || candidateLower.startsWith(rootLower + path.sep);
+    }
+    return candidate === root || candidate.startsWith(root + path.sep);
+}
+
+function _resolveExistingFileWithin(roots, candidatePath) {
+    try {
+        const resolved = path.resolve(String(candidatePath || ''));
+        if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) return null;
+        const realCandidate = fs.realpathSync.native(resolved);
+        for (const rootPath of roots) {
+            if (!rootPath || !fs.existsSync(rootPath)) continue;
+            const realRoot = fs.realpathSync.native(rootPath);
+            if (_isPathWithin(realRoot, realCandidate)) return realCandidate;
+        }
+    } catch (_) {
+        return null;
+    }
+    return null;
+}
+
+function _grantSelectedFile(event, candidatePath, ttlMs = 30 * 60 * 1000) {
+    try {
+        const realPath = fs.realpathSync.native(candidatePath);
+        if (!fs.statSync(realPath).isFile()) return null;
+        let grants = _selectedFileGrants.get(event.sender.id);
+        if (!grants) {
+            grants = new Map();
+            _selectedFileGrants.set(event.sender.id, grants);
+        }
+        grants.set(process.platform === 'win32' ? realPath.toLowerCase() : realPath, Date.now() + ttlMs);
+        return realPath;
+    } catch (_) {
+        return null;
+    }
+}
+
+function _resolveGrantedFile(event, candidatePath) {
+    try {
+        const realPath = fs.realpathSync.native(candidatePath);
+        const key = process.platform === 'win32' ? realPath.toLowerCase() : realPath;
+        const grants = _selectedFileGrants.get(event.sender.id);
+        const expiresAt = grants?.get(key) || 0;
+        if (expiresAt < Date.now()) {
+            grants?.delete(key);
+            return null;
+        }
+        return fs.statSync(realPath).isFile() ? realPath : null;
+    } catch (_) {
+        return null;
+    }
+}
+
+function _grantSelectedDirectory(event, candidatePath, ttlMs = 30 * 60 * 1000) {
+    try {
+        const realPath = fs.realpathSync.native(candidatePath);
+        if (!fs.statSync(realPath).isDirectory()) return null;
+        let grants = _selectedDirectoryGrants.get(event.sender.id);
+        if (!grants) {
+            grants = new Map();
+            _selectedDirectoryGrants.set(event.sender.id, grants);
+        }
+        grants.set(process.platform === 'win32' ? realPath.toLowerCase() : realPath, Date.now() + ttlMs);
+        return realPath;
+    } catch (_) {
+        return null;
+    }
+}
+
+function _resolveGrantedDirectory(event, candidatePath) {
+    try {
+        const realPath = fs.realpathSync.native(candidatePath);
+        const key = process.platform === 'win32' ? realPath.toLowerCase() : realPath;
+        const grants = _selectedDirectoryGrants.get(event.sender.id);
+        const expiresAt = grants?.get(key) || 0;
+        if (expiresAt < Date.now()) {
+            grants?.delete(key);
+            return null;
+        }
+        return fs.statSync(realPath).isDirectory() ? realPath : null;
+    } catch (_) {
+        return null;
+    }
+}
+
+function _projectReadableRoots() {
+    return [
+        INPUT_PATH,
+        OUTPUT_PATH,
+        TEMP_PATH,
+        PUBLIC_PATH,
+        path.join(PROJECT_DIR, 'assets'),
+        path.join(PROJECT_DIR, 'hyperframes'),
+        path.join(PROJECT_DIR, 'logs'),
+        path.join(PROJECT_DIR, 'styles'),
+        path.join(APP_ROOT, 'assets'),
+    ];
+}
+
+function _resolveRendererReadableFile(event, candidatePath) {
+    return _resolveExistingFileWithin(_projectReadableRoots(), candidatePath)
+        || _resolveGrantedFile(event, candidatePath);
+}
+
+function _assetUrlForFile(filePath) {
+    return `asset:///${filePath.replace(/\\/g, '/')}`;
+}
+
+function _isAllowedProjectMediaFile(candidatePath) {
+    return Boolean(_resolveExistingFileWithin([
+        INPUT_PATH,
+        OUTPUT_PATH,
+        TEMP_PATH,
+        PUBLIC_PATH,
+        path.join(PROJECT_DIR, 'assets'),
+        path.join(PROJECT_DIR, 'hyperframes'),
+    ], candidatePath));
+}
+
+function _resolveAllowedMutableProjectMediaFile(candidatePath) {
+    const rawPath = String(candidatePath || '').trim();
+    if (!rawPath) return null;
+
+    const roots = [
+        PUBLIC_PATH,
+        TEMP_PATH,
+        path.join(PROJECT_DIR, 'assets'),
+    ].filter((root) => fs.existsSync(root));
+    const candidates = path.isAbsolute(rawPath)
+        ? [rawPath]
+        : [
+            path.resolve(PROJECT_DIR, rawPath),
+            ...roots.map((root) => path.resolve(root, rawPath)),
+        ];
+
+    for (const candidate of candidates) {
+        try {
+            if (!fs.existsSync(candidate) || !fs.statSync(candidate).isFile()) continue;
+            const realCandidate = fs.realpathSync.native(candidate);
+            const isAllowed = roots.some((root) => (
+                _isPathWithin(fs.realpathSync.native(root), realCandidate)
+            ));
+            if (isAllowed) return realCandidate;
+        } catch (_) {
+            // Try the next candidate.
+        }
+    }
+    return null;
+}
+
+function _hyperframesPreviewUrl(indexPath) {
+    const previewRoot = path.resolve(PROJECT_DIR, 'hyperframes');
+    const resolvedIndex = _resolveExistingFileWithin([previewRoot], indexPath);
+    if (!resolvedIndex) {
+        throw new Error(`HyperFrames preview escaped its project root: ${path.resolve(indexPath)}`);
+    }
+    const relative = path.relative(previewRoot, resolvedIndex)
+        .split(path.sep)
+        .map((segment) => encodeURIComponent(segment))
+        .join('/');
+    return `hf-preview://project/${relative}`;
+}
+
+const LOCAL_FILE_CONTENT_TYPES = Object.freeze({
+    '.html': 'text/html; charset=utf-8',
+    '.js': 'text/javascript; charset=utf-8',
+    '.mjs': 'text/javascript; charset=utf-8',
+    '.css': 'text/css; charset=utf-8',
+    '.json': 'application/json; charset=utf-8',
+    '.txt': 'text/plain; charset=utf-8',
+    '.svg': 'image/svg+xml',
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.webp': 'image/webp',
+    '.gif': 'image/gif',
+    '.mp3': 'audio/mpeg',
+    '.wav': 'audio/wav',
+    '.m4a': 'audio/mp4',
+    '.aac': 'audio/aac',
+    '.ogg': 'audio/ogg',
+    '.opus': 'audio/ogg',
+    '.mp4': 'video/mp4',
+    '.m4v': 'video/mp4',
+    '.webm': 'video/webm',
+    '.mov': 'video/quicktime',
+    '.woff': 'font/woff',
+    '.woff2': 'font/woff2',
+    '.ttf': 'font/ttf',
+    '.otf': 'font/otf',
+});
+
+function _parseLocalFileByteRange(rawHeader, size) {
+    const match = /^bytes=(\d*)-(\d*)$/i.exec(String(rawHeader || '').trim());
+    if (!match || (!match[1] && !match[2]) || size <= 0) return null;
+
+    let start;
+    let end;
+    if (!match[1]) {
+        const suffixLength = Number(match[2]);
+        if (!Number.isSafeInteger(suffixLength) || suffixLength <= 0) return null;
+        start = Math.max(0, size - suffixLength);
+        end = size - 1;
+    } else {
+        start = Number(match[1]);
+        end = match[2] ? Number(match[2]) : size - 1;
+        if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || start >= size) return null;
+        end = Math.min(end, size - 1);
+        if (end < start) return null;
+    }
+    return { start, end };
+}
+
+function _serveLocalFileRequest(request, filePath) {
+    try {
+        const method = String(request?.method || 'GET').toUpperCase();
+        if (method !== 'GET' && method !== 'HEAD') {
+            return new Response('Method Not Allowed', {
+                status: 405,
+                headers: { Allow: 'GET, HEAD' },
+            });
+        }
+
+        const stat = fs.statSync(filePath);
+        if (!stat.isFile()) return new Response('Not Found', { status: 404 });
+        const size = stat.size;
+        const rangeHeader = request?.headers?.get?.('range') || '';
+        const requestedRange = rangeHeader ? _parseLocalFileByteRange(rangeHeader, size) : null;
+        if (rangeHeader && !requestedRange) {
+            return new Response(null, {
+                status: 416,
+                headers: {
+                    'Accept-Ranges': 'bytes',
+                    'Content-Range': `bytes */${size}`,
+                },
+            });
+        }
+
+        const start = requestedRange?.start ?? 0;
+        const end = requestedRange?.end ?? Math.max(0, size - 1);
+        const contentLength = size === 0 ? 0 : end - start + 1;
+        const headers = new Headers({
+            'Accept-Ranges': 'bytes',
+            'Access-Control-Allow-Origin': '*',
+            'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+            'Content-Length': String(contentLength),
+            'Content-Type': LOCAL_FILE_CONTENT_TYPES[path.extname(filePath).toLowerCase()] || 'application/octet-stream',
+            'Expires': '0',
+            'Last-Modified': stat.mtime.toUTCString(),
+            'Pragma': 'no-cache',
+            'X-Content-Type-Options': 'nosniff',
+        });
+        if (requestedRange) headers.set('Content-Range', `bytes ${start}-${end}/${size}`);
+
+        const body = method === 'HEAD' || size === 0
+            ? null
+            : Readable.toWeb(fs.createReadStream(filePath, { start, end }));
+        return new Response(body, {
+            status: requestedRange ? 206 : 200,
+            headers,
+        });
+    } catch (_) {
+        return new Response('Not Found', { status: 404 });
+    }
+}
+
+function _projectSelectionFromLaunchArgs(args = [], additionalData = {}) {
+    if (additionalData?.projectDir) {
+        const projectDir = path.resolve(String(additionalData.projectDir));
+        const projectFile = additionalData.projectFile
+            ? path.resolve(String(additionalData.projectFile))
+            : null;
+        return { projectDir, projectFile };
+    }
+    for (const rawArg of args) {
+        const arg = String(rawArg || '');
+        if (arg.startsWith('--project=')) {
+            return {
+                projectDir: path.resolve(arg.substring('--project='.length)),
+                projectFile: null,
+            };
+        }
+        if (/\.fvp$/i.test(arg)) {
+            const projectFile = path.resolve(arg);
+            return {
+                projectDir: path.dirname(projectFile),
+                projectFile,
+            };
+        }
+    }
+    return null;
+}
+
+const initialProjectSelection = _projectSelectionFromLaunchArgs(process.argv);
+if (initialProjectSelection) {
+    const inspected = projectStore.inspectProjectDirectory({
+        projectDir: initialProjectSelection.projectDir,
+        preferredFvpPath: initialProjectSelection.projectFile,
+    });
+    if (inspected.valid) {
+        PROJECT_DIR = inspected.projectDir;
+        PROJECT_FILE_PATH = inspected.projectFile;
         hasExplicitProject = true;
-        break;
+    } else {
+        initialProjectOpenError = inspected.error || 'The requested project is not valid.';
     }
 }
 
 // Resolve to absolute path
 PROJECT_DIR = path.resolve(PROJECT_DIR);
+fs.mkdirSync(USER_DATA_DIR, { recursive: true });
+fs.mkdirSync(DEFAULT_WORKSPACE_DIR, { recursive: true });
+const legacyAppEnvPath = path.join(APP_ROOT, '.env');
+if (!fs.existsSync(USER_ENV_PATH) && fs.existsSync(legacyAppEnvPath)) {
+    fs.copyFileSync(legacyAppEnvPath, USER_ENV_PATH);
+}
 // Publish to the process env so any module running in the main process
 // (e.g. style-studio-agent) can locate the active project without being passed it.
 process.env.PROJECT_DIR = PROJECT_DIR;
+process.env.DOTENV_PATH = path.join(PROJECT_DIR, '.env');
 
-// ========================================
-// Single-Instance Lock (per project directory)
-// ========================================
-// Each unique PROJECT_DIR gets its own lock so multiple projects can run simultaneously,
-// but two instances can't accidentally share the same project folder.
-// We use a lock file instead of Electron's requestSingleInstanceLock because that's app-global.
-function acquireProjectLock() {
-    const lockFile = path.join(PROJECT_DIR, '.lock');
-    try {
-        // Ensure directory exists before creating lock
-        if (!fs.existsSync(PROJECT_DIR)) {
-            fs.mkdirSync(PROJECT_DIR, { recursive: true });
-        }
-        // Try to create lock file exclusively (fails if already exists)
-        fs.writeFileSync(lockFile, String(process.pid), { flag: 'wx' });
-        return true;
-    } catch (e) {
-        if (e.code === 'EEXIST') {
-            // Lock file exists — check if the PID is still alive
-            try {
-                const pid = parseInt(fs.readFileSync(lockFile, 'utf8').trim(), 10);
-                if (pid && !isNaN(pid)) {
-                    // Check if process is still running
-                    try {
-                        process.kill(pid, 0); // signal 0 = just check if alive
-                        return false; // Process is alive — lock is held
-                    } catch (_) {
-                        // Process is dead — stale lock, overwrite it
-                        fs.writeFileSync(lockFile, String(process.pid));
-                        return true;
-                    }
-                }
-            } catch (_) { }
-            // Can't read lock file or invalid PID — overwrite
-            fs.writeFileSync(lockFile, String(process.pid));
-            return true;
-        }
-        // Some other error (e.g. dir doesn't exist yet) — proceed anyway
-        return true;
-    }
-}
-
-function releaseProjectLock() {
-    try {
-        const lockFile = path.join(PROJECT_DIR, '.lock');
-        if (fs.existsSync(lockFile)) {
-            const pid = parseInt(fs.readFileSync(lockFile, 'utf8').trim(), 10);
-            if (pid === process.pid) {
-                fs.unlinkSync(lockFile);
+let _pendingExternalProjectSelection = null;
+const _isProjectChildInstance = process.argv.includes('--yta-project-instance');
+const _hasPrimaryInstanceLock = _isProjectChildInstance || app.requestSingleInstanceLock(
+    hasExplicitProject
+        ? { projectDir: PROJECT_DIR, projectFile: PROJECT_FILE_PATH || '' }
+        : {}
+);
+if (!_hasPrimaryInstanceLock) {
+    app.quit();
+} else if (!_isProjectChildInstance) {
+    app.on('second-instance', (_event, commandLine, _workingDirectory, additionalData) => {
+        const requestedSelection = _projectSelectionFromLaunchArgs(commandLine, additionalData);
+        if (!requestedSelection) {
+            if (mainWindow && !mainWindow.isDestroyed()) {
+                if (mainWindow.isMinimized()) mainWindow.restore();
+                mainWindow.show();
+                mainWindow.focus();
             }
+            return;
         }
-    } catch (_) { }
+        const selection = _validateExistingProjectTarget(
+            requestedSelection.projectDir,
+            requestedSelection.projectFile
+        );
+        if (!selection.success) {
+            void dialog.showMessageBox(mainWindow && !mainWindow.isDestroyed() ? mainWindow : null, {
+                type: 'error',
+                title: 'Could Not Open Project',
+                message: selection.error,
+            });
+            return;
+        }
+        if (_pathsEqual(selection.projectDir, PROJECT_DIR)) {
+            if (mainWindow && !mainWindow.isDestroyed()) {
+                if (mainWindow.isMinimized()) mainWindow.restore();
+                mainWindow.show();
+                mainWindow.focus();
+            }
+            return;
+        }
+        if (_pathsEqual(PROJECT_DIR, DEFAULT_WORKSPACE_DIR)) {
+            _pendingExternalProjectSelection = selection;
+            void _consumePendingExternalProjectSelection();
+            return;
+        }
+        const opened = _spawnProjectInstance(selection.projectDir, {
+            projectFile: selection.projectFile,
+            validatedProject: selection,
+        });
+        if (!opened.success && mainWindow && !mainWindow.isDestroyed()) {
+            void dialog.showMessageBox(mainWindow, {
+                type: 'error',
+                title: 'Could Not Open Project',
+                message: opened.error || 'The additional project window could not be opened.',
+            });
+        }
+    });
 }
 
 // Project-specific paths (isolated per instance)
@@ -117,15 +591,8 @@ function ensureProjectDirs() {
 }
 ensureProjectDirs();
 
-// Copy .env from app root to project dir if it doesn't exist there yet
-const appEnvPath = path.join(APP_ROOT, '.env');
-const projectEnvPath = path.join(PROJECT_DIR, '.env');
-if (PROJECT_DIR !== APP_ROOT && fs.existsSync(appEnvPath) && !fs.existsSync(projectEnvPath)) {
-    fs.copyFileSync(appEnvPath, projectEnvPath);
-}
-
 // Derive a human-readable project name from the directory
-let PROJECT_NAME = PROJECT_DIR === APP_ROOT ? '' : path.basename(PROJECT_DIR);
+let PROJECT_NAME = PROJECT_DIR === DEFAULT_WORKSPACE_DIR ? '' : path.basename(PROJECT_DIR);
 let CURRENT_LOG_FILE = null;
 
 const _baseConsole = {
@@ -282,21 +749,21 @@ function setupConsoleTee() {
 setupConsoleTee();
 initProjectLogger(PROJECT_DIR);
 
-function applyProjectDir(projectDir) {
+function applyProjectDir(projectDir, options = {}) {
     PROJECT_DIR = path.resolve(projectDir);
+    PROJECT_FILE_PATH = options.projectFile ? path.resolve(options.projectFile) : null;
     process.env.PROJECT_DIR = PROJECT_DIR;
+    process.env.DOTENV_PATH = path.join(PROJECT_DIR, '.env');
     INPUT_PATH = path.join(PROJECT_DIR, 'input');
     OUTPUT_PATH = path.join(PROJECT_DIR, 'output');
     TEMP_PATH = path.join(PROJECT_DIR, 'temp');
     PUBLIC_PATH = path.join(PROJECT_DIR, 'public');
-    PROJECT_NAME = PROJECT_DIR === APP_ROOT ? '' : path.basename(PROJECT_DIR);
+    PROJECT_NAME = PROJECT_DIR === DEFAULT_WORKSPACE_DIR ? '' : path.basename(PROJECT_DIR);
     ensureProjectDirs();
-
-    // Copy .env from app root to selected project dir if needed
-    const newEnvPath = path.join(PROJECT_DIR, '.env');
-    if (fs.existsSync(appEnvPath) && !fs.existsSync(newEnvPath)) {
-        fs.copyFileSync(appEnvPath, newEnvPath);
+    for (const modulePath of RUNTIME_CONFIG_MODULE_PATHS) {
+        delete require.cache[modulePath];
     }
+
     initProjectLogger(PROJECT_DIR);
     console.log(`📁 Active project set to: ${PROJECT_DIR}`);
 
@@ -344,13 +811,15 @@ function createStartupWindow() {
             title: 'YTA Empire WEBGL — Start',
             webPreferences: {
                 nodeIntegration: false,
-                contextIsolation: false,
-                sandbox: false,
-                preload: path.join(__dirname, 'preload.js')
+                contextIsolation: true,
+                sandbox: true,
+                preload: path.join(__dirname, 'preload.js'),
+                additionalArguments: ['--yta-window-role=startup'],
             },
             icon: getWindowIconPath() || undefined
         });
 
+        hardenRendererWindow(startupWindow, 'startup');
         startupWindow.loadFile(path.join(__dirname, 'ui', 'startup.html'));
 
         startupWindow.on('closed', () => {
@@ -387,7 +856,10 @@ async function promptForExistingProjectPath(parentWindow) {
             filters: [{ name: 'Project Files', extensions: ['fvp'] }],
         });
         if (fileResult.canceled || !fileResult.filePaths.length) return null;
-        return path.dirname(fileResult.filePaths[0]);
+        return {
+            projectDir: path.dirname(fileResult.filePaths[0]),
+            projectFile: fileResult.filePaths[0],
+        };
     }
 
     const folderResult = await dialog.showOpenDialog(parentWindow || null, {
@@ -395,7 +867,10 @@ async function promptForExistingProjectPath(parentWindow) {
         properties: ['openDirectory']
     });
     if (folderResult.canceled || !folderResult.filePaths.length) return null;
-    return folderResult.filePaths[0];
+    return {
+        projectDir: folderResult.filePaths[0],
+        projectFile: null,
+    };
 }
 
 async function promptStartupProjectPath() {
@@ -529,13 +1004,15 @@ function createFootageResourcesWindow() {
         title: 'Resource Control Center',
         webPreferences: {
             nodeIntegration: false,
-            contextIsolation: false,
-            sandbox: false,
+            contextIsolation: true,
+            sandbox: true,
             preload: path.join(__dirname, 'preload.js'),
+            additionalArguments: ['--yta-window-role=footage-resources'],
         },
         icon: getWindowIconPath() || undefined,
         parent: mainWindow || undefined,
     });
+    hardenRendererWindow(footageResourcesWindow, 'footage-resources');
     footageResourcesWindow.loadFile(htmlFile);
     footageResourcesWindow.on('closed', () => { footageResourcesWindow = null; });
     footageResourcesWindow.webContents.once('did-finish-load', () => {
@@ -559,12 +1036,14 @@ async function createWindow() {
         titleBarStyle: 'default',
         webPreferences: {
             nodeIntegration: false,
-            contextIsolation: false,
-            sandbox: false,
-            preload: path.join(__dirname, 'preload.js')
+            contextIsolation: true,
+            sandbox: true,
+            preload: path.join(__dirname, 'preload.js'),
+            additionalArguments: ['--yta-window-role=main'],
         },
         icon: getWindowIconPath() || undefined
     });
+    hardenRendererWindow(mainWindow, 'main');
 
     // Disable caching so CSS/JS changes are picked up immediately
     await mainWindow.webContents.session.clearCache().catch(() => {});
@@ -576,7 +1055,7 @@ async function createWindow() {
     }
 
     // Load the UI
-    mainWindow.loadFile(path.join(__dirname, 'ui', 'index.html'));
+    await mainWindow.loadFile(path.join(__dirname, 'ui', 'index.html'));
 
     // Custom menu - let Ctrl+Z/C/V/S pass through to the renderer
     const sendToRenderer = (channel) => {
@@ -671,10 +1150,23 @@ async function createWindow() {
     });
 
     // Forward renderer console messages to main process log (critical for diagnostics)
-    mainWindow.webContents.on('console-message', (event, level, message, line, sourceId) => {
-        // level: 0=verbose, 1=info, 2=warning, 3=error
-        if (level >= 2 || message.includes('✅') || message.includes('❌') || message.includes('Restored project') || message.includes('No saved project') || message.includes('[PreCache]') || message.includes('[MGRenderer]')) {
-            const prefix = level >= 3 ? '[RENDERER ERROR]' : level >= 2 ? '[RENDERER WARN]' : '[RENDERER]';
+    mainWindow.webContents.on('console-message', (details) => {
+        const level = String(details?.level || 'info').toLowerCase();
+        const message = String(details?.message || '');
+        const noteworthy = level === 'warning'
+            || level === 'error'
+            || message.includes('✅')
+            || message.includes('❌')
+            || message.includes('Restored project')
+            || message.includes('No saved project')
+            || message.includes('[PreCache]')
+            || message.includes('[MGRenderer]');
+        if (noteworthy) {
+            const prefix = level === 'error'
+                ? '[RENDERER ERROR]'
+                : level === 'warning'
+                    ? '[RENDERER WARN]'
+                    : '[RENDERER]';
             console.log(`${prefix} ${message}`);
         }
     });
@@ -695,8 +1187,6 @@ async function createWindow() {
 if (process.env.EXPORT_V2 !== '0') {
     app.commandLine.appendSwitch('in-process-gpu');
     app.commandLine.appendSwitch('disable-gpu-compositing');
-    app.commandLine.appendSwitch('disable-gpu-sandbox');
-    app.commandLine.appendSwitch('no-sandbox');
     console.log('[V2] --in-process-gpu + --disable-gpu-compositing ENABLED');
 } else {
     console.log('[V2] --in-process-gpu DISABLED (EXPORT_V2=0)');
@@ -707,31 +1197,54 @@ if (process.env.EXPORT_V2 !== '0') {
 // ========================================
 app.setAppUserModelId('YTA Empire WEBGL');
 
-// Register asset:// as a privileged scheme (must be before app.whenReady)
+// Register local-media schemes before app.whenReady. Neither scheme bypasses
+// CSP. hf-preview uses a distinct origin from the renderer so its sandboxed
+// iframe can load local media without gaining access to preload globals.
 protocol.registerSchemesAsPrivileged([
-    { scheme: 'asset', privileges: { bypassCSP: true, supportFetchAPI: true, stream: true } }
+    { scheme: 'asset', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, corsEnabled: true } },
+    { scheme: 'hf-preview', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, corsEnabled: true } },
 ]);
 
 app.whenReady().then(async () => {
-    // Register asset:// protocol handler for serving local files securely
-    // Raw string manipulation to avoid URL parser mangling Windows drive letters
+    if (!_hasPrimaryInstanceLock) return;
+    // Register asset:// for project media only. Arbitrary filesystem reads are
+    // rejected even if a renderer bug manages to request a crafted URL.
     protocol.handle('asset', (request) => {
-        // Strip scheme prefix: "asset:///C:/path" or "asset://C:/path" → "C:/path"
         let filePath = request.url.replace(/^asset:\/{2,3}/, '');
-        // Strip any cache-bust query/hash (?cb=… added after a scene Retry so the browser
-        // re-fetches the swapped file) before resolving the real path on disk.
         filePath = filePath.replace(/[?#].*$/, '');
         filePath = decodeURIComponent(filePath);
-        // Restore drive colon if URL parser stripped it (C/path → C:/path)
         if (/^[A-Za-z]\//.test(filePath)) {
             filePath = filePath[0] + ':' + filePath.slice(1);
         }
-        return net.fetch('file:///' + filePath);
+        const allowedRoots = _projectReadableRoots();
+        const resolved = _resolveExistingFileWithin(allowedRoots, filePath);
+        if (!resolved) {
+            return new Response('Forbidden', { status: 403 });
+        }
+        return _serveLocalFileRequest(request, resolved);
+    });
+
+    protocol.handle('hf-preview', (request) => {
+        try {
+            const url = new URL(request.url);
+            if (url.hostname !== 'project') return new Response('Forbidden', { status: 403 });
+            const previewRoot = path.resolve(PROJECT_DIR, 'hyperframes');
+            const relative = decodeURIComponent(url.pathname).replace(/^\/+/, '');
+            const resolved = _resolveExistingFileWithin([previewRoot], path.resolve(previewRoot, relative));
+            if (!resolved) {
+                return new Response('Forbidden', { status: 403 });
+            }
+            return _serveLocalFileRequest(request, resolved);
+        } catch (_) {
+            return new Response('Bad Request', { status: 400 });
+        }
     });
     // Premiere-style startup: open straight to the WORKSPACE (default project = app
     // root). The full UI + all settings are usable immediately for review — no folder
     // has to be chosen first. The user creates or opens a named project on demand via
-    // the New / Open Project buttons in the header (which spawn a project instance).
+    // the New / Open Project buttons in the header. The empty workspace absorbs
+    // the first project; once a named project is open, additional projects launch
+    // in separate isolated instances so both can stay open.
     // A --project=<dir> or .fvp launch arg still loads that project directly.
     // (Previously this forced a startup project chooser and quit if none was picked.)
 
@@ -749,26 +1262,67 @@ app.whenReady().then(async () => {
         });
 
         if (response.response === 0) {
-            // Let user pick a new folder
-            const folderResult = await dialog.showOpenDialog(null, {
-                title: 'Choose a project folder',
-                properties: ['openDirectory', 'createDirectory']
-            });
-            if (folderResult.canceled || !folderResult.filePaths.length) {
-                app.quit();
-                return;
+            let replacementOpened = false;
+            while (!replacementOpened) {
+                const folderResult = await dialog.showOpenDialog(null, {
+                    title: 'Choose another YTA Empire project folder',
+                    properties: ['openDirectory']
+                });
+                if (folderResult.canceled || !folderResult.filePaths.length) {
+                    app.quit();
+                    return;
+                }
+
+                const inspected = _validateExistingProjectTarget(folderResult.filePaths[0]);
+                if (!inspected.success) {
+                    await dialog.showMessageBox(null, {
+                        type: 'error',
+                        title: 'Not a YTA Empire Project',
+                        message: inspected.error,
+                    });
+                    continue;
+                }
+
+                applyProjectDir(inspected.projectDir, { projectFile: inspected.projectFile });
+                if (!acquireProjectLock()) {
+                    await dialog.showMessageBox(null, {
+                        type: 'error',
+                        title: 'Could Not Lock Project',
+                        message: 'The selected project is already open or is not writable.',
+                    });
+                    continue;
+                }
+                hasExplicitProject = true;
+                replacementOpened = true;
             }
-            // Re-set all project paths to the new folder
-            applyProjectDir(folderResult.filePaths[0]);
-            // Acquire lock on new dir
-            acquireProjectLock();
         } else {
             app.quit();
             return;
         }
     }
 
-    createWindow();
+    if (hasExplicitProject) {
+        try {
+            projectStore.writeProjectMarker({
+                projectDir: PROJECT_DIR,
+                projectFile: PROJECT_FILE_PATH,
+            });
+        } catch (error) {
+            console.warn(`[Projects] Could not update project marker: ${error.message}`);
+        }
+    }
+
+    await createWindow();
+    await _consumePendingExternalProjectSelection();
+    if (initialProjectOpenError) {
+        await dialog.showMessageBox(mainWindow || null, {
+            type: 'error',
+            title: 'Could Not Open Project',
+            message: initialProjectOpenError,
+            detail: 'The app opened the empty workspace instead.',
+        });
+        initialProjectOpenError = null;
+    }
 
     // Auto-probe V2 on startup to log GPU capabilities
     if (typeof _gpuExportAddon !== 'undefined' && _gpuExportAddon && process.env.EXPORT_V2 !== '0') {
@@ -803,8 +1357,9 @@ app.on('before-quit', () => {
 });
 
 app.on('activate', () => {
+    if (!_hasPrimaryInstanceLock) return;
     if (BrowserWindow.getAllWindows().length === 0) {
-        createWindow();
+        void createWindow();
     }
 });
 
@@ -813,13 +1368,23 @@ app.on('activate', () => {
 // ========================================
 
 // Copy audio file to input folder
-ipcMain.handle('copy-file', async (event, sourcePath, destFolder) => {
+ipcMain.handle('import-audio-file', async (_event, sourcePath) => {
     try {
         if (!sourcePath || typeof sourcePath !== 'string') {
             return { success: false, error: 'Source path is missing or invalid' };
         }
-        const destPath = destFolder === 'input' ? INPUT_PATH : destFolder;
-        const fileName = path.basename(sourcePath);
+        const resolvedSource = fs.realpathSync.native(sourcePath);
+        const sourceStat = fs.statSync(resolvedSource);
+        const extension = path.extname(resolvedSource).toLowerCase();
+        if (!sourceStat.isFile() || !new Set(['.mp3', '.wav']).has(extension)) {
+            return { success: false, error: 'Only an existing MP3 or WAV file can be imported' };
+        }
+        if (sourceStat.size > 4 * 1024 * 1024 * 1024) {
+            return { success: false, error: 'Audio file exceeds the 4 GB import limit' };
+        }
+        const destPath = INPUT_PATH;
+        const destFolder = 'project input';
+        const fileName = path.basename(resolvedSource);
         const destination = path.join(destPath, fileName);
 
         // Ensure folder exists
@@ -828,7 +1393,7 @@ ipcMain.handle('copy-file', async (event, sourcePath, destFolder) => {
         }
 
         // Skip copy if source is already in the destination folder
-        if (path.resolve(sourcePath) === path.resolve(destination)) {
+        if (path.resolve(resolvedSource) === path.resolve(destination)) {
             console.log(`✅ Audio already in ${destFolder}, skipping copy`);
             return { success: true, path: destination };
         }
@@ -837,7 +1402,7 @@ ipcMain.handle('copy-file', async (event, sourcePath, destFolder) => {
         // a public/ copy wiped by a prior build) must never cause us to delete the good
         // copy already sitting in the destination. If the destination already holds this
         // file, treat it as already-present and reuse it instead of failing.
-        if (!fs.existsSync(sourcePath)) {
+        if (!fs.existsSync(resolvedSource)) {
             if (fs.existsSync(destination)) {
                 console.log(`⚠️ Source missing (${sourcePath}) but ${fileName} already in ${destFolder} — reusing existing copy`);
                 return { success: true, path: destination };
@@ -854,7 +1419,7 @@ ipcMain.handle('copy-file', async (event, sourcePath, destFolder) => {
         });
 
         // Copy file
-        fs.copyFileSync(sourcePath, destination);
+        fs.copyFileSync(resolvedSource, destination);
         console.log(`✅ Copied ${fileName} to ${destFolder}`);
 
         return { success: true, path: destination };
@@ -869,14 +1434,19 @@ ipcMain.handle('copy-file', async (event, sourcePath, destFolder) => {
 // project dir, so the image is project-local and Step 8 can find it. Returns absolute path.
 ipcMain.handle('copy-presenter-image', async (event, sourcePath) => {
     try {
-        if (!sourcePath || typeof sourcePath !== 'string' || !fs.existsSync(sourcePath)) {
+        const grantedSource = _resolveGrantedFile(event, sourcePath);
+        if (!grantedSource) {
             return { success: false, error: 'Presenter image not found' };
         }
+        const allowedExtensions = new Set(['.jpg', '.jpeg', '.png', '.webp']);
         const assetsDir = path.join(PROJECT_DIR, 'assets');
         if (!fs.existsSync(assetsDir)) fs.mkdirSync(assetsDir, { recursive: true });
-        const ext = (path.extname(sourcePath) || '.png').toLowerCase();
+        const ext = path.extname(grantedSource).toLowerCase();
+        if (!allowedExtensions.has(ext)) {
+            return { success: false, error: 'Unsupported presenter image type' };
+        }
         const destination = path.join(assetsDir, `presenter-source${ext}`);
-        fs.copyFileSync(sourcePath, destination);
+        fs.copyFileSync(grantedSource, destination);
         console.log(`✅ Copied presenter image to ${destination}`);
         return { success: true, path: destination };
     } catch (error) {
@@ -890,10 +1460,16 @@ let activeProcess = null;
 let activeProcessType = null; // 'build' or 'render'
 let processCancelled = false;
 let activeRenderCancelled = false;
+let activeAiVideoJob = null;
 
-ipcMain.handle('cancel-process', async () => {
+ipcMain.handle('cancel-process', async (event) => {
 
-    if (activeProcess) {
+    if (activeAiVideoJob && activeAiVideoJob.ownerWebContentsId === event.sender.id) {
+        activeAiVideoJob.controller.abort();
+        return { success: true, message: 'AI Video generation cancellation requested' };
+    }
+
+    if (activeProcess && _rendererRoles.get(event.sender.id) === 'main') {
         const type = activeProcessType || 'process';
         const pid = activeProcess.pid;
         console.log(`⛔ Cancelling ${type} (PID: ${pid})...`);
@@ -916,17 +1492,16 @@ ipcMain.handle('cancel-process', async () => {
         return { success: true, message: `${type} cancelled` };
     }
 
-    // Legacy: WebGL export via main-process FFmpeg (kept for backward compat)
-    if (_webglExport && _webglExport.proc) {
-        try {
-            _webglExport.proc.stdin.end();
-            _webglExport.proc.kill('SIGTERM');
-        } catch (_) { }
+    if (_webglExport && _webglExport.ownerWebContentsId === event.sender.id) {
+        const exp = _webglExport;
+        exp.cancelled = true;
+        _webglExport = null;
+        _detachWebglExportOwner(exp);
+        await _terminateWebglExport(exp);
         return { success: true, message: 'render cancelled' };
     }
 
-    // Direct-spawn mode: FFmpeg runs in renderer, cancelled via ExportPipeline.cancel()
-    return { success: true, message: 'No active main-process export (direct-spawn mode)' };
+    return { success: true, message: 'No active process' };
 });
 
 // Apply the chosen vision backend before the build spawns, so the build child inherits it.
@@ -945,28 +1520,176 @@ async function _prepareVisionForBuild(options) {
     }
 }
 
-// Run the isolated AI Videos pipeline (script-first — no audio/transcription).
-// Writes a renderer-ready plan to public/video-plan.json. generate:false = dry-run
-// (scenes + prompts, no credits/browser); generate:true = real Kling/Veo clips.
-// Deliberately separate from run-build so the normal pipeline is untouched.
-ipcMain.handle('run-ai-videos', async (_event, opts = {}) => {
+ipcMain.handle('read-ai-script-file', async (event, filePath) => {
     try {
+        const grantedFile = _resolveGrantedFile(event, filePath);
+        if (!grantedFile) return { success: false, error: 'Choose the story file with Import file first' };
+        const { loadScriptFile } = require('./src/categories/ai-videos/source-loader');
+        const loaded = loadScriptFile(grantedFile);
+        return { success: true, ...loaded };
+    } catch (error) {
+        console.warn(`[AI Videos] Story file import failed: ${error.message}`);
+        return { success: false, error: error.message || String(error) };
+    }
+});
+
+ipcMain.handle('load-ai-script-url', async (_event, rawUrl) => {
+    try {
+        const url = String(rawUrl || '').trim();
+        if (!url || url.length > 4096) return { success: false, error: 'Enter a valid public story URL' };
+        const { loadScriptUrl } = require('./src/categories/ai-videos/source-loader');
+        const loaded = await loadScriptUrl(url);
+        return { success: true, ...loaded };
+    } catch (error) {
+        console.warn(`[AI Videos] Story URL import failed: ${error.message}`);
+        return { success: false, error: error.message || String(error) };
+    }
+});
+
+function _applyAiVideoGeneratorOptions(opts = {}) {
+    const envKeys = ['VEO_AI_VIDEO', 'VEO_SCOPE', 'VEO_RESOLUTION', 'KLING_VIDEO_RESOLUTION', 'AI_VIDEO_BACKEND', 'VEO_BACKEND'];
+    const previous = Object.fromEntries(envKeys.map((key) => [
+        key,
+        Object.prototype.hasOwnProperty.call(process.env, key) ? { present: true, value: process.env[key] } : { present: false },
+    ]));
+    const resolution = String(opts.resolution || '720p').toLowerCase() === '1080p' ? '1080p' : '720p';
+    const selected = String(opts.backend || 'kling').trim().toLowerCase();
+    process.env.VEO_AI_VIDEO = '1';
+    process.env.VEO_SCOPE = 'all';
+    process.env.VEO_RESOLUTION = resolution;
+    process.env.KLING_VIDEO_RESOLUTION = resolution;
+    if (selected === 'veo-fal') {
+        process.env.AI_VIDEO_BACKEND = 'veo';
+        process.env.VEO_BACKEND = 'fal';
+    } else if (selected === 'veo-gemini') {
+        process.env.AI_VIDEO_BACKEND = 'veo';
+        process.env.VEO_BACKEND = 'gemini';
+    } else {
+        process.env.AI_VIDEO_BACKEND = 'kling';
+    }
+    return {
+        selected: ['veo-fal', 'veo-gemini'].includes(selected) ? selected : 'kling',
+        engine: process.env.AI_VIDEO_BACKEND,
+        resolution,
+        restore() {
+            for (const key of envKeys) {
+                if (previous[key].present) process.env[key] = previous[key].value;
+                else delete process.env[key];
+            }
+        },
+    };
+}
+
+function _cleanupSupersededAiVideoClips(clips = []) {
+    try {
+        const keep = new Set((clips || [])
+            .map((clip) => clip?.file)
+            .filter(Boolean)
+            .map((filePath) => path.resolve(filePath).toLowerCase()));
+        for (const filename of fs.readdirSync(PUBLIC_PATH)) {
+            if (!/^ai-video-scene-\d+(?:-[a-f0-9]{14})?\.mp4$/i.test(filename)) continue;
+            const candidate = path.resolve(PUBLIC_PATH, filename);
+            if (!keep.has(candidate.toLowerCase())) fs.unlinkSync(candidate);
+        }
+    } catch (error) {
+        console.warn(`[AI Videos] Could not clean superseded generated clips: ${error.message}`);
+    }
+}
+
+// Script-driven AI Videos pipeline. Narration-driven AI Videos use run-build so
+// they keep transcription timing, Director/Planner decisions, subtitles, and audio.
+ipcMain.handle('run-ai-videos', async (event, opts = {}) => {
+    let generator = null;
+    let job = null;
+    try {
+        if (activeAiVideoJob) return { success: false, error: 'Another AI Video build is already running' };
         const script = String((opts && opts.script) || '').trim();
         if (!script) return { success: false, error: 'No script provided' };
+        if (Buffer.byteLength(script, 'utf8') > 4 * 1024 * 1024) {
+            return { success: false, error: 'Script exceeds the 4 MB build limit' };
+        }
+        generator = _applyAiVideoGeneratorOptions({
+            backend: opts.backend,
+            resolution: opts.resolution,
+        });
+        job = {
+            ownerWebContentsId: event.sender.id,
+            controller: new AbortController(),
+        };
+        activeAiVideoJob = job;
         const { buildAiVideosProject } = require('./src/categories/ai-videos/pipeline');
         if (!fs.existsSync(PUBLIC_PATH)) fs.mkdirSync(PUBLIC_PATH, { recursive: true });
+        const notify = (percent, message) => {
+            try { event.sender.send('build-progress', { percent, message }); } catch (_) {}
+        };
+        notify(8, 'Preparing script-driven AI Video build...');
         const ctx = await buildAiVideosProject(
             { script },
-            { generate: !!opts.generate, outDir: PUBLIC_PATH, aspectRatio: opts.aspectRatio || '16:9', log: (m) => console.log(m) }
+            {
+                generate: opts.generate !== false,
+                outDir: PUBLIC_PATH,
+                aspectRatio: opts.aspectRatio || '16:9',
+                backend: generator.selected,
+                resolution: generator.resolution,
+                qualityTier: opts.qualityTier || 'standard',
+                themeId: opts.themeId || 'auto',
+                themeLabel: opts.themeLabel || '',
+                nicheId: opts.nicheId || 'auto',
+                nicheLabel: opts.nicheLabel || '',
+                videoTitle: String(opts.videoTitle || '').trim().slice(0, 500),
+                aiInstructions: String(opts.aiInstructions || '').trim().slice(0, 4000),
+                signal: job.controller.signal,
+                log: (m) => console.log(m),
+                onProgress: ({ completed, total, message }) => {
+                    const ratio = total > 0 ? completed / total : 0;
+                    notify(Math.min(88, Math.round(18 + ratio * 70)), message || `Generating scene ${completed}/${total}`);
+                },
+            }
         );
+        if (job.controller.signal.aborted) throw new Error('Cancelled');
         if (!ctx.plan) return { success: false, error: 'Pipeline produced no plan (empty script?)' };
-        const planPath = path.join(PUBLIC_PATH, 'video-plan.json');
-        fs.writeFileSync(planPath, JSON.stringify(ctx.plan, null, 2));
-        console.log(`✅ AI Videos: ${ctx.plan.scenes.length} scene(s), ${ctx.plan.totalDuration}s → ${planPath}${opts.generate ? '' : ' (dry-run)'}`);
-        return { success: true, sceneCount: ctx.plan.scenes.length, totalDuration: ctx.plan.totalDuration, planPath, dryRun: !opts.generate };
+        const current = _loadUnifiedProjectState({ reconcile: false });
+        const nextSettings = {
+            ...(current?.settings || {}),
+            aiVideosScript: script,
+            aiVideosInputMode: 'script',
+            aiVideosScriptSource: {
+                type: ['file', 'url'].includes(String(opts.scriptSource?.type || ''))
+                    ? String(opts.scriptSource.type)
+                    : 'paste',
+                label: String(opts.scriptSource?.label || '').slice(0, 500),
+            },
+        };
+        const saved = _persistUnifiedProjectState({
+            settings: nextSettings,
+            videoPlan: ctx.plan,
+            revision: current?.revision || 0,
+        });
+        _cleanupSupersededAiVideoClips(ctx.clips);
+        const generatedCount = ctx.clips.filter((clip) => !!clip.file).length;
+        const failedCount = ctx.clips.filter((clip) => !clip.file && !clip.dryRun).length;
+        notify(100, failedCount
+            ? `AI Video plan ready with ${failedCount} generation warning(s)`
+            : 'AI Video build ready');
+        console.log(`✅ AI Videos: ${ctx.plan.scenes.length} scene(s), ${ctx.plan.totalDuration}s → ${saved.fvpPath}${opts.generate === false ? ' (dry-run)' : ''}`);
+        return {
+            success: true,
+            sceneCount: ctx.plan.scenes.length,
+            totalDuration: ctx.plan.totalDuration,
+            generatedCount,
+            failedCount,
+            planPath: path.join(PUBLIC_PATH, 'video-plan.json'),
+            dryRun: opts.generate === false,
+            revision: saved.revision,
+            planHash: saved.planHash,
+        };
     } catch (e) {
         console.error('AI Videos pipeline failed:', e);
-        return { success: false, error: e.message || String(e) };
+        const cancelled = job?.controller.signal.aborted || e?.message === 'Cancelled';
+        return { success: false, error: cancelled ? 'Cancelled' : (e.message || String(e)) };
+    } finally {
+        if (activeAiVideoJob === job) activeAiVideoJob = null;
+        generator?.restore?.();
     }
 });
 
@@ -975,15 +1698,9 @@ ipcMain.handle('run-build', async (event, options) => {
     try {
         console.log('🚀 Starting build with options:', options);
 
-        // Update .env with AI provider and Ollama model settings
+        // Apply the selected AI provider before spawning the build.
         if (options.aiProvider) {
             applyBrainProvider(options.aiProvider);
-        }
-        if (options.ollamaModel) {
-            updateEnvFile('OLLAMA_MODEL', options.ollamaModel);
-        }
-        if (options.ollamaVisionModel) {
-            updateEnvFile('OLLAMA_VISION_MODEL', options.ollamaVisionModel);
         }
 
         // Send progress updates to renderer
@@ -1201,22 +1918,11 @@ ipcMain.handle('run-build', async (event, options) => {
 // Load video plan
 ipcMain.handle('load-video-plan', async () => {
     try {
-        // Try public folder first (where build-video.js copies files)
-        const publicPlanPath = path.join(PUBLIC_PATH, 'video-plan.json');
-        if (fs.existsSync(publicPlanPath)) {
-            const data = fs.readFileSync(publicPlanPath, 'utf8');
-            console.log('✅ Loaded video plan from public folder');
-            return JSON.parse(data);
+        const loaded = _loadUnifiedProjectState({ reconcile: true });
+        if (loaded?.videoPlan) {
+            console.log(`✅ Loaded unified video plan from ${loaded.source}`);
+            return loaded.videoPlan;
         }
-
-        // Fall back to temp folder
-        const tempPlanPath = path.join(TEMP_PATH, 'video-plan.json');
-        if (fs.existsSync(tempPlanPath)) {
-            const data = fs.readFileSync(tempPlanPath, 'utf8');
-            console.log('✅ Loaded video plan from temp folder');
-            return JSON.parse(data);
-        }
-
         console.log('⚠️ No video plan found');
         return null;
     } catch (error) {
@@ -1226,28 +1932,172 @@ ipcMain.handle('load-video-plan', async () => {
 });
 
 // Save Video Plan
-ipcMain.handle('save-video-plan', async (event, plan) => {
+ipcMain.handle('save-video-plan', async (event, plan, expectedRevision, expectedPlanHash) => {
     try {
-        // Save to both temp and public to be safe
-        const paths = [
-            path.join(TEMP_PATH, 'video-plan.json'),
-            path.join(PUBLIC_PATH, 'video-plan.json')
-        ];
-
-        const data = JSON.stringify(plan, null, 2);
-
-        paths.forEach(p => {
-            // Ensure directory exists
-            const dir = path.dirname(p);
-            if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-            fs.writeFileSync(p, data);
-        });
-
-        console.log('✅ Video plan saved from UI');
-        return { success: true };
+        const safePlan = _boundedPlainObject(plan, 32 * 1024 * 1024);
+        const saved = await _queueProjectSave(() => (
+            _persistUnifiedVideoPlan(safePlan, expectedRevision, expectedPlanHash)
+        ));
+        console.log(`✅ Unified video plan saved (revision ${saved.revision})`);
+        return {
+            success: true,
+            revision: saved.revision,
+            planHash: saved.planHash,
+            path: saved.fvpPath,
+        };
     } catch (error) {
         console.error('❌ Failed to save plan:', error);
         return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('load-test-mg-plan', async () => {
+    try {
+        const testPlanPath = path.join(PUBLIC_PATH, 'test-mg-plan.json');
+        if (!fs.existsSync(testPlanPath)) {
+            return { success: false, error: 'public/test-mg-plan.json does not exist' };
+        }
+        return {
+            success: true,
+            plan: JSON.parse(fs.readFileSync(testPlanPath, 'utf8')),
+        };
+    } catch (error) {
+        return {
+            success: false,
+            conflict: error.code === 'PROJECT_REVISION_CONFLICT' || error.code === 'PROJECT_PLAN_CONFLICT',
+            error: error.message,
+        };
+    }
+});
+
+ipcMain.handle('get-country-geojson', async () => {
+    try {
+        const geoPath = path.join(APP_ROOT, 'assets', 'geo', 'countries-slim.json');
+        const allowed = _resolveExistingFileWithin([path.join(APP_ROOT, 'assets', 'geo')], geoPath);
+        if (!allowed) return null;
+        return JSON.parse(fs.readFileSync(allowed, 'utf8'));
+    } catch (error) {
+        console.warn(`[Geo] Could not load country boundaries: ${error.message}`);
+        return null;
+    }
+});
+
+const QA_CROP_IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.bmp']);
+const QA_CROP_VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.mkv']);
+const _activeQaCropFiles = new Set();
+
+ipcMain.handle('qa-pre-crop-media', async (event, payload = {}) => {
+    const mediaFile = _resolveAllowedMutableProjectMediaFile(payload.mediaFile);
+    if (!mediaFile) {
+        return { success: false, error: 'Crop target must be an existing file inside project public/temp/assets' };
+    }
+
+    const crop = {};
+    for (const key of ['cropTop', 'cropBottom', 'cropLeft', 'cropRight']) {
+        const value = Number(payload.crop?.[key] || 0);
+        if (!Number.isFinite(value) || value < 0 || value > 40) {
+            return { success: false, error: `Invalid ${key}: ${payload.crop?.[key]}` };
+        }
+        crop[key] = value;
+    }
+    if (crop.cropTop + crop.cropBottom >= 90 || crop.cropLeft + crop.cropRight >= 90) {
+        return { success: false, error: 'Crop removes too much of the source frame' };
+    }
+    if (!Object.values(crop).some((value) => value > 0)) {
+        return { success: false, error: 'Crop request does not remove any pixels' };
+    }
+
+    const extension = path.extname(mediaFile).toLowerCase();
+    const isImage = QA_CROP_IMAGE_EXTENSIONS.has(extension);
+    const isVideo = QA_CROP_VIDEO_EXTENSIONS.has(extension);
+    if (!isImage && !isVideo) {
+        return { success: false, error: `Unsupported QA crop media type: ${extension || '(none)'}` };
+    }
+
+    const activeKey = process.platform === 'win32' ? mediaFile.toLowerCase() : mediaFile;
+    if (_activeQaCropFiles.has(activeKey)) {
+        return { success: false, error: 'This media file is already being cropped' };
+    }
+    _activeQaCropFiles.add(activeKey);
+
+    const nonce = crypto.randomBytes(5).toString('hex');
+    const basePath = mediaFile.slice(0, -extension.length);
+    const tempFile = `${basePath}.qa-crop-${nonce}${extension}`;
+    const backupFile = `${basePath}.qa-backup-${nonce}${extension}`;
+    const horizontal = `${crop.cropLeft}/100-${crop.cropRight}/100`;
+    const vertical = `${crop.cropTop}/100-${crop.cropBottom}/100`;
+    const cropFilter = [
+        `floor(iw*(1-${horizontal})/2)*2`,
+        `floor(ih*(1-${vertical})/2)*2`,
+        `floor(iw*${crop.cropLeft}/100)`,
+        `floor(ih*${crop.cropTop}/100)`,
+    ].join(':');
+    const args = ['-y', '-i', mediaFile, '-vf', `crop=${cropFilter}`];
+    if (isImage) {
+        args.push('-frames:v', '1', tempFile);
+    } else {
+        args.push(
+            '-map', '0:v:0',
+            '-map', '0:a?',
+            '-c:v', 'libx264',
+            '-crf', '18',
+            '-preset', 'fast',
+            '-c:a', 'copy'
+        );
+        if (extension === '.mp4' || extension === '.mov') args.push('-movflags', '+faststart');
+        args.push(tempFile);
+    }
+
+    try {
+        await new Promise((resolve, reject) => {
+            const proc = spawn(WEBGL_FFMPEG_PATH, args, {
+                stdio: ['ignore', 'ignore', 'pipe'],
+                windowsHide: true,
+            });
+            let stderr = '';
+            let settled = false;
+            const finish = (error) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timeout);
+                if (error) reject(error);
+                else resolve();
+            };
+            const timeout = setTimeout(async () => {
+                await _terminateChildProcess(proc);
+                finish(new Error('FFmpeg pre-crop timed out'));
+            }, 120_000);
+            proc.stderr.on('data', (data) => {
+                stderr = (stderr + data.toString()).slice(-32 * 1024);
+            });
+            proc.once('error', finish);
+            proc.once('close', (code) => {
+                if (code === 0) finish(null);
+                else finish(new Error(`FFmpeg pre-crop failed (code ${code}): ${stderr.slice(-800)}`));
+            });
+        });
+        _assertNonEmptyFile(tempFile, 'Cropped QA media');
+
+        fs.renameSync(mediaFile, backupFile);
+        try {
+            fs.renameSync(tempFile, mediaFile);
+        } catch (error) {
+            try { fs.renameSync(backupFile, mediaFile); } catch (_) { }
+            throw error;
+        }
+        try { fs.unlinkSync(backupFile); } catch (error) {
+            console.warn(`[QA Crop] Could not remove backup ${backupFile}: ${error.message}`);
+        }
+        _assertNonEmptyFile(mediaFile, 'Cropped QA media');
+        return { success: true, mediaFile };
+    } catch (error) {
+        try { if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile); } catch (_) { }
+        if (!fs.existsSync(mediaFile) && fs.existsSync(backupFile)) {
+            try { fs.renameSync(backupFile, mediaFile); } catch (_) { }
+        }
+        return { success: false, error: error.message };
+    } finally {
+        _activeQaCropFiles.delete(activeKey);
     }
 });
 
@@ -1262,19 +2112,355 @@ function _resolveSceneMediaPathMain(scene) {
         candidates.push(path.join(PUBLIC_PATH, scene.mediaFile), path.join(TEMP_PATH, scene.mediaFile));
     }
     const exts = ['.mp4', '.jpg', '.jpeg', '.png', '.webp'];
-    const idx = scene?.index;
+    const idx = scene?.sourceSceneIndex ?? scene?.index;
     for (const ext of exts) {
         candidates.push(path.join(PUBLIC_PATH, `scene-${idx}-asset${ext}`));
         candidates.push(path.join(PUBLIC_PATH, `scene-${idx}${ext}`));
         candidates.push(path.join(TEMP_PATH, `scene-${idx}${ext}`));
     }
-    for (const p of candidates) { try { if (p && fs.existsSync(p)) return p; } catch (_) {} }
+    for (const p of candidates) {
+        try {
+            if (p && _isAllowedProjectMediaFile(p)) return p;
+        } catch (_) {}
+    }
     return null;
 }
 
+const _projectLockNonce = crypto.randomBytes(16).toString('hex');
+const _projectLockStartedAt = new Date().toISOString();
+
+function _readProjectLock(lockFile) {
+    try {
+        const raw = fs.readFileSync(lockFile, 'utf8').trim();
+        if (/^\d+$/.test(raw)) return { pid: Number(raw), legacy: true };
+        const parsed = JSON.parse(raw);
+        return {
+            pid: Number(parsed.pid),
+            nonce: String(parsed.nonce || ''),
+            startedAt: String(parsed.startedAt || ''),
+        };
+    } catch (_) {
+        return null;
+    }
+}
+
+function _writeProjectLockExclusive(lockFile, projectDir) {
+    fs.writeFileSync(lockFile, JSON.stringify({
+        pid: process.pid,
+        nonce: _projectLockNonce,
+        startedAt: _projectLockStartedAt,
+        projectDir,
+    }), { flag: 'wx' });
+}
+
+function acquireProjectLock(projectDir = PROJECT_DIR) {
+    const resolvedProjectDir = path.resolve(projectDir);
+    const lockFile = path.join(resolvedProjectDir, '.lock');
+    fs.mkdirSync(resolvedProjectDir, { recursive: true });
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+            _writeProjectLockExclusive(lockFile, resolvedProjectDir);
+            return true;
+        } catch (error) {
+            if (error.code !== 'EEXIST') {
+                console.error(`[Lock] Cannot acquire ${lockFile}: ${error.message}`);
+                return false;
+            }
+
+            const existing = _readProjectLock(lockFile);
+            if (existing?.pid && Number.isInteger(existing.pid)) {
+                try {
+                    process.kill(existing.pid, 0);
+                    return false;
+                } catch (probeError) {
+                    if (probeError.code && probeError.code !== 'ESRCH') {
+                        console.error(`[Lock] Cannot verify lock owner ${existing.pid}: ${probeError.message}`);
+                        return false;
+                    }
+                }
+            }
+
+            try {
+                fs.unlinkSync(lockFile);
+            } catch (unlinkError) {
+                if (unlinkError.code !== 'ENOENT') {
+                    console.error(`[Lock] Cannot remove stale lock ${lockFile}: ${unlinkError.message}`);
+                    return false;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+function releaseProjectLock(projectDir = PROJECT_DIR) {
+    try {
+        const lockFile = path.join(path.resolve(projectDir), '.lock');
+        if (!fs.existsSync(lockFile)) return;
+        const lock = _readProjectLock(lockFile);
+        if (lock?.pid === process.pid && (lock.legacy || lock.nonce === _projectLockNonce)) {
+            fs.unlinkSync(lockFile);
+        }
+    } catch (error) {
+        console.warn(`[Lock] Could not release project lock: ${error.message}`);
+    }
+}
+
+function _closeProjectScopedWindows() {
+    for (const win of [footageResourcesWindow, qaStudioWindow, styleStudioWindow]) {
+        try {
+            if (win && !win.isDestroyed()) win.close();
+        } catch (_) { }
+    }
+}
+
+function _pathsEqual(left, right) {
+    const a = path.resolve(left);
+    const b = path.resolve(right);
+    return process.platform === 'win32'
+        ? a.toLowerCase() === b.toLowerCase()
+        : a === b;
+}
+
+function _validateExistingProjectTarget(projectDir, projectFile = null) {
+    try {
+        const inspected = projectStore.inspectProjectDirectory({
+            projectDir,
+            preferredFvpPath: projectFile,
+        });
+        if (!inspected.valid) {
+            return {
+                success: false,
+                invalidProject: true,
+                code: inspected.code,
+                error: inspected.error || 'The selected folder is not a valid YTA Empire project.',
+            };
+        }
+        return {
+            success: true,
+            projectDir: inspected.projectDir,
+            projectFile: inspected.projectFile,
+            inspection: inspected,
+        };
+    } catch (error) {
+        return {
+            success: false,
+            invalidProject: true,
+            error: `The selected project could not be inspected: ${error.message}`,
+        };
+    }
+}
+
+function _writeProjectMarkerForTarget(target) {
+    return projectStore.writeProjectMarker({
+        projectDir: target.projectDir,
+        projectFile: target.projectFile,
+    });
+}
+
+function _prepareNewProjectTarget(options = {}) {
+    return projectStore.createProjectAtLocation(options);
+}
+
+async function _switchProjectInPlace(projectDir, options = {}) {
+    if (activeProcess || _webglExport) {
+        return {
+            success: false,
+            error: 'Finish or cancel the active build/render before switching projects.',
+        };
+    }
+
+    const target = options.validatedProject?.success
+        ? options.validatedProject
+        : _validateExistingProjectTarget(projectDir, options.projectFile);
+    if (!target.success) return target;
+    const targetDir = target.projectDir;
+    const targetProjectFile = target.projectFile;
+
+    const previousDir = PROJECT_DIR;
+    const previousProjectFile = PROJECT_FILE_PATH;
+    const sameProject = _pathsEqual(targetDir, previousDir);
+    if (sameProject) {
+        if (targetProjectFile) PROJECT_FILE_PATH = targetProjectFile;
+        try {
+            _writeProjectMarkerForTarget(target);
+        } catch (error) {
+            console.warn(`[Projects] Could not update project marker: ${error.message}`);
+        }
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            if (mainWindow.isMinimized()) mainWindow.restore();
+            mainWindow.show();
+            mainWindow.focus();
+        }
+        return {
+            success: true,
+            projectDir: PROJECT_DIR,
+            projectFile: PROJECT_FILE_PATH,
+            sameProject: true,
+        };
+    }
+
+    if (!acquireProjectLock(targetDir)) {
+        return {
+            success: false,
+            alreadyOpen: true,
+            error: 'This project is already open in another app session.',
+        };
+    }
+
+    try {
+        _writeProjectMarkerForTarget(target);
+        releaseProjectLock(previousDir);
+        killLogTailWindows();
+        _closeProjectScopedWindows();
+        _selectedFileGrants.clear();
+        _selectedDirectoryGrants.clear();
+        applyProjectDir(targetDir, { projectFile: targetProjectFile });
+        _addRecentProject(targetDir);
+
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.setTitle(PROJECT_NAME ? `YTA Empire WEBGL — ${PROJECT_NAME}` : 'YTA Empire WEBGL');
+            if (options.reloadRenderer) {
+                await mainWindow.loadFile(path.join(APP_ROOT, 'ui', 'index.html'));
+            }
+            if (mainWindow.isMinimized()) mainWindow.restore();
+            mainWindow.show();
+            mainWindow.focus();
+        }
+        return {
+            success: true,
+            projectDir: PROJECT_DIR,
+            projectFile: PROJECT_FILE_PATH,
+            reload: options.reloadRenderer !== true,
+        };
+    } catch (error) {
+        releaseProjectLock(targetDir);
+        try {
+            acquireProjectLock(previousDir);
+            applyProjectDir(previousDir, { projectFile: previousProjectFile });
+        } catch (_) { }
+        return { success: false, error: `Could not switch projects: ${error.message}` };
+    }
+}
+
+function _spawnProjectInstance(projectDir, options = {}) {
+    const target = options.validatedProject?.success
+        ? options.validatedProject
+        : _validateExistingProjectTarget(projectDir, options.projectFile);
+    if (!target.success) return target;
+    const targetDir = target.projectDir;
+    const targetProjectFile = target.projectFile;
+
+    const args = [
+        APP_ROOT,
+        targetProjectFile || `--project=${targetDir}`,
+        '--yta-project-instance',
+    ];
+    if (process.argv.includes('--dev')) args.push('--dev');
+
+    const childEnv = { ...process.env };
+    // A test/dev debugging port belongs to the current process. Forwarding it
+    // would make the second project fight for the same DevTools endpoint.
+    delete childEnv.YTA_REMOTE_DEBUG;
+    delete childEnv.YTA_REMOTE_DEBUG_PORT;
+    if (childEnv.YTA_TEST_USER_DATA_DIR) {
+        const childProfile = crypto.createHash('sha1')
+            .update(targetDir)
+            .digest('hex')
+            .slice(0, 12);
+        childEnv.YTA_TEST_USER_DATA_DIR = path.join(
+            childEnv.YTA_TEST_USER_DATA_DIR,
+            `project-child-${childProfile}`
+        );
+        childEnv.YTA_ALLOW_TEST_USER_DATA_DIR = '1';
+    }
+
+    try {
+        const child = spawn(process.execPath, args, {
+            detached: true,
+            stdio: 'ignore',
+            cwd: APP_ROOT,
+            env: childEnv,
+        });
+        child.unref();
+        console.log(`🚀 Opened additional project instance: ${targetDir}`);
+        return {
+            success: true,
+            projectDir: targetDir,
+            projectFile: targetProjectFile,
+            openedIn: 'new-instance',
+            reload: false,
+        };
+    } catch (error) {
+        return { success: false, error: `Could not open another project window: ${error.message}` };
+    }
+}
+
+async function _openProjectTarget(projectDir, options = {}) {
+    const target = options.validatedProject?.success
+        ? options.validatedProject
+        : _validateExistingProjectTarget(projectDir, options.projectFile);
+    if (!target.success) return target;
+
+    if (_pathsEqual(PROJECT_DIR, DEFAULT_WORKSPACE_DIR)) {
+        const switched = await _switchProjectInPlace(target.projectDir, {
+            ...options,
+            projectFile: target.projectFile,
+            validatedProject: target,
+        });
+        if (switched.success) {
+            switched.openedIn = 'current-window';
+            switched.reload = true;
+        }
+        return switched;
+    }
+    if (_pathsEqual(target.projectDir, PROJECT_DIR)) {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            if (mainWindow.isMinimized()) mainWindow.restore();
+            mainWindow.show();
+            mainWindow.focus();
+        }
+        return {
+            success: true,
+            projectDir: PROJECT_DIR,
+            projectFile: PROJECT_FILE_PATH,
+            openedIn: 'current-window',
+            sameProject: true,
+            reload: false,
+        };
+    }
+    return _spawnProjectInstance(target.projectDir, {
+        ...options,
+        projectFile: target.projectFile,
+        validatedProject: target,
+    });
+}
+
+async function _consumePendingExternalProjectSelection() {
+    if (!_pendingExternalProjectSelection || !app.isReady() || !mainWindow || mainWindow.isDestroyed()) {
+        return;
+    }
+    const selection = _pendingExternalProjectSelection;
+    _pendingExternalProjectSelection = null;
+    const result = await _switchProjectInPlace(selection.projectDir, {
+        projectFile: selection.projectFile,
+        reloadRenderer: true,
+    });
+    if (!result.success) {
+        await dialog.showMessageBox(mainWindow, {
+            type: 'error',
+            title: 'Could Not Open Project',
+            message: result.error || 'The project could not be opened.',
+        });
+    }
+}
+
 ipcMain.handle('scene-action', async (event, payload = {}) => {
-    const { kind, sceneIndices = [], action = '', instruction = '' } = payload;
-    const send = (sceneIndex, message) => { try { event.sender.send('scene-action-progress', { sceneIndex, message }); } catch (_) {} };
+    const { kind, sceneIndices = [], sceneRefs = [], action = '', instruction = '' } = payload;
+    const send = (sceneIndex, message, clipId) => {
+        try { event.sender.send('scene-action-progress', { sceneIndex, clipId, message }); } catch (_) {}
+    };
     const result = { success: false, ok: 0, fail: 0, scenes: [], errors: [] };
     let visionBox = null;
     let weStarted = false;
@@ -1294,9 +2480,8 @@ ipcMain.handle('scene-action', async (event, payload = {}) => {
         visionBox = null;
         try { visionBox = require('./src/vision/vision-box'); } catch (_) {}
 
-        const planPath = [path.join(PUBLIC_PATH, 'video-plan.json'), path.join(TEMP_PATH, 'video-plan.json')].find(p => fs.existsSync(p));
-        if (!planPath) return { success: false, error: 'no video-plan.json found' };
-        const plan = JSON.parse(fs.readFileSync(planPath, 'utf8'));
+        const plan = _loadUnifiedProjectState({ reconcile: true })?.videoPlan;
+        if (!plan) return { success: false, error: 'no video plan found' };
         const scenes = plan.scenes || [];
         const scriptContext = plan.scriptContext || {};
 
@@ -1326,20 +2511,31 @@ ipcMain.handle('scene-action', async (event, payload = {}) => {
             send(-1, `Vision: using Bedrock (${process.env.VISION_PROVIDER}) for retry — no GPU-box boot needed`);
         }
 
-        for (const si of sceneIndices) {
-            const scene = scenes.find((s) => Number(s.index) === Number(si)) || scenes[si];
-            if (!scene) { result.fail++; result.errors.push({ si, error: 'scene not found' }); continue; }
-            const onProgress = (m) => send(si, m);
+        const requests = Array.isArray(sceneRefs) && sceneRefs.length
+            ? sceneRefs
+            : sceneIndices.map((sceneIndex) => ({ sourceSceneIndex: sceneIndex, index: sceneIndex }));
+        for (const request of requests) {
+            const si = request?.sourceSceneIndex ?? request?.index;
+            const clipId = request?.clipId != null ? String(request.clipId) : null;
+            const scene = (clipId ? scenes.find((candidate) => String(candidate?.clipId || '') === clipId) : null)
+                || scenes.find((candidate) => Number(candidate?.sourceSceneIndex ?? candidate?.index) === Number(si))
+                || scenes[si];
+            if (!scene) { result.fail++; result.errors.push({ si, clipId, error: 'scene not found' }); continue; }
+            const onProgress = (m) => send(si, m, clipId);
             try {
                 if (kind === 'retry') {
                     const mediaFilePath = _resolveSceneMediaPathMain(scene);
                     const r = await sceneActions.retrySceneMedia(scene, scriptContext, { mediaFilePath, onProgress });
-                    if (r.success) { result.ok++; result.scenes.push({ si, reload: true, keyword: r.keyword, sourceHint: r.sourceHint }); }
+                    if (r.success) { result.ok++; result.scenes.push({ si, clipId, reload: true, keyword: r.keyword, sourceHint: r.sourceHint }); }
                     else { result.fail++; result.errors.push({ si, error: r.error }); send(si, `❌ ${r.error}`); }
                 } else if (kind === 'ceo') {
                     const arrIdx = scenes.indexOf(scene);
                     const r = await sceneActions.ceoEditScene(action, scene, scriptContext, arrIdx, scenes, { instruction, onProgress });
-                    if (r.success) { result.ok++; result.scenes.push({ si, scene: r.scene, change: r.change }); }
+                    if (r.success) {
+                        if (r.scene && clipId && !r.scene.clipId) r.scene.clipId = clipId;
+                        result.ok++;
+                        result.scenes.push({ si, clipId, scene: r.scene, change: r.change });
+                    }
                     else { result.fail++; result.errors.push({ si, error: r.error }); send(si, `❌ ${r.error}`); }
                 }
             } catch (e) { result.fail++; result.errors.push({ si, error: e.message }); send(si, `❌ ${e.message}`); }
@@ -1347,9 +2543,7 @@ ipcMain.handle('scene-action', async (event, payload = {}) => {
 
         // Persist scene changes (framing etc.) back to the plan.
         plan.scenes = scenes;
-        [path.join(PUBLIC_PATH, 'video-plan.json'), path.join(TEMP_PATH, 'video-plan.json')].forEach((p) => {
-            try { if (fs.existsSync(path.dirname(p))) fs.writeFileSync(p, JSON.stringify(plan, null, 2)); } catch (_) {}
-        });
+        _persistUnifiedVideoPlan(plan);
 
         if (kind === 'retry' && weStarted && visionBox?.stop) {
             send(-1, 'Vision box: stopping (mission done)…');
@@ -1378,8 +2572,8 @@ ipcMain.handle('scene-action', async (event, payload = {}) => {
 ipcMain.handle('qa-preview-order', async (event, payload = {}) => {
     try {
         const { previewOrder } = require('./src/directives/directive-actuator');
-        const planPath = [path.join(PUBLIC_PATH, 'video-plan.json'), path.join(TEMP_PATH, 'video-plan.json')].find(p => fs.existsSync(p));
-        const sc = planPath ? (JSON.parse(fs.readFileSync(planPath, 'utf8')).scriptContext || {}) : {};
+        const plan = _loadUnifiedProjectState({ reconcile: true })?.videoPlan;
+        const sc = plan?.scriptContext || {};
         const prev = await previewOrder(payload.text || '', { themeId: sc.themeId, nicheId: sc.nicheId, productionMode: sc.productionMode });
         return { ok: true, summary: prev.summary, hasActions: prev.hasActions };
     } catch (e) { return { ok: false, error: e.message }; }
@@ -1390,9 +2584,8 @@ ipcMain.handle('qa-apply-order', async (event, payload = {}) => {
     try {
         const { previewOrder, applyOrderToPlan } = require('./src/directives/directive-actuator');
         const sceneActions = require('./src/agents/scene-actions');
-        const planPath = [path.join(PUBLIC_PATH, 'video-plan.json'), path.join(TEMP_PATH, 'video-plan.json')].find(p => fs.existsSync(p));
-        if (!planPath) return { success: false, error: 'no video-plan.json found' };
-        const plan = JSON.parse(fs.readFileSync(planPath, 'utf8'));
+        const plan = _loadUnifiedProjectState({ reconcile: true })?.videoPlan;
+        if (!plan) return { success: false, error: 'no video plan found' };
 
         // Undo snapshot before any mutation.
         try { fs.writeFileSync(path.join(PUBLIC_PATH, '.qa-undo.json'), JSON.stringify(plan)); } catch (_) {}
@@ -1422,10 +2615,8 @@ ipcMain.handle('qa-apply-order', async (event, payload = {}) => {
             } catch (e) { send(`Scene ${nf.index} footage retry failed: ${e.message}`); }
         }
 
-        // Persist to both plan copies + refresh preview.
-        [path.join(PUBLIC_PATH, 'video-plan.json'), path.join(TEMP_PATH, 'video-plan.json')].forEach((p) => {
-            try { if (fs.existsSync(path.dirname(p))) fs.writeFileSync(p, JSON.stringify(plan, null, 2)); } catch (_) {}
-        });
+        // Persist the unified project state + refresh preview.
+        _persistUnifiedVideoPlan(plan);
         try { if (mainWindow) mainWindow.webContents.send('qa-plan-updated', plan); } catch (_) {}
 
         const rep = res.report || {};
@@ -1446,12 +2637,406 @@ ipcMain.handle('qa-undo', async () => {
         const snap = path.join(PUBLIC_PATH, '.qa-undo.json');
         if (!fs.existsSync(snap)) return { success: false, error: 'nothing to undo' };
         const plan = JSON.parse(fs.readFileSync(snap, 'utf8'));
-        [path.join(PUBLIC_PATH, 'video-plan.json'), path.join(TEMP_PATH, 'video-plan.json')].forEach((p) => {
-            try { if (fs.existsSync(path.dirname(p))) fs.writeFileSync(p, JSON.stringify(plan, null, 2)); } catch (_) {}
-        });
+        _persistUnifiedVideoPlan(plan);
         try { if (mainWindow) mainWindow.webContents.send('qa-plan-updated', plan); } catch (_) {}
         return { success: true };
     } catch (e) { return { success: false, error: e.message }; }
+});
+
+// Integrated editor Agent. This is the versioned replacement for the legacy
+// QA-chat acting path above. The legacy handlers remain temporarily for old
+// windows/tests, but the main editor only uses these transaction-safe channels.
+function _sendAgentPlanUpdate(payload) {
+    try {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('agent-plan-updated', payload);
+        }
+    } catch (_) { }
+}
+
+function _agentPreviewCaptureRect(value) {
+    const rect = value && typeof value === 'object' ? value : {};
+    const x = Math.max(0, Math.trunc(Number(rect.x) || 0));
+    const y = Math.max(0, Math.trunc(Number(rect.y) || 0));
+    const width = Math.max(0, Math.min(4096, Math.trunc(Number(rect.width) || 0)));
+    const height = Math.max(0, Math.min(2304, Math.trunc(Number(rect.height) || 0)));
+    if (width < 64 || height < 36) return null;
+    return { x, y, width, height };
+}
+
+async function _captureAgentPlayheadFrame(event, visualContext) {
+    const source = visualContext && typeof visualContext === 'object' ? visualContext : {};
+    if (source.captureRequested !== true || !event?.sender || event.sender.isDestroyed()) return null;
+    const rect = _agentPreviewCaptureRect(source.rect);
+    if (!rect) return null;
+    try {
+        let image = await event.sender.capturePage(rect);
+        if (!image || image.isEmpty()) return null;
+        const original = image.getSize();
+        if (original.width > 1280) {
+            const height = Math.max(1, Math.round(original.height * (1280 / original.width)));
+            image = image.resize({ width: 1280, height, quality: 'good' });
+        }
+        const size = image.getSize();
+        const jpeg = image.toJPEG(84);
+        if (!jpeg.length || jpeg.length > 4 * 1024 * 1024) return null;
+        return {
+            captured: true,
+            imageBase64: jpeg.toString('base64'),
+            mimeType: 'image/jpeg',
+            currentTime: Math.max(0, Number(source.currentTime) || 0),
+            renderer: String(source.renderer || '').slice(0, 80),
+            width: size.width,
+            height: size.height,
+        };
+    } catch (error) {
+        console.warn(`[Editor Agent] Playhead screenshot unavailable: ${error.message}`);
+        return null;
+    }
+}
+
+ipcMain.handle('agent-plan', async (_event, rawPayload = {}) => {
+    try {
+        const payload = _boundedPlainObject(rawPayload, 512 * 1024);
+        const loaded = _loadUnifiedProjectState({ reconcile: true });
+        if (!loaded?.videoPlan) return { success: false, error: 'Open a generated project before using Agent' };
+        if (payload.planHash && loaded.planHash && payload.planHash !== loaded.planHash) {
+            return {
+                success: false,
+                conflict: true,
+                error: 'The project changed. Agent scope was refreshed; send the request again.',
+                revision: loaded.revision,
+                planHash: loaded.planHash,
+            };
+        }
+        if (payload.projectRevision != null
+            && Number(payload.projectRevision) !== Number(loaded.revision || 0)) {
+            return {
+                success: false,
+                conflict: true,
+                error: 'The project changed. Agent scope was refreshed; send the request again.',
+                revision: loaded.revision,
+                planHash: loaded.planHash,
+            };
+        }
+        const sessionStore = require('./src/agents/editor-supervisor/session-store');
+        const session = sessionStore.loadSession(PROJECT_DIR);
+        const { resolveContextualPayload } = require('./src/agents/editor-supervisor/conversation-context');
+        const resolvedPayload = resolveContextualPayload(payload, session, loaded.videoPlan);
+        resolvedPayload.history = sessionStore.historyForModel(session, payload.text);
+        const { shouldGroundVisualRequest } = require('./src/agents/editor-supervisor/visual-grounding');
+        if (shouldGroundVisualRequest(resolvedPayload)) {
+            resolvedPayload.visualContext = await _captureAgentPlayheadFrame(
+                _event,
+                payload.visualContext
+            );
+        } else {
+            resolvedPayload.visualContext = null;
+        }
+        const supervisor = require('./src/agents/editor-supervisor');
+        const result = await supervisor.planRequest(resolvedPayload, {
+            plan: loaded.videoPlan,
+            revision: loaded.revision,
+            planHash: loaded.planHash,
+        });
+        let savedSession = session;
+        try {
+            savedSession = sessionStore.recordExchange(PROJECT_DIR, {
+                originalRequest: payload.text,
+                resolvedRequest: resolvedPayload.text,
+                effort: resolvedPayload.effort,
+                scope: resolvedPayload.scope,
+                result,
+            });
+        } catch (sessionError) {
+            console.warn(`[Editor Agent] Could not persist conversation: ${sessionError.message}`);
+        }
+        return {
+            success: true,
+            ...result,
+            sessionId: savedSession.id,
+            revision: loaded.revision,
+            planHash: loaded.planHash,
+        };
+    } catch (error) {
+        return { success: false, error: error.message, code: error.code || null };
+    }
+});
+
+ipcMain.handle('agent-execute', async (event, rawPayload = {}) => {
+    const send = (phase, message, percent) => {
+        try {
+            event.sender.send('agent-progress', {
+                planId: String(rawPayload?.planId || '').slice(0, 160),
+                phase,
+                message: String(message || '').slice(0, 2_000),
+                percent: Math.max(0, Math.min(100, Number(percent) || 0)),
+            });
+        } catch (_) { }
+    };
+    try {
+        const payload = _boundedPlainObject(rawPayload, 128 * 1024);
+        const loaded = _loadUnifiedProjectState({ reconcile: true });
+        if (!loaded?.videoPlan) return { success: false, error: 'No generated video plan found' };
+
+        send('validate', 'Validating project version and active scope...', 10);
+        const supervisor = require('./src/agents/editor-supervisor');
+        const result = await supervisor.executePlanned(payload.planId, {
+            plan: loaded.videoPlan,
+            revision: loaded.revision,
+            planHash: loaded.planHash,
+        }, {
+            log: (message) => send('apply', message, 45),
+            progress: send,
+            projectDir: PROJECT_DIR,
+            appRoot: PROJECT_ROOT,
+            tempDir: TEMP_PATH,
+            publicDir: PUBLIC_PATH,
+            inputDir: INPUT_PATH,
+            browserPath: findHyperframesBrowserPath(),
+        });
+        if (!result.success) return result;
+
+        const transactionAssets = require('./src/agents/editor-supervisor/transaction-assets');
+        let committedAssetPaths = [];
+        let saved;
+        try {
+            if (result.assetManifest?.assets?.length) {
+                send('assets', `Committing ${result.assetManifest.assets.length} staged media asset(s)...`, 97);
+                committedAssetPaths = transactionAssets.commitAssets(result.assetManifest, {
+                    projectDir: PROJECT_DIR,
+                });
+            }
+            send('save', 'Saving the Agent edit as one undoable transaction...', 98);
+            saved = _persistUnifiedVideoPlan(result.plan, loaded.revision, loaded.planHash);
+        } catch (commitError) {
+            transactionAssets.rollbackCommittedAssets(committedAssetPaths, { projectDir: PROJECT_DIR });
+            transactionAssets.cleanupStage(result.assetManifest, { projectDir: PROJECT_DIR });
+            throw commitError;
+        }
+        let transaction;
+        try {
+            const history = require('./src/agents/editor-supervisor/history-store');
+            transaction = history.recordCommit(PROJECT_DIR, {
+                request: result.request,
+                summary: result.summary,
+                scope: result.scope,
+                beforePlan: result.beforePlan,
+                afterPlan: result.plan,
+                beforeRevision: loaded.revision,
+                afterRevision: saved.revision,
+                beforePlanHash: loaded.planHash,
+                afterPlanHash: saved.planHash,
+                stats: result.stats,
+                diff: result.diff,
+                qualityReport: result.qualityReport,
+                visualQa: result.visualQa,
+                operationGraph: result.operationGraph,
+                operationResults: result.operationResults,
+                recoveries: result.recoveries,
+                decisionLog: result.decisionLog,
+                assetManifest: result.assetManifest
+                    ? {
+                        transactionId: result.assetManifest.transactionId,
+                        assets: result.assetManifest.assets.map((asset) => ({
+                            relativePath: asset.relativePath,
+                            finalPath: asset.finalPath,
+                            size: asset.size,
+                        })),
+                    }
+                    : null,
+            });
+        } catch (historyError) {
+            // Never leave an edit committed without its promised undo record.
+            try {
+                const rolledBack = _persistUnifiedVideoPlan(result.beforePlan, saved.revision, saved.planHash);
+                _sendAgentPlanUpdate({
+                    videoPlan: rolledBack.videoPlan,
+                    revision: rolledBack.revision,
+                    planHash: rolledBack.planHash,
+                    source: 'editor-agent-rollback',
+                });
+            } catch (_) { }
+            transactionAssets.rollbackCommittedAssets(committedAssetPaths, { projectDir: PROJECT_DIR });
+            transactionAssets.cleanupStage(result.assetManifest, { projectDir: PROJECT_DIR });
+            return { success: false, error: `Could not create Agent undo history: ${historyError.message}` };
+        }
+        transactionAssets.cleanupStage(result.assetManifest, { projectDir: PROJECT_DIR });
+
+        _sendAgentPlanUpdate({
+            videoPlan: saved.videoPlan,
+            revision: saved.revision,
+            planHash: saved.planHash,
+            source: 'editor-agent',
+            transactionId: transaction.id,
+        });
+        let sessionId = '';
+        let sessionWarning = '';
+        try {
+            const sessionStore = require('./src/agents/editor-supervisor/session-store');
+            const session = sessionStore.recordExecution(PROJECT_DIR, {
+                request: result.request,
+                resolvedRequest: result.resolvedRequest,
+                effort: result.effort,
+                summary: result.summary,
+                scope: result.scope,
+                capabilityIds: result.capabilityIds,
+                operations: result.operationResults,
+                transactionId: transaction.id,
+            });
+            sessionId = session.id;
+        } catch (sessionError) {
+            sessionWarning = `Edit succeeded, but Agent conversation memory could not be saved: ${sessionError.message}`;
+            console.warn(`[Editor Agent] ${sessionWarning}`);
+        }
+        send('complete', 'Edit applied. Preview and timeline are updated.', 100);
+        return {
+            success: true,
+            summary: result.summary,
+            stats: result.stats,
+            unsupported: result.unsupported,
+            qualityReport: result.qualityReport,
+            visualQa: result.visualQa,
+            diff: result.diff,
+            inspection: result.inspection,
+            operationGraph: result.operationGraph,
+            operationResults: result.operationResults,
+            recoveries: result.recoveries,
+            decisionLog: result.decisionLog,
+            transactionId: transaction.id,
+            sessionId,
+            sessionWarning,
+            revision: saved.revision,
+            planHash: saved.planHash,
+        };
+    } catch (error) {
+        return {
+            success: false,
+            conflict: error.code === 'AGENT_PLAN_CONFLICT'
+                || error.code === 'PROJECT_REVISION_CONFLICT'
+                || error.code === 'PROJECT_PLAN_CONFLICT',
+            error: error.message,
+            code: error.code || null,
+            visualQa: error.visualQa || null,
+        };
+    }
+});
+
+ipcMain.handle('agent-undo', async () => {
+    try {
+        const history = require('./src/agents/editor-supervisor/history-store');
+        const transaction = history.getUndoCandidate(PROJECT_DIR);
+        if (!transaction) return { success: false, error: 'Nothing to undo' };
+        const loaded = _loadUnifiedProjectState({ reconcile: true });
+        if (loaded?.planHash !== transaction.afterPlanHash) {
+            return {
+                success: false,
+                conflict: true,
+                error: 'The project changed after this Agent edit, so undo was stopped to protect newer work.',
+            };
+        }
+        const saved = _persistUnifiedVideoPlan(transaction.beforePlan, loaded.revision, loaded.planHash);
+        history.markUndone(PROJECT_DIR, transaction.id);
+        try {
+            require('./src/agents/editor-supervisor/session-store').recordActivity(
+                PROJECT_DIR,
+                `Undid: ${transaction.summary || 'last Agent edit'}.`,
+                'undo'
+            );
+        } catch (_) { }
+        _sendAgentPlanUpdate({
+            videoPlan: saved.videoPlan,
+            revision: saved.revision,
+            planHash: saved.planHash,
+            source: 'editor-agent-undo',
+            transactionId: transaction.id,
+        });
+        return {
+            success: true,
+            summary: transaction.summary,
+            revision: saved.revision,
+            planHash: saved.planHash,
+        };
+    } catch (error) {
+        return { success: false, error: error.message, code: error.code || null };
+    }
+});
+
+ipcMain.handle('agent-redo', async () => {
+    try {
+        const history = require('./src/agents/editor-supervisor/history-store');
+        const transaction = history.getRedoCandidate(PROJECT_DIR);
+        if (!transaction) return { success: false, error: 'Nothing to redo' };
+        const loaded = _loadUnifiedProjectState({ reconcile: true });
+        if (loaded?.planHash !== transaction.beforePlanHash) {
+            return {
+                success: false,
+                conflict: true,
+                error: 'The project changed after undo, so redo was stopped to protect newer work.',
+            };
+        }
+        const saved = _persistUnifiedVideoPlan(transaction.afterPlan, loaded.revision, loaded.planHash);
+        history.markRedone(PROJECT_DIR, transaction.id);
+        try {
+            require('./src/agents/editor-supervisor/session-store').recordActivity(
+                PROJECT_DIR,
+                `Restored: ${transaction.summary || 'Agent edit'}.`,
+                'redo'
+            );
+        } catch (_) { }
+        _sendAgentPlanUpdate({
+            videoPlan: saved.videoPlan,
+            revision: saved.revision,
+            planHash: saved.planHash,
+            source: 'editor-agent-redo',
+            transactionId: transaction.id,
+        });
+        return {
+            success: true,
+            summary: transaction.summary,
+            revision: saved.revision,
+            planHash: saved.planHash,
+        };
+    } catch (error) {
+        return { success: false, error: error.message, code: error.code || null };
+    }
+});
+
+ipcMain.handle('agent-history', async () => {
+    try {
+        const history = require('./src/agents/editor-supervisor/history-store');
+        return { success: true, ...history.listHistory(PROJECT_DIR) };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('agent-session', async () => {
+    try {
+        const loaded = _loadUnifiedProjectState({ reconcile: true });
+        if (!loaded?.videoPlan) return { success: false, error: 'Open a project to load Agent memory' };
+        const sessionStore = require('./src/agents/editor-supervisor/session-store');
+        return {
+            success: true,
+            session: sessionStore.publicSession(sessionStore.loadSession(PROJECT_DIR)),
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('agent-new-session', async () => {
+    try {
+        const loaded = _loadUnifiedProjectState({ reconcile: true });
+        if (!loaded?.videoPlan) return { success: false, error: 'Open a project before starting an Agent conversation' };
+        const sessionStore = require('./src/agents/editor-supervisor/session-store');
+        return {
+            success: true,
+            session: sessionStore.publicSession(sessionStore.startSession(PROJECT_DIR)),
+        };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
 });
 
 ipcMain.handle('vision-box-status', async () => {
@@ -1602,7 +3187,8 @@ ipcMain.handle('save-qa-results', async (event, data) => {
     try {
         const filePath = path.join(TEMP_PATH, 'qa-results.json');
         if (!fs.existsSync(TEMP_PATH)) fs.mkdirSync(TEMP_PATH, { recursive: true });
-        fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+        const safeResults = _boundedPlainObject(data, 8 * 1024 * 1024);
+        projectStore.atomicWriteJson(filePath, safeResults);
         return { success: true };
     } catch (error) {
         console.error('❌ Failed to save QA results:', error.message);
@@ -1614,6 +3200,9 @@ ipcMain.handle('load-qa-results', async () => {
     try {
         const filePath = path.join(TEMP_PATH, 'qa-results.json');
         if (!fs.existsSync(filePath)) return { success: true, data: null };
+        if (fs.statSync(filePath).size > 8 * 1024 * 1024) {
+            throw new Error('QA results file is too large');
+        }
         const raw = fs.readFileSync(filePath, 'utf-8');
         return { success: true, data: JSON.parse(raw) };
     } catch (error) {
@@ -1622,10 +3211,101 @@ ipcMain.handle('load-qa-results', async () => {
     }
 });
 
+function _boundedPlainObject(value, maxBytes = 256 * 1024) {
+    const json = JSON.stringify(value == null ? {} : value);
+    if (Buffer.byteLength(json, 'utf8') > maxBytes) {
+        throw new Error('IPC payload is too large');
+    }
+    return JSON.parse(json);
+}
+
+ipcMain.handle('qa-agent-init-log', async () => {
+    const agent = require('./src/studio/qa-studio-agent');
+    agent.initLog(PROJECT_DIR);
+    return { success: true };
+});
+
+ipcMain.handle('qa-agent-set-provider', async (_event, provider, model) => {
+    const normalized = String(provider || 'gemini');
+    if (!new Set(['gemini', 'qwen', 'qwenOmni']).has(normalized)) {
+        throw new Error('Unsupported QA provider');
+    }
+    const agent = require('./src/studio/qa-studio-agent');
+    agent.setProvider(normalized, String(model || '').slice(0, 160));
+    return { success: true, provider: normalized };
+});
+
+ipcMain.handle('qa-agent-analyze-scene', async (_event, clipPath, sceneInfo, context) => {
+    const allowedClip = _resolveExistingFileWithin([TEMP_PATH, OUTPUT_PATH], clipPath);
+    if (!allowedClip) {
+        throw new Error('QA analysis accepts only generated clips inside project temp/output');
+    }
+    if (!new Set(['.mp4', '.mov', '.mkv', '.webm']).has(path.extname(allowedClip).toLowerCase())) {
+        throw new Error('Unsupported QA clip type');
+    }
+    const agent = require('./src/studio/qa-studio-agent');
+    return agent.analyzeSceneClip(
+        allowedClip,
+        _boundedPlainObject(sceneInfo, 128 * 1024),
+        _boundedPlainObject(context, 256 * 1024)
+    );
+});
+
+ipcMain.handle('qa-agent-log', async (_event, ...args) => {
+    const agent = require('./src/studio/qa-studio-agent');
+    agent.qaLog(...args.slice(0, 16).map((value) => String(value).slice(0, 4000)));
+    return { success: true };
+});
+
+ipcMain.handle('qa-replace-scene-media', async (event, payload = {}) => {
+    const mediaFile = _resolveAllowedMutableProjectMediaFile(payload.mediaFile);
+    if (!mediaFile) {
+        return { success: false, error: 'Replacement target is outside project public/temp/assets' };
+    }
+    const replacer = require('./src/studio/qa-replacer');
+    return replacer.replaceSceneMedia({
+        mediaFile,
+        keyword: String(payload.keyword || '').slice(0, 500),
+        sourceHint: String(payload.sourceHint || '').slice(0, 80),
+        mediaType: payload.mediaType === 'image' ? 'image' : 'video',
+        sceneDuration: Math.max(1, Math.min(120, Number(payload.sceneDuration) || 8)),
+        scriptContext: _boundedPlainObject(payload.scriptContext, 256 * 1024),
+        scene: payload.scene ? _boundedPlainObject(payload.scene, 128 * 1024) : null,
+        onProgress: (message) => {
+            try { event.sender.send('qa-replacer-progress', String(message).slice(0, 2000)); } catch (_) { }
+        },
+    });
+});
+
+ipcMain.handle('qa-chat-niches', async () => {
+    const agent = require('./src/studio/qa-chat-agent');
+    return agent.getNicheList();
+});
+
+ipcMain.handle('qa-chat-send', async (_event, history, projectContext) => {
+    const safeHistory = Array.isArray(history)
+        ? history.slice(-40).map((item) => ({
+            role: item?.role === 'model' ? 'model' : 'user',
+            text: String(item?.text || '').slice(0, 12_000),
+        }))
+        : [];
+    const agent = require('./src/studio/qa-chat-agent');
+    return agent.sendMessageWithProject(
+        safeHistory,
+        _boundedPlainObject(projectContext, 256 * 1024)
+    );
+});
+
 // Push QA-fixed plan into the main window's memory so auto-save picks it up
-ipcMain.handle('push-plan-to-main', async (event, plan) => {
+ipcMain.handle('push-plan-to-main', async (event, payload) => {
+    const plan = _boundedPlainObject(payload?.videoPlan || payload, 16 * 1024 * 1024);
+    if (!Array.isArray(plan?.scenes)) return { success: false, error: 'Invalid video plan' };
     if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('qa-plan-updated', plan);
+        mainWindow.webContents.send('qa-plan-updated', {
+            videoPlan: plan,
+            revision: Number(payload?.revision) || null,
+            planHash: payload?.planHash || null,
+        });
     }
     return { success: true };
 });
@@ -1637,76 +3317,98 @@ ipcMain.handle('push-plan-to-main', async (event, plan) => {
 // Project file path computed dynamically (PROJECT_DIR may change on lock conflict redirect)
 // Named after the project folder (e.g., "My Video Project.fvp")
 function getProjectFilePath() {
-    const name = path.basename(PROJECT_DIR) || 'project';
-    return path.join(PROJECT_DIR, name + '.fvp');
+    return projectStore.resolveProjectFilePath({
+        projectDir: PROJECT_DIR,
+        preferredFvpPath: PROJECT_FILE_PATH,
+    });
 }
-const RECENT_PROJECTS_FILE = path.join(APP_ROOT, 'recent-projects.json');
 
-// Save .fvp project file (video plan + editor settings unified)
-ipcMain.handle('save-project-file', async (event, data) => {
-    try {
-        const fvpData = {
-            version: 1,
-            savedAt: new Date().toISOString(),
-            settings: data.settings || {},
-            videoPlan: data.videoPlan || {}
-        };
+function _projectStoreOptions() {
+    return {
+        projectDir: PROJECT_DIR,
+        publicDir: PUBLIC_PATH,
+        tempDir: TEMP_PATH,
+        preferredFvpPath: PROJECT_FILE_PATH,
+    };
+}
 
-        // Write .fvp file to project root
-        fs.writeFileSync(getProjectFilePath(), JSON.stringify(fvpData, null, 2));
-
-        // Also write video-plan.json to public/ and temp/ (renderer needs it)
-        if (data.videoPlan) {
-            const planData = JSON.stringify(data.videoPlan, null, 2);
-            [path.join(PUBLIC_PATH, 'video-plan.json'), path.join(TEMP_PATH, 'video-plan.json')].forEach(p => {
-                const dir = path.dirname(p);
-                if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-                fs.writeFileSync(p, planData);
-            });
-        }
-
-        // Add to recent projects list
-        _addRecentProject(PROJECT_DIR);
-
-        console.log('✅ Project file saved:', getProjectFilePath());
-        return { success: true, path: getProjectFilePath() };
-    } catch (error) {
-        console.error('❌ Failed to save project file:', error);
-        return { success: false, error: error.message };
+function _loadUnifiedProjectState({ reconcile = true } = {}) {
+    const options = _projectStoreOptions();
+    const loaded = reconcile
+        ? projectStore.reconcileProjectState(options)
+        : projectStore.loadProjectState(options);
+    if (loaded?.fvpPath) PROJECT_FILE_PATH = loaded.fvpPath;
+    for (const warning of loaded?.warnings || []) {
+        console.warn(`[ProjectStore] ${warning}`);
     }
-});
+    return loaded;
+}
+
+function _persistUnifiedProjectState({ settings, videoPlan, revision, expectedRevision } = {}) {
+    const saved = projectStore.saveProjectState({
+        ..._projectStoreOptions(),
+        settings,
+        videoPlan,
+        revision,
+        expectedRevision,
+    });
+    PROJECT_FILE_PATH = saved.fvpPath;
+    _addRecentProject(PROJECT_DIR);
+    return saved;
+}
+
+function _persistUnifiedVideoPlan(videoPlan, expectedRevision, expectedPlanHash) {
+    const current = _loadUnifiedProjectState({ reconcile: false });
+    if (expectedRevision !== undefined && expectedRevision !== null
+        && Number(expectedRevision) !== Number(current?.revision || 0)) {
+        const error = new Error('Project changed since it was loaded');
+        error.code = 'PROJECT_REVISION_CONFLICT';
+        throw error;
+    }
+    if (expectedPlanHash && current?.planHash && expectedPlanHash !== current.planHash) {
+        const error = new Error('Project plan changed since it was loaded');
+        error.code = 'PROJECT_PLAN_CONFLICT';
+        throw error;
+    }
+    return _persistUnifiedProjectState({
+        settings: current?.settings || {},
+        videoPlan,
+        revision: current?.revision || 0,
+        expectedRevision: current?.revision || 0,
+    });
+}
+let _projectSaveQueue = Promise.resolve();
+function _queueProjectSave(task) {
+    const run = _projectSaveQueue.then(task, task);
+    _projectSaveQueue = run.catch(() => {});
+    return run;
+}
+const RECENT_PROJECTS_FILE = path.join(USER_DATA_DIR, 'recent-projects.json');
+const LEGACY_RECENT_PROJECTS_FILE = path.join(APP_ROOT, 'recent-projects.json');
+if (!fs.existsSync(RECENT_PROJECTS_FILE) && fs.existsSync(LEGACY_RECENT_PROJECTS_FILE)) {
+    try {
+        projectStore.atomicWriteJson(
+            RECENT_PROJECTS_FILE,
+            JSON.parse(fs.readFileSync(LEGACY_RECENT_PROJECTS_FILE, 'utf8'))
+        );
+    } catch (error) {
+        console.warn(`[Projects] Could not migrate recent-projects.json: ${error.message}`);
+    }
+}
 
 // Load .fvp project file
 ipcMain.handle('load-project-file', async () => {
     console.log('[IPC] load-project-file called, PROJECT_DIR:', PROJECT_DIR);
     try {
-        // Try expected .fvp name first, then scan for any .fvp in project dir
-        let fvpPath = getProjectFilePath();
-        console.log('[IPC] Expected .fvp path:', fvpPath, 'exists:', fs.existsSync(fvpPath));
-        if (!fs.existsSync(fvpPath)) {
-            // Scan for any .fvp file (handles renamed projects or legacy "project.fvp")
-            const files = fs.readdirSync(PROJECT_DIR).filter(f => f.endsWith('.fvp'));
-            if (files.length > 0) fvpPath = path.join(PROJECT_DIR, files[0]);
-            else fvpPath = null;
-            console.log('[IPC] Scanned .fvp files:', files, 'resolved:', fvpPath);
+        const loaded = _loadUnifiedProjectState({ reconcile: true });
+        if (loaded?.videoPlan) {
+            console.log(
+                `✅ Loaded unified project state from ${loaded.source}`,
+                `| revision=${loaded.revision}`,
+                `| scenes=${loaded.videoPlan?.scenes?.length || 0}`
+            );
+            return loaded;
         }
-        if (fvpPath) {
-            const data = JSON.parse(fs.readFileSync(fvpPath, 'utf8'));
-            console.log('✅ Loaded project from .fvp file:', fvpPath, '| scenes:', data?.videoPlan?.scenes?.length || 0);
-            return data;
-        }
-
-        // Fallback: migrate from video-plan.json (old format, no settings)
-        const publicPlan = path.join(PUBLIC_PATH, 'video-plan.json');
-        const tempPlan = path.join(TEMP_PATH, 'video-plan.json');
-        const planPath = fs.existsSync(publicPlan) ? publicPlan : (fs.existsSync(tempPlan) ? tempPlan : null);
-
-        if (planPath) {
-            const videoPlan = JSON.parse(fs.readFileSync(planPath, 'utf8'));
-            console.log('✅ Loaded video plan from legacy JSON (no .fvp found, will migrate on save)');
-            return { version: 1, savedAt: null, settings: null, videoPlan };
-        }
-
         console.log('⚠️ No .fvp or video-plan.json found in:', PROJECT_DIR);
         return null;
     } catch (error) {
@@ -1719,7 +3421,17 @@ ipcMain.handle('load-project-file', async () => {
 ipcMain.handle('get-recent-projects', async () => {
     try {
         if (fs.existsSync(RECENT_PROJECTS_FILE)) {
-            return JSON.parse(fs.readFileSync(RECENT_PROJECTS_FILE, 'utf8'));
+            const recent = JSON.parse(fs.readFileSync(RECENT_PROJECTS_FILE, 'utf8'));
+            if (!Array.isArray(recent)) return [];
+            const validRecent = recent.filter((entry) => (
+                typeof entry?.path === 'string'
+                && !_pathsEqual(entry.path, DEFAULT_WORKSPACE_DIR)
+                && projectStore.inspectProjectDirectory({ projectDir: entry.path }).valid
+            ));
+            if (validRecent.length !== recent.length) {
+                projectStore.atomicWriteJson(RECENT_PROJECTS_FILE, validRecent);
+            }
+            return validRecent;
         }
         return [];
     } catch (e) {
@@ -1735,6 +3447,8 @@ ipcMain.handle('add-recent-project', async () => {
 
 function _addRecentProject(projectDir) {
     try {
+        if (_pathsEqual(projectDir, DEFAULT_WORKSPACE_DIR)) return;
+        if (!projectStore.inspectProjectDirectory({ projectDir }).valid) return;
         let recent = [];
         if (fs.existsSync(RECENT_PROJECTS_FILE)) {
             recent = JSON.parse(fs.readFileSync(RECENT_PROJECTS_FILE, 'utf8'));
@@ -1744,7 +3458,7 @@ function _addRecentProject(projectDir) {
         const projectName = path.basename(projectDir) || projectDir;
         recent.unshift({ path: projectDir, name: projectName, lastOpened: new Date().toISOString() });
         if (recent.length > 20) recent = recent.slice(0, 20);
-        fs.writeFileSync(RECENT_PROJECTS_FILE, JSON.stringify(recent, null, 2));
+        projectStore.atomicWriteJson(RECENT_PROJECTS_FILE, recent);
     } catch (e) {
         console.warn('Could not update recent projects:', e.message);
     }
@@ -1753,16 +3467,22 @@ function _addRecentProject(projectDir) {
 // Get scene media path (video or image) for preview
 ipcMain.handle('get-scene-media-path', async (event, sceneIndex, extension, prefix) => {
     try {
+        const numericIndex = Number(sceneIndex);
+        if (!Number.isInteger(numericIndex) || numericIndex < 0 || numericIndex > 1_000_000) return null;
+        const allowedPrefixes = new Set(['scene', 'frame', 'article', 'overlay']);
         const filePrefix = prefix || 'scene';
+        if (!allowedPrefixes.has(filePrefix)) return null;
+        const allowedExtensions = new Set(['.mp4', '.mov', '.mkv', '.webm', '.jpg', '.jpeg', '.png', '.webp']);
+        if (extension && !allowedExtensions.has(String(extension).toLowerCase())) return null;
         // Try with provided extension first, then try common extensions
-        const extensions = extension ? [extension] : ['.mp4', '.jpg', '.jpeg', '.png', '.webp'];
+        const extensions = extension ? [String(extension).toLowerCase()] : ['.mp4', '.jpg', '.jpeg', '.png', '.webp'];
         for (const ext of extensions) {
             // Try both naming conventions: scene-{i}-asset{ext} (new) and scene-{i}{ext} (legacy)
-            const publicAssetPath = path.join(PUBLIC_PATH, `${filePrefix}-${sceneIndex}-asset${ext}`);
+            const publicAssetPath = path.join(PUBLIC_PATH, `${filePrefix}-${numericIndex}-asset${ext}`);
             if (fs.existsSync(publicAssetPath)) return publicAssetPath;
-            const publicPath = path.join(PUBLIC_PATH, `${filePrefix}-${sceneIndex}${ext}`);
+            const publicPath = path.join(PUBLIC_PATH, `${filePrefix}-${numericIndex}${ext}`);
             if (fs.existsSync(publicPath)) return publicPath;
-            const tempPath = path.join(TEMP_PATH, `${filePrefix}-${sceneIndex}${ext}`);
+            const tempPath = path.join(TEMP_PATH, `${filePrefix}-${numericIndex}${ext}`);
             if (fs.existsSync(tempPath)) return tempPath;
         }
         return null;
@@ -1775,13 +3495,15 @@ ipcMain.handle('get-scene-media-path', async (event, sceneIndex, extension, pref
 // Backward compatibility: get scene video path
 ipcMain.handle('get-scene-video-path', async (event, sceneIndex) => {
     try {
+        const numericIndex = Number(sceneIndex);
+        if (!Number.isInteger(numericIndex) || numericIndex < 0 || numericIndex > 1_000_000) return null;
         const extensions = ['.mp4', '.jpg', '.jpeg', '.png', '.webp'];
         for (const ext of extensions) {
-            const publicAssetPath = path.join(PUBLIC_PATH, `scene-${sceneIndex}-asset${ext}`);
+            const publicAssetPath = path.join(PUBLIC_PATH, `scene-${numericIndex}-asset${ext}`);
             if (fs.existsSync(publicAssetPath)) return publicAssetPath;
-            const publicPath = path.join(PUBLIC_PATH, `scene-${sceneIndex}${ext}`);
+            const publicPath = path.join(PUBLIC_PATH, `scene-${numericIndex}${ext}`);
             if (fs.existsSync(publicPath)) return publicPath;
-            const tempPath = path.join(TEMP_PATH, `scene-${sceneIndex}${ext}`);
+            const tempPath = path.join(TEMP_PATH, `scene-${numericIndex}${ext}`);
             if (fs.existsSync(tempPath)) return tempPath;
         }
         return null;
@@ -1795,24 +3517,26 @@ ipcMain.handle('get-scene-video-path', async (event, sceneIndex) => {
 ipcMain.handle('get-audio-path', async (event, filename) => {
     try {
         if (!filename) return null;
+        const safeFilename = path.basename(String(filename));
+        if (safeFilename !== String(filename) || !/\.(mp3|wav)$/i.test(safeFilename)) return null;
 
         // Prefer input/ — it is the STABLE source copy of the audio (written once per
         // build and never cleaned). public/ and temp/ are build outputs that Step 0 wipes,
         // so resolving the canonical audio path to them leaves a dangling reference that
         // breaks the next "Copy audio" on Generate/Repeat (ENOENT). Order: input → public → temp.
-        const inputPath = path.join(INPUT_PATH, filename);
+        const inputPath = path.join(INPUT_PATH, safeFilename);
         if (fs.existsSync(inputPath)) {
             return inputPath;
         }
 
         // Check public folder (serving copy)
-        const publicPath = path.join(PUBLIC_PATH, filename);
+        const publicPath = path.join(PUBLIC_PATH, safeFilename);
         if (fs.existsSync(publicPath)) {
             return publicPath;
         }
 
         // Check temp folder
-        const tempPath = path.join(TEMP_PATH, filename);
+        const tempPath = path.join(TEMP_PATH, safeFilename);
         if (fs.existsSync(tempPath)) {
             return tempPath;
         }
@@ -1839,7 +3563,6 @@ async function probeNvencForWebGL() {
     if (_webglNvencAvailable !== null) return _webglNvencAvailable;
     try {
         await new Promise((resolve, reject) => {
-            const { execFile } = require('child_process');
             execFile(WEBGL_FFMPEG_PATH, [
                 '-f', 'lavfi', '-i', 'color=c=black:s=64x64:d=0.1',
                 '-c:v', 'h264_nvenc', '-preset', 'p4',
@@ -1857,253 +3580,442 @@ async function probeNvencForWebGL() {
     return _webglNvencAvailable;
 }
 
-// State for the active WebGL export
+const WEBGL_EXPORT_MAX_DIMENSION = 4096;
+const WEBGL_EXPORT_MAX_FRAME_BYTES = 48 * 1024 * 1024;
+const WEBGL_EXPORT_MAX_FRAMES = 2_000_000;
+const WEBGL_EXPORT_BATCH_SIZE = 3;
+const WEBGL_EXPORT_WRITE_TIMEOUT_MS = 30_000;
+
+// State for the one active WebGL export. The owning renderer is recorded so a
+// secondary window cannot inject frames into, finish, or cancel another export.
 let _webglExport = null;
 
-ipcMain.handle('start-webgl-export', async (event, options) => {
+function _validateWebglExportOptions(rawOptions = {}) {
+    const width = Number(rawOptions.width);
+    const height = Number(rawOptions.height);
+    const fps = Number(rawOptions.fps);
+    const totalFrames = Number(rawOptions.totalFrames);
+
+    if (!Number.isInteger(width) || !Number.isInteger(height)
+        || width < 16 || height < 16
+        || width > WEBGL_EXPORT_MAX_DIMENSION || height > WEBGL_EXPORT_MAX_DIMENSION
+        || width % 2 !== 0 || height % 2 !== 0) {
+        throw new Error(`Invalid export dimensions: ${rawOptions.width}x${rawOptions.height}`);
+    }
+    if (!Number.isFinite(fps) || fps < 1 || fps > 120) {
+        throw new Error(`Invalid export frame rate: ${rawOptions.fps}`);
+    }
+    if (!Number.isInteger(totalFrames) || totalFrames < 1 || totalFrames > WEBGL_EXPORT_MAX_FRAMES) {
+        throw new Error(`Invalid export frame count: ${rawOptions.totalFrames}`);
+    }
+
+    const expectedFrameSize = width * height * 4;
+    if (!Number.isSafeInteger(expectedFrameSize) || expectedFrameSize > WEBGL_EXPORT_MAX_FRAME_BYTES) {
+        throw new Error(`Export frame buffer is too large: ${expectedFrameSize} bytes`);
+    }
+
+    const parseTrim = (value, name) => {
+        if (value == null) return undefined;
+        const parsed = Number(value);
+        if (!Number.isFinite(parsed) || parsed < 0 || parsed > 24 * 60 * 60) {
+            throw new Error(`Invalid ${name}: ${value}`);
+        }
+        return parsed;
+    };
+    const audioTrimStartSec = parseTrim(rawOptions.audioTrimStartSec, 'audio trim start');
+    const audioTrimEndSec = parseTrim(rawOptions.audioTrimEndSec, 'audio trim end');
+    if (audioTrimStartSec != null && audioTrimEndSec != null && audioTrimEndSec <= audioTrimStartSec) {
+        throw new Error('Audio trim end must be after trim start');
+    }
+
+    return { width, height, fps, totalFrames, expectedFrameSize, audioTrimStartSec, audioTrimEndSec };
+}
+
+function _getOwnedWebglExport(event, exportId, allowedStatuses = ['running']) {
+    const exp = _webglExport;
+    if (!exp || !allowedStatuses.includes(exp.status) || !exp.proc || exp.proc.killed) {
+        throw new Error('No active export process');
+    }
+    if (exp.ownerWebContentsId !== event.sender.id) {
+        throw new Error('This renderer does not own the active export');
+    }
+    if (typeof exportId !== 'string' || exportId !== exp.exportId) {
+        throw new Error('Stale or invalid export ID');
+    }
+    return exp;
+}
+
+function _webglFrameBuffer(value, expectedSize) {
+    let buffer;
+    if (value instanceof ArrayBuffer) {
+        buffer = Buffer.from(value);
+    } else if (ArrayBuffer.isView(value)) {
+        buffer = Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+    } else {
+        throw new Error('Frame payload must be an ArrayBuffer or typed array');
+    }
+    if (buffer.length !== expectedSize) {
+        throw new Error(`Frame buffer size mismatch: ${buffer.length} bytes; expected ${expectedSize}`);
+    }
+    return buffer;
+}
+
+function _detachWebglExportOwner(exp) {
     try {
-        const { width, height, fps, totalFrames } = options;
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        exp?.ownerSender?.removeListener('destroyed', exp.ownerDestroyedHandler);
+    } catch (_) { }
+}
+
+async function _terminateChildProcess(child) {
+    if (!child || child.exitCode != null || child.signalCode != null) return;
+    try { child.stdin?.destroy(); } catch (_) { }
+
+    const waitForClose = new Promise((resolve) => {
+        let timeout = null;
+        const onClose = () => {
+            if (timeout) clearTimeout(timeout);
+            resolve();
+        };
+        child.once('close', onClose);
+        timeout = setTimeout(() => {
+            child.removeListener('close', onClose);
+            resolve();
+        }, 5000);
+    });
+
+    if (process.platform === 'win32' && child.pid) {
+        const killed = await new Promise((resolve) => {
+            execFile(
+                'taskkill',
+                ['/pid', String(child.pid), '/f', '/t'],
+                { windowsHide: true, timeout: 5000 },
+                (error) => resolve(!error)
+            );
+        });
+        if (!killed) {
+            try { child.kill('SIGTERM'); } catch (_) { }
+        }
+    } else {
+        try { child.kill('SIGTERM'); } catch (_) { }
+    }
+    await waitForClose;
+}
+
+async function _terminateWebglExport(exp) {
+    if (!exp) return;
+    exp.status = 'cancelled';
+    await Promise.all([
+        _terminateChildProcess(exp.proc),
+        _terminateChildProcess(exp.muxProc),
+    ]);
+}
+
+function _assertNonEmptyFile(filePath, label) {
+    let stat;
+    try {
+        stat = fs.statSync(filePath);
+    } catch (_) {
+        throw new Error(`${label} was not created`);
+    }
+    if (!stat.isFile() || stat.size < 1) {
+        throw new Error(`${label} is empty`);
+    }
+}
+
+function _writeWebglChunk(exp, chunk) {
+    return new Promise((resolve, reject) => {
+        if (_webglExport !== exp || exp.status !== 'running' || exp.proc.killed) {
+            reject(new Error('Export process is no longer writable'));
+            return;
+        }
+
+        let settled = false;
+        const finish = (error) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeout);
+            exp.proc.removeListener('close', onClose);
+            exp.proc.stdin.removeListener('error', onError);
+            if (error) reject(error);
+            else resolve();
+        };
+        const onClose = (code) => finish(new Error(`FFmpeg closed while writing frames (code ${code})`));
+        const onError = (error) => finish(error);
+        const timeout = setTimeout(
+            () => finish(new Error('Timed out writing frames to FFmpeg')),
+            WEBGL_EXPORT_WRITE_TIMEOUT_MS
+        );
+
+        exp.proc.once('close', onClose);
+        exp.proc.stdin.once('error', onError);
+        try {
+            exp.proc.stdin.write(chunk, (error) => finish(error || null));
+        } catch (error) {
+            finish(error);
+        }
+    });
+}
+
+ipcMain.handle('start-webgl-export', async (event, rawOptions = {}) => {
+    if (_webglExport) {
+        return { success: false, error: 'Another WebGL export is already active' };
+    }
+
+    let reservation = null;
+    try {
+        const options = _validateWebglExportOptions(rawOptions);
+        const ownerSender = event.sender;
+        const ownerWebContentsId = ownerSender.id;
+        reservation = {
+            exportId: crypto.randomUUID(),
+            status: 'starting',
+            cancelled: false,
+            ownerSender,
+            ownerWebContentsId,
+        };
+        reservation.ownerDestroyedHandler = () => {
+            reservation.cancelled = true;
+            if (_webglExport === reservation) {
+                _webglExport = null;
+                void _terminateWebglExport(reservation);
+            }
+        };
+        ownerSender.once('destroyed', reservation.ownerDestroyedHandler);
+        _webglExport = reservation;
+
+        const useGpu = await probeNvencForWebGL();
+        if (reservation.cancelled || ownerSender.isDestroyed() || _webglExport !== reservation) {
+            throw new Error('Export cancelled before the encoder started');
+        }
+
+        const timestamp = `${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}-${crypto.randomBytes(3).toString('hex')}`;
         const videoFile = path.join(TEMP_PATH, `webgl-video-${timestamp}.mp4`);
         const outputFile = path.join(OUTPUT_PATH, `video-${timestamp}.mp4`);
-
-        // Ensure output dirs exist
         if (!fs.existsSync(OUTPUT_PATH)) fs.mkdirSync(OUTPUT_PATH, { recursive: true });
         if (!fs.existsSync(TEMP_PATH)) fs.mkdirSync(TEMP_PATH, { recursive: true });
 
-        // Probe NVENC
-        const useGpu = await probeNvencForWebGL();
         const encArgs = useGpu
             ? ['-c:v', 'h264_nvenc', '-preset', 'p4', '-b:v', '18M', '-maxrate:v', '24M', '-bufsize:v', '48M']
             : ['-c:v', 'libx264', '-preset', 'medium', '-crf', '22'];
-
-        console.log(`[WebGL Export] Starting: ${width}x${height} @ ${fps}fps, ${totalFrames} frames, encoder: ${useGpu ? 'NVENC' : 'libx264'}`);
+        console.log(`[WebGL Export] Starting: ${options.width}x${options.height} @ ${options.fps}fps, ${options.totalFrames} frames, encoder: ${useGpu ? 'NVENC' : 'libx264'}`);
 
         const ffmpegProc = spawn(WEBGL_FFMPEG_PATH, [
             '-y',
             '-f', 'rawvideo',
             '-pixel_format', 'rgba',
-            '-video_size', `${width}x${height}`,
-            '-framerate', String(fps),
+            '-video_size', `${options.width}x${options.height}`,
+            '-framerate', String(options.fps),
             '-i', 'pipe:0',
             ...encArgs,
             '-pix_fmt', 'yuv420p',
-            '-an',  // No audio (muxed later)
-            videoFile
-        ], { stdio: ['pipe', 'pipe', 'pipe'] });
-
-        let ffmpegStderr = '';
-        ffmpegProc.stderr.on('data', (data) => {
-            ffmpegStderr += data.toString();
+            '-an',
+            videoFile,
+        ], {
+            stdio: ['pipe', 'ignore', 'pipe'],
+            windowsHide: true,
         });
 
-        _webglExport = {
+        Object.assign(reservation, {
+            ...options,
+            status: 'running',
             proc: ffmpegProc,
             videoFile,
             outputFile,
-            totalFrames,
-            width, height, fps,
-            stderr: ffmpegStderr,
+            stderr: '',
+            framesAccepted: 0,
             framesWritten: 0,
             bytesWritten: 0,
             lastLogTime: Date.now(),
             lastLogFrames: 0,
-            expectedFrameSize: width * height * 4,
-        };
-
-        return { success: true, videoFile, outputFile };
-    } catch (err) {
-        console.error('[WebGL Export] start error:', err.message);
-        return { success: false, error: err.message };
-    }
-});
-
-ipcMain.handle('export-frame', async (event, frameBuffer) => {
-    const exp = _webglExport;
-    if (!exp || !exp.proc || exp.proc.killed) {
-        return { success: false, error: 'No active export process' };
-    }
-
-    try {
-        const buf = Buffer.from(frameBuffer);
-        const canWrite = exp.proc.stdin.write(buf);
-        exp.framesWritten++;
-        if (!canWrite) {
-            // Wait for drain before accepting more frames (backpressure)
-            await new Promise(resolve => exp.proc.stdin.once('drain', resolve));
-        }
-        return { success: true };
-    } catch (err) {
-        return { success: false, error: err.message };
-    }
-});
-
-ipcMain.handle('export-frames-batch', async (event, batchPayload) => {
-    const exp = _webglExport;
-    if (!exp || !exp.proc || exp.proc.killed) {
-        return { success: false, error: 'No active export process' };
-    }
-
-    try {
-        const { frames } = batchPayload; // Array of { frameIndex, buffer }
-        if (!frames || !frames.length) {
-            return { success: true, written: 0 };
-        }
-
-        // Detect out-of-order (renderer guarantees order, but log if violated)
-        for (let i = 1; i < frames.length; i++) {
-            if (frames[i].frameIndex <= frames[i - 1].frameIndex) {
-                console.warn(`[WebGL Export] Out-of-order batch: frame ${frames[i].frameIndex} after ${frames[i - 1].frameIndex}`);
-            }
-        }
-
-        // Concatenate all frame buffers into a single Buffer for one stdin.write()
-        const totalSize = frames.length * exp.expectedFrameSize;
-        const combined = Buffer.allocUnsafe(totalSize);
-        let offset = 0;
-        for (const entry of frames) {
-            const src = Buffer.from(entry.buffer);
-            if (src.length !== exp.expectedFrameSize) {
-                console.warn(`[WebGL Export] Frame ${entry.frameIndex} size mismatch: ${src.length} vs expected ${exp.expectedFrameSize}`);
-            }
-            src.copy(combined, offset);
-            offset += src.length;
-        }
-
-        // Single write for the whole batch
-        const canWrite = exp.proc.stdin.write(combined);
-        exp.framesWritten += frames.length;
-        exp.bytesWritten += offset;
-
-        // Backpressure: wait for FFmpeg to drain before returning
-        if (!canWrite) {
-            await new Promise(resolve => exp.proc.stdin.once('drain', resolve));
-        }
-
-        // Periodic logging (~every second)
-        const now = Date.now();
-        if (now - exp.lastLogTime >= 1000) {
-            const elapsed = (now - exp.lastLogTime) / 1000;
-            const recentFrames = exp.framesWritten - exp.lastLogFrames;
-            const fps = (recentFrames / elapsed).toFixed(1);
-            const totalMB = (exp.bytesWritten / (1024 * 1024)).toFixed(0);
-            console.log(`[WebGL Export] ${exp.framesWritten}/${exp.totalFrames} frames | ${fps} fps recent | ${totalMB} MB written`);
-            exp.lastLogTime = now;
-            exp.lastLogFrames = exp.framesWritten;
-        }
-
-        return { success: true, written: frames.length };
-    } catch (err) {
-        return { success: false, error: err.message };
-    }
-});
-
-ipcMain.handle('finish-webgl-export', async () => {
-    const exp = _webglExport;
-    if (!exp || !exp.proc) {
-        return { success: false, error: 'No active export process' };
-    }
-
-    try {
-        // Close FFmpeg stdin to signal end of input
-        exp.proc.stdin.end();
-
-        // Wait for FFmpeg to finish encoding
-        const exitCode = await new Promise((resolve, reject) => {
-            const timeout = setTimeout(() => {
-                try { exp.proc.kill('SIGTERM'); } catch (_) { }
-                reject(new Error('FFmpeg timeout'));
-            }, 120000); // 2 minute timeout
-
-            exp.proc.on('close', (code) => {
-                clearTimeout(timeout);
-                resolve(code);
-            });
-            exp.proc.on('error', (err) => {
-                clearTimeout(timeout);
-                reject(err);
-            });
+            writeChain: Promise.resolve(),
         });
-
-        if (exitCode !== 0) {
-            throw new Error(`FFmpeg exited with code ${exitCode}`);
-        }
-
-        console.log(`[WebGL Export] Video encoded: ${exp.videoFile} (${exp.framesWritten} frames)`);
-
-        // Mux audio if available
-        const finalOutput = await _webglMuxAudio(exp);
-
-        _webglExport = null;
-        return { success: true, outputPath: finalOutput };
-
-    } catch (err) {
-        console.error('[WebGL Export] finish error:', err.message);
-        _webglExport = null;
-        return { success: false, error: err.message };
-    }
-});
-
-ipcMain.handle('cancel-webgl-export', async () => {
-    if (_webglExport && _webglExport.proc) {
-        try {
-            if (process.platform === 'win32' && _webglExport.proc.pid) {
-                exec(`taskkill /pid ${_webglExport.proc.pid} /f /t`, () => { });
-            } else {
-                _webglExport.proc.kill('SIGTERM');
-            }
-        } catch (_) { }
-        _webglExport = null;
-    }
-    return { success: true };
-});
-
-// ========================================
-// Direct-spawn export support (renderer-side FFmpeg)
-// ========================================
-
-ipcMain.handle('get-export-config', async (event, options) => {
-    try {
-        const { width, height, fps, totalFrames } = options;
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-        const videoFile = path.join(TEMP_PATH, `webgl-video-${timestamp}.mp4`);
-        const outputFile = path.join(OUTPUT_PATH, `video-${timestamp}.mp4`);
-
-        // Ensure output dirs exist
-        if (!fs.existsSync(OUTPUT_PATH)) fs.mkdirSync(OUTPUT_PATH, { recursive: true });
-        if (!fs.existsSync(TEMP_PATH)) fs.mkdirSync(TEMP_PATH, { recursive: true });
-
-        // Probe NVENC
-        const useGpu = await probeNvencForWebGL();
-        const encArgs = useGpu
-            ? ['-c:v', 'h264_nvenc', '-preset', 'p4', '-b:v', '18M', '-maxrate:v', '24M', '-bufsize:v', '48M']
-            : ['-c:v', 'libx264', '-preset', 'medium', '-crf', '22'];
-
-        console.log(`[WebGL Export] Config: ${width}x${height} @ ${fps}fps, ${totalFrames} frames, encoder: ${useGpu ? 'NVENC' : 'libx264'}, direct-spawn mode`);
+        ffmpegProc.stderr.on('data', (data) => {
+            reservation.stderr = (reservation.stderr + data.toString()).slice(-64 * 1024);
+        });
+        reservation.exitPromise = new Promise((resolve) => {
+            ffmpegProc.once('error', (error) => resolve({ code: null, error: error.message }));
+            ffmpegProc.once('close', (code, signal) => resolve({ code, signal, error: null }));
+        });
 
         return {
             success: true,
-            ffmpegPath: WEBGL_FFMPEG_PATH,
-            encArgs,
-            videoFile,
-            outputFile,
-            useGpu,
+            exportId: reservation.exportId,
+            encoder: useGpu ? 'h264_nvenc' : 'libx264',
         };
     } catch (err) {
-        console.error('[WebGL Export] get-export-config error:', err.message);
+        console.error('[WebGL Export] start error:', err.message);
+        if (reservation) {
+            if (_webglExport === reservation) _webglExport = null;
+            _detachWebglExportOwner(reservation);
+            await _terminateWebglExport(reservation);
+        }
         return { success: false, error: err.message };
     }
 });
 
-ipcMain.handle('mux-audio', async (event, videoFile, outputFile, audioTrimStartSec, audioTrimEndSec) => {
+ipcMain.handle('save-project-file', async (_event, data) => _queueProjectSave(async () => {
     try {
-        const exp = { videoFile, outputFile, audioTrimStartSec, audioTrimEndSec };
-        const finalOutput = await _webglMuxAudio(exp);
-        return { success: true, outputPath: finalOutput };
+        const safeData = _boundedPlainObject(data, 32 * 1024 * 1024);
+        const current = _loadUnifiedProjectState({ reconcile: false });
+        const expectedRevision = safeData?.expectedRevision;
+        const expectedPlanHash = safeData?.expectedPlanHash;
+        if (expectedRevision !== undefined && expectedRevision !== null
+            && Number(expectedRevision) !== Number(current?.revision || 0)) {
+            return {
+                success: false,
+                conflict: true,
+                error: 'Project changed since it was loaded',
+                currentRevision: current?.revision || 0,
+                currentPlanHash: current?.planHash || null,
+            };
+        }
+        if (expectedPlanHash && current?.planHash && expectedPlanHash !== current.planHash) {
+            return {
+                success: false,
+                conflict: true,
+                error: 'Project plan changed since it was loaded',
+                currentRevision: current?.revision || 0,
+                currentPlanHash: current?.planHash || null,
+            };
+        }
+        const saved = _persistUnifiedProjectState({
+            settings: safeData?.settings || {},
+            videoPlan: safeData?.videoPlan,
+            revision: current?.revision || 0,
+            expectedRevision: current?.revision || 0,
+        });
+        return {
+            success: true,
+            path: saved.fvpPath,
+            revision: saved.revision,
+            planHash: saved.planHash,
+        };
+    } catch (error) {
+        console.error('[ProjectStore] Save failed:', error);
+        return {
+            success: false,
+            conflict: error.code === 'PROJECT_REVISION_CONFLICT' || error.code === 'PROJECT_PLAN_CONFLICT',
+            error: error.message,
+        };
+    }
+}));
+
+ipcMain.handle('export-frames-batch', async (event, batchPayload = {}) => {
+    try {
+        const exp = _getOwnedWebglExport(event, batchPayload.exportId);
+        const frames = batchPayload.frames;
+        if (!Array.isArray(frames) || frames.length < 1 || frames.length > WEBGL_EXPORT_BATCH_SIZE) {
+            throw new Error(`Frame batch must contain 1-${WEBGL_EXPORT_BATCH_SIZE} frames`);
+        }
+        if (exp.framesAccepted + frames.length > exp.totalFrames) {
+            throw new Error(`Frame batch exceeds declared total of ${exp.totalFrames}`);
+        }
+
+        const firstFrameIndex = exp.framesAccepted;
+        const sources = frames.map((entry, index) => {
+            const expectedIndex = firstFrameIndex + index;
+            if (!entry || !Number.isInteger(entry.frameIndex) || entry.frameIndex !== expectedIndex) {
+                throw new Error(`Out-of-order frame: received ${entry?.frameIndex}; expected ${expectedIndex}`);
+            }
+            return _webglFrameBuffer(entry.buffer, exp.expectedFrameSize);
+        });
+
+        const combined = Buffer.allocUnsafe(exp.expectedFrameSize * sources.length);
+        for (let index = 0; index < sources.length; index++) {
+            sources[index].copy(combined, index * exp.expectedFrameSize);
+        }
+        exp.framesAccepted += sources.length;
+
+        const writeTask = exp.writeChain.then(async () => {
+            await _writeWebglChunk(exp, combined);
+            exp.framesWritten += sources.length;
+            exp.bytesWritten += combined.length;
+
+            const now = Date.now();
+            if (now - exp.lastLogTime >= 1000) {
+                const elapsed = (now - exp.lastLogTime) / 1000;
+                const recentFrames = exp.framesWritten - exp.lastLogFrames;
+                const recentFps = (recentFrames / elapsed).toFixed(1);
+                const totalMB = (exp.bytesWritten / (1024 * 1024)).toFixed(0);
+                console.log(`[WebGL Export] ${exp.framesWritten}/${exp.totalFrames} frames | ${recentFps} fps recent | ${totalMB} MB written`);
+                exp.lastLogTime = now;
+                exp.lastLogFrames = exp.framesWritten;
+            }
+            return { success: true, written: sources.length };
+        });
+        exp.writeChain = writeTask;
+        return await writeTask;
     } catch (err) {
-        console.error('[WebGL Export] mux-audio error:', err.message);
         return { success: false, error: err.message };
     }
+});
+
+ipcMain.handle('finish-webgl-export', async (event, exportId) => {
+    let exp = null;
+    let timeout = null;
+    try {
+        exp = _getOwnedWebglExport(event, exportId);
+        exp.status = 'finishing';
+        await exp.writeChain;
+        if (exp.framesAccepted !== exp.totalFrames || exp.framesWritten !== exp.totalFrames) {
+            throw new Error(`Incomplete export: received ${exp.framesWritten}/${exp.totalFrames} frames`);
+        }
+
+        exp.proc.stdin.end();
+        const exitResult = await Promise.race([
+            exp.exitPromise,
+            new Promise((_, reject) => {
+                timeout = setTimeout(() => reject(new Error('FFmpeg encoding timeout')), 120_000);
+            }),
+        ]);
+        clearTimeout(timeout);
+        timeout = null;
+
+        if (exitResult.error || exitResult.code !== 0) {
+            const detail = exp.stderr.trim().slice(-1200);
+            throw new Error(exitResult.error || `FFmpeg exited with code ${exitResult.code}${detail ? `\n${detail}` : ''}`);
+        }
+        _assertNonEmptyFile(exp.videoFile, 'Encoded WebGL video');
+
+        console.log(`[WebGL Export] Video encoded: ${exp.videoFile} (${exp.framesWritten} frames)`);
+        exp.status = 'muxing';
+        const finalOutput = await _webglMuxAudio(exp);
+        if (_webglExport !== exp || exp.status === 'cancelled') {
+            throw new Error('Export cancelled');
+        }
+        _assertNonEmptyFile(finalOutput, 'Final WebGL output');
+
+        exp.status = 'finished';
+        if (_webglExport === exp) _webglExport = null;
+        _detachWebglExportOwner(exp);
+        return { success: true, outputPath: finalOutput };
+    } catch (err) {
+        if (timeout) clearTimeout(timeout);
+        console.error('[WebGL Export] finish error:', err.message);
+        if (exp) {
+            if (_webglExport === exp) _webglExport = null;
+            _detachWebglExportOwner(exp);
+            await _terminateWebglExport(exp);
+        }
+        return { success: false, error: err.message };
+    }
+});
+
+ipcMain.handle('cancel-webgl-export', async (event, exportId) => {
+    const exp = _webglExport;
+    if (!exp) return { success: true };
+    if (exp.ownerWebContentsId !== event.sender.id) {
+        return { success: false, error: 'This renderer does not own the active export' };
+    }
+    if (typeof exportId !== 'string' || exportId !== exp.exportId) {
+        return { success: false, error: 'Stale or invalid export ID' };
+    }
+
+    exp.cancelled = true;
+    _webglExport = null;
+    _detachWebglExportOwner(exp);
+    await _terminateWebglExport(exp);
+    return { success: true };
 });
 
 function sendRenderProgress(percent, message) {
@@ -2244,27 +4156,18 @@ function runHyperframesCli(projectDir, outputFile, options = {}) {
     return new Promise((resolve) => {
         const localCliJs = path.join(PROJECT_ROOT, 'node_modules', 'hyperframes', 'dist', 'cli.js');
         const hasLocalCli = fs.existsSync(localCliJs);
-        const cliCmd = hasLocalCli ? 'node' : (process.platform === 'win32' ? 'npx.cmd' : 'npx');
+        if (!hasLocalCli) {
+            resolve({ success: false, error: 'Bundled HyperFrames CLI is missing; reinstall application dependencies' });
+            return;
+        }
+        const cliCmd = 'node';
         const workerCountRaw = Number(options.workers);
         const workerCount = Number.isFinite(workerCountRaw) && workerCountRaw > 0
             ? Math.max(1, Math.min(8, Math.floor(workerCountRaw)))
             : 1;
         const browserGpu = options.browserGpu === true;
-        const args = hasLocalCli ? [
+        const args = [
             localCliJs,
-            'render',
-            projectDir,
-            '--output',
-            outputFile,
-            '--fps',
-            String(options.fps || 30),
-            '--quality',
-            options.quality || 'standard',
-            '--workers',
-            String(workerCount),
-        ] : [
-            '--no-install',
-            'hyperframes',
             'render',
             projectDir,
             '--output',
@@ -2403,7 +4306,7 @@ function runHyperframesCli(projectDir, outputFile, options = {}) {
 }
 
 function loadHyperframesBridgeFresh() {
-    const bridgePath = require.resolve('./src/hyperframes-bridge');
+    const bridgePath = require.resolve('./src/render/hyperframes-bridge');
     delete require.cache[bridgePath];
     return require(bridgePath);
 }
@@ -2428,6 +4331,22 @@ async function runCompositionAuthorPass(plan) {
 ipcMain.handle('hyperframes-generate-project', async (_event, payload = {}) => {
     try {
         await runCompositionAuthorPass(payload.plan);
+        let previewMotionQa = null;
+        if (payload.plan) {
+            const { prepareMotionPlan } = require('./src/agents/workers/motion-qa-agent');
+            previewMotionQa = prepareMotionPlan(payload.plan, {
+                log: (message) => console.log(`[HyperFrames Preview] ${message}`),
+            });
+            payload.plan.motionQa = {
+                version: previewMotionQa.version || 1,
+                status: previewMotionQa.status,
+                agentic: true,
+                stage: 'preview-preflight',
+                checkedVisuals: previewMotionQa.checked || 0,
+                repairCount: (previewMotionQa.repairs || []).length,
+                findingCount: (previewMotionQa.findings || []).length,
+            };
+        }
         const { generateHyperframesProject } = loadHyperframesBridgeFresh();
         const result = generateHyperframesProject({
             plan: payload.plan,
@@ -2439,8 +4358,45 @@ ipcMain.handle('hyperframes-generate-project', async (_event, payload = {}) => {
             outputRoot: path.join(PROJECT_DIR, 'hyperframes'),
             options: payload.options || {},
         });
+        let savedPlan = null;
+        const persistMotionQa = payload?.options?.persistMotionQa !== false;
+        if ((previewMotionQa?.repairs || []).length > 0 && persistMotionQa) {
+            try {
+                savedPlan = _persistUnifiedVideoPlan(payload.plan);
+                if (mainWindow && !mainWindow.isDestroyed()) {
+                    mainWindow.webContents.send('qa-plan-updated', {
+                        videoPlan: payload.plan,
+                        revision: savedPlan.revision,
+                        planHash: savedPlan.planHash,
+                        source: 'motion-qa-preview',
+                        motionQa: payload.plan.motionQa,
+                    });
+                }
+                console.log(`[HyperFrames Preview] Motion QA persisted ${previewMotionQa.repairs.length} automatic repair(s).`);
+            } catch (persistError) {
+                console.warn(`[HyperFrames Preview] Motion QA repairs are active in preview but could not be persisted: ${persistError.message}`);
+            }
+        } else if ((previewMotionQa?.repairs || []).length > 0) {
+            const source = String(payload?.options?.previewSource || 'read-only refresh');
+            console.log(`[HyperFrames Preview] Motion QA applied ${previewMotionQa.repairs.length} preview-only repair(s) for ${source}; the saved Agent transaction was left unchanged.`);
+        }
         console.log(`[HyperFrames] Project generated: ${result.projectDir}`);
-        return result;
+        return {
+            ...result,
+            previewUrl: _hyperframesPreviewUrl(result.indexPath),
+            motionQa: previewMotionQa
+                ? {
+                    version: previewMotionQa.version || 1,
+                    status: previewMotionQa.status,
+                    checkedVisuals: previewMotionQa.checked || 0,
+                    repairCount: (previewMotionQa.repairs || []).length,
+                    findingCount: (previewMotionQa.findings || []).length,
+                    repairs: previewMotionQa.repairs || [],
+                }
+                : null,
+            revision: savedPlan?.revision || null,
+            planHash: savedPlan?.planHash || null,
+        };
     } catch (err) {
         console.error('[HyperFrames] Project generation failed:', err.message);
         return { success: false, error: err.message };
@@ -2451,7 +4407,7 @@ ipcMain.handle('hyperframes-generate-project', async (_event, payload = {}) => {
 // points). Shifts all timings to start at 0, drops out-of-range items, keeps a transition
 // only if both its scenes survive, and trims the narration audio so the section stays in
 // sync. Returns a NEW plan object; never mutates the original. Used only when In/Out is set.
-async function _clipPlanForRange(plan, startSec, endSec) {
+async function _clipPlanForRangeLegacy(plan, startSec, endSec) {
     const dur = Math.max(0.1, endSec - startSec);
     const overlaps = (s, e) => Number(e) > startSec + 0.001 && Number(s) < endSec - 0.001;
     const shift = (item) => {
@@ -2525,6 +4481,40 @@ async function _clipPlanForRange(plan, startSec, endSec) {
     return clipped;
 }
 
+async function _clipPlanForRange(plan, startSec, endSec) {
+    const { clipPlanForRange } = require('./src/project/plan-range');
+    const clipped = clipPlanForRange(plan, startSec, endSec);
+
+    if (!plan.audio) return clipped;
+    const resolved = [PUBLIC_PATH, TEMP_PATH, INPUT_PATH]
+        .map((directory) => path.join(directory, plan.audio))
+        .find((candidate) => {
+            try { return fs.existsSync(candidate) && fs.statSync(candidate).isFile(); } catch (_) { return false; }
+        });
+    if (!resolved) {
+        throw new Error(`Partial render audio was not found: ${plan.audio}`);
+    }
+
+    const duration = endSec - startSec;
+    const outName = `hf-clip-voiceover-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.mp3`;
+    const outPath = path.join(TEMP_PATH, outName);
+    await new Promise((resolve, reject) => {
+        execFile(WEBGL_FFMPEG_PATH, [
+            '-y',
+            '-ss', String(startSec),
+            '-t', String(duration),
+            '-i', resolved,
+            '-vn',
+            '-c:a', 'libmp3lame',
+            '-q:a', '4',
+            outPath,
+        ], { windowsHide: true }, (error) => error ? reject(error) : resolve());
+    });
+    _assertNonEmptyFile(outPath, 'Partial render audio');
+    clipped.audio = outName;
+    return clipped;
+}
+
 ipcMain.handle('hyperframes-render', async (_event, payload = {}) => {
     try {
         activeRenderCancelled = false;
@@ -2553,27 +4543,76 @@ ipcMain.handle('hyperframes-render', async (_event, payload = {}) => {
         if (_isPartial) {
             sendRenderProgress(6, `[HyperFrames] Partial render ${_start.toFixed(1)}s → ${_end.toFixed(1)}s (clipping to section)...`);
             try { renderPlan = await _clipPlanForRange(payload.plan, _start, _end); }
-            catch (e) { console.warn(`[HyperFrames] plan clip failed (${e.message}); rendering full timeline`); renderPlan = payload.plan; }
+            catch (e) { throw new Error(`Partial render preparation failed: ${e.message}`); }
         }
 
-        sendRenderProgress(8, '[HyperFrames] Generating HTML composition...');
+        sendRenderProgress(8, '[HyperFrames] Preparing agentic Motion QA...');
         await runCompositionAuthorPass(renderPlan);
-        const project = generateHyperframesProject({
+        const { runMotionQa } = require('./src/agents/workers/motion-qa-agent');
+        const qaBrowserPath = findHyperframesBrowserPath();
+        const motionQa = await runMotionQa({
             plan: renderPlan,
-            projectDir: PROJECT_DIR,
             appRoot: APP_ROOT,
-            tempDir: TEMP_PATH,
-            publicDir: PUBLIC_PATH,
-            inputDir: INPUT_PATH,
-            outputRoot: path.join(PROJECT_DIR, 'hyperframes'),
-            options: {
-                ...(payload.options || {}),
-                onProgress: sendRenderProgress,
+            reportDir: PUBLIC_PATH,
+            browserPath: qaBrowserPath,
+            quick: _isPartial,
+            log: (message) => console.log(message),
+            onProgress: sendRenderProgress,
+            isCancelled: () => activeRenderCancelled === true,
+            onProcess: (nextProcess, _label, finishedProcess) => {
+                if (nextProcess) {
+                    activeProcess = nextProcess;
+                    activeProcessType = 'render';
+                } else if (!finishedProcess || activeProcess === finishedProcess) {
+                    activeProcess = null;
+                    activeProcessType = null;
+                }
             },
+            generateProject: async () => generateHyperframesProject({
+                plan: renderPlan,
+                projectDir: PROJECT_DIR,
+                appRoot: APP_ROOT,
+                tempDir: TEMP_PATH,
+                publicDir: PUBLIC_PATH,
+                inputDir: INPUT_PATH,
+                outputRoot: path.join(PROJECT_DIR, 'hyperframes'),
+                options: {
+                    ...(payload.options || {}),
+                    onProgress: sendRenderProgress,
+                },
+            }),
         });
+        const project = motionQa.project;
+        if (!project?.projectDir) {
+            throw new Error('Motion QA did not produce a HyperFrames project');
+        }
+        if (motionQa.hardFail) {
+            const first = (motionQa.report?.findings || []).find((finding) => finding.severity === 'error');
+            return {
+                success: false,
+                error: `Motion QA blocked a broken render${first?.message ? `: ${first.message}` : ''}`,
+                projectDir: project.projectDir,
+                motionQa: motionQa.report,
+            };
+        }
+        if (motionQa.changed && !_isPartial) {
+            try {
+                const savedMotionPlan = _persistUnifiedVideoPlan(renderPlan);
+                if (mainWindow && !mainWindow.isDestroyed()) {
+                    mainWindow.webContents.send('qa-plan-updated', {
+                        videoPlan: renderPlan,
+                        revision: savedMotionPlan.revision,
+                        planHash: savedMotionPlan.planHash,
+                    });
+                }
+                console.log(`[Motion QA] Persisted ${motionQa.report?.repairCount || 0} automatic repair(s) to the project.`);
+            } catch (persistError) {
+                console.warn(`[Motion QA] Repaired render will continue, but project persistence failed: ${persistError.message}`);
+            }
+        }
 
-        console.log(`[HyperFrames] Project generated: ${project.projectDir}`);
-        sendRenderProgress(14, '[HyperFrames] Project generated, starting renderer...');
+        console.log(`[HyperFrames] Motion-QA project ready: ${project.projectDir}`);
+        sendRenderProgress(17, `[Motion QA] ${String(motionQa.report?.status || 'pass').toUpperCase()} — starting renderer...`);
 
         // Pre-render slideshow/monotony advisory (OPENMONTAGE-BORROW-PLAN #10).
         // Log-only — surfaces monotony before we spend a full render; never blocks.
@@ -2586,8 +4625,11 @@ ipcMain.handle('hyperframes-render', async (_event, payload = {}) => {
             }
         } catch (_) { /* advisory only */ }
 
-        // Pre-render HyperFrames lint (OPENMONTAGE-BORROW-PLAN #12).
-        try { runHyperframesLint(project.projectDir); } catch (_) { /* advisory only */ }
+        // Motion QA already ran HyperFrames lint/check/keyframes. Keep the
+        // legacy advisory lint only when Motion QA was explicitly disabled.
+        if (motionQa.report?.status === 'skipped') {
+            try { runHyperframesLint(project.projectDir); } catch (_) { /* advisory only */ }
+        }
 
         const renderOptions = {
             fps: payload.fps || payload.plan?.fps || 30,
@@ -2657,7 +4699,12 @@ ipcMain.handle('hyperframes-render', async (_event, payload = {}) => {
                         .map((d) => (d ? path.join(d, bedCandidate) : bedCandidate))
                         .find((p) => { try { return fs.existsSync(p); } catch (_) { return false; } }) || null;
                 }
-                finishAudio({ videoPath: rendered.outputPath, bedPath, log: (m) => console.log(m) });
+                finishAudio({
+                    videoPath: rendered.outputPath,
+                    bedPath,
+                    bedGain: renderPlan?.musicBedGain,
+                    log: (m) => console.log(m),
+                });
             } catch (e) {
                 console.warn(`[HyperFrames] audio finishing skipped (${e.message}) — original render kept`);
             }
@@ -2691,6 +4738,7 @@ ipcMain.handle('hyperframes-render', async (_event, payload = {}) => {
             projectDir: project.projectDir,
             indexPath: project.indexPath,
             review,
+            motionQa: motionQa.report,
         };
     } catch (err) {
         activeProcess = null;
@@ -2709,7 +4757,6 @@ async function _webglMuxAudio(exp) {
     const planPath = path.join(PUBLIC_PATH, 'video-plan.json');
     let audioFile = null;
     let sfxClips = [];
-    let sfxEnabled = true;
 
     if (fs.existsSync(planPath)) {
         try {
@@ -2717,23 +4764,33 @@ async function _webglMuxAudio(exp) {
             if (plan.audio) {
                 for (const dir of [PUBLIC_PATH, TEMP_PATH, INPUT_PATH]) {
                     const candidate = path.join(dir, plan.audio);
-                    if (fs.existsSync(candidate)) {
-                        audioFile = candidate;
+                    if (_isAllowedProjectMediaFile(candidate)) {
+                        audioFile = fs.realpathSync.native(candidate);
                         break;
                     }
                 }
             }
             // Read SFX clips from plan
-            if (plan.sfxEnabled !== false && plan.sfxClips && plan.sfxClips.length > 0) {
+            if (Array.isArray(plan.sfxClips) && plan.sfxClips.length > 0) {
                 const sfxDir = path.join(__dirname, 'assets', 'sfx');
                 for (const clip of plan.sfxClips) {
-                    const sfxPath = path.join(sfxDir, clip.file);
-                    if (fs.existsSync(sfxPath)) {
+                    const sfxPath = path.resolve(sfxDir, String(clip.file || ''));
+                    let realSfxPath = null;
+                    try {
+                        const realSfxRoot = fs.realpathSync.native(sfxDir);
+                        const candidate = fs.realpathSync.native(sfxPath);
+                        if (_isPathWithin(realSfxRoot, candidate) && fs.statSync(candidate).isFile()) {
+                            realSfxPath = candidate;
+                        }
+                    } catch (_) { }
+                    if (realSfxPath) {
+                        const rawVolume = clip.volume !== undefined ? Number(clip.volume) : 0.35;
                         sfxClips.push({
-                            path: sfxPath,
-                            startTime: clip.startTime || 0,
-                            duration: clip.duration || 0.5,
-                            volume: clip.volume !== undefined ? clip.volume : 0.35,
+                            path: realSfxPath,
+                            startTime: Math.max(0, Number(clip.startTime) || 0),
+                            duration: Math.max(0.01, Number(clip.duration) || 0.5),
+                            volume: Number.isFinite(rawVolume) ? Math.max(0, Math.min(2, rawVolume)) : 0.35,
+                            inputOffset: 0,
                         });
                     }
                 }
@@ -2750,10 +4807,18 @@ async function _webglMuxAudio(exp) {
             const sfxEnd = sfx.startTime + sfx.duration;
             return sfxEnd > trimStart && sfx.startTime < trimEnd;
         });
-        // Adjust startTime relative to the trim start
-        for (const sfx of sfxClips) {
-            sfx.startTime = Math.max(0, sfx.startTime - trimStart);
-        }
+        sfxClips = sfxClips.map((sfx) => {
+            const originalStart = sfx.startTime;
+            const originalEnd = originalStart + sfx.duration;
+            const audibleStart = Math.max(originalStart, trimStart);
+            const audibleEnd = Math.min(originalEnd, trimEnd);
+            return {
+                ...sfx,
+                inputOffset: Math.max(0, audibleStart - originalStart),
+                startTime: Math.max(0, originalStart - trimStart),
+                duration: Math.max(0.01, audibleEnd - audibleStart),
+            };
+        });
         if (before !== sfxClips.length) {
             console.log(`[WebGL Export] SFX trimmed: ${before} → ${sfxClips.length} clips (range ${trimStart.toFixed(1)}s-${trimEnd === Infinity ? 'end' : trimEnd.toFixed(1) + 's'})`);
         }
@@ -2762,8 +4827,11 @@ async function _webglMuxAudio(exp) {
     const hasSfx = sfxClips.length > 0;
 
     if (!audioFile && !hasSfx) {
+        if (exp.status === 'cancelled') throw new Error('Export cancelled');
         // No audio at all — just copy video
         fs.copyFileSync(exp.videoFile, exp.outputFile);
+        _assertNonEmptyFile(exp.outputFile, 'Final WebGL output');
+        try { fs.unlinkSync(exp.videoFile); } catch (_) { }
         console.log('[WebGL Export] No audio to mux, video only:', exp.outputFile);
         return exp.outputFile;
     }
@@ -2780,9 +4848,7 @@ async function _webglMuxAudio(exp) {
         if (exp.audioTrimStartSec != null && exp.audioTrimStartSec > 0) {
             inputArgs.push('-ss', String(exp.audioTrimStartSec));
         }
-        if (exp.audioTrimEndSec != null) {
-            inputArgs.push('-to', String(exp.audioTrimEndSec));
-        }
+        inputArgs.push('-t', String(exp.totalFrames / exp.fps));
         inputArgs.push('-i', audioFile);
         voIndex = audioInputIndex++;
     }
@@ -2790,6 +4856,8 @@ async function _webglMuxAudio(exp) {
     // Add each SFX clip as a separate input with offset
     const sfxIndices = [];
     for (const sfx of sfxClips) {
+        if (sfx.inputOffset > 0) inputArgs.push('-ss', String(sfx.inputOffset));
+        inputArgs.push('-t', String(sfx.duration));
         inputArgs.push('-i', sfx.path);
         sfxIndices.push(audioInputIndex++);
     }
@@ -2858,33 +4926,70 @@ async function _webglMuxAudio(exp) {
         const muxProc = spawn(WEBGL_FFMPEG_PATH, [
             ...inputArgs,
             ...outputArgs
-        ], { stdio: ['ignore', 'pipe', 'pipe'] });
+        ], {
+            stdio: ['ignore', 'ignore', 'pipe'],
+            windowsHide: true,
+        });
+        exp.muxProc = muxProc;
 
         let stderr = '';
-        muxProc.stderr.on('data', (d) => { stderr += d.toString(); });
+        let settled = false;
+        const finish = (error, outputPath) => {
+            if (settled) return;
+            settled = true;
+            if (exp.muxProc === muxProc) exp.muxProc = null;
+            if (error) reject(error);
+            else resolve(outputPath);
+        };
+        muxProc.stderr.on('data', (d) => {
+            stderr = (stderr + d.toString()).slice(-64 * 1024);
+        });
 
         muxProc.on('close', (code) => {
+            if (exp.status === 'cancelled') {
+                finish(new Error('Export cancelled'));
+                return;
+            }
             if (code === 0) {
-                console.log('[WebGL Export] Final output:', exp.outputFile);
-                // Clean up temp video after successful mux
-                try { fs.unlinkSync(exp.videoFile); } catch (_) { }
-                resolve(exp.outputFile);
+                try {
+                    _assertNonEmptyFile(exp.outputFile, 'Final WebGL output');
+                    console.log('[WebGL Export] Final output:', exp.outputFile);
+                    // Clean up temp video after successful mux
+                    try { fs.unlinkSync(exp.videoFile); } catch (_) { }
+                    finish(null, exp.outputFile);
+                } catch (error) {
+                    finish(error);
+                }
             } else {
                 console.error('[WebGL Export] Mux failed:', stderr.slice(-500));
                 // Fallback: use video-only file (rename, don't delete first)
                 try { fs.renameSync(exp.videoFile, exp.outputFile); } catch (_) {
                     try { fs.copyFileSync(exp.videoFile, exp.outputFile); } catch (_2) { }
                 }
-                resolve(exp.outputFile);
+                try {
+                    _assertNonEmptyFile(exp.outputFile, 'Video-only WebGL fallback');
+                    finish(null, exp.outputFile);
+                } catch (error) {
+                    finish(error);
+                }
             }
         });
 
         muxProc.on('error', (err) => {
+            if (exp.status === 'cancelled') {
+                finish(new Error('Export cancelled'));
+                return;
+            }
             console.error('[WebGL Export] Mux process error:', err.message);
             try { fs.renameSync(exp.videoFile, exp.outputFile); } catch (_) {
                 try { fs.copyFileSync(exp.videoFile, exp.outputFile); } catch (_2) { }
             }
-            resolve(exp.outputFile);
+            try {
+                _assertNonEmptyFile(exp.outputFile, 'Video-only WebGL fallback');
+                finish(null, exp.outputFile);
+            } catch (fallbackError) {
+                finish(fallbackError);
+            }
         });
     });
 }
@@ -2918,7 +5023,10 @@ ipcMain.handle('get-current-log-file', async () => {
 
 // Open file in default app
 ipcMain.handle('open-file', async (event, filePath) => {
-    shell.openPath(filePath);
+    const allowed = _resolveRendererReadableFile(event, filePath);
+    if (!allowed) return { success: false, error: 'File is outside the active project' };
+    const error = await shell.openPath(allowed);
+    return error ? { success: false, error } : { success: true };
 });
 
 // Select folder dialog
@@ -2928,7 +5036,7 @@ ipcMain.handle('select-folder', async (event, title) => {
         properties: ['openDirectory', 'createDirectory']
     });
     if (!result.canceled && result.filePaths.length > 0) {
-        return result.filePaths[0];
+        return _grantSelectedDirectory(event, result.filePaths[0]);
     }
     return null;
 });
@@ -2936,13 +5044,18 @@ ipcMain.handle('select-folder', async (event, title) => {
 // Startup chooser actions (custom in-app startup window)
 ipcMain.handle('startup-create-project', async () => {
     const result = await dialog.showOpenDialog(startupWindow || null, {
-        title: 'Choose folder for new project',
+        title: 'Choose an empty folder for the new project',
         properties: ['openDirectory', 'createDirectory']
     });
     if (result.canceled || !result.filePaths.length) return { success: false, cancelled: true };
-    const projectPath = result.filePaths[0];
-    resolveStartupChoice(projectPath);
-    return { success: true, projectDir: projectPath };
+    const prepared = _prepareNewProjectTarget({
+        location: result.filePaths[0],
+        projectName: path.basename(result.filePaths[0]),
+        locationMode: 'selected-folder',
+    });
+    if (!prepared.success) return prepared;
+    resolveStartupChoice(prepared.projectDir);
+    return prepared;
 });
 
 ipcMain.handle('startup-open-project-folder', async () => {
@@ -2951,9 +5064,10 @@ ipcMain.handle('startup-open-project-folder', async () => {
         properties: ['openDirectory']
     });
     if (result.canceled || !result.filePaths.length) return { success: false, cancelled: true };
-    const projectPath = result.filePaths[0];
-    resolveStartupChoice(projectPath);
-    return { success: true, projectDir: projectPath };
+    const inspected = _validateExistingProjectTarget(result.filePaths[0]);
+    if (!inspected.success) return inspected;
+    resolveStartupChoice(inspected.projectDir);
+    return inspected;
 });
 
 ipcMain.handle('startup-open-project-file', async () => {
@@ -2964,9 +5078,10 @@ ipcMain.handle('startup-open-project-file', async () => {
     });
     if (result.canceled || !result.filePaths.length) return { success: false, cancelled: true };
     const fvpPath = result.filePaths[0];
-    const projectPath = path.dirname(fvpPath);
-    resolveStartupChoice(projectPath);
-    return { success: true, projectDir: projectPath, projectFile: fvpPath };
+    const inspected = _validateExistingProjectTarget(path.dirname(fvpPath), fvpPath);
+    if (!inspected.success) return inspected;
+    resolveStartupChoice(inspected.projectDir);
+    return inspected;
 });
 
 ipcMain.handle('startup-cancel', async () => {
@@ -2976,72 +5091,67 @@ ipcMain.handle('startup-cancel', async () => {
 
 // Select file dialog
 ipcMain.handle('select-file', async (event, options) => {
+    const requestedFilters = Array.isArray(options?.filters) ? options.filters.slice(0, 8) : null;
+    const filters = requestedFilters?.map((filter) => ({
+        name: String(filter?.name || 'Files').slice(0, 80),
+        extensions: Array.isArray(filter?.extensions)
+            ? filter.extensions
+                .slice(0, 20)
+                .map((extension) => String(extension).replace(/[^a-z0-9]/gi, '').toLowerCase())
+                .filter(Boolean)
+            : [],
+    })).filter((filter) => filter.extensions.length) || [
+        { name: 'Audio Files', extensions: ['mp3', 'wav'] },
+    ];
     const result = await dialog.showOpenDialog(mainWindow, {
         properties: ['openFile'],
-        filters: [
-            { name: 'Audio Files', extensions: ['mp3', 'wav'] }
-        ],
-        ...options
+        title: typeof options?.title === 'string' ? options.title.slice(0, 120) : undefined,
+        filters,
     });
 
     if (!result.canceled && result.filePaths.length > 0) {
-        return result.filePaths[0];
+        return _grantSelectedFile(event, result.filePaths[0]);
     }
     return null;
 });
 
 // Get file URL for video playback
 ipcMain.handle('get-file-url', async (event, filePath) => {
-    // Convert file path to file:// URL
-    if (fs.existsSync(filePath)) {
-        // Use URL constructor to handle encoding of spaces and special chars
-        const fileUrl = new URL(`file://${filePath.replace(/\\/g, '/')}`);
-        return fileUrl.href;
+    let candidate = String(filePath || '').trim();
+    if (!candidate || candidate.length > 32_768) return null;
+    if (/^file:/i.test(candidate)) {
+        try {
+            candidate = fileURLToPath(candidate);
+        } catch (_) {
+            return null;
+        }
     }
-    return null;
+    const allowed = _resolveExistingFileWithin(_projectReadableRoots(), candidate);
+    return allowed ? _assetUrlForFile(allowed) : null;
 });
 
 // Show OS notification
 ipcMain.handle('show-notification', async (event, title, body) => {
     if (Notification.isSupported()) {
-        const n = new Notification({ title, body, silent: false });
+        const n = new Notification({
+            title: String(title || '').slice(0, 160),
+            body: String(body || '').slice(0, 1000),
+            silent: false,
+        });
         n.show();
     }
 });
 
 // Get SFX file path for preview playback
 ipcMain.handle('get-sfx-path', async (event, filename) => {
-    const sfxPath = path.join(__dirname, 'assets', 'sfx', filename);
-    if (fs.existsSync(sfxPath)) {
-        const fileUrl = new URL(`file://${sfxPath.replace(/\\/g, '/')}`);
-        return fileUrl.href;
-    }
+    const safeFilename = path.basename(String(filename || ''));
+    if (safeFilename !== String(filename || '') || !/\.(mp3|wav|ogg|m4a)$/i.test(safeFilename)) return null;
+    const sfxPath = _resolveExistingFileWithin([path.join(APP_ROOT, 'assets', 'sfx')], path.join(APP_ROOT, 'assets', 'sfx', safeFilename));
+    if (sfxPath) return _assetUrlForFile(sfxPath);
     // Fallback: check project's public folder
-    const pubPath = path.join(PUBLIC_PATH, filename);
-    if (fs.existsSync(pubPath)) {
-        const fileUrl = new URL(`file://${pubPath.replace(/\\/g, '/')}`);
-        return fileUrl.href;
-    }
+    const pubPath = _resolveExistingFileWithin([PUBLIC_PATH], path.join(PUBLIC_PATH, safeFilename));
+    if (pubPath) return _assetUrlForFile(pubPath);
     return null;
-});
-
-// Download real SFX from Freesound API (replaces synthetic placeholders)
-ipcMain.handle('download-real-sfx', async () => {
-    try {
-        const { downloadAllSfx } = require('./src/media/sfx-provider');
-        const simpleLog = {
-            step: (msg) => console.log(msg),
-            ok: (msg) => console.log(`   ✅ ${msg}`),
-            warn: (msg) => console.log(`   ⚠️ ${msg}`),
-            dim: (msg) => console.log(msg),
-            br: () => console.log(''),
-        };
-        const result = await downloadAllSfx({ log: simpleLog });
-        return { success: true, ...result };
-    } catch (err) {
-        console.error('[SFX Download] Error:', err.message);
-        return { success: false, error: err.message };
-    }
 });
 
 // Scan assets/overlays/ folder for available overlay files
@@ -3074,12 +5184,13 @@ ipcMain.handle('scan-overlays', async () => {
 
 // Get overlay file URL for preview playback
 ipcMain.handle('get-overlay-url', async (event, filename) => {
-    const overlayPath = path.join(__dirname, 'assets', 'overlays', filename);
-    if (fs.existsSync(overlayPath)) {
-        const fileUrl = new URL(`file://${overlayPath.replace(/\\/g, '/')}`);
-        return fileUrl.href;
-    }
-    return null;
+    const safeFilename = path.basename(String(filename || ''));
+    if (safeFilename !== String(filename || '') || !/\.(mp4|webm|mov|jpg|jpeg|png|webp)$/i.test(safeFilename)) return null;
+    const overlayPath = _resolveExistingFileWithin(
+        [path.join(APP_ROOT, 'assets', 'overlays')],
+        path.join(APP_ROOT, 'assets', 'overlays', safeFilename)
+    );
+    return overlayPath ? _assetUrlForFile(overlayPath) : null;
 });
 
 // Scan assets/backgrounds/ folder for available background pattern files
@@ -3133,12 +5244,13 @@ ipcMain.handle('scan-backgrounds', async () => {
 
 // Get background file URL for preview
 ipcMain.handle('get-background-url', async (event, filename) => {
-    const bgPath = path.join(__dirname, 'assets', 'backgrounds', filename);
-    if (fs.existsSync(bgPath)) {
-        const fileUrl = new URL(`file://${bgPath.replace(/\\/g, '/')}`);
-        return fileUrl.href;
-    }
-    return null;
+    const safeFilename = path.basename(String(filename || ''));
+    if (safeFilename !== String(filename || '') || !/\.(mp4|webm|mov|jpg|jpeg|png|webp|gif)$/i.test(safeFilename)) return null;
+    const bgPath = _resolveExistingFileWithin(
+        [path.join(APP_ROOT, 'assets', 'backgrounds')],
+        path.join(APP_ROOT, 'assets', 'backgrounds', safeFilename)
+    );
+    return bgPath ? _assetUrlForFile(bgPath) : null;
 });
 
 // ========================================
@@ -3152,12 +5264,12 @@ ipcMain.handle('get-project-info', async () => {
         projectName: PROJECT_NAME,
         projectFile: getProjectFilePath(),
         appRoot: APP_ROOT,
-        isDefaultProject: PROJECT_DIR === APP_ROOT
+        isDefaultProject: PROJECT_DIR === DEFAULT_WORKSPACE_DIR
     };
 });
 
 // Qwen model pool status + reset (used by UI)
-const _qwenExhaustedPath = path.join(APP_ROOT, '.qwen-exhausted-models.json');
+const _qwenExhaustedPath = path.join(USER_DATA_DIR, '.qwen-exhausted-models.json');
 function _parseEnvListForUi(raw) {
     return String(raw || '')
         .split(/[,\n;]/)
@@ -3200,7 +5312,7 @@ function _maskSecretForUi(secret) {
 }
 
 function _qwenVisionKeysForUi() {
-    const envPath = path.join(APP_ROOT, '.env');
+    const envPath = USER_ENV_PATH;
     const sharedKeys = _parseEnvListForUi(_readEnvValueForUi(envPath, 'QWEN_VISION_API_KEY'));
     const hasImagePrimary = _envHasKeyForUi(envPath, 'QWEN_IMAGE_API_KEY');
     const hasImageLane = hasImagePrimary || _envHasKeyForUi(envPath, 'QWEN_VL_API_KEY');
@@ -3461,7 +5573,7 @@ const CLOUD_ACCOUNT_DEFS = {
 };
 
 function _resourceEnvPath() {
-    return path.join(APP_ROOT, '.env');
+    return USER_ENV_PATH;
 }
 
 function _backupEnvFile(envPath, reason = 'resource-edit') {
@@ -3864,8 +5976,8 @@ function _applyCloudAccountSlots(payload = {}) {
         const value = parsedAgain.byKey.get(key)?.value;
         if (value != null) process.env[key] = _unquoteEnvValue(value);
     }
-    for (const mod of ['./src/config', './src/ai-provider']) {
-        try { delete require.cache[require.resolve(mod)]; } catch (_) {}
+    for (const modulePath of RUNTIME_CONFIG_MODULE_PATHS) {
+        delete require.cache[modulePath];
     }
     return {
         changedKeys: [...new Set(changedKeys)],
@@ -3893,8 +6005,8 @@ function _applyResourceEnvEdits(envPath, updates = {}, removals = []) {
     const qwenChanged = changedKeys.some(key => String(key).startsWith('QWEN_'));
     const runtimeConfigChanged = changedKeys.some(key => /^(AI_PROVIDER|BEDROCK_|AZURE_|QWEN_|BRAVE_|TAVILY_|YTDLP_|STORYBLOCKS_|MEDIA_|FOOTAGE_|IMAGE_|CLIP_ANALYZER_|VISION_)/.test(String(key)));
     if (runtimeConfigChanged) {
-        for (const mod of ['./src/config', './src/ai-provider']) {
-            try { delete require.cache[require.resolve(mod)]; } catch (_) {}
+        for (const modulePath of RUNTIME_CONFIG_MODULE_PATHS) {
+            delete require.cache[modulePath];
         }
     }
     if (qwenChanged && fs.existsSync(_qwenExhaustedPath)) {
@@ -4244,7 +6356,7 @@ ipcMain.handle('qwen-vision-keys-status', async () => {
 
 ipcMain.handle('qwen-vision-keys-save', async (_event, payload = {}) => {
     try {
-        const envPath = path.join(APP_ROOT, '.env');
+        const envPath = USER_ENV_PATH;
         let saved;
         if (payload?.lanes && typeof payload.lanes === 'object') {
             const imageKeys = _applyQwenKeyEdit(_resolveQwenLaneKeysForSave(envPath, 'image'), payload.lanes.image || {});
@@ -4422,6 +6534,12 @@ ipcMain.handle('learn-style', async (event, input) => {
         if (!input || typeof input !== 'string') {
             return { success: false, error: 'No input provided' };
         }
+        const normalizedInput = /^https?:\/\//i.test(input)
+            ? input
+            : _resolveGrantedFile(event, input);
+        if (!normalizedInput) {
+            return { success: false, error: 'Reference must be an http(s) URL or a file selected through the picker' };
+        }
         const styleLearner = require('./src/studio/style-learner');
         const saveDir = _styleProfilesDir();
 
@@ -4431,7 +6549,7 @@ ipcMain.handle('learn-style', async (event, input) => {
             }
         };
 
-        const profile = await styleLearner.analyzeStyle(input, {
+        const profile = await styleLearner.analyzeStyle(normalizedInput, {
             saveDir,
             onProgress: sendProgress
         });
@@ -4449,6 +6567,13 @@ ipcMain.handle('learn-style-multi', async (event, urls, profileName) => {
         if (!urls || !Array.isArray(urls) || urls.length === 0) {
             return { success: false, error: 'No URLs provided' };
         }
+        const safeInputs = urls.slice(0, 20).map((input) => {
+            if (typeof input !== 'string') return null;
+            return /^https?:\/\//i.test(input) ? input : _resolveGrantedFile(event, input);
+        }).filter(Boolean);
+        if (safeInputs.length !== urls.length) {
+            return { success: false, error: 'Every reference must be an http(s) URL or a selected file' };
+        }
         const styleLearner = require('./src/studio/style-learner');
         const saveDir = _styleProfilesDir();
 
@@ -4458,7 +6583,7 @@ ipcMain.handle('learn-style-multi', async (event, urls, profileName) => {
             }
         };
 
-        const profile = await styleLearner.analyzeMultiple(urls, {
+        const profile = await styleLearner.analyzeMultiple(safeInputs, {
             name: profileName || undefined,
             saveDir,
             onProgress: sendProgress,
@@ -4474,7 +6599,11 @@ ipcMain.handle('learn-style-multi', async (event, urls, profileName) => {
 ipcMain.handle('compare-style', async (event, profilePath, videoPlan) => {
     try {
         const styleLearner = require('./src/studio/style-learner');
-        const profile = styleLearner.loadStyleProfile(profilePath);
+        const allowedProfile = _resolveExistingFileWithin([_styleProfilesDir()], profilePath);
+        if (!allowedProfile || path.extname(allowedProfile).toLowerCase() !== '.json') {
+            return { success: false, error: 'Style profile must be inside the active project styles folder' };
+        }
+        const profile = styleLearner.loadStyleProfile(allowedProfile);
         if (!profile) return { success: false, error: 'Could not load style profile' };
         const report = styleLearner.compareWithBuild(profile, videoPlan);
         const formatted = styleLearner.formatComparison(report);
@@ -4494,19 +6623,26 @@ function _sendStudioProgress(window, percent, message) {
     }
 }
 
+function _resolveStyleStudioInput(event, input) {
+    if (typeof input !== 'string') return null;
+    if (/^https?:\/\//i.test(input)) return input.slice(0, 4000);
+    return _resolveGrantedFile(event, input);
+}
+
 ipcMain.handle('style-studio-start', async (event, input, options) => {
     try {
-        if (!input || typeof input !== 'string') {
-            return { error: 'No input provided' };
+        const safeInput = _resolveStyleStudioInput(event, input);
+        if (!safeInput) {
+            return { error: 'Input must be an http(s) URL or a file selected through the picker' };
         }
         const studio = require('./src/studio/style-studio-agent');
         const saveDir = _styleProfilesDir();
         const win = BrowserWindow.fromWebContents(event.sender);
 
-        const result = await studio.startSession(input, {
+        const result = await studio.startSession(safeInput, {
             saveDir,
-            thinkingMode: options?.thinkingMode || 'off',
-            codeAccess: options?.codeAccess !== false,
+            thinkingMode: options?.thinkingMode === 'on' ? 'on' : 'off',
+            codeAccess: options?.codeAccess === true,
             onProgress: (pct, msg) => _sendStudioProgress(win, pct, msg),
         });
         return result;
@@ -4518,9 +6654,11 @@ ipcMain.handle('style-studio-start', async (event, input, options) => {
 
 ipcMain.handle('style-studio-add-video', async (event, sessionId, input) => {
     try {
+        const safeInput = _resolveStyleStudioInput(event, input);
+        if (!safeInput) return { error: 'Video must be an http(s) URL or a selected file' };
         const studio = require('./src/studio/style-studio-agent');
         const win = BrowserWindow.fromWebContents(event.sender);
-        const result = await studio.addVideo(sessionId, input, (pct, msg) =>
+        const result = await studio.addVideo(String(sessionId || '').slice(0, 160), safeInput, (pct, msg) =>
             _sendStudioProgress(win, pct, msg));
         return result;
     } catch (e) {
@@ -4532,7 +6670,10 @@ ipcMain.handle('style-studio-add-video', async (event, sessionId, input) => {
 ipcMain.handle('style-studio-chat', async (event, sessionId, message) => {
     try {
         const studio = require('./src/studio/style-studio-agent');
-        const result = await studio.chat(sessionId, message);
+        const result = await studio.chat(
+            String(sessionId || '').slice(0, 160),
+            String(message || '').slice(0, 20_000)
+        );
         return result;
     } catch (e) {
         console.error('[style-studio-chat] Failed:', e);
@@ -4707,7 +6848,8 @@ ipcMain.handle('style-studio-pick-audio', async (event) => {
             ]
         });
         if (result.canceled || !result.filePaths.length) return null;
-        const audioPath = result.filePaths[0];
+        const audioPath = _grantSelectedFile(event, result.filePaths[0]);
+        if (!audioPath) return { error: 'Selected audio file is unavailable' };
         let size = null;
         try { size = fs.statSync(audioPath).size; } catch (_) {}
         return { path: audioPath, name: path.basename(audioPath), size };
@@ -4722,8 +6864,10 @@ ipcMain.handle('style-studio-transcribe-audio', async (event, audioPath, options
         if (!audioPath || typeof audioPath !== 'string') {
             return { error: 'No audio path provided' };
         }
-        if (!fs.existsSync(audioPath)) {
-            return { error: `Audio file not found: ${audioPath}` };
+        const allowedAudio = _resolveGrantedFile(event, audioPath)
+            || _resolveExistingFileWithin([INPUT_PATH, TEMP_PATH], audioPath);
+        if (!allowedAudio || !/\.(mp3|wav|m4a|flac|ogg|opus|aac|webm|mp4)$/i.test(allowedAudio)) {
+            return { error: 'Audio file is outside the active project and was not selected through the picker' };
         }
         const win = BrowserWindow.fromWebContents(event.sender);
         const send = (pct, msg) => {
@@ -4734,8 +6878,8 @@ ipcMain.handle('style-studio-transcribe-audio', async (event, audioPath, options
 
         send(5, 'Loading Whisper…');
         const { transcribeAudio } = require('./src/pipeline/transcribe');
-        const result = await transcribeAudio(audioPath, {
-            languageHint: options?.languageHint || null
+        const result = await transcribeAudio(allowedAudio, {
+            languageHint: typeof options?.languageHint === 'string' ? options.languageHint.slice(0, 20) : null
         });
         send(100, 'Transcription complete');
 
@@ -4804,9 +6948,9 @@ ipcMain.handle('scan-style-profiles', async () => {
     }
 });
 
-ipcMain.handle('pick-video-file', async () => {
+ipcMain.handle('pick-video-file', async (event) => {
     try {
-        const result = await dialog.showOpenDialog(mainWindow, {
+        const result = await dialog.showOpenDialog(BrowserWindow.fromWebContents(event.sender) || mainWindow, {
             title: 'Choose reference video',
             properties: ['openFile'],
             filters: [
@@ -4815,45 +6959,63 @@ ipcMain.handle('pick-video-file', async () => {
             ]
         });
         if (result.canceled || !result.filePaths.length) return null;
-        return result.filePaths[0];
+        return _grantSelectedFile(event, result.filePaths[0]);
     } catch (e) {
         console.error('[pick-video-file] Failed:', e);
         return null;
     }
 });
 
-// Launch a new instance with a new project folder
-// options: { projectName, location } — if provided, creates named subfolder
+// Create a real project and route it through the hybrid workspace/new-instance lifecycle.
+// options: { projectName, location, locationMode }
 ipcMain.handle('launch-new-instance', async (event, options) => {
-    let projectPath;
+    let selectedLocation;
+    let projectName;
+    let locationMode;
 
-    if (options && options.projectName && options.location) {
-        // Create named subfolder at chosen location
-        projectPath = path.join(options.location, options.projectName);
-        if (!fs.existsSync(projectPath)) {
-            fs.mkdirSync(projectPath, { recursive: true });
-        }
+    if (options?.location) {
+        const grantedLocation = _resolveGrantedDirectory(event, options.location);
+        if (!grantedLocation) return { success: false, error: 'Project location was not selected through the folder picker' };
+        selectedLocation = grantedLocation;
+        projectName = String(options.projectName || '').trim();
+        locationMode = options.locationMode;
     } else {
-        // Legacy: just pick a folder
         const result = await dialog.showOpenDialog(mainWindow, {
-            title: 'Choose location for new project',
+            title: 'Choose an empty folder for the new project',
             properties: ['openDirectory', 'createDirectory']
         });
         if (result.canceled || !result.filePaths.length) return { success: false, cancelled: true };
-        projectPath = result.filePaths[0];
+        selectedLocation = result.filePaths[0];
+        projectName = path.basename(selectedLocation);
+        locationMode = 'selected-folder';
     }
 
-    _spawnNewInstance(projectPath);
-    return { success: true, projectDir: projectPath };
+    const prepared = _prepareNewProjectTarget({
+        location: selectedLocation,
+        projectName,
+        locationMode,
+    });
+    if (!prepared.success) return prepared;
+
+    const opened = await _openProjectTarget(prepared.projectDir, {
+        projectFile: prepared.projectFile,
+    });
+    return {
+        ...opened,
+        created: true,
+        projectName: prepared.projectName,
+        locationMode: prepared.locationMode,
+    };
 });
 
-// Open an existing project folder in a new instance
+// Open an existing project in the current workspace window.
 ipcMain.handle('open-existing-project', async () => {
-    const projectPath = await promptForExistingProjectPath(mainWindow);
-    if (!projectPath) return { success: false, cancelled: true };
+    const selection = await promptForExistingProjectPath(mainWindow);
+    if (!selection) return { success: false, cancelled: true };
 
-    _spawnNewInstance(projectPath);
-    return { success: true, projectDir: projectPath };
+    return _openProjectTarget(selection.projectDir, {
+        projectFile: selection.projectFile,
+    });
 });
 
 // Open existing project by selecting a folder (no mode prompt)
@@ -4865,8 +7027,7 @@ ipcMain.handle('open-existing-project-folder', async () => {
     if (folderResult.canceled || !folderResult.filePaths.length) return { success: false, cancelled: true };
 
     const projectPath = folderResult.filePaths[0];
-    _spawnNewInstance(projectPath);
-    return { success: true, projectDir: projectPath };
+    return _openProjectTarget(projectPath);
 });
 
 // Open existing project by selecting a .fvp file (no mode prompt)
@@ -4880,26 +7041,8 @@ ipcMain.handle('open-existing-project-file', async () => {
 
     const projectFile = fileResult.filePaths[0];
     const projectPath = path.dirname(projectFile);
-    _spawnNewInstance(projectPath);
-    return { success: true, projectDir: projectPath, projectFile };
+    return _openProjectTarget(projectPath, { projectFile });
 });
-
-function _spawnNewInstance(projectPath) {
-    // Spawn a new Electron process with --project= pointing to the chosen folder
-    const electronPath = process.argv[0]; // path to electron executable
-    const appPath = APP_ROOT;
-    const args = [appPath, `--project=${projectPath}`];
-    // Also forward --dev flag if active
-    if (process.argv.includes('--dev')) args.push('--dev');
-
-    const child = spawn(electronPath, args, {
-        detached: true,
-        stdio: 'ignore',
-        cwd: APP_ROOT
-    });
-    child.unref();
-    console.log(`🚀 Launched new instance for project: ${projectPath}`);
-}
 
 // ========================================
 // Desktop Shortcut & Start Menu
@@ -4988,25 +7131,6 @@ function registerFvpFileAssociation() {
 ipcMain.handle('register-fvp-association', async () => {
     return registerFvpFileAssociation();
 });
-
-// Auto-register file association + create desktop shortcut on first launch
-const fvpRegisteredFlag = path.join(APP_ROOT, '.fvp-registered');
-if (process.platform === 'win32' && !fs.existsSync(fvpRegisteredFlag)) {
-    try {
-        registerFvpFileAssociation();
-        // Auto-create desktop shortcut
-        const desktopDir = path.join(require('os').homedir(), 'Desktop');
-        const shortcutPath = path.join(desktopDir, 'YTA Empire WEBGL.lnk');
-        if (!fs.existsSync(shortcutPath)) {
-            const electronExe = process.execPath;
-            const icon = getShortcutIconPath();
-            const ps = `$ws = New-Object -ComObject WScript.Shell; $sc = $ws.CreateShortcut('${shortcutPath.replace(/'/g, "''")}'); $sc.TargetPath = '${electronExe.replace(/'/g, "''")}'; $sc.Arguments = '""${APP_ROOT.replace(/'/g, "''")}""'; $sc.WorkingDirectory = '${APP_ROOT.replace(/'/g, "''")}'; $sc.IconLocation = '${icon.replace(/'/g, "''")}'; $sc.Description = 'YTA Empire WEBGL'; $sc.Save();`;
-            execSync(`powershell -Command "${ps.replace(/"/g, '\\"')}"`, { stdio: 'ignore' });
-            console.log('✅ Desktop shortcut created');
-        }
-        fs.writeFileSync(fvpRegisteredFlag, new Date().toISOString());
-    } catch (e) { /* silent fail on first try */ }
-}
 
 // ========================================
 // Helper Functions
@@ -5135,13 +7259,15 @@ ipcMain.handle('open-qa-studio', async (event, options) => {
         title: 'QA Studio',
         webPreferences: {
             nodeIntegration: false,
-            contextIsolation: false,
-            sandbox: false,
+            contextIsolation: true,
+            sandbox: true,
             preload: path.join(__dirname, 'preload.js'),
+            additionalArguments: ['--yta-window-role=qa-studio'],
         },
         icon: getWindowIconPath() || undefined,
         parent: mainWindow || undefined,
     });
+    hardenRendererWindow(qaStudioWindow, 'qa-studio');
     qaStudioWindow.loadFile(htmlFile, { query: openChat ? 'chat=1' : '' });
     qaStudioWindow.on('closed', () => { qaStudioWindow = null; });
 });
@@ -5170,13 +7296,15 @@ ipcMain.handle('open-qa-chat', async () => {
         title: 'QA Studio',
         webPreferences: {
             nodeIntegration: false,
-            contextIsolation: false,
-            sandbox: false,
+            contextIsolation: true,
+            sandbox: true,
             preload: path.join(__dirname, 'preload.js'),
+            additionalArguments: ['--yta-window-role=qa-studio'],
         },
         icon: getWindowIconPath() || undefined,
         parent: mainWindow || undefined,
     });
+    hardenRendererWindow(qaStudioWindow, 'qa-studio');
     qaStudioWindow.loadFile(htmlFile, { query: 'chat=1' });
     qaStudioWindow.on('closed', () => { qaStudioWindow = null; });
 });
@@ -5202,13 +7330,15 @@ ipcMain.handle('open-style-studio', async () => {
         title: 'Learner',
         webPreferences: {
             nodeIntegration: false,
-            contextIsolation: false,
-            sandbox: false,
+            contextIsolation: true,
+            sandbox: true,
             preload: path.join(__dirname, 'preload.js'),
+            additionalArguments: ['--yta-window-role=style-studio'],
         },
         icon: getWindowIconPath() || undefined,
         parent: mainWindow || undefined,
     });
+    hardenRendererWindow(styleStudioWindow, 'style-studio');
     styleStudioWindow.loadFile(htmlFile);
     styleStudioWindow.on('closed', () => { styleStudioWindow = null; });
 });

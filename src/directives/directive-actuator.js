@@ -19,8 +19,9 @@
 const { compileDirectives, directivesFloor } = require('./directive-compiler');
 const { applySceneDirectives, resolveWhen } = require('./directive-util');
 const { auditCompliance } = require('./compliance-loop');
+const { applyFramingPreset } = require('./framing-preset');
+const { applySceneEffectPreset } = require('./effect-preset');
 
-const TEXTURE_FX = new Set(['grain', 'dust', 'vhsband', 'staticNoise', 'flicker', 'scanlines', 'scanline']);
 const ACTION_SLICES = ['footage', 'effects', 'transitions', 'framing', 'graphics', 'icons', 'maps'];
 
 // Does a compiled directives object carry anything ACTIONABLE (an order), vs a
@@ -99,14 +100,19 @@ async function applyOrderToScene(scene, order, scriptContext = {}, opts = {}) {
     const { directives } = await previewOrder(order, { themeId: scriptContext.themeId, nicheId: scriptContext.nicheId }, opts);
     if (!directives) return { success: false, error: 'could not parse instruction' };
     const changes = [];
-    if (directives.framing && directives.framing.force) { scene.framing = directives.framing.force; changes.push(`framing → ${directives.framing.force}`); }
+    if (directives.framing && directives.framing.force) {
+        const applied = applyFramingPreset(scene, directives.framing.force);
+        if (applied.changed) changes.push(`framing → ${directives.framing.force}`);
+    }
     if (directives.transitions && directives.transitions.style === 'hard-cuts') { scene.transition = { type: 'cut', duration: 0 }; scene._txDirected = true; changes.push('transition → cut'); }
     if (directives.effects && directives.effects.noGrain) {
-        if (Array.isArray(scene._effectRecipe)) scene._effectRecipe = scene._effectRecipe.filter(e => !TEXTURE_FX.has(e && e.id));
-        scene._directiveEffect = { ...(scene._directiveEffect || {}), noGrain: true };
-        changes.push('no grain');
+        if (applySceneEffectPreset(scene, { noGrain: true }).changed) changes.push('no grain');
     }
-    if (directives.effects && directives.effects.grade) { scene._directiveEffect = { ...(scene._directiveEffect || {}), grade: directives.effects.grade }; changes.push(`grade → ${directives.effects.grade}`); }
+    if (directives.effects && directives.effects.grade) {
+        if (applySceneEffectPreset(scene, { grade: directives.effects.grade }).changed) {
+            changes.push(`grade → ${directives.effects.grade}`);
+        }
+    }
     if (directives.maps && directives.maps.want === 'none' && /^mapchart/i.test(String(scene.fullscreenMG || ''))) { scene.fullscreenMG = null; if (!scene.sourceHint) scene.sourceHint = 'stock'; changes.push('removed map'); }
     if (directives.icons && directives.icons.allow === false && Array.isArray(scene._iconMoments)) { scene._iconMoments = []; changes.push('removed icons'); }
     if (!changes.length) return { success: false, error: 'no actionable per-scene change from that instruction' };

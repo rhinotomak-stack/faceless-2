@@ -248,8 +248,6 @@ async function main() {
         executablePath: exe,
         headless: 'new',
         args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
             '--disable-blink-features=AutomationControlled',
             '--lang=en-US,en',
         ],

@@ -3,6 +3,10 @@ const path = require('path');
 // Load app root .env first (has all API keys — single source of truth for credentials)
 const appRootEnv = path.join(__dirname, '..', '..', '.env');
 require('dotenv').config({ path: appRootEnv, quiet: true });
+const userEnvPath = process.env.YTA_USER_ENV_PATH ? path.resolve(process.env.YTA_USER_ENV_PATH) : null;
+if (userEnvPath && userEnvPath !== appRootEnv) {
+    require('dotenv').config({ path: userEnvPath, quiet: true, override: true });
+}
 
 // If a project-specific .env exists, only override PROJECT-SPECIFIC settings (not API keys).
 // This prevents stale API keys in old project .env files from breaking builds.
@@ -19,7 +23,9 @@ const OPERATIONAL_OVERRIDE_KEYS = [
     'YTDLP_PATH', 'YTDLP_CHECK_TIMEOUT_MS', 'YTDLP_TIMEOUT_SCALE',
 ];
 const PROJECT_OVERRIDE_KEYS = new Set([...OPERATIONAL_OVERRIDE_KEYS, ..._settingsSchema.projectEnvVars()]);
-if (process.env.DOTENV_PATH && process.env.DOTENV_PATH !== appRootEnv) {
+if (process.env.DOTENV_PATH
+    && process.env.DOTENV_PATH !== appRootEnv
+    && process.env.DOTENV_PATH !== userEnvPath) {
     const fs = require('fs');
     try {
         const projEnvContent = fs.readFileSync(process.env.DOTENV_PATH, 'utf8');

@@ -37,7 +37,7 @@ async function _getBrowser() {
         try {
             return await puppeteer.launch({
                 executablePath: exe,
-                args: ['--no-sandbox', '--disable-gpu', '--hide-scrollbars'],
+                args: ['--disable-gpu', '--hide-scrollbars'],
                 defaultViewport: { width: 1920, height: 1080 },
             });
         } catch (_) { return null; }

@@ -311,90 +311,6 @@ function _scoreSound(sound, catalog) {
     return score;
 }
 
-// ============================================================
-// MAIN DOWNLOAD ORCHESTRATOR
-// ============================================================
-
-/**
- * Download all SFX from Freesound API. Skips files that already exist AND are
- * marked as real Freesound downloads (sidecar `.freesound` file).
- *
- * Synthetic placeholders from generate-sfx.js are 3-12KB, real Freesound HQ
- * previews are typically 25-80KB. Plain size check is unreliable, so we use
- * a sidecar marker file written after a successful download.
- *
- * @param {object} options
- * @param {function} options.log - Logger { step, ok, warn, dim, br }
- * @param {boolean} options.force - Re-download even if files exist
- * @returns {Promise<{ downloaded: number, skipped: number, failed: number }>}
- */
-async function downloadAllSfx({ log, force = false } = {}) {
-    const token = config.freesound?.apiKey;
-    if (!token) {
-        if (log) log.warn('No FREESOUND_API_KEY configured — skipping real SFX download');
-        return { downloaded: 0, skipped: 0, failed: 0, noKey: true };
-    }
-
-    // Ensure directory exists
-    if (!fs.existsSync(SFX_DIR)) fs.mkdirSync(SFX_DIR, { recursive: true });
-
-    const entries = Object.entries(SFX_CATALOG);
-    let downloaded = 0, skipped = 0, failed = 0;
-
-    for (const [filename, catalog] of entries) {
-        const destPath = path.join(SFX_DIR, filename);
-
-        // Skip only if marked as a real Freesound download (sidecar exists)
-        if (!force && _isFreesoundDownload(destPath)) {
-            skipped++;
-            continue;
-        }
-
-        // Try each query until we get a good result
-        let success = false;
-        for (const query of catalog.queries) {
-            try {
-                const results = await searchFreesound(query, {
-                    maxDuration: catalog.maxDuration,
-                    minDuration: catalog.minDuration,
-                    token,
-                });
-
-                if (results.length === 0) continue;
-
-                // Score and pick best
-                const scored = results.map(s => ({ ...s, score: _scoreSound(s, catalog) }));
-                scored.sort((a, b) => b.score - a.score);
-                const best = scored[0];
-
-                // Download preview MP3
-                await downloadFile(best.previewUrl, destPath);
-                _markFreesoundDownload(destPath, best);
-
-                const sizeKB = (fs.statSync(destPath).size / 1024).toFixed(1);
-                if (log) log.dim(`  ✓ ${filename} ← "${best.name}" (${best.duration.toFixed(1)}s, ${sizeKB}KB, ★${best.rating.toFixed(1)})`);
-                downloaded++;
-                success = true;
-                break;
-
-            } catch (e) {
-                // Try next query
-                continue;
-            }
-        }
-
-        if (!success) {
-            failed++;
-            if (log) log.dim(`  ✗ ${filename} — no results (keeping synthetic fallback)`);
-        }
-
-        // Rate limit: Freesound allows ~60 req/min with token auth
-        await _sleep(250);
-    }
-
-    return { downloaded, skipped, failed };
-}
-
 /**
  * Download SFX for specific transition types only (on-demand).
  * Used when the build knows which transitions are in the plan.
@@ -477,8 +393,7 @@ async function downloadSfxForTransitions(transitionTypes, { mgTypes = [], log } 
 
 // ============================================================
 // TRANSITION TYPE → SFX FILE MAPPING
-// This is the authoritative map — used by both build pipeline
-// and the UI (SFX_MAP in app.js should mirror this).
+// Authoritative build-pipeline fallback map.
 // ============================================================
 const TRANSITION_TO_SFX = {
     // Smooth / dissolve
@@ -563,7 +478,7 @@ const TRANSITION_TO_SFX = {
     'light-sweep': 'sfx-warm-leak.mp3', 'fire-burn': 'sfx-filmburn.mp3', 'lens-flare': 'sfx-flare.mp3',
 };
 
-// MG type → SFX file (must match MG_SFX_MAP in app.js)
+// MG type → SFX file for the build-pipeline fallback.
 const MG_TO_SFX = {
     // Overlay MGs
     headline:        'sfx-mg-pop.mp3',
@@ -684,7 +599,6 @@ module.exports = {
     SFX_CATALOG,
     TRANSITION_TO_SFX,
     MG_TO_SFX,
-    downloadAllSfx,
     downloadSfxForTransitions,
     downloadSoundDesignKit,
     searchFreesound,

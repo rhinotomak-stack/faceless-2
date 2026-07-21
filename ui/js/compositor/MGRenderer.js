@@ -130,6 +130,7 @@ class MGRenderer {
             popUp:       (f, fps, anim, mg) => this._computeAnim_popUp(f, fps, anim, mg),
             fadeSlide:   (f, fps, anim, mg) => this._computeAnim_fadeSlide(f, fps, anim, mg),
             springScale: (f, fps, anim, mg) => this._computeAnim_springScale(f, fps, anim, mg),
+            typewriter:  (f, fps, anim, mg) => this._computeAnim_typewriter(f, fps, anim, mg),
         };
     }
 
@@ -265,13 +266,16 @@ class MGRenderer {
                 delete this._mapIconLoading[key];
             };
             img.onerror = () => { delete this._mapIconLoading[key]; };
-            // iconPath is a local file path or URL
-            if (iconPath.startsWith('http') || iconPath.startsWith('data:') || iconPath.startsWith('file:')) {
+            // Remote/data/asset URLs are already browser-safe. Local paths and
+            // legacy file: URLs must pass through the confined asset protocol.
+            if (/^(https?:|data:|blob:|asset:)/i.test(iconPath)) {
                 img.src = iconPath;
             } else if (window.electronAPI?.getFileUrl) {
                 window.electronAPI.getFileUrl(iconPath).then(url => { if (url) img.src = url; });
+            } else if (!/^(?:[a-z]:[\\/]|\\\\|\/|file:)/i.test(iconPath)) {
+                img.src = iconPath;
             } else {
-                img.src = `file:///${iconPath.replace(/\\/g, '/')}`;
+                delete this._mapIconLoading[key];
             }
         }
     }
@@ -600,7 +604,7 @@ class MGRenderer {
     _ensureGridThumbnails(mg) {
         const thumbs = mg._itemThumbnails;
         if (!thumbs || !Array.isArray(thumbs)) return;
-        const resolvedUrls = mg._itemThumbnailUrls; // Pre-resolved file:// URLs from app.js
+        const resolvedUrls = mg._itemThumbnailUrls; // Pre-resolved asset:// URLs from app.js
 
         for (let i = 0; i < thumbs.length; i++) {
             const raw = thumbs[i];
@@ -610,7 +614,7 @@ class MGRenderer {
             if (this._gridThumbs[file] || this._gridThumbLoading[file]) continue;
 
             this._gridThumbLoading[file] = true;
-            // Use pre-resolved file:// URL if available, fallback to media/ prefix
+            // Use pre-resolved asset URL if available, fallback to media/ prefix
             const url = (resolvedUrls && resolvedUrls[i]) || `media/${file}`;
             const isVideo = /\.(mp4|webm|mkv|mov)$/i.test(file);
 
@@ -790,6 +794,23 @@ class MGRenderer {
         const s = styled
             ? (mg?.styleManual ? { ...styled, ...baseS } : { ...baseS, ...styled })
             : { ...baseS };
+        const explicitColors = mg?.colors && typeof mg.colors === 'object'
+            ? mg.colors
+            : (mg?.mgData?.colors && typeof mg.mgData.colors === 'object'
+                ? mg.mgData.colors
+                : null);
+        if (explicitColors) {
+            if (explicitColors.primary) s.primary = explicitColors.primary;
+            if (explicitColors.accent) s.accent = explicitColors.accent;
+            if (explicitColors.text) s.text = explicitColors.text;
+            if (explicitColors.textMuted) s.textSub = explicitColors.textMuted;
+            if (explicitColors.surface || explicitColors.background) {
+                s.bg = explicitColors.surface || explicitColors.background;
+            }
+        }
+        if (mg?.transparentBackground === true || mg?.cardStyle === 'transparent') {
+            s.bg = 'rgba(0,0,0,0)';
+        }
 
         if (typeof getActiveThemeFonts === 'function') {
             const tf = getActiveThemeFonts();
@@ -963,7 +984,7 @@ class MGRenderer {
 
     /**
      * Lazily load and draw a background image from assets/backgrounds/.
-     * Uses electronAPI.getBackgroundUrl() to resolve file:// URL.
+     * Uses electronAPI.getBackgroundUrl() to resolve a confined asset:// URL.
      */
     _drawBgImage(ctx, filename, W, H) {
         // Check cache
@@ -1299,7 +1320,7 @@ class MGRenderer {
             ctx.miterLimit = 2;
             ctx.strokeText(mg.text || '', 0, -30);
         }
-        MGRenderer._drawHeadlineText(ctx, mg.text || '', 0, -30, ls, false);
+        MGRenderer._drawHeadlineText(ctx, mg.text || '', 0, -30, ls, false, mg);
 
         ctx.filter = 'none';
 
@@ -1349,7 +1370,7 @@ class MGRenderer {
 
         // Shadowed fill on top
         ctx.fillStyle = ls.textFill || p.colors?.textFill || s.text;
-        MGRenderer._drawHeadlineText(ctx, mg.text || '', 0, -20, ls, false);
+        MGRenderer._drawHeadlineText(ctx, mg.text || '', 0, -20, ls, false, mg);
 
         // Accent line below
         const lineW = ctx.measureText(mg.text || '').width * 0.8;
@@ -1386,7 +1407,7 @@ class MGRenderer {
         ctx.fillStyle = ls.textFill || p.colors?.textFill || s.text;
         ctx.textAlign = p.textAlign;
         ctx.textBaseline = 'middle';
-        MGRenderer._drawHeadlineText(ctx, visibleText, 0, -25, ls, false);
+        MGRenderer._drawHeadlineText(ctx, visibleText, 0, -25, ls, false, mg);
 
         // Blinking cursor
         const cursorW = ctx.measureText(visibleText).width;
@@ -1664,6 +1685,29 @@ class MGRenderer {
         return r;
     }
 
+    _computeAnim_typewriter(frame, fps, anim, mg) {
+        const { interpolate } = AnimationUtils;
+        const speed = anim.speed;
+        const revealDur = Math.round((1.35 / speed) * fps);
+        const revealProgress = Math.min(1.1, frame / Math.max(1, revealDur));
+        return {
+            scale: 1,
+            slideY: 0,
+            blur: 0,
+            barSpring: revealProgress,
+            textSpring: revealProgress,
+            subSpring: interpolate(
+                revealProgress,
+                [0.72, 1],
+                [0, 1],
+                { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' }
+            ),
+            stampScale: 1,
+            stampAlpha: Math.min(1, revealProgress * 4),
+            revealProgress,
+        };
+    }
+
     // ── Variant: BAR (thin vertical gradient bar + text) ──
     // Used by: tech, neutral
     _renderLT_Bar(ctx, mg, s, anim, a, bx, by, bw, bh, ls) {
@@ -1708,11 +1752,23 @@ class MGRenderer {
         ctx.globalAlpha = Math.min(1, opacity) * (a.textSpring || 1);
         if (ls.glow) {
             ctx.shadowColor = ls.accentFill; ctx.shadowBlur = 10;
-            ctx.fillText(mg.text || '', bx + ls.barWidth + 20 + (a.textSlideX || 0), by + 10);
+            MGRenderer._drawStyledText(
+                ctx,
+                mg.text || '',
+                bx + ls.barWidth + 20 + (a.textSlideX || 0),
+                by + 10,
+                mg
+            );
             ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
         } else {
             ctx.shadowColor = 'rgba(0,0,0,0.7)'; ctx.shadowBlur = 8; ctx.shadowOffsetY = 2;
-            ctx.fillText(mg.text || '', bx + ls.barWidth + 20 + (a.textSlideX || 0), by + 10);
+            MGRenderer._drawStyledText(
+                ctx,
+                mg.text || '',
+                bx + ls.barWidth + 20 + (a.textSlideX || 0),
+                by + 10,
+                mg
+            );
             ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
         }
 
@@ -1774,7 +1830,13 @@ class MGRenderer {
         ctx.textAlign = 'left';
         ctx.textBaseline = 'top';
         ctx.globalAlpha = Math.min(1, opacity) * (a.textSpring || 1);
-        ctx.fillText(mg.text || '', bx + ls.barWidth + 20 + (a.textSlideX || 0), by + slideY + 18);
+        MGRenderer._drawStyledText(
+            ctx,
+            mg.text || '',
+            bx + ls.barWidth + 20 + (a.textSlideX || 0),
+            by + slideY + 18,
+            mg
+        );
 
         // Subtext
         if (mg.subtext) {
@@ -1811,7 +1873,7 @@ class MGRenderer {
         } else {
             ctx.shadowColor = 'rgba(0,0,0,0.8)'; ctx.shadowBlur = 10; ctx.shadowOffsetY = 2;
         }
-        ctx.fillText(mg.text || '', bx, textY);
+        MGRenderer._drawStyledText(ctx, mg.text || '', bx, textY, mg);
         ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
 
         // Animated underline
@@ -1872,7 +1934,13 @@ class MGRenderer {
         ctx.fillStyle = ls.textFill;
         ctx.textAlign = 'left';
         ctx.textBaseline = 'top';
-        ctx.fillText(mg.text || '', 50 + (a.textSlideX || 0), baseY + (hasSub ? 8 : 14));
+        MGRenderer._drawStyledText(
+            ctx,
+            mg.text || '',
+            50 + (a.textSlideX || 0),
+            baseY + (hasSub ? 8 : 14),
+            mg
+        );
 
         // Subtext
         if (mg.subtext) {
@@ -1936,7 +2004,13 @@ class MGRenderer {
         ctx.globalAlpha = Math.min(1, opacity) * (a.textSpring || fadeIn);
         if (ls.glow) { ctx.shadowColor = ls.accentFill; ctx.shadowBlur = 8; }
         else { ctx.shadowColor = 'rgba(0,0,0,0.6)'; ctx.shadowBlur = 8; }
-        ctx.fillText(mg.text || '', bx + 36 + (a.textSlideX || 0), by + slideY + 16);
+        MGRenderer._drawStyledText(
+            ctx,
+            mg.text || '',
+            bx + 36 + (a.textSlideX || 0),
+            by + slideY + 16,
+            mg
+        );
         ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
 
         // Subtext
@@ -2020,7 +2094,13 @@ class MGRenderer {
         ctx.fillStyle = ls.textFill;
         ctx.textAlign = 'left';
         ctx.textBaseline = 'middle';
-        ctx.fillText(mg.text || '', bx + leftW + 20 + (a.textSlideX || 0), drawY + totalH / 2);
+        MGRenderer._drawStyledText(
+            ctx,
+            mg.text || '',
+            bx + leftW + 20 + (a.textSlideX || 0),
+            drawY + totalH / 2,
+            mg
+        );
     }
 
     // ========================================================================
@@ -6839,7 +6919,26 @@ class MGRenderer {
         // Priority: mg.style (user-set) > theme's styleName > 'clean'
         const themeStyle = s?._mgOverrides?.lowerThird?.styleName;
         const styleName = mg.style || themeStyle || 'clean';
-        return MGRenderer._LOWER_THIRD_STYLES[styleName] || MGRenderer._LOWER_THIRD_STYLES.clean;
+        const resolved = {
+            ...(MGRenderer._LOWER_THIRD_STYLES[styleName] || MGRenderer._LOWER_THIRD_STYLES.clean),
+        };
+        const colors = mg?.colors && typeof mg.colors === 'object'
+            ? mg.colors
+            : (mg?.mgData?.colors && typeof mg.mgData.colors === 'object'
+                ? mg.mgData.colors
+                : {});
+        if (colors.surface || colors.background) resolved.bgFill = colors.surface || colors.background;
+        if (colors.primary || colors.accent) resolved.accentFill = colors.primary || colors.accent;
+        if (colors.text) resolved.textFill = colors.text;
+        if (colors.textMuted) resolved.subFill = colors.textMuted;
+        if (mg?.transparentBackground === true || mg?.cardStyle === 'transparent') {
+            resolved.bgFill = 'rgba(0,0,0,0)';
+            resolved.borderColor = 'rgba(0,0,0,0)';
+            resolved.borderWidth = 0;
+            resolved.shadowColor = 'transparent';
+            resolved.shadowBlur = 0;
+        }
+        return resolved;
     }
 
     // ========================================================================
@@ -6904,10 +7003,113 @@ class MGRenderer {
         return MGRenderer._HEADLINE_STYLES[styleName] || MGRenderer._HEADLINE_STYLES.clean;
     }
 
+    static _normalizeTextRangeColor(value) {
+        const text = String(value == null ? '' : value).trim().toLowerCase();
+        const aliases = {
+            red: '#ef4444', crimson: '#dc2626', scarlet: '#f43f5e',
+            orange: '#f97316', amber: '#f59e0b', yellow: '#eab308',
+            lime: '#84cc16', green: '#22c55e', emerald: '#10b981',
+            teal: '#14b8a6', cyan: '#06b6d4', blue: '#3b82f6',
+            indigo: '#6366f1', purple: '#8b5cf6', violet: '#7c3aed',
+            pink: '#ec4899', rose: '#f43f5e', white: '#ffffff',
+            black: '#000000', gray: '#6b7280', grey: '#6b7280',
+            silver: '#c0c0c0', gold: '#f59e0b', brown: '#92400e',
+        };
+        if (aliases[text]) return aliases[text];
+        if (/^#[0-9a-f]{3,4}$/i.test(text) || /^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(text)) {
+            return text;
+        }
+        if (/^(?:rgba?|hsla?)\(\s*[-\d.%]+\s*(?:,\s*[-\d.%]+\s*){2}(?:,\s*[-\d.%]+\s*)?\)$/i.test(text)) {
+            return text;
+        }
+        return '';
+    }
+
+    static _styledTextSegments(value, mg) {
+        const text = String(value == null ? '' : value);
+        const sourceRanges = mg?.textStyleRanges || mg?.mgData?.textStyleRanges;
+        if (!text || !Array.isArray(sourceRanges) || !sourceRanges.length) {
+            return [{ text, color: '' }];
+        }
+        const lower = text.toLocaleLowerCase();
+        const intervals = [];
+        sourceRanges.slice(0, 64).forEach((range, order) => {
+            const match = String(range?.match ?? range?.text ?? range?.phrase ?? '').trim();
+            const color = MGRenderer._normalizeTextRangeColor(
+                range?.color ?? range?.textColor ?? range?.fill
+            );
+            if (!match || !color) return;
+            const needle = match.toLocaleLowerCase();
+            const indexes = [];
+            let fromIndex = 0;
+            while (fromIndex <= lower.length - needle.length) {
+                const index = lower.indexOf(needle, fromIndex);
+                if (index < 0) break;
+                indexes.push(index);
+                fromIndex = index + Math.max(1, needle.length);
+            }
+            const rawOccurrence = Number(range?.occurrence);
+            const occurrence = Number.isInteger(rawOccurrence) && rawOccurrence >= 0
+                ? rawOccurrence
+                : 0;
+            const selected = range?.allOccurrences === true || rawOccurrence === -1
+                ? indexes
+                : (indexes[occurrence] == null ? [] : [indexes[occurrence]]);
+            selected.forEach((start) => intervals.push({
+                start,
+                end: start + needle.length,
+                color,
+                order,
+            }));
+        });
+        intervals.sort((left, right) => (
+            left.start - right.start
+            || left.order - right.order
+            || right.end - left.end
+        ));
+        const segments = [];
+        let cursor = 0;
+        for (const interval of intervals) {
+            if (interval.start < cursor || interval.end <= interval.start) continue;
+            if (interval.start > cursor) {
+                segments.push({ text: text.slice(cursor, interval.start), color: '' });
+            }
+            segments.push({
+                text: text.slice(interval.start, interval.end),
+                color: interval.color,
+            });
+            cursor = interval.end;
+        }
+        if (cursor < text.length) segments.push({ text: text.slice(cursor), color: '' });
+        return segments.length ? segments : [{ text, color: '' }];
+    }
+
+    static _drawStyledText(ctx, text, x, y, mg) {
+        const segments = MGRenderer._styledTextSegments(text, mg);
+        if (!segments.some((segment) => segment.color)) {
+            ctx.fillText(text, x, y);
+            return;
+        }
+        const originalAlign = ctx.textAlign;
+        const originalFill = ctx.fillStyle;
+        const totalWidth = ctx.measureText(text).width;
+        let cursorX = x;
+        if (originalAlign === 'center') cursorX -= totalWidth / 2;
+        else if (originalAlign === 'right' || originalAlign === 'end') cursorX -= totalWidth;
+        ctx.textAlign = 'left';
+        for (const segment of segments) {
+            ctx.fillStyle = segment.color || originalFill;
+            ctx.fillText(segment.text, cursorX, y);
+            cursorX += ctx.measureText(segment.text).width;
+        }
+        ctx.textAlign = originalAlign;
+        ctx.fillStyle = originalFill;
+    }
+
     // Paint headline text with per-style shadow/glow/outline. `isSub` switches
     // to the lighter subtext shadow tokens. Clears shadow at end, then paints a
     // final crisp fill on top to keep letter edges sharp.
-    static _drawHeadlineText(ctx, text, x, y, ls, isSub) {
+    static _drawHeadlineText(ctx, text, x, y, ls, isSub, mg = null) {
         const blur = isSub ? ls.subShadowBlur : ls.shadowBlur;
         const color = isSub ? ls.subShadowColor : ls.shadowColor;
         const offY = isSub ? ls.subShadowY : ls.shadowY;
@@ -6917,26 +7119,26 @@ class MGRenderer {
             ctx.shadowBlur = blur || 20;
             ctx.shadowOffsetX = 0;
             ctx.shadowOffsetY = offY || 0;
-            ctx.fillText(text, x, y);
+            MGRenderer._drawStyledText(ctx, text, x, y, mg);
             ctx.shadowColor = ls.glowColor;
             ctx.shadowBlur = ls.glowBlur;
             ctx.shadowOffsetY = 0;
-            ctx.fillText(text, x, y);
+            MGRenderer._drawStyledText(ctx, text, x, y, mg);
             ctx.shadowBlur = ls.glowBlur * 1.8;
-            ctx.fillText(text, x, y);
+            MGRenderer._drawStyledText(ctx, text, x, y, mg);
         } else if (blur > 0) {
             ctx.shadowColor = color || 'rgba(0,0,0,0.7)';
             ctx.shadowBlur = blur;
             ctx.shadowOffsetX = 0;
             ctx.shadowOffsetY = offY || 0;
-            ctx.fillText(text, x, y);
+            MGRenderer._drawStyledText(ctx, text, x, y, mg);
         }
 
         ctx.shadowColor = 'transparent';
         ctx.shadowBlur = 0;
         ctx.shadowOffsetX = 0;
         ctx.shadowOffsetY = 0;
-        ctx.fillText(text, x, y);
+        MGRenderer._drawStyledText(ctx, text, x, y, mg);
     }
 
     // ========================================================================

@@ -24,6 +24,10 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { authorCompositions } = require('../../render/hf-template-author');
+const {
+    clearAuthoredComposition,
+    prefersFixedRenderer,
+} = require('../../render/authored-composition-policy');
 let directSceneEffects = null;
 try { ({ directSceneEffects } = require('./effects-director')); } catch (_) { directSceneEffects = null; }
 let directTransitions = null;
@@ -255,6 +259,7 @@ async function authorPlanCompositions(plan, opts = {}) {
     const log = typeof opts.log === 'function' ? opts.log : (m) => console.log(m);
     const forceRefresh = /^(1|true|on|yes)$/i.test(String(process.env.HF_AUTHOR_REFRESH || '').trim());
     const openMode = Boolean(opts.openMode) && !forceRefresh;
+    const fastTest = opts.fastTest === true;
 
     // Effects director rides along with the author pass (same call sites:
     // build Step 7.6 + render-prep). One batch reasoning call; recipes
@@ -274,9 +279,13 @@ async function authorPlanCompositions(plan, opts = {}) {
 
     // Explainer icon moments over footage (photo cutouts / authored SVGs),
     // word-synced, sparse. Same pattern: 1 batch call, disk cache.
-    if (!openMode && directIcons) {
+    if (!openMode && directIcons && !fastTest) {
         try { await directIcons(plan, { log, projectDir: opts.projectDir }); }
         catch (e) { log(`  ⚠️ [Icon Director] skipped: ${String(e.message || e).slice(0, 100)}`); }
+    }
+
+    if (!openMode && fastTest) {
+        log('  ⚡ [Composition Author] Fast Test: icon/subject asset searches and bespoke overlay authoring are skipped; stage authoring and Motion QA remain active');
     }
 
     // Keyword-glow word-emphasis overlays (OPENMONTAGE-BORROW-PLAN #18). Deterministic,
@@ -302,35 +311,48 @@ async function authorPlanCompositions(plan, opts = {}) {
     // HF_AUTHOR_REFRESH=1 to force a re-author on open.
     const hasSavedComp = (mg) => Boolean(mg && mg._authoredComposition && mg._authoredComposition.html && mg._authoredComposition.timeline);
     let reused = 0;
+    let fixedOverrides = 0;
+    const skipForExplicitOverride = (mg) => {
+        if (!prefersFixedRenderer(mg)) return false;
+        clearAuthoredComposition(mg);
+        fixedOverrides++;
+        return true;
+    };
 
     const candidates = [];
     (plan.templateScenes || []).forEach((mg, i) => {
         if (!mg || mg.disabled) return;
         if (EXCLUDED_TYPES.has(normType(mg))) return;
+        if (skipForExplicitOverride(mg)) return;
         if (hasSavedComp(mg) && !forceRefresh) { reused++; return; }
         candidates.push({ mg, kind: 'template', index: candidates.length });
     });
     (plan.mgScenes || []).forEach((mg) => {
         if (!mg || mg.disabled) return;
         if (EXCLUDED_TYPES.has(normType(mg))) return;
+        if (skipForExplicitOverride(mg)) return;
         if (hasSavedComp(mg) && !forceRefresh) { reused++; return; }
         candidates.push({ mg, kind: 'fullscreen', index: candidates.length });
     });
     // Overlay MGs (June 12): authored like everything else, under OVERLAY
     // MODE rules (transparent stage, coverage budget). HF_AUTHOR_OVERLAYS=0
     // reverts them to the legacy/agentic-spec renderers.
-    if (!overlaysDisabled()) {
+    if (!overlaysDisabled() && !fastTest) {
         (plan.motionGraphics || []).forEach((mg) => {
             if (!mg || mg.disabled) return;
             const t = normType(mg);
             if (EXCLUDED_TYPES.has(t) || OVERLAY_EXCLUDED_TYPES.has(t)) return;
+            if (skipForExplicitOverride(mg)) return;
             if (hasSavedComp(mg) && !forceRefresh) { reused++; return; }
             candidates.push({ mg, kind: 'overlay', index: candidates.length });
         });
     }
 
     if (reused > 0) log(`  ♻️ [Composition Author] ${reused} composition(s) reused from the saved project (opens are read-only; rebuild or HF_AUTHOR_REFRESH=1 to re-author)`);
-    if (candidates.length === 0) return { authored: 0, eligible: 0, reused };
+    if (fixedOverrides > 0) {
+        log(`  [Composition Author] ${fixedOverrides} explicit graphic override(s) kept on the deterministic renderer`);
+    }
+    if (candidates.length === 0) return { authored: 0, eligible: 0, reused, fixedOverrides };
     log(`  🎨 [Composition Author] ${candidates.length} eligible scene(s) (templates + fullscreen MGs + overlays; maps excluded)`);
 
     const briefs = candidates.map(c => buildBrief(plan, c.mg, c.index, c.kind));
@@ -359,8 +381,10 @@ async function authorPlanCompositions(plan, opts = {}) {
             }
         }
     }
-    try { await enrichBriefsWithSubjectImages(briefs, plan, opts); }
+    if (!fastTest && !openMode) {
+        try { await enrichBriefsWithSubjectImages(briefs, plan, opts); }
     catch (e) { log(`  ⚠️ [Subject Image] enrichment skipped: ${String(e.message || e).slice(0, 100)}`); }
+    }
     const results = await authorCompositions(briefs, { projectDir: opts.projectDir, log, openMode: Boolean(opts.openMode) });
 
     let authored = 0;
@@ -374,7 +398,7 @@ async function authorPlanCompositions(plan, opts = {}) {
         }
     });
     log(`  ✅ [Composition Author] attached ${authored}/${candidates.length} authored compositions`);
-    return { authored, eligible: candidates.length };
+    return { authored, eligible: candidates.length, fixedOverrides };
 }
 
 module.exports = { authorPlanCompositions, buildBrief, enrichBriefsWithSubjectImages, EXCLUDED_TYPES, OVERLAY_EXCLUDED_TYPES };

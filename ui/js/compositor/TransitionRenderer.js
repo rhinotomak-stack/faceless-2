@@ -106,6 +106,8 @@ class TransitionRenderer {
         fade:       { shader: 'crossfade' },
         fade_to_black: { shader: 'crossfade' },
         dissolve:   { shader: 'crossfade' },
+        'blur-dissolve': { shader: 'crossfade' },
+        'dip-black': { shader: 'crossfade' },
         crossBlur:  { shader: 'crossfade' },
         blur:       { shader: 'crossfade' },
         morph:      { shader: 'crossfade' },
@@ -116,6 +118,12 @@ class TransitionRenderer {
 
         // ── Wipe shader (directional wipes) ──
         wipe:       { shader: 'wipe', direction: 0, softness: 0.08 },
+        'wipe-left':  { shader: 'wipe', direction: 0, softness: 0.08 },
+        'wipe-right': { shader: 'wipe', direction: 1, softness: 0.08 },
+        'wipe-up':    { shader: 'wipe', direction: 2, softness: 0.08 },
+        'push-left':  { shader: 'wipe', direction: 0, softness: 0.04 },
+        'push-right': { shader: 'wipe', direction: 1, softness: 0.04 },
+        'push-up':    { shader: 'wipe', direction: 2, softness: 0.04 },
         slide:      { shader: 'wipe', direction: 0, softness: 0.04 },
         push:       { shader: 'wipe', direction: 0, softness: 0.06 },
         swipe:      { shader: 'wipe', direction: 1, softness: 0.06 },
@@ -126,6 +134,8 @@ class TransitionRenderer {
 
         // ── Zoom shader (zoom in/out/rotate) ──
         zoom:       { shader: 'zoom', mode: 0 },       // zoom in
+        'zoom-punch': { shader: 'zoom', mode: 0 },
+        'zoom-pull':  { shader: 'zoom', mode: 1 },
         zoomBlur:   { shader: 'zoom', mode: 0 },       // zoom in (with natural blur from scaling)
         zoomOut:    { shader: 'zoom', mode: 1 },       // zoom out
         zoomRotate: { shader: 'zoom', mode: 2 },       // zoom + rotate
@@ -136,6 +146,8 @@ class TransitionRenderer {
         coolLeak:   { shader: 'lightleak', mode: 1 },  // cool blue
         flare:      { shader: 'lightleak', mode: 2 },  // white flare
         flash:      { shader: 'lightleak', mode: 2 },  // white flare
+        'flash-white': { shader: 'lightleak', mode: 2 },
+        'light-sweep': { shader: 'lightleak', mode: 2 },
         cameraFlash:{ shader: 'lightleak', mode: 2 },  // white flare
 
         // ── Glitch shader (digital distortion) ──
@@ -163,8 +175,11 @@ class TransitionRenderer {
         panUp:      { shader: 'camera', mode: 2 },
         panDown:    { shader: 'camera', mode: 3 },
         whip:       { shader: 'camera', mode: 4 },      // whip pan with motion blur
+        'whip-left': { shader: 'camera', mode: 4 },
+        'whip-right': { shader: 'camera', mode: 4 },
         whipPan:    { shader: 'camera', mode: 4 },
         spin:       { shader: 'camera', mode: 5 },      // rotation
+        'spin-settle': { shader: 'camera', mode: 5 },
         directionalBlur: { shader: 'camera', mode: 4 }, // whip-like motion blur
 
         // ── Luma shader (luminance-based dissolve) ──

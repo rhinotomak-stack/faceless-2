@@ -20,7 +20,7 @@ const config = require('../settings/config');
 const { recordUsage } = require('./cost-tracker');
 // nvidia-client require REMOVED in 2026-05-25 cleanup.
 
-const _qwenEnvPath = path.join(__dirname, '..', '..', '.env');
+const _qwenEnvPath = process.env.YTA_USER_ENV_PATH || path.join(__dirname, '..', '..', '.env');
 const _qwenGeneratedPoolsPath = process.env.QWEN_MODEL_REGISTRY_PATH || path.join(__dirname, '..', 'qwen-vision-generated-pools.json');
 let _qwenEnvLastReadAt = 0;
 let _qwenEnvSignature = '';
@@ -480,7 +480,8 @@ function _markQwenRuntimeUnsupported(model, error, role = 'vision') {
 // → NEVER demote a `true` (permanent) entry back to a timestamp.
 // → To recover a model, the user must add a NEW key, not wait for refresh.
 // (The 2-minute timestamp cooldown below is ONLY for transient 429/5xx — never quota.)
-const _exhaustedModelsFile = path.join(__dirname, '..', '..', '.qwen-exhausted-models.json');
+const _runtimeStateRoot = process.env.YTA_USER_DATA_DIR || path.join(__dirname, '..', '..');
+const _exhaustedModelsFile = path.join(_runtimeStateRoot, '.qwen-exhausted-models.json');
 // Two separate per-role maps. Default to empty; populated by loader below.
 let _perKeyExhaustion = {
     text:   {}, // { keyHash: { modelName: true|timestamp } }
@@ -504,7 +505,10 @@ function _qwenKeyTail(key) {
 // This is the flexible truth layer: quota and support are tracked per
 // (key, model, lane). The static pools say what can be tried; this file says
 // what was actually verified for the user's current keys.
-const _qwenHealthFile = path.join(__dirname, '..', '..', '.qwen-vision-health.json');
+const _qwenHealthFile = path.join(
+    process.env.YTA_USER_DATA_DIR || path.join(__dirname, '..', '..'),
+    '.qwen-vision-health.json'
+);
 const QWEN_HEALTH_FRESH_MS = Math.max(
     60_000,
     Math.min(7 * 24 * 60 * 60 * 1000, parseInt(process.env.QWEN_HEALTH_FRESH_MS || String(24 * 60 * 60 * 1000), 10) || 24 * 60 * 60 * 1000)

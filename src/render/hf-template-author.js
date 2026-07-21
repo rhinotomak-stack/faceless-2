@@ -209,6 +209,7 @@ function buildPrompt(brief, design, repairErrors = null, prevOutput = null, ledg
         `SCENE ROLE: ${brief.kind === 'overlay'
         ? 'OVERLAY floating on LIVE FOOTAGE — the footage stays visible and is the star; you annotate it, never replace it. OVERLAY MODE rules apply (transparent stage, coverage budget).'
         : brief.kind === 'fullscreen' ? 'full-screen graphic moment (replaces footage entirely)' : 'standalone full-screen editorial beat'}`,
+        'SEMANTIC ECONOMY: communicate each fact once. Never repeat the hero number/headline in a second lower third, footer, ticker, badge, chip, caption, or decorative data row inside the same composition.',
         brief.kind === 'overlay' && brief.position ? `POSITION: anchor the content in the "${brief.position}" zone of the 1920x1080 frame.` : '',
         brief.chainPrev ? `CHAIN CONTINUITY (IN): this graphic appears the INSTANT the previous graphic ("${brief.chainPrev.text}") ends — there is NO cut and the container does not animate. Design this as the NEXT PAGE of the same design system: a calm full-frame background built from the DESIGN base colors (no loud novel background construction), so the canvas appears continuous; let your CONTENT entrance carry the change. Skip heavy full-canvas entrance moves.` : '',
         brief.chainNext ? `CHAIN CONTINUITY (OUT): another graphic follows this one immediately with no cut. Exit your CONTENT cleanly by the end, but keep the background calm and full-frame to the last frame (built from DESIGN base colors) — the next page lands on it.` : '',
@@ -316,7 +317,7 @@ function parseAuthorResponse(text) {
 // (APPROVE / ≤3 concrete visual fixes), one refine round, no regression.
 // v13: author-fx — the author also prescribes the scene's film finish (FX recipe +
 // grade) as one creative act with layout + motion; ===EFFECTS=== section added.
-const AUTHOR_VERSION = 'v13-author-fx';
+const AUTHOR_VERSION = 'v14-semantic-economy';
 
 function briefHash(brief, design) {
     const key = JSON.stringify({

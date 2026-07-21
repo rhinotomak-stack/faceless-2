@@ -2563,4 +2563,13 @@ async function processMotionGraphics(scenes, scriptContext, visualAnalysis, aiIn
     return { motionGraphics: results, mgStyle, mapStyle, mapStylePack: mapStylePackId };
 }
 
-module.exports = { processMotionGraphics, STYLE_NAMES, MAP_STYLE_NAMES, pickStyle, pickMapStyle, FULLSCREEN_MG_TYPES, generateCandidates };
+module.exports = {
+    processMotionGraphics,
+    STYLE_NAMES,
+    MAP_STYLE_NAMES,
+    pickStyle,
+    pickMapStyle,
+    FULLSCREEN_MG_TYPES,
+    generateCandidates,
+    buildRuleMG,
+};

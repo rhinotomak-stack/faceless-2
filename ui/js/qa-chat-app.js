@@ -4,7 +4,7 @@
 
 'use strict';
 
-const agent    = window._qaChatAgent;
+const api      = window.electronAPI;
 const messages = document.getElementById('messages');
 const input    = document.getElementById('msg-input');
 const sendBtn  = document.getElementById('btn-send');
@@ -58,8 +58,8 @@ function _esc(str) {
 }
 
 // ── Populate niche dropdown ──
-(function initNicheSelect() {
-    const { explainer, news, other } = agent.getNicheList();
+(async function initNicheSelect() {
+    const { explainer = [], news = [], other = [] } = await api.qaChatGetNicheList();
 
     const addGroup = (label, ids) => {
         if (!ids.length) return;
@@ -77,7 +77,7 @@ function _esc(str) {
     addGroup('── Explainer / Documentary ──', explainer);
     addGroup('── Breaking News ──', news);
     addGroup('── Other ──', other);
-})();
+})().catch((error) => addSysMsg(`Could not load niches: ${error.message}`));
 
 // ── Render helpers ──
 function addSysMsg(text) {
@@ -165,7 +165,7 @@ async function send(text) {
         const ctx = projectContext
             ? { ...projectContext, nicheId: focusNiche || projectContext.nicheId }
             : { nicheId: focusNiche };
-        const reply = await agent.sendMessageWithProject(history, ctx);
+        const reply = await api.qaChatSend(history, ctx);
         typing.remove();
         addMessage('model', reply);
         history.push({ role: 'model', text: reply });

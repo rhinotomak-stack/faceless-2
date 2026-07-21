@@ -592,6 +592,7 @@ class ShaderProgram {
     set1f(name, v) { this.gl.uniform1f(this._loc(name), v); }
     set1i(name, v) { this.gl.uniform1i(this._loc(name), v); }
     set2f(name, x, y) { this.gl.uniform2f(this._loc(name), x, y); }
+    set3f(name, x, y, z) { this.gl.uniform3f(this._loc(name), x, y, z); }
     set4f(name, x, y, z, w) { this.gl.uniform4f(this._loc(name), x, y, z, w); }
 
     /**
@@ -643,6 +644,7 @@ uniform float u_dustDensity;     // 0-1 (threshold)
 uniform float u_vignetteIntensity; // 0-1, how dark the edges get
 uniform float u_vignetteRadius;    // 0-1, where darkening starts (0=center, 1=edge)
 uniform float u_vignetteSoftness;  // 0-1, falloff smoothness
+uniform vec3 u_vignetteColor;       // user-selected edge color
 
 // BlurVignette params
 uniform float u_blurVigIntensity;  // 0-1
@@ -762,7 +764,7 @@ vec3 applyVignette(vec3 color, vec2 uv) {
     vec2 center = uv - 0.5;
     float dist = length(center) * 1.414; // normalize so corners = 1.0
     float vig = smoothstep(u_vignetteRadius, u_vignetteRadius + u_vignetteSoftness, dist);
-    return color * (1.0 - vig * u_vignetteIntensity);
+    return mix(color, u_vignetteColor, vig * u_vignetteIntensity);
 }
 
 // ---- BlurVignette ----

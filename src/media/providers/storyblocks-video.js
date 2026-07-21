@@ -30,6 +30,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { createByteLimitTransform, requestSafeStream } = require('../../security/safe-download');
 const BaseProvider = require('./base-provider');
 
 const SEARCH_URL_BASE = 'https://www.storyblocks.com/all-video/search/';
@@ -359,8 +360,6 @@ async function _getBrowser() {
         headless: 'new',
         userDataDir: BROWSER_PROFILE_DIR,
         args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
             '--disable-blink-features=AutomationControlled',
             '--lang=en-US,en',
         ],
@@ -1021,7 +1020,6 @@ class StoryblocksVideoProvider extends BaseProvider {
             }
         } catch (_) { /* no cookies — base path will likely 403 too, but try */ }
 
-        const axios = require('axios');
         const abortSignal = _isAbortSignalLike(opts.abortSignal) ? opts.abortSignal : null;
         if (abortSignal?.aborted) throw new Error('aborted before request');
         const timeoutMs = Math.max(15_000, Number(opts.timeoutMs || 120_000));
@@ -1032,17 +1030,20 @@ class StoryblocksVideoProvider extends BaseProvider {
             'Origin': 'https://www.storyblocks.com',
         };
         if (cookieHeader) headers['Cookie'] = cookieHeader;
-        const response = await axios({
-            url, method: 'GET', responseType: 'stream', adapter: 'http',
-            timeout: timeoutMs, signal: abortSignal || undefined, maxRedirects: 10,
+        const maxBytes = 2 * 1024 * 1024 * 1024;
+        const response = await requestSafeStream(url, {
+            method: 'GET', adapter: 'http',
+            timeout: timeoutMs, signal: abortSignal || undefined,
             headers,
-        });
+        }, { maxRedirects: 10, maxBytes });
         const ct = response.headers['content-type'] || '';
         if (ct.includes('text/html') || ct.includes('application/json')) {
             throw new Error(`Server returned ${ct} instead of media`);
         }
         const writer = fs.createWriteStream(outputPath);
-        response.data.pipe(writer);
+        const limiter = createByteLimitTransform(maxBytes);
+        response.data.pipe(limiter).pipe(writer);
+        limiter.on('error', (error) => writer.destroy(error));
         const onAbort = () => {
             try { response.data.destroy(new Error('aborted mid-stream')); } catch (_) {}
             try { writer.destroy(new Error('aborted mid-stream')); } catch (_) {}

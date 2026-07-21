@@ -2,12 +2,15 @@ const fs = require('fs');
 const path = require('path');
 const { fileURLToPath } = require('url');
 const { execFileSync, execSync, spawnSync } = require('child_process');
+const timelineContract = require('../project/timeline-contract');
+const { atomicWriteJson } = require('../project/project-store');
 const config = require('../settings/config');
 const { resetCosts, logCostReport, writeCostReport } = require('../brain/cost-tracker');
 const { transcribeAudio } = require('./transcribe');
 // NEW: Smart AI modules (Phase 1 & 2)
 const { createDirectorsBrief } = require('../agents/directors-brief');
 const { compileDirectives, directivesFloor, isDisabled: directivesDisabled } = require('../directives/directive-compiler');
+const { enforceNumericLowerThirdExclusivity } = require('../directives/compliance-loop');
 const directiveUtil = require('../directives/directive-util');
 const { analyzeAndCreateScenes } = require('../agents/ai-director');
 const { planVisuals } = require('../agents/ai-visual-planner');
@@ -22,6 +25,32 @@ const { sanitizeSourceHint } = require('../media/source-policy');
 // const { loadRecipe } = require('../settings/recipe-loader'); // Disabled — recipes caused wrong genre detection
 const { preBuildReview, midBuildValidation, postBuildReview } = require('./build-orchestrator');
 const log = require('../util/logger');
+
+function writeVideoPlanAtomic(filePath, videoPlan) {
+    const serializable = JSON.parse(JSON.stringify(
+        videoPlan,
+        (key, value) => key === '_fileIndex' ? undefined : value
+    ));
+    atomicWriteJson(filePath, serializable);
+}
+
+function copyVideoPlanAtomic(sourcePath, destinationPath) {
+    atomicWriteJson(destinationPath, JSON.parse(fs.readFileSync(sourcePath, 'utf8')));
+}
+
+function assignFinalSceneIndices(scenes = []) {
+    scenes.forEach((scene, index) => {
+        if (!scene || typeof scene !== 'object') return;
+        const stableSourceIndex = scene.originalIndex
+            ?? scene.sourceSceneIndex
+            ?? scene.index
+            ?? index;
+        scene.index = index;
+        scene.sourceSceneIndex = stableSourceIndex;
+        scene.originalIndex = scene.originalIndex ?? stableSourceIndex;
+    });
+    return scenes;
+}
 
 // Clean a folder of old build artifacts — removes ALL media and plan files
 function cleanFolder(folderPath, label) {
@@ -1382,6 +1411,8 @@ function prepareTemplateBackgroundMedia(scenes = [], scriptContext = {}) {
 async function buildDumbVideo(transcription, audioFile, directorsBrief) {
     const { downloadAllMedia } = require('../media/footage-manager');
     const { assignTransitions } = require('../agents/ai-director');
+    const productionMode = directorsBrief?.productionMode || 'faceless';
+    const aiVideosMode = require('../categories').usesAiVideo(productionMode);
 
     const fps = config.video.fps;
     const segments = transcription.segments || [];
@@ -1413,7 +1444,7 @@ async function buildDumbVideo(transcription, audioFile, directorsBrief) {
         const unique = [...new Set(words)].slice(0, 3);
         scene.keyword = unique.join(' ') || 'abstract background';
         scene.mediaType = 'video';
-        scene.sourceHint = 'stock';
+        scene.sourceHint = aiVideosMode ? 'ai-video' : 'stock';
         scene.framing = 'fullscreen';
         scene.backgroundId = 'none';
         scene.background = 'none';
@@ -1422,7 +1453,7 @@ async function buildDumbVideo(transcription, audioFile, directorsBrief) {
 
     // Assign theme-driven transitions
     console.log('🎬 Assigning transitions...');
-    const defaultContext = { pacing: 'moderate', themeId: 'standard' };
+    const defaultContext = { pacing: 'moderate', themeId: 'standard', productionMode };
     assignTransitions(scenes, defaultContext);
     console.log('');
 
@@ -1480,7 +1511,10 @@ async function buildDumbVideo(transcription, audioFile, directorsBrief) {
         entities: [], keyStats: [], mainPoints: [], targetAudience: '', emotionalArc: '',
         format: 'documentary', sections: [],
         ctaDetected: false, ctaStartTime: null, hookEndTime: null,
-        densityTarget: 3, nicheId: 'general', themeId: 'standard'
+        densityTarget: 3, nicheId: 'general', themeId: 'standard',
+        productionMode,
+        videoTitle: String(process.env.VIDEO_TITLE || '').trim(),
+        aiInstructions: String(process.env.AI_INSTRUCTIONS || '').trim(),
     };
 
     const videoPlan = {
@@ -1527,8 +1561,8 @@ async function buildDumbVideo(transcription, audioFile, directorsBrief) {
 
     // Save plan
     const planPath = path.join(config.paths.temp, 'video-plan.json');
-    fs.writeFileSync(planPath, JSON.stringify(videoPlan, (k, v) => k === '_fileIndex' ? undefined : v, 2));
-    fs.copyFileSync(planPath, path.join(publicDir, 'video-plan.json'));
+    writeVideoPlanAtomic(planPath, videoPlan);
+    copyVideoPlanAtomic(planPath, path.join(publicDir, 'video-plan.json'));
 
     // Copy audio
     fs.copyFileSync(
@@ -1936,6 +1970,11 @@ async function preflightVisionHealth() {
     if (['0', 'false', 'off', 'no'].includes(String(process.env.QWEN_PREFLIGHT || '1').toLowerCase())) {
         return;
     }
+    const fastMedia = /^(1|true|on|yes)$/i.test(String(process.env.BUILD_FAST_MEDIA || '').trim());
+    if (fastMedia) {
+        log.info('🔬 Pre-build footage-vision check skipped — Fast Test uses random media; Motion QA remains active');
+        return;
+    }
     // Self-hosted GPU backends (aws / lightning) expose a single vLLM endpoint that is
     // intentionally OFF until it's started just-in-time at Step 5. Probing it now would time
     // out on every (key,model) pair and POISON the health map (everything flagged exhausted),
@@ -1949,7 +1988,7 @@ async function preflightVisionHealth() {
     await preflightQwenModelRegistrySync();
     let mod;
     try {
-        const providerPath = require.resolve('./ai-provider');
+        const providerPath = require.resolve('../brain/ai-provider');
         delete require.cache[providerPath];
         mod = require('../brain/ai-provider');
     } catch (_) { return; }
@@ -2814,7 +2853,7 @@ async function buildVideo() {
     // SFX, effects, render). Also skips the vision GPU start + topic scout below.
     const _fastMedia = /^(1|true|on|yes)$/i.test(String(process.env.BUILD_FAST_MEDIA || '').trim());
     if (_fastMedia) {
-        log.warn('⚡ FAST TEST MODE (BUILD_FAST_MEDIA): random stock pool + placeholders — skipping footage search / vision / topic scout');
+        log.warn('⚡ ONE-SHOT PIPELINE TEST (BUILD_FAST_MEDIA): unique random stock; semantic asset search, footage relevance vision, topic scout, icon/subject acquisition, and bespoke overlay authoring are skipped; stage authoring and Motion QA remain active');
         // Fast mode starts no vision GPU, so the Composition Author's perfectionist
         // hero-frame vision review would 530 on Qwen (and slow-fall-back to Bedrock).
         // Skip that review in fast tests — comps still author, just without the vision pass.
@@ -3499,7 +3538,31 @@ async function buildVideo() {
 
     // Split MGs: overlay types stay in motionGraphics, full-screen types become V3 scenes
     let motionGraphics = allMGs.filter(mg => mg.category !== 'fullscreen');
-    const fullscreenMGs = allMGs.filter(mg => mg.category === 'fullscreen');
+    let fullscreenMGs = allMGs.filter(mg => mg.category === 'fullscreen');
+
+    // Creator-directed numeric lower thirds are an exclusive treatment. Apply
+    // this before V1 is carved so a competing stat card can be removed without
+    // leaving a black hole in the final timeline.
+    const numericMgGuard = enforceNumericLowerThirdExclusivity({
+        fps: config.video.fps,
+        mgStyle,
+        scenes: scenesWithMedia,
+        motionGraphics,
+        mgScenes: fullscreenMGs,
+        templateScenes: [],
+        scriptContext,
+    }, scriptContext?._directives, { allowStageRemoval: true });
+    if (numericMgGuard.fixed.length > 0) {
+        motionGraphics = motionGraphics.filter(mg => !mg?.disabled);
+        fullscreenMGs = fullscreenMGs.filter(mg => !mg?.disabled);
+        log.info(`🔢 Numeric treatment resolved ${numericMgGuard.fixed.length} competing graphic action(s) before fullscreen carving`);
+    }
+    // The guard can insert replacement lower thirds and disable original MGs.
+    // Rebuild the canonical list so later asset workers see the replacements
+    // and never spend time on disabled graphics.
+    allMGs = [...motionGraphics, ...fullscreenMGs]
+        .filter(mg => mg && !mg.disabled)
+        .sort((a, b) => Number(a.startTime || 0) - Number(b.startTime || 0));
 
     // Remove overlay MGs that overlap with fullscreen MG time windows
     // (fullscreen MGs cover the entire screen — stacking overlays on top looks broken)
@@ -3523,14 +3586,23 @@ async function buildVideo() {
     }
 
     // Convert full-screen MGs into scene-like objects for V3
-    let mgScenes = fullscreenMGs.map((mg, i) => ({
-        ...mg,
-        isMGScene: true,
-        trackId: 'video-track-3',
-        mediaType: 'motion-graphic',
-        endTime: mg.startTime + mg.duration,
-        keyword: `MG: ${mg.type}`,
-    }));
+    let mgScenes = fullscreenMGs.map((mg) => {
+        const ownerScene = scenesWithKeywords.find(scene => scene?.index === mg?.sceneIndex);
+        const stableOwnerIndex = ownerScene?.originalIndex
+            ?? ownerScene?.sourceSceneIndex
+            ?? mg?.sourceSceneIndex
+            ?? mg?.sceneIndex;
+        return {
+            ...mg,
+            sourceSceneIndex: stableOwnerIndex,
+            originalSceneIndex: stableOwnerIndex,
+            isMGScene: true,
+            trackId: 'video-track-3',
+            mediaType: 'motion-graphic',
+            endTime: mg.startTime + mg.duration,
+            keyword: `MG: ${mg.type}`,
+        };
+    });
 
     // Tag each scene with its original index (footage-manager uses scene.index for filenames).
     // Keep originalIndex in the public plan so asset filenames can follow the
@@ -3628,11 +3700,30 @@ async function buildVideo() {
         allMGs.push(...compositorExplainers);
         motionGraphics.push(...compositorExplainers);
         log.ok(`Merged ${compositorExplainers.length} compositor explainer(s) into MG pipeline`);
+        const postCompositorNumericGuard = enforceNumericLowerThirdExclusivity({
+            fps: config.video.fps,
+            mgStyle,
+            scenes: scenesWithKeywords,
+            motionGraphics,
+            mgScenes: [],
+            templateScenes: [],
+            scriptContext,
+        }, scriptContext?._directives, { allowStageRemoval: true });
+        if (postCompositorNumericGuard.fixed.length > 0) {
+            log.info(`🔢 Numeric treatment removed ${postCompositorNumericGuard.fixed.length} competing compositor overlay action(s)`);
+        }
+        motionGraphics = motionGraphics.filter(mg => mg && !mg.disabled);
+        allMGs = [...motionGraphics, ...fullscreenMGs]
+            .filter(mg => mg && !mg.disabled)
+            .sort((a, b) => Number(a.startTime || 0) - Number(b.startTime || 0));
     }
 
     // Step 6.05: Download explainer images (search + bg removal)
-    const explainerMGs = allMGs.filter(mg => mg.type === 'explainer');
-    if (explainerMGs.length > 0) {
+    const explainerMGs = allMGs.filter(mg => mg.type === 'explainer' && !mg.disabled);
+    if (_fastMedia && explainerMGs.length > 0) {
+        log.info(`⚡ Fast Test: skipped semantic explainer-image search for ${explainerMGs.length} graphic(s); text/motion layout remains active`);
+        log.br();
+    } else if (explainerMGs.length > 0) {
         log.step('🖼️ Step 6.05: Explainer Images');
         try {
             let count;
@@ -3763,6 +3854,19 @@ async function buildVideo() {
             templateResult = await processTemplates(scenesWithKeywords, scriptContext, mgScenes, combinedInstructions);
         }
         templateScenes = templateResult.templateScenes || [];
+        const numericTemplateGuard = enforceNumericLowerThirdExclusivity({
+            fps: config.video.fps,
+            mgStyle,
+            scenes: scenesWithKeywords,
+            motionGraphics,
+            mgScenes,
+            templateScenes,
+            scriptContext,
+        }, scriptContext?._directives, { allowStageRemoval: true });
+        if (numericTemplateGuard.fixed.length > 0) {
+            templateScenes = templateScenes.filter(template => !template?.disabled);
+            log.info(`🔢 Numeric treatment resolved ${numericTemplateGuard.fixed.length} competing graphic action(s) before template carving`);
+        }
         if (templateScenes.length > 0) {
             log.ok(`Placed ${templateScenes.length} template(s)`);
             for (const tpl of templateScenes) {
@@ -4030,14 +4134,47 @@ async function buildVideo() {
         log.ok(`Final media audit: 0 missing scenes; continuity reuse disabled${finalAgenticFallbacks ? `, agenticFallback=${finalAgenticFallbacks}` : ''}.`);
     }
 
-    // Assign final scene indices (after carving, these match the file names scene-0, scene-1, etc.)
-    scenesWithMedia.forEach((scene, i) => { scene.index = i; });
+    // Compact timeline indexes after carving while preserving the original
+    // source identity used by assets, directives, QA, and visual ownership.
+    assignFinalSceneIndices(scenesWithMedia);
+    timelineContract.normalizeScenes(scenesWithMedia, {
+        fps: config.video.fps,
+        totalDuration: actualAudioDuration,
+    }).forEach((normalized, index) => Object.assign(scenesWithMedia[index], normalized));
 
     // Assign V2 overlay scene indices (after V1 scenes)
     const v2ScenesForPlan = plannedV2Scenes.filter(v2 => v2.mediaFile);
     v2ScenesForPlan.forEach((v2, i) => {
         v2.index = scenesWithMedia.length + i;
+        v2.sourceSceneIndex = v2.index;
     });
+    timelineContract.normalizeScenes(v2ScenesForPlan, {
+        fps: config.video.fps,
+        totalDuration: actualAudioDuration,
+        prefix: 'overlay-clip',
+    }).forEach((normalized, index) => Object.assign(v2ScenesForPlan[index], normalized));
+    timelineContract.normalizeVisualScenes(mgScenes, {
+        fps: config.video.fps,
+        totalDuration: actualAudioDuration,
+        prefix: 'mg',
+    }).forEach((normalized, index) => Object.assign(mgScenes[index], normalized));
+    timelineContract.normalizeVisualScenes(templateScenes, {
+        fps: config.video.fps,
+        totalDuration: actualAudioDuration,
+        prefix: 'template',
+        fallbackDuration: 4,
+    }).forEach((normalized, index) => Object.assign(templateScenes[index], normalized));
+    for (const graphic of motionGraphics) {
+        if (!graphic || graphic.originalSceneIndex != null) continue;
+        const ownerScene = scenesWithKeywords.find(scene => scene?.index === graphic?.sceneIndex);
+        const stableOwnerIndex = ownerScene?.originalIndex
+            ?? ownerScene?.sourceSceneIndex
+            ?? graphic?.sourceSceneIndex
+            ?? graphic?.sceneIndex;
+        if (stableOwnerIndex == null) continue;
+        graphic.sourceSceneIndex = stableOwnerIndex;
+        graphic.originalSceneIndex = stableOwnerIndex;
+    }
 
     // Step 7: Create video plan
     log.step('📋 Step 7: Creating video plan');
@@ -4194,8 +4331,8 @@ async function buildVideo() {
         // focusWord/kineticText/caption) stay SILENT. SFX_LEGACY=1 restores the old
         // dense every-boundary/every-MG behavior.
         const legacySfx = /^(1|true|on|yes)$/i.test(String(process.env.SFX_LEGACY || '').trim());
-        // Motivated-transition + impact-MG gates + density come from the shared SFX
-        // ruleset (single source of truth with the AI Sound Designer and app floor).
+        // Motivated-transition + impact-MG gates + density come from the shared
+        // build-side SFX ruleset used by the AI designer and deterministic floor.
         const { MOTIVATED_TRANSITIONS, IMPACT_MG_TYPES, DENSITY, normTx } = require('../agents/workers/sfx-rules');
         // The modern transition-director emits kebab/directional types (whip-right,
         // zoom-punch, dip-black) that don't match the camelCase TRANSITION_TO_SFX
@@ -4263,6 +4400,12 @@ async function buildVideo() {
         }
     } catch (e) { log.warn(`SFX clip generation failed: ${e.message}`); }
 
+    // Keep the exact creator context that produced this plan as build provenance.
+    // Project settings remain canonical for the next build, but this makes a plan
+    // diagnosable and recoverable if a settings envelope is ever damaged.
+    scriptContext.videoTitle = String(process.env.VIDEO_TITLE || '').trim();
+    scriptContext.aiInstructions = String(process.env.AI_INSTRUCTIONS || '').trim();
+
     const videoPlan = {
         audio: audioFile,
         totalDuration: actualAudioDuration,
@@ -4274,17 +4417,16 @@ async function buildVideo() {
         templateScenes: templateScenes,
         motionGraphics: motionGraphics,
         sfxClips: planSfxClips,
-        sfxDesigned: _soundDesigned, // true = AI Sound Designer authored this track (editor should hydrate, not regenerate)
-        sfxEnabled: true,
         musicBed: musicBedFile || undefined,
         mgStyle: mgStyle,
         mapStyle: mapStyle,
         scriptContext: scriptContext,
         themeId: resolvedThemeId
     };
+    videoPlan.timelineContractVersion = timelineContract.VERSION;
 
     const planPath = path.join(config.paths.temp, 'video-plan.json');
-    fs.writeFileSync(planPath, JSON.stringify(videoPlan, (k, v) => k === '_fileIndex' ? undefined : v, 2));
+    writeVideoPlanAtomic(planPath, videoPlan);
     log.ok('Plan saved');
     log.br();
 
@@ -4297,7 +4439,7 @@ async function buildVideo() {
                 log.ok(`Orchestrator injected ${reviewResult.injectedMGs.length} overlay MG(s) to fill gaps`);
             }
             // Re-save plan with build report + any injected MGs
-            fs.writeFileSync(planPath, JSON.stringify(videoPlan, (k, v) => k === '_fileIndex' ? undefined : v, 2));
+            writeVideoPlanAtomic(planPath, videoPlan);
         } catch (error) {
             log.warn(`Orchestrator Phase 3 failed: ${error.message}`);
         }
@@ -4311,10 +4453,14 @@ async function buildVideo() {
     try {
         const { authorPlanCompositions } = require('../agents/workers/composition-author');
         log.step('🎨 Step 7.6: Composition Author (agent-authored MGs)');
-        const authorRes = await authorPlanCompositions(videoPlan, { projectDir: PROJECT_DIR, log: (m) => console.log(m) });
+        const authorRes = await authorPlanCompositions(videoPlan, {
+            projectDir: PROJECT_DIR,
+            fastTest: _fastMedia,
+            log: (m) => console.log(m),
+        });
         if (authorRes && authorRes.eligible > 0) {
             log.ok(`Composition Author: ${authorRes.authored}/${authorRes.eligible} scene(s) authored`);
-            fs.writeFileSync(planPath, JSON.stringify(videoPlan, (k, v) => k === '_fileIndex' ? undefined : v, 2));
+            writeVideoPlanAtomic(planPath, videoPlan);
         }
     } catch (error) {
         log.warn(`Composition Author skipped: ${error.message}`);
@@ -4333,12 +4479,51 @@ async function buildVideo() {
                 videoPlan.complianceReport = rep;
                 if (rep.fixed && rep.fixed.length) {
                     // Re-write so the public copy below ships the fixed plan.
-                    fs.writeFileSync(planPath, JSON.stringify(videoPlan, (k, v) => k === '_fileIndex' ? undefined : v, 2));
+                    writeVideoPlanAtomic(planPath, videoPlan);
                 }
                 log.ok(`Compliance: ${(rep.checked || []).length} slice(s) checked · ${(rep.fixed || []).length} auto-fixed · ${(rep.unfixable || []).length} flagged${rep.ok ? '' : ' (see complianceReport)'}`);
                 for (const u of (rep.unfixable || [])) log.warn(`   ⚠️ [Compliance] ${u.reason}`);
             }
         } catch (e) { log.warn(`Compliance loop skipped: ${e.message}`); }
+    }
+
+    // ── Step 7.8: Agentic Motion QA preflight ────────────────────────────────
+    // The Motion Director chooses the creative treatment; this pass makes sure
+    // every resulting visual has enough time for entrance + readable hold +
+    // exit, and resolves same-zone collisions before the plan is published.
+    // Full HyperFrames pixel/keyframe/vision verification runs automatically
+    // immediately before render, when the final generated composition exists.
+    try {
+        const { prepareMotionPlan } = require('../agents/workers/motion-qa-agent');
+        log.step('🎯 Step 7.8: Motion QA (automatic animation preflight)');
+        const motionQa = prepareMotionPlan(videoPlan, { log: (message) => console.log(message) });
+        videoPlan.motionQa = {
+            version: motionQa.version || 1,
+            status: motionQa.status,
+            agentic: true,
+            stage: 'build-preflight',
+            checkedVisuals: motionQa.checked || 0,
+            repairCount: (motionQa.repairs || []).length,
+            findingCount: (motionQa.findings || []).length,
+        };
+        try {
+            fs.writeFileSync(
+                path.join(config.paths.temp, 'motion-qa-build-report.json'),
+                `${JSON.stringify(motionQa, null, 2)}\n`,
+                'utf8'
+            );
+        } catch (_) { /* report is advisory; the repaired plan is authoritative */ }
+        writeVideoPlanAtomic(planPath, videoPlan);
+        if ((motionQa.repairs || []).length) {
+            log.ok(`Motion QA preflight repaired ${motionQa.repairs.length} animation issue(s) automatically`);
+        } else {
+            log.ok(`Motion QA preflight checked ${motionQa.checked || 0} visual(s) — no timing repair needed`);
+        }
+        for (const finding of (motionQa.findings || []).slice(0, 8)) {
+            log.warn(`   [Motion QA] ${finding.code}: ${finding.message}`);
+        }
+    } catch (e) {
+        log.warn(`Motion QA preflight skipped: ${e.message}`);
     }
 
     // Step 8: Copy files to public folder
@@ -4351,7 +4536,7 @@ async function buildVideo() {
     }
 
     // Copy video plan
-    fs.copyFileSync(planPath, path.join(publicDir, 'video-plan.json'));
+    copyVideoPlanAtomic(planPath, path.join(publicDir, 'video-plan.json'));
 
     // Copy audio file
     fs.copyFileSync(
@@ -4612,7 +4797,7 @@ async function _stopVisionGpuIfStarted() {
 // Testable helpers (safe to require without running the pipeline).
 module.exports = { getFfmpegPath, getFfprobePath, probeNarration, cleanNarration };
 // Test-only surface (verify-directives.js; require with BUILD_VIDEO_NO_RUN=1).
-module.exports.__test = { applySceneDirectives, _applyVeoScope };
+module.exports.__test = { applySceneDirectives, _applyVeoScope, assignFinalSceneIndices };
 
 // Run when this file is the ENTRY POINT — true both for `node src/build-video.js`
 // AND for `electron.exe src/build-video.js` (how main.js spawns it). Under

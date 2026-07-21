@@ -1,3 +1,4 @@
+(() => {
 /**
  * MG Registry — Central source of truth for all MG categories and their types/variants.
  *
@@ -26,9 +27,9 @@ const MG_REGISTRY = {
         types: {
             standard:  { label: 'Standard',      animation: 'springScale' },
             stamp:     { label: 'Stamp',          animation: 'popUp' },
-            typewriter:{ label: 'Typewriter',     animation: 'slideLeft' },
+            typewriter:{ label: 'Typewriter',     animation: 'typewriter' },
         },
-        animations: ['springScale', 'popUp', 'slideLeft', 'fadeSlide'],
+        animations: ['springScale', 'popUp', 'slideLeft', 'fadeSlide', 'typewriter'],
         defaultType: 'standard',
         fields: ['text', 'subtext', 'position'],
     },
@@ -348,12 +349,18 @@ function getAnimationsForCategory(category) {
 }
 
 // ── Exports ──
+const MG_REGISTRY_API = {
+    MG_REGISTRY,
+    registry: MG_REGISTRY,
+    resolveSubType,
+    resolveAnimation,
+    getTypesForCategory,
+    getAnimationsForCategory,
+};
 if (typeof module !== 'undefined' && module.exports) {
-    module.exports = {
-        MG_REGISTRY,
-        resolveSubType,
-        resolveAnimation,
-        getTypesForCategory,
-        getAnimationsForCategory,
-    };
+    module.exports = MG_REGISTRY_API;
 }
+if (typeof window !== 'undefined') {
+    window._mgRegistry = MG_REGISTRY_API;
+}
+})();

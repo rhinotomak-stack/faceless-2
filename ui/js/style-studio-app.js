@@ -321,7 +321,14 @@ function renderProfile() {
 
     if (p.colorPalette) {
         const cp = p.colorPalette;
-        const swatch = (color) => color ? `<span class="color-swatch" style="background:${color}"></span>${color}` : '—';
+        const swatch = (color) => {
+            const raw = String(color || '').trim();
+            if (!raw) return '—';
+            const safeColor = /^#(?:[0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(raw)
+                ? raw
+                : null;
+            return `${safeColor ? `<span class="color-swatch" style="background-color:${safeColor}"></span>` : ''}${escapeHtml(raw)}`;
+        };
         const rows = [];
         if (cp.primary)   rows.push(`<div class="profile-row"><span class="key">Primary</span><span class="val">${swatch(cp.primary)}</span></div>`);
         if (cp.secondary) rows.push(`<div class="profile-row"><span class="key">Secondary</span><span class="val">${swatch(cp.secondary)}</span></div>`);

@@ -12,6 +12,8 @@ const { SETTINGS } = require('./schema');
 
 function applyOptionsToEnv(options = {}, { projectDir, baseEnv = process.env } = {}) {
     const env = { ...baseEnv, FORCE_COLOR: '0', PROJECT_DIR: projectDir };
+    const productionMode = require('../categories').resolveMode(options.buildProductionMode);
+    const aiVideosMode = productionMode === 'aiVideos';
 
     // Runtime + project-scoped strings (always set, exactly as main.js did).
     if (options.audioFileName) env.BUILD_AUDIO_FILE = options.audioFileName;
@@ -23,6 +25,7 @@ function applyOptionsToEnv(options = {}, { projectDir, baseEnv = process.env } =
     for (const s of SETTINGS) {
         if (s.build === 'if' && s.env && options[s.key]) env[s.env] = options[s.key];
     }
+    if (aiVideosMode) env.BUILD_FORMAT = 'auto';
 
     // Kling avatar bridge (fan-out).
     if (options.klingAvatar) {
@@ -33,9 +36,9 @@ function applyOptionsToEnv(options = {}, { projectDir, baseEnv = process.env } =
 
     // AI-video generator (fan-out): veoBackend -> {AI_VIDEO_BACKEND, VEO_BACKEND},
     // veoResolution -> {VEO_RESOLUTION, KLING_VIDEO_RESOLUTION}.
-    if (options.veoAiVideo) {
+    if (options.veoAiVideo || aiVideosMode) {
         env.VEO_AI_VIDEO = '1';
-        env.VEO_SCOPE = options.veoScope || 'directives';
+        env.VEO_SCOPE = aiVideosMode ? 'all' : (options.veoScope || 'directives');
         const gen = String(options.veoBackend || 'kling').toLowerCase();
         if (gen === 'veo-fal') { env.AI_VIDEO_BACKEND = 'veo'; env.VEO_BACKEND = 'fal'; }
         else if (gen === 'veo-gemini') { env.AI_VIDEO_BACKEND = 'veo'; env.VEO_BACKEND = 'gemini'; }
@@ -46,7 +49,7 @@ function applyOptionsToEnv(options = {}, { projectDir, baseEnv = process.env } =
         }
     }
 
-    if (options.fastMedia) env.BUILD_FAST_MEDIA = 'true';
+    if (options.fastMedia && !aiVideosMode) env.BUILD_FAST_MEDIA = 'true';
     if (options.buildStyleProfile && options.buildStyleProfile !== 'none') env.BUILD_STYLE_PROFILE = options.buildStyleProfile;
 
     // Smart AI (also drives the --dumb CLI arg in main.js via the returned flag).
@@ -56,9 +59,9 @@ function applyOptionsToEnv(options = {}, { projectDir, baseEnv = process.env } =
     const clipAnalyzerOn = options.clipAnalyzer !== false && options.clipAnalyzer !== 'false';
     env.CLIP_ANALYZER_ENABLED = clipAnalyzerOn ? 'true' : 'false';
 
-    // Resume + repeat-from-step (repeat-from-media forces resume ON + may force-fresh footage).
-    const resumeOn = options.buildResume === true || options.buildResume === 'true';
-    env.BUILD_RESUME = resumeOn ? 'true' : 'false';
+    // Fresh builds are the only normal path. Repeat-from-media explicitly enables
+    // checkpoint reuse; the retired standalone Resume toggle no longer exists.
+    env.BUILD_RESUME = 'false';
     const repeatFromStep = String(options.repeatFromStep || '').trim();
     if (repeatFromStep) {
         env.BUILD_REPEAT_FROM = repeatFromStep;

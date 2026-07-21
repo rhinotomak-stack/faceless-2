@@ -1,3 +1,4 @@
+(() => {
 /**
  * Effect Presets — Pre-made effect combos like CapCut's "Retro DV", "Old Film" etc.
  *
@@ -223,4 +224,10 @@ const EFFECT_PRESETS = {
     }
 };
 
-module.exports = EFFECT_PRESETS;
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = EFFECT_PRESETS;
+}
+if (typeof window !== 'undefined') {
+    window._effectPresets = EFFECT_PRESETS;
+}
+})();

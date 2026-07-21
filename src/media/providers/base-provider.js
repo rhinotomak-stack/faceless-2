@@ -1,9 +1,9 @@
-const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
 const config = require('../../settings/config');
 const { normalizeUrlForDedup } = require('../../util/url-utils');
+const { createByteLimitTransform, requestSafeStream } = require('../../security/safe-download');
 
 // In Electron renderer/preload context axios auto-picks the XHR adapter (XMLHttpRequest is defined),
 // which returns ArrayBuffer instead of a Node.js stream — .pipe() fails and User-Agent/Referer are blocked.
@@ -179,10 +179,13 @@ class BaseProvider {
             throw new Error('aborted before request');
         }
         const timeoutMs = Math.max(10_000, Number(opts.timeoutMs || config.network?.mediaDownloadTimeoutMs || 45_000) || 45_000);
-        const response = await axios({
-            url,
+        const maxBytes = Number(opts.maxBytes) || (
+            /\.(?:jpe?g|png|webp|bmp|gif)$/i.test(outputPath)
+                ? 80 * 1024 * 1024
+                : 2 * 1024 * 1024 * 1024
+        );
+        const response = await requestSafeStream(url, {
             method: 'GET',
-            responseType: 'stream',
             adapter: _HTTP_ADAPTER, // force Node.js http adapter (avoids XHR adapter in Electron renderer)
             timeout: timeoutMs,
             signal: abortSignal || undefined,
@@ -195,8 +198,7 @@ class BaseProvider {
                     ? { 'Referer': 'https://www.google.com/' }
                     : (opts.referer ? { 'Referer': opts.referer } : {})),
             },
-            maxRedirects: 5
-        });
+        }, { maxRedirects: 5, maxBytes });
 
         // Check content-type — reject HTML error pages
         const contentType = response.headers['content-type'] || '';
@@ -205,7 +207,12 @@ class BaseProvider {
         }
 
         const writer = fs.createWriteStream(outputPath);
-        response.data.pipe(writer);
+        const limiter = createByteLimitTransform(maxBytes);
+        response.data.pipe(limiter).pipe(writer);
+        limiter.on('error', (error) => {
+            try { response.data.destroy(error); } catch (_) {}
+            try { writer.destroy(error); } catch (_) {}
+        });
 
         // If the caller aborts mid-stream, tear the stream down and delete the partial file.
         const onAbort = () => {

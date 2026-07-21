@@ -7,14 +7,10 @@
 //
 // Stages (buildAiVideosProject runs them in order):
 //   1. INPUT      script-input.js   — normalize pasted story/link → clean script   [DONE]
-//   2. SCENES     scene-planner.js  — script → scene beats (text + timing)          [P7 next]
-//   3. PROMPTS    prompt-generator.js — per-scene → generation prompt               [P7 next]
-//   4. GENERATE   (reuses the Kling/Veo engine via the media layer)                 [P7 next]
-//   5. PLAN       assemble a renderer-ready video-plan.json                          [P7 next]
-//
-// Each not-yet-built stage is a clearly-marked no-op that passes the context
-// through, so the pipeline runs end-to-end today (returning after INPUT) and each
-// stage lights up as it's implemented — no rewrites.
+//   2. SCENES     scene-planner.js  — script → quality-aware scene beats
+//   3. PROMPTS    prompt-generator.js — per-scene → styled generation prompt
+//   4. GENERATE   generate.js       — Kling/Veo generation (dry-run in tests)
+//   5. PLAN       plan-builder.js   — renderer-ready video-plan.json
 // ============================================================================
 'use strict';
 
@@ -49,7 +45,7 @@ async function buildAiVideosProject(input = {}, opts = {}) {
     ctx.isLink = scriptInput.isLink(ctx.rawInput);
     ctx.wordCount = scriptInput.wordCount(ctx.scriptText);
     ctx.stage = 'input';
-    log(`  [AI Videos] script normalized: ${ctx.wordCount} words, ${ctx.paragraphs.length} paragraph(s)${ctx.isLink ? ' (input looks like a link — fetch TBD)' : ''}`);
+    log(`  [AI Videos] script normalized: ${ctx.wordCount} words, ${ctx.paragraphs.length} paragraph(s)${ctx.isLink ? ' (input resembles an unresolved path/URL)' : ''}`);
     if (!ctx.scriptText) { ctx.stage = 'empty'; return ctx; }
 
     // ── Stage 2: SCENES ─────────────────────────────────────────────────────

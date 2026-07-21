@@ -296,8 +296,8 @@ async function _uploadToGemini(filePath, apiKey) {
             'Content-Length': body.length,
         },
         timeout: 300000,
-        maxBodyLength: Infinity,
-        maxContentLength: Infinity,
+        maxBodyLength: 2 * 1024 * 1024 * 1024,
+        maxContentLength: 2 * 1024 * 1024 * 1024,
     });
 
     const file = uploadResp.data?.file;

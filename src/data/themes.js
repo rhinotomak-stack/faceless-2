@@ -1,3 +1,4 @@
+(() => {
 /**
  * Theme System — Visual layer only
  *
@@ -572,9 +573,10 @@ const BACKGROUND_LIBRARY = {
 // Step 5.1 uses getThemeBackgrounds() to find assets for the active theme.
 // ============================================================
 
-const _fs = require('fs');
-const _path = require('path');
-const _bgDir = _path.join(__dirname, '..', '..', 'assets', 'backgrounds');
+const _hasNodeRuntime = typeof module !== 'undefined' && module.exports;
+const _fs = _hasNodeRuntime ? require('fs') : null;
+const _path = _hasNodeRuntime ? require('path') : null;
+const _bgDir = _path ? _path.join(__dirname, '..', '..', 'assets', 'backgrounds') : null;
 const _supportedBgExts = new Set(['.jpg', '.jpeg', '.png', '.gif', '.mp4', '.webm', '.mov']);
 const _validThemes = new Set(['crime', 'history', 'modern', 'minimal', 'standard', 'warm-editorial', 'luxury', 'nature']);
 
@@ -588,7 +590,7 @@ let _bgScanCache = null;
 function getThemeBackgrounds(themeId) {
     if (!_bgScanCache) {
         _bgScanCache = {};
-        if (_fs.existsSync(_bgDir)) {
+        if (_fs && _path && _bgDir && _fs.existsSync(_bgDir)) {
             const files = _fs.readdirSync(_bgDir).filter(f => {
                 const ext = _path.extname(f).toLowerCase();
                 return _supportedBgExts.has(ext) && !f.startsWith('.');
@@ -1948,7 +1950,7 @@ function getBackgroundSource(themeId) {
 // EXPORTS
 // ============================================================
 
-module.exports = {
+const THEME_API = {
     THEMES,
     BACKGROUND_SOURCES,
     BACKGROUND_LIBRARY,
@@ -1971,3 +1973,16 @@ module.exports = {
     getMGStylePresetNames,
     applyModifier: _applyModifier,
 };
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = THEME_API;
+}
+if (typeof window !== 'undefined') {
+    window._themeTokens = {
+        getTokens: THEME_API.getThemeTokens,
+        getStylePreset: THEME_API.getMGStylePreset,
+        stylePresetNames: THEME_API.getMGStylePresetNames(),
+        themeIds: THEME_API.getThemeIds(),
+        applyModifier: THEME_API.applyModifier,
+    };
+}
+})();
